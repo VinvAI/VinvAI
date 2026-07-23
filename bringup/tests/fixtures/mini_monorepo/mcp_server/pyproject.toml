@@ -1,0 +1,7 @@
+[project]
+name = "mini-mcp"
+version = "0.0.1"
+description = "Fixture stdio JSON-RPC (MCP) server — port-less long-runner."
+
+[project.scripts]
+mini-mcp = "mini_mcp.server:main"

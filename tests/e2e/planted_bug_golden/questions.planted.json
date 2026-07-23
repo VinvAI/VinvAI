@@ -1,0 +1,28 @@
+[
+  {
+    "q": "where is the empty cart checkout total computed?",
+    "category": "behavior",
+    "file": "planted_app/service.py",
+    "symbol": "compute_total"
+  },
+  {
+    "q": "checkout HTTP handler endpoint",
+    "category": "identifier",
+    "file": "planted_app/service.py",
+    "symbol": "checkout"
+  },
+  {
+    "q": "average price of cart items",
+    "category": "behavior",
+    "file": "planted_app/service.py",
+    "symbol": "compute_total"
+  },
+  {
+    "q": "route decorator that registers a POST handler",
+    "category": "graph",
+    "answers": [
+      { "file": "planted_app/service.py", "symbol": "post", "relevance": 2 },
+      { "file": "planted_app/service.py", "symbol": "decorate", "relevance": 1 }
+    ]
+  }
+]

@@ -1,0 +1,9 @@
+Vinv
+Copyright 2026 Vinv contributors
+
+This product includes software developed as part of the Vinv project
+(https://vinv.ai).
+
+Default embedding model: nomic-ai/CodeRankEmbed (MIT License,
+https://huggingface.co/nomic-ai/CodeRankEmbed) — downloaded at first run,
+not distributed with this repository.

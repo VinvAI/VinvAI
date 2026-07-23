@@ -1,0 +1,303 @@
+{
+  "$defs": {
+    "CodeVersion": {
+      "additionalProperties": false,
+      "description": "Source-of-truth identifier for the running code.\n\nResolution priority (capture-side):\n    1. git_sha            \u2014 `git rev-parse HEAD` succeeds in target's cwd\n    2. build_id           \u2014 CI/CD env (BUILD_ID, etc.)\n    3. container_digest   \u2014 sha256 of the OCI image\n    4. content_hash       \u2014 sha256 of the target package's installed __file__ tree\n    5. \"unknown\"          \u2014 last resort; replay corpora become hash-only",
+      "properties": {
+        "build_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Id"
+        },
+        "container_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Digest"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
+        "git_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Sha"
+        },
+        "primary": {
+          "title": "Primary",
+          "type": "string"
+        },
+        "primary_kind": {
+          "enum": [
+            "git_sha",
+            "build_id",
+            "container_digest",
+            "content_hash",
+            "unknown"
+          ],
+          "title": "Primary Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "primary",
+        "primary_kind"
+      ],
+      "title": "CodeVersion",
+      "type": "object"
+    },
+    "ExternalCallSummary": {
+      "additionalProperties": false,
+      "description": "Compact form of one ExternalCallEvent for replay verification (no full payload).",
+      "properties": {
+        "duration_ns": {
+          "title": "Duration Ns",
+          "type": "integer"
+        },
+        "request_hash": {
+          "title": "Request Hash",
+          "type": "string"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response Hash"
+        },
+        "span_id": {
+          "title": "Span Id",
+          "type": "string"
+        },
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "db",
+            "http",
+            "cache",
+            "queue",
+            "llm",
+            "fs",
+            "other"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "span_id",
+        "target_kind",
+        "target_id",
+        "request_hash",
+        "response_hash",
+        "duration_ns"
+      ],
+      "title": "ExternalCallSummary",
+      "type": "object"
+    },
+    "InputFingerprint": {
+      "additionalProperties": false,
+      "properties": {
+        "args_hash": {
+          "title": "Args Hash",
+          "type": "string"
+        },
+        "args_schema": {
+          "title": "Args Schema",
+          "type": "string"
+        },
+        "canonical_blob_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "object-store ref to KMS-encrypted full args; absent if hash-only",
+          "title": "Canonical Blob Ref"
+        }
+      },
+      "required": [
+        "args_hash",
+        "args_schema"
+      ],
+      "title": "InputFingerprint",
+      "type": "object"
+    },
+    "OutputFingerprint": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_blob_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Canonical Blob Ref"
+        },
+        "error_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Type"
+        },
+        "result_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Hash"
+        },
+        "result_schema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Schema"
+        },
+        "status": {
+          "default": "ok",
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "title": "OutputFingerprint",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "code_version": {
+      "$ref": "#/$defs/CodeVersion"
+    },
+    "determinism_record_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "reference to the DeterminismBoundaryRecord row joined by request_id",
+      "title": "Determinism Record Ref"
+    },
+    "entry_component": {
+      "description": "FQN of the symbol that began the request",
+      "title": "Entry Component",
+      "type": "string"
+    },
+    "expected_output": {
+      "$ref": "#/$defs/OutputFingerprint"
+    },
+    "external_calls": {
+      "items": {
+        "$ref": "#/$defs/ExternalCallSummary"
+      },
+      "title": "External Calls",
+      "type": "array"
+    },
+    "input": {
+      "$ref": "#/$defs/InputFingerprint"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1",
+      "default": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_id": {
+      "default": "default",
+      "title": "Service Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "default": "default",
+      "title": "Tenant Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "code_version",
+    "request_id",
+    "captured_at",
+    "entry_component",
+    "input",
+    "expected_output"
+  ],
+  "title": "ReplayCorpusRow",
+  "type": "object"
+}

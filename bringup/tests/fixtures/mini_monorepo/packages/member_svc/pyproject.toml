@@ -1,0 +1,7 @@
+[project]
+name = "member-svc"
+version = "0.0.1"
+description = "Nested workspace member with its own HTTP service."
+
+[project.scripts]
+member-serve = "member_svc.main:run"

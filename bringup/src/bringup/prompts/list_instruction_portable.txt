@@ -1,0 +1,126 @@
+## Vinv bring-up — Python service inventory (read-only, portable runbook)
+
+You are producing a machine-readable inventory of the **Python services** in this repo. This
+stage installs nothing and starts nothing — it only reads and describes. Use your own terminal
+and file-editing tools; this runbook names no specific tool APIs.
+
+### What counts as a "service"
+
+A service is a Python distribution/component we instrument — the unit a later
+`bringup start --service <name>` brings up while tracelens AST-rewrites its import package(s).
+Most repos ship one per packaging manifest (`pyproject.toml` / `setup.py`); the framework scan
+below lists the candidates it found and, for each, the import package(s) that belong in `modules`.
+EXCLUDE stateful infrastructure (Postgres, MySQL, Redis, ClickHouse, Kafka, Mongo, etc.) and
+non-Python processes (Node/Vite/Next frontends). Only Python services count.
+
+**"Service" is broader than HTTP.** Include every long-running Python process the repo defines:
+web apps (`python_web`), background/queue workers (`python_worker`), **stdio JSON-RPC servers**
+(`python_stdio` — MCP servers and the like, spoken to over stdin/stdout, no port), and beat/cron
+schedulers (`python_scheduler`). A port scan finds none of the last three — find them from the
+handbook's enumeration, the manifest-scan list below, and the entry code.
+
+**A LIBRARY IS NOT A SERVICE.** A package with no runnable process of its own — no
+`[project.scripts]` / `[tool.poetry.scripts]` console script, no `__main__.py`, no handbook
+`### Run on host` row — is a library: never fabricate a `command` for it. If another service's
+process imports and runs its code, list it with **that host app's** command/working
+directory/port (entries then differ only in which package is instrumented); if nothing in the
+repo runs it, leave it out of `services` entirely. Fewer real services beat padded unrunnable
+ones — a fabricated command burns a whole downstream bring-up attempt.
+
+### Candidate services (framework scan — strong prior; the handbook decides)
+
+{_pkgs_note}
+
+### Source of truth
+
+Read the handbook at `{vinv_md}` first (it is also inlined above this runbook if present). Use its
+`### Run on host (instrumented by tracelens)` rows to find the **start command, working directory
+and port** for each Python app; ignore the `### Run in Docker` table for the inventory itself.
+Treat the handbook as authoritative and the scan as a strong prior. Where the handbook is thin,
+read `pyproject.toml`, `compose.yaml`, the package's own `__main__.py` / entrypoint — but do
+**not** install dependencies or start any process.
+
+### What to capture for each service
+
+- **`name`** — the service name: the candidate name from the scan verbatim; for a service you add
+  from the handbook, its distribution name (its `pyproject.toml` `[project].name` or
+  `[tool.poetry].name`, whichever table the manifest uses).
+- **`kind`** — `python_web` (serves HTTP), `python_worker` (background worker/consumer, no HTTP
+  port), `python_stdio` (stdio JSON-RPC server — MCP style, port-less, requests on stdin /
+  responses on stdout), or `python_scheduler` (beat/cron-style scheduler process). Classify by
+  **reading the entry code** the command names: `uvicorn.run`/an ASGI app → `python_web`; a
+  `FastMCP(...)` app or `mcp` stdio transport → `python_stdio`; a celery worker → `python_worker`;
+  a beat/scheduler loop → `python_scheduler`. Verify every candidate is actually startable this
+  way before emitting it — a candidate whose entry code you could not locate does not go in the
+  file.
+- **`transport`** — optional: `"http"` for `python_web`, `"stdio"` for `python_stdio`, else
+  omit/`null`. A `python_stdio` service's readiness check downstream is a JSON-RPC initialize
+  round-trip over stdin/stdout (recorded by Stage 2b as `"probe": {{"type": "stdio-jsonrpc"}}` in
+  start_commands), never a port probe.
+- **`command`** — the native start command (NEVER `docker compose up`), taken from what the repo
+  **actually declares**: the handbook's `### Run on host` row, a `[project.scripts]` /
+  `[tool.poetry.scripts]` console script, a verified `python -m <module>` target (only if that
+  package really has a `__main__.py` — check), or the server command the project documents
+  (uvicorn/gunicorn/`manage.py runserver`/`flask run`/…, in `python -m <server> …` form where
+  supported). A command you could not ground in the handbook, a manifest script, or an existing
+  entrypoint file is a fabrication. **`python -m <module>:<attr>` is INVALID** — `-m` takes a
+  module, not an app-factory reference. Services served by the same app process may share a
+  `command`.
+- **`working_directory`** — absolute path the command runs from (default the candidate's own path
+  from the scan, else `{root}`).
+- **`port`** — the HTTP port it listens on (**required** for `python_web`); `null` for every
+  other kind (`python_stdio` in particular MUST have `port: null`).
+- **`modules`** — the top-level **import package(s)** to instrument; each must be a valid Python
+  identifier (never a directory or distribution name containing `-`).
+
+### Write the file
+
+Write this JSON to `{services_json}` with your file-writing tool — one entry per Python service,
+no infra, no frontends:
+
+```json
+{{
+  "services": [
+    {{
+      "name": "acme-payment",
+      "kind": "python_web",
+      "command": "python -m uvicorn acme_payment.main:app --host 0.0.0.0 --port 8000",
+      "working_directory": "{root}",
+      "port": 8000,
+      "modules": ["acme_payment"]
+    }},
+    {{
+      "name": "toolshed",
+      "kind": "python_worker",
+      "command": "python -m toolshed",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["toolshed"]
+    }},
+    {{
+      "name": "acme-mcp",
+      "kind": "python_stdio",
+      "transport": "stdio",
+      "command": "python -m acme_mcp.server",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["acme_mcp"]
+    }}
+  ]
+}}
+```
+
+(The names above are illustrative of the **shape** — note how the service `name` may carry a dash
+while `modules` carries the underscore import package, and how the stdio server carries
+`transport: "stdio"` with `port: null`. Use the actual names for this repo.) Emit
+**valid JSON only** (no trailing commas, no comments, no Markdown fences inside the file).
+
+### Finish
+
+You are done only when **`{services_json}` exists on disk** with a valid `services` array covering
+every service in the handbook. Reading and thinking are not a substitute for writing the file.
+Validation to expect: every `modules` entry must be an importable Python identifier, `kind` must
+be one of `python_web` / `python_worker` / `python_stdio` / `python_scheduler`, `python_web`
+entries must carry an integer `port`, `python_stdio` entries must carry `port: null`, `transport`
+(when present) must match the kind, and commands must be runnable (no `-m module:attr`, no
+docker).

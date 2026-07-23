@@ -1,0 +1,400 @@
+/**
+ * The Vinv Flow panel — the one always-visible home in the sidebar.
+ *
+ * A vertical pipeline rail: Discover → Services → Traces → Insights → Verify,
+ * each stage with live status, what it produced (handbook, start commands,
+ * traces, per-endpoint reports, checks — one click each), the single next
+ * action when a human is needed, and a highlighted red Issues section with
+ * per-issue "Fix with agent". Auto-Pilot's live step pulses on its stage.
+ *
+ * Rendering follows the existing panels' pattern: the extension posts the
+ * whole `FlowModel` on every change; the webview rebuilds the DOM from it
+ * (textContent only — no HTML injection) and posts small action messages back.
+ * All colors come from the shared theme (webviewTheme.ts), which keys off the
+ * body.vscode-light/-dark/-high-contrast classes, so both themes stay legible.
+ */
+import * as vscode from 'vscode';
+import * as crypto from 'crypto';
+import * as path from 'path';
+import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import type { FlowStateSource } from './flowStateSource';
+import type { FlowLink, FlowModel } from './flowModel';
+
+export const FLOW_VIEW_ID = 'vinv.flow';
+
+/** Messages the Flow webview sends back to the extension. */
+interface OutboundMessage {
+	type: 'link' | 'fix' | 'evidence' | 'action';
+	link?: FlowLink;
+	fixArgs?: { issue: string; service?: string; row?: number };
+	path?: string;
+	line?: number;
+	command?: string;
+	args?: unknown[];
+}
+
+export class FlowViewProvider implements vscode.WebviewViewProvider {
+	constructor(
+		private readonly context: vscode.ExtensionContext,
+		private readonly source: FlowStateSource,
+	) {}
+
+	resolveWebviewView(view: vscode.WebviewView): void {
+		view.webview.options = { enableScripts: true };
+		view.webview.html = getFlowHtml(view.webview.cspSource);
+
+		const post = (model: FlowModel): void => {
+			void view.webview.postMessage({ type: 'model', model });
+		};
+		const sub = this.source.onDidChange(post);
+		view.onDidDispose(() => sub.dispose());
+		// A collapsed-then-expanded view keeps its HTML but may have missed
+		// updates; re-post the current model whenever it becomes visible.
+		view.onDidChangeVisibility(() => {
+			if (view.visible) {
+				post(this.source.getModel());
+			}
+		});
+		post(this.source.getModel());
+
+		view.webview.onDidReceiveMessage(async (msg: OutboundMessage) => {
+			switch (msg.type) {
+				case 'link':
+					if (msg.link) {
+						await openLink(msg.link);
+					}
+					return;
+				case 'fix':
+					if (msg.fixArgs) {
+						await vscode.commands.executeCommand('vinv-vs.fixWithHarness', msg.fixArgs);
+					}
+					return;
+				case 'evidence':
+					if (msg.path) {
+						await openFileAt(msg.path, msg.line);
+					}
+					return;
+				case 'action':
+					if (msg.command) {
+						await vscode.commands.executeCommand(msg.command, ...(msg.args ?? []));
+					}
+					return;
+			}
+		}, undefined, this.context.subscriptions);
+	}
+}
+
+/** Executes a rail link: a command, a markdown preview, or a file open. */
+async function openLink(link: FlowLink): Promise<void> {
+	if (link.command) {
+		await vscode.commands.executeCommand(link.command, ...(link.args ?? []));
+		return;
+	}
+	if (!link.openPath) {
+		return;
+	}
+	if (link.markdownPreview) {
+		await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(link.openPath));
+		return;
+	}
+	// vscode.open resolves the registered default editor, so calltree-*.json
+	// and smoke-*.html land in their custom viewers, plain files in the editor.
+	await openFileAt(link.openPath, link.openLine);
+}
+
+async function openFileAt(fsPath: string, line?: number): Promise<void> {
+	const uri = vscode.Uri.file(fsPath);
+	const ext = path.extname(fsPath);
+	if (line && ext !== '.html') {
+		const pos = new vscode.Position(Math.max(0, line - 1), 0);
+		await vscode.window.showTextDocument(uri, {
+			selection: new vscode.Range(pos, pos),
+			preview: true,
+		});
+		return;
+	}
+	await vscode.commands.executeCommand('vscode.open', uri);
+}
+
+function getFlowHtml(cspSource: string): string {
+	const nonce = crypto.randomBytes(16).toString('base64');
+	const csp = [
+		`default-src 'none'`,
+		`style-src ${cspSource} 'unsafe-inline'`,
+		`script-src 'nonce-${nonce}'`,
+	].join('; ');
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="${csp}">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Vinv Flow</title>
+	<style>
+		${VINV_BASE_CSS}
+		body { font-size: 11.5px; padding: 10px 12px 18px; }
+		.pilot {
+			display: none; align-items: center; gap: 8px;
+			margin: 2px 0 12px; padding: 8px 10px;
+			border: 1px solid var(--line-strong);
+		}
+		.pilot.on { display: flex; }
+		.pilot .txt { color: var(--ink); font-size: 10.5px; letter-spacing: 0.06em; min-width: 0; }
+		.pilot .txt b { display: block; font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--muted); }
+
+		.next {
+			display: none; margin: 2px 0 12px; padding: 10px 12px;
+			border: 1px solid var(--accent);
+		}
+		.next.on { display: block; }
+		.next .k { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
+		.next .why { color: var(--muted); margin: 6px 0 10px; line-height: 1.5; }
+		.next button {
+			display: inline-flex; align-items: center; gap: 6px;
+			padding: 6px 12px; cursor: pointer; border-radius: 0;
+			font-family: inherit; font-size: 10px; font-weight: 500;
+			letter-spacing: 0.2em; text-transform: uppercase;
+			background: var(--ink); color: var(--bg); border: 1px solid var(--ink);
+			transition: background 0.2s, border-color 0.2s;
+		}
+		.next button:hover { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+
+		/* ---- the rail ---- */
+		.rail { position: relative; }
+		.stage { position: relative; padding: 0 0 14px 22px; }
+		/* connector line between stage dots */
+		.stage::before {
+			content: ''; position: absolute; left: 5px; top: 16px; bottom: -2px;
+			width: 1px; background: var(--line-strong);
+		}
+		.stage:last-child::before { display: none; }
+		.dot {
+			position: absolute; left: 0; top: 4px; width: 11px; height: 11px;
+			border-radius: 50%; box-sizing: border-box;
+			border: 1.5px solid var(--muted-2); background: var(--bg);
+		}
+		.stage.done .dot { border-color: var(--ink); background: var(--ink); }
+		.stage.error .dot { border-color: var(--accent); background: var(--accent); }
+		.stage.running .dot {
+			border-color: var(--accent); background: var(--accent);
+			box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18);
+			animation: v-pulse 2.4s ease-in-out infinite;
+		}
+		.stage h2 {
+			margin: 0; font-size: 12.5px; font-weight: 600;
+			letter-spacing: 0.04em; color: var(--ink);
+			display: flex; align-items: baseline; gap: 8px;
+		}
+		.stage.waiting h2 { color: var(--muted); font-weight: 400; }
+		.stage h2 .st {
+			font-size: 8.5px; letter-spacing: 0.2em; text-transform: uppercase;
+			color: var(--muted-2);
+		}
+		.stage.error h2 .st, .stage.running h2 .st { color: var(--accent); }
+		.stage.done h2 .st { color: var(--muted); }
+		.summary { color: var(--muted); margin: 3px 0 0; line-height: 1.5; }
+		.stage.error .summary { color: var(--accent); }
+		.activity { color: var(--accent); margin: 3px 0 0; line-height: 1.5; }
+		.links { margin: 6px 0 0; }
+		.lnk {
+			display: flex; align-items: baseline; gap: 7px;
+			width: 100%; text-align: left; box-sizing: border-box;
+			padding: 3px 6px; margin: 0 0 1px -6px;
+			background: transparent; border: none; border-left: 2px solid transparent;
+			border-radius: 0; color: var(--ink); font-family: inherit; font-size: 11px;
+			cursor: pointer; line-height: 1.45;
+		}
+		.lnk:hover { background: var(--bg-2); border-left-color: var(--accent); }
+		.lnk:disabled { cursor: default; }
+		.lnk:disabled:hover { background: transparent; border-left-color: transparent; }
+		.lnk .b {
+			flex: none; width: 6px; height: 6px; border-radius: 50%;
+			align-self: center; background: var(--muted-2);
+		}
+		.lnk.s-ok .b { background: var(--ink); }
+		.lnk.s-error .b { background: var(--accent); }
+		.lnk.s-running .b {
+			background: var(--accent);
+			box-shadow: 0 0 0 3px rgba(215, 25, 33, 0.18);
+			animation: v-pulse 2.4s ease-in-out infinite;
+		}
+		.lnk .lab { color: var(--ink); }
+		.lnk.s-muted .lab { color: var(--muted); }
+		.lnk .det { color: var(--muted-2); font-size: 10px; min-width: 0; }
+
+		/* ---- issues ---- */
+		.issues { display: none; margin-top: 6px; border: 1px solid var(--accent); }
+		.issues.on { display: block; }
+		.issues .hd {
+			padding: 7px 10px; background: var(--accent); color: #ffffff;
+			font-size: 9.5px; letter-spacing: 0.22em; text-transform: uppercase;
+		}
+		.issue { padding: 9px 10px; border-top: 1px solid var(--line); }
+		.issue:first-of-type { border-top: none; }
+		.issue .t { color: var(--ink); font-weight: 600; line-height: 1.45; }
+		.issue .d {
+			color: var(--muted); margin-top: 3px; line-height: 1.5;
+			font-size: 10.5px; word-break: break-word;
+		}
+		.issue .acts { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
+		.issue button {
+			padding: 4px 10px; cursor: pointer; border-radius: 0;
+			font-family: inherit; font-size: 9px; font-weight: 500;
+			letter-spacing: 0.18em; text-transform: uppercase;
+			transition: background 0.2s, color 0.2s, border-color 0.2s;
+		}
+		.issue .fix { background: var(--accent); border: 1px solid var(--accent); color: #ffffff; }
+		.issue .fix:hover { background: var(--accent-soft); border-color: var(--accent-soft); }
+		.issue .ev { background: transparent; border: 1px solid var(--line-strong); color: var(--ink); }
+		.issue .ev:hover { border-color: var(--ink); }
+		.issue .sent { align-self: center; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); border: 1px dashed var(--line-strong); padding: 3px 8px; }
+
+		.empty { color: var(--muted); line-height: 1.6; padding: 4px 0; }
+		.brand {
+			display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
+			font-size: 10px; font-weight: 600; letter-spacing: 0.24em;
+			text-transform: uppercase; color: var(--ink);
+		}
+		.brand em { font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 11px; }
+	</style>
+</head>
+<body>
+	<div class="brand">Vinv Flow <em>start to finish</em></div>
+	<div class="pilot" id="pilot"><span class="v-dot"></span><span class="txt" id="pilot-txt"></span></div>
+	<div class="next" id="next">
+		<div class="k">Next step</div>
+		<div id="next-label" style="font-weight:600;"></div>
+		<div class="why" id="next-why"></div>
+		<button id="next-btn" type="button">Do it</button>
+	</div>
+	<div class="rail" id="rail"></div>
+	<div class="issues" id="issues">
+		<div class="hd" id="issues-hd">Problems found</div>
+		<div id="issues-list"></div>
+	</div>
+
+	<script nonce="${nonce}">
+		const vscode = acquireVsCodeApi();
+		let model = null;
+		let nextAction = null;
+
+		function el(tag, cls, text) {
+			const e = document.createElement(tag);
+			if (cls) { e.className = cls; }
+			if (text != null) { e.textContent = text; }
+			return e;
+		}
+
+		function renderLink(link) {
+			const b = el('button', 'lnk s-' + (link.state || 'muted'));
+			b.type = 'button';
+			b.appendChild(el('span', 'b'));
+			b.appendChild(el('span', 'lab', link.label));
+			if (link.detail) { b.appendChild(el('span', 'det', link.detail)); }
+			const actionable = !!(link.command || link.openPath);
+			if (actionable) {
+				if (link.detail) { b.title = link.detail; }
+				b.addEventListener('click', () => vscode.postMessage({ type: 'link', link }));
+			} else {
+				b.disabled = true;
+			}
+			return b;
+		}
+
+		const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', error: 'needs attention' };
+
+		function render() {
+			if (!model) { return; }
+
+			// Auto-Pilot banner (the spine's header).
+			const pilot = document.getElementById('pilot');
+			pilot.classList.toggle('on', model.autoPilot.running);
+			if (model.autoPilot.running) {
+				const txt = document.getElementById('pilot-txt');
+				txt.textContent = '';
+				txt.appendChild(el('b', null, 'Auto-Pilot is driving'));
+				txt.appendChild(document.createTextNode(model.autoPilot.label || 'working…'));
+			}
+
+			// Single next action.
+			const next = document.getElementById('next');
+			nextAction = model.nextAction || null;
+			next.classList.toggle('on', !!nextAction);
+			if (nextAction) {
+				document.getElementById('next-label').textContent = nextAction.label;
+				document.getElementById('next-why').textContent = nextAction.why;
+			}
+
+			// The rail.
+			const rail = document.getElementById('rail');
+			rail.textContent = '';
+			for (const s of model.stages) {
+				const st = el('div', 'stage ' + s.status);
+				st.appendChild(el('span', 'dot'));
+				const h = el('h2', null, s.title);
+				h.appendChild(el('span', 'st', STATUS_WORD[s.status] || s.status));
+				st.appendChild(h);
+				if (s.activity) {
+					st.appendChild(el('div', 'activity', s.activity));
+				} else {
+					st.appendChild(el('div', 'summary', s.summary));
+				}
+				if (s.links.length) {
+					const box = el('div', 'links');
+					for (const l of s.links) { box.appendChild(renderLink(l)); }
+					st.appendChild(box);
+				}
+				rail.appendChild(st);
+			}
+
+			// Issues.
+			const wrap = document.getElementById('issues');
+			wrap.classList.toggle('on', model.issues.length > 0);
+			document.getElementById('issues-hd').textContent =
+				model.issues.length === 1 ? '1 problem found' : model.issues.length + ' problems found';
+			const list = document.getElementById('issues-list');
+			list.textContent = '';
+			for (const issue of model.issues) {
+				const item = el('div', 'issue');
+				item.appendChild(el('div', 't', issue.title));
+				if (issue.detail) { item.appendChild(el('div', 'd', issue.detail)); }
+				const acts = el('div', 'acts');
+				if (issue.dispatched) {
+					// Auto-dispatch already fired — show the state, not a button
+					// (a second click would just hit the dedup anyway).
+					acts.appendChild(el('span', 'sent', 'Fix sent — agent working'));
+				} else {
+					const fix = el('button', 'fix', 'Fix with agent');
+					fix.type = 'button';
+					fix.addEventListener('click', () =>
+						vscode.postMessage({ type: 'fix', fixArgs: issue.fixArgs }));
+					acts.appendChild(fix);
+				}
+				if (issue.evidencePath) {
+					const ev = el('button', 'ev', 'See evidence');
+					ev.type = 'button';
+					ev.addEventListener('click', () =>
+						vscode.postMessage({ type: 'evidence', path: issue.evidencePath, line: issue.evidenceLine }));
+					acts.appendChild(ev);
+				}
+				item.appendChild(acts);
+				list.appendChild(item);
+			}
+		}
+
+		document.getElementById('next-btn').addEventListener('click', () => {
+			if (nextAction) {
+				vscode.postMessage({ type: 'action', command: nextAction.command, args: nextAction.args });
+			}
+		});
+
+		window.addEventListener('message', (event) => {
+			if (event.data && event.data.type === 'model') {
+				model = event.data.model;
+				render();
+			}
+		});
+	</script>
+</body>
+</html>`;
+}

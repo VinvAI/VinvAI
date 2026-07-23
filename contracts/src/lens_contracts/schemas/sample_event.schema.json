@@ -1,0 +1,238 @@
+{
+  "$defs": {
+    "CodeVersion": {
+      "additionalProperties": false,
+      "description": "Source-of-truth identifier for the running code.\n\nResolution priority (capture-side):\n    1. git_sha            \u2014 `git rev-parse HEAD` succeeds in target's cwd\n    2. build_id           \u2014 CI/CD env (BUILD_ID, etc.)\n    3. container_digest   \u2014 sha256 of the OCI image\n    4. content_hash       \u2014 sha256 of the target package's installed __file__ tree\n    5. \"unknown\"          \u2014 last resort; replay corpora become hash-only",
+      "properties": {
+        "build_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Id"
+        },
+        "container_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Digest"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
+        "git_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Sha"
+        },
+        "primary": {
+          "title": "Primary",
+          "type": "string"
+        },
+        "primary_kind": {
+          "enum": [
+            "git_sha",
+            "build_id",
+            "container_digest",
+            "content_hash",
+            "unknown"
+          ],
+          "title": "Primary Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "primary",
+        "primary_kind"
+      ],
+      "title": "CodeVersion",
+      "type": "object"
+    },
+    "StackFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Line"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "title": "StackFrame",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "code_version": {
+      "$ref": "#/$defs/CodeVersion"
+    },
+    "kind": {
+      "const": "sample",
+      "default": "sample",
+      "title": "Kind",
+      "type": "string"
+    },
+    "process_id": {
+      "description": "ephemeral; pid+boot_time",
+      "title": "Process Id",
+      "type": "string"
+    },
+    "sample_kind": {
+      "enum": [
+        "cpu",
+        "alloc",
+        "dealloc",
+        "event_loop_block",
+        "gc_pause",
+        "lock_wait"
+      ],
+      "title": "Sample Kind",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1",
+      "default": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "type": "string"
+        }
+      ],
+      "default": "default",
+      "title": "Service Id"
+    },
+    "span_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Span Id"
+    },
+    "stack": {
+      "items": {
+        "$ref": "#/$defs/StackFrame"
+      },
+      "title": "Stack",
+      "type": "array"
+    },
+    "tenant_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "type": "string"
+        }
+      ],
+      "default": "default",
+      "title": "Tenant Id"
+    },
+    "trace_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trace Id"
+    },
+    "ts": {
+      "description": "ISO 8601 UTC",
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    },
+    "value": {
+      "description": "bytes for alloc, 1 for cpu, ms for waits",
+      "title": "Value",
+      "type": "integer"
+    },
+    "weight_ms": {
+      "description": "sampling period in milliseconds",
+      "minimum": 1,
+      "title": "Weight Ms",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "process_id",
+    "code_version",
+    "ts",
+    "sample_kind",
+    "value",
+    "weight_ms"
+  ],
+  "title": "SampleEvent",
+  "type": "object"
+}

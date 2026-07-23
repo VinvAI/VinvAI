@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "identification"
+version = "0.1.0"
+description = "Deterministic entry-point and call-tree analysis over the Vinv Rust code index"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "click>=8.1.0,<9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[project.scripts]
+identification = "identification.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

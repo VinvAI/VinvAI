@@ -1,0 +1,237 @@
+{
+  "$defs": {
+    "ClockCall": {
+      "additionalProperties": false,
+      "properties": {
+        "fn": {
+          "enum": [
+            "time.time",
+            "time.monotonic",
+            "time.perf_counter",
+            "datetime.datetime.now"
+          ],
+          "title": "Fn",
+          "type": "string"
+        },
+        "returned": {
+          "title": "Returned",
+          "type": "number"
+        }
+      },
+      "required": [
+        "fn",
+        "returned"
+      ],
+      "title": "ClockCall",
+      "type": "object"
+    },
+    "ExternalResponseRecord": {
+      "additionalProperties": false,
+      "description": "Recorded response for one external boundary call. Replayed by IOMock.",
+      "properties": {
+        "request_hash": {
+          "title": "Request Hash",
+          "type": "string"
+        },
+        "response_blob_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "object-store ref to canonical response; absent if hash-only",
+          "title": "Response Blob Ref"
+        },
+        "response_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Response Hash"
+        },
+        "span_id": {
+          "title": "Span Id",
+          "type": "string"
+        },
+        "target_id": {
+          "title": "Target Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "enum": [
+            "db",
+            "http",
+            "cache",
+            "queue",
+            "llm",
+            "fs"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "span_id",
+        "target_kind",
+        "target_id",
+        "request_hash",
+        "response_hash"
+      ],
+      "title": "ExternalResponseRecord",
+      "type": "object"
+    },
+    "RngEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "fn": {
+          "enum": [
+            "random.random",
+            "random.randint",
+            "random.getrandbits",
+            "numpy.random.default_rng",
+            "uuid.uuid4",
+            "secrets.token_bytes",
+            "secrets.token_hex"
+          ],
+          "title": "Fn",
+          "type": "string"
+        },
+        "payload_hex": {
+          "description": "returned bytes / int / float, hex-encoded",
+          "title": "Payload Hex",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fn",
+        "payload_hex"
+      ],
+      "title": "RngEvent",
+      "type": "object"
+    },
+    "ThreadingEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "fn": {
+          "enum": [
+            "threading.Thread.start",
+            "asyncio.create_task"
+          ],
+          "title": "Fn",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fn",
+        "name",
+        "order"
+      ],
+      "title": "ThreadingEvent",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "capture_gaps": {
+      "description": "documented limitations: native_clock | gpu | lock_order | retry_jitter | ...",
+      "items": {
+        "type": "string"
+      },
+      "title": "Capture Gaps",
+      "type": "array"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "clock_calls": {
+      "items": {
+        "$ref": "#/$defs/ClockCall"
+      },
+      "title": "Clock Calls",
+      "type": "array"
+    },
+    "env_snapshot": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "only the env vars actually read in the request scope",
+      "title": "Env Snapshot",
+      "type": "object"
+    },
+    "external_responses": {
+      "items": {
+        "$ref": "#/$defs/ExternalResponseRecord"
+      },
+      "title": "External Responses",
+      "type": "array"
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    },
+    "python_hash_seed": {
+      "title": "Python Hash Seed",
+      "type": "string"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "rng_events": {
+      "items": {
+        "$ref": "#/$defs/RngEvent"
+      },
+      "title": "Rng Events",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1",
+      "default": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_id": {
+      "default": "default",
+      "title": "Service Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "default": "default",
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "threading_events": {
+      "items": {
+        "$ref": "#/$defs/ThreadingEvent"
+      },
+      "title": "Threading Events",
+      "type": "array"
+    }
+  },
+  "required": [
+    "request_id",
+    "captured_at",
+    "python_hash_seed"
+  ],
+  "title": "DeterminismBoundaryRecord",
+  "type": "object"
+}

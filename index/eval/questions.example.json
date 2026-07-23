@@ -1,0 +1,26 @@
+[
+  {
+    "q": "How does the native index combine semantic and lexical rankings?",
+    "file": "index/src/search.rs",
+    "symbol": "hybrid",
+    "category": "behavior"
+  },
+  {
+    "q": "Where is the BM25 lexical index type defined?",
+    "file": "index/src/bm25.rs",
+    "symbol": "Bm25",
+    "category": "identifier"
+  },
+  {
+    "q": "How is the native index binary built?",
+    "file": "index/README.md",
+    "symbol": "`// 01 · build`",
+    "category": "doc"
+  },
+  {
+    "q": "Which graph function returns neighboring symbols?",
+    "file": "index/src/graph.rs",
+    "symbol": "neighbors",
+    "category": "graph"
+  }
+]

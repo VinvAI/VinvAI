@@ -1,0 +1,45 @@
+{
+  "baseline": {
+    "clipped_fraction": 0.0,
+    "count": 64,
+    "direct_method": 0.9765625,
+    "doubly_robust": 0.9774789222873901,
+    "effective_sample_size": 44.99999999999999,
+    "ips": 0.8870967741935485,
+    "matched_count": 45,
+    "max_importance_weight": 1.2903225806451615,
+    "overlap": 0.703125,
+    "snips": 0.9777777777777777,
+    "support_ok": false,
+    "target_top_k": 10,
+    "weight_clip_used": 1.2903225806451615
+  },
+  "candidate": {
+    "clipped_fraction": 0.0,
+    "count": 64,
+    "direct_method": 1.0,
+    "doubly_robust": 1.0,
+    "effective_sample_size": 3.0,
+    "ips": 0.625,
+    "matched_count": 3,
+    "max_importance_weight": 13.333333333333334,
+    "overlap": 0.046875,
+    "snips": 1.0,
+    "support_ok": false,
+    "target_top_k": 5,
+    "weight_clip_used": 13.333333333333334
+  },
+  "dr_delta": 0.022521077712609916,
+  "dr_delta_ci95": [
+    -0.015318627450980449,
+    0.08405401103565369
+  ],
+  "epoch": "4ff0456033800e1b94133065",
+  "promotable": false,
+  "telemetry_diagnostics": {
+    "explicit_feedback_rate": 1.0,
+    "fallback_decisions_excluded": 0,
+    "logged_decisions": 64,
+    "reward_source": "explicit"
+  }
+}

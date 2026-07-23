@@ -1,0 +1,2 @@
+# External post-conditions (spec §12.1) — demo silent correctness bug on /wrong/{n}
+demo_app.main.wrong: "result.get('got') == result.get('expected')"

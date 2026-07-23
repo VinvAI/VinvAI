@@ -1,0 +1,358 @@
+{
+  "$defs": {
+    "SideEffect": {
+      "properties": {
+        "hash": {
+          "title": "Hash",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "db",
+            "http",
+            "cache",
+            "queue",
+            "llm",
+            "fs",
+            "other"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Id"
+        }
+      },
+      "required": [
+        "kind",
+        "hash"
+      ],
+      "title": "SideEffect",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "enter"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "args_hash",
+          "args_schema",
+          "args_summary"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "event": {
+            "const": "exit"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "then": {
+        "required": [
+          "duration_ms",
+          "status",
+          "oracle_violations",
+          "call_count_in_request"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "args_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "blake2b-8 hex (16 chars)",
+      "title": "Args Hash"
+    },
+    "args_schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Args Schema"
+    },
+    "args_summary": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "\u2264256 B serialized",
+      "title": "Args Summary"
+    },
+    "call_count_in_request": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Call Count In Request"
+    },
+    "capture_scope": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Capture Scope"
+    },
+    "component": {
+      "description": "FQN: pkg.module.symbol",
+      "title": "Component",
+      "type": "string"
+    },
+    "depth": {
+      "minimum": 0,
+      "title": "Depth",
+      "type": "integer"
+    },
+    "determinism_sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Determinism Sources",
+      "type": "array"
+    },
+    "duration_ms": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duration Ms"
+    },
+    "error_message": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "truncated to 500 chars",
+      "title": "Error Message"
+    },
+    "error_stack": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "formatted traceback tail, truncated (raise site preserved)",
+      "title": "Error Stack"
+    },
+    "error_type": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Type"
+    },
+    "event": {
+      "enum": [
+        "enter",
+        "exit"
+      ],
+      "title": "Event",
+      "type": "string"
+    },
+    "level": {
+      "title": "Level",
+      "type": "string"
+    },
+    "mem_delta_bytes": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mem Delta Bytes"
+    },
+    "oracle_violations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Oracle Violations",
+      "type": "array"
+    },
+    "parent_component": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Parent Component"
+    },
+    "request_id": {
+      "title": "Request Id",
+      "type": "string"
+    },
+    "result_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Hash"
+    },
+    "result_schema": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Schema"
+    },
+    "result_summary": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Summary"
+    },
+    "side_effects": {
+      "items": {
+        "$ref": "#/$defs/SideEffect"
+      },
+      "title": "Side Effects",
+      "type": "array"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "enum": [
+            "ok",
+            "error"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Status"
+    },
+    "symbol_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Symbol Id"
+    },
+    "thread_id": {
+      "title": "Thread Id",
+      "type": "integer"
+    },
+    "ts": {
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T",
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ts",
+    "request_id",
+    "component",
+    "event",
+    "level",
+    "depth",
+    "parent_component",
+    "thread_id"
+  ],
+  "title": "SpanEvent",
+  "type": "object"
+}

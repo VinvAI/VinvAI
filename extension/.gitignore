@@ -1,0 +1,19 @@
+out
+dist
+node_modules
+.vscode-test/
+*.vsix
+*.zip
+
+# Local Claude settings (may contain machine-specific paths and secrets)
+.claude/settings.local.json
+
+# Bundled binaries (large, platform-specific) — packaged into the .vsix but not committed
+bin/tracelens
+bin/index
+
+# Generated per-workspace Cursor MCP config (may contain credentials)
+.cursor/
+
+# Vinv local artifacts (captures, index, reports)
+.vinv/

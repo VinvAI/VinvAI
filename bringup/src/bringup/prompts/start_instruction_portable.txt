@@ -1,0 +1,193 @@
+## Vinv bring-up — start one service (portable runbook)
+
+You are bringing up **one** service, **`{service}`**, in this repo and **only** that service —
+wrapping it with `tracelens run` if it is a Python process so we can capture traces for downstream
+RCA. Use your own terminal and file-editing tools; this runbook names no specific tool APIs, so map
+each step onto whatever terminal / file primitives you have.
+
+### Prime directive — GET THE SERVICE RUNNING
+
+Get **`{service}`** actually serving traffic. Diagnose and fix errors; do **not** bail on the first
+failure. Common self-heals:
+
+- `No module named pip` → the venv was made by a tool that doesn't install pip into it; use **that
+  project's own installer** (detect it — see below), not a guessed one.
+- `command not found: python` → use **`python3`** or the venv's interpreter (`<venv>/bin/python`, or
+  `<venv>\Scripts\python.exe` on Windows).
+- missing venv / deps → create it **with the project's own toolchain** and install (see below).
+- port already in use → find the holder (`lsof -nP -iTCP:<port>`, or `netstat -ano | findstr :<port>`
+  on Windows) and pick a free port, or reuse it.
+- import/version conflict → prefer the project's **lockfile** resolution; hand-pin only if the lock
+  cannot be honoured, then retry.
+- a genuinely **unreachable** infra dependency (DB/broker: connection refused / DNS failure) → start
+  it and retry. A dependency that is merely **slow** (a pool taking 20–40s) is NOT a failure.
+
+### Source of truth
+
+Read the handbook at `{vinv_md}` first (also inlined above this runbook if present). Find how
+**`{service}`** is run — the `### Run on host (instrumented by tracelens)` table, the package's own
+`__main__.py` / entrypoint, and `pyproject.toml` scripts. Treat it as authoritative for **what** to
+install and **what** to start.
+
+### CRITICAL — Python apps run on the HOST, never in Docker
+
+Tracelens instruments Python by AST-rewriting modules at import time inside the **host** interpreter
+that `tracelens run` launches. If the app runs inside a Docker container, the wrapper sits outside
+the container and never wraps the real `python` process — **zero spans land** and downstream RCA has
+nothing. So: start only **stateful infrastructure** (Postgres/Redis/Kafka/…) in Docker
+(`docker compose up -d <infra-svc> …`, NOT the whole stack), and run the Python app itself
+**natively on the host**, pointed at the dockerised infra's loopback ports. If the handbook only
+documents `docker compose up`, derive the native command from the container's `CMD` / `ENTRYPOINT`.
+
+### STEP 0 — Detect the package manager. NEVER assume one.
+
+**Before installing anything, determine which manager THIS repo uses.** Each manager reads only its
+own manifest format and is blind to the others'. Detect from the manifest + lockfile:
+
+| Evidence                                        | Manager | Install                 | Run                |
+| :---------------------------------------------- | :------ | :---------------------- | :----------------- |
+| `[tool.poetry]` in pyproject / `poetry.lock`     | Poetry  | `poetry install`        | `poetry run <cmd>` |
+| `[project]` in pyproject + `uv.lock`             | uv      | `uv sync`               | `uv run <cmd>`     |
+| `[tool.pdm]` / `pdm.lock`                        | PDM     | `pdm install`           | `pdm run <cmd>`    |
+| `Pipfile.lock`                                   | Pipenv  | `pipenv install`        | `pipenv run <cmd>` |
+| `requirements*.txt`, `setup.py`, or `[project]` with no lock | pip | `pip install -r <f>` / `-e .` | `<venv>/bin/python -m …` |
+| `environment.yml`                                | conda   | `conda env create -f …` | `conda run -n <env> <cmd>` |
+
+Non-Python: `package-lock.json` → `npm ci`; `yarn.lock` → `yarn install`; `pnpm-lock.yaml` →
+`pnpm i --frozen-lockfile`; `bun.lockb` → `bun install`; `Cargo.lock` → `cargo build`.
+
+**The manifest table wins over a stray lockfile's name** (a `uv.lock` may be debris from an earlier
+failed attempt — possibly your own). **The handbook wins over both**: if `{vinv_md}` documents an
+install command, run THAT verbatim. In a monorepo, detect **per directory**.
+
+**THE TRAP — the wrong manager EXITS 0 AND INSTALLS NOTHING.** No error, a valid near-empty stub
+lockfile, a correctly-created but **empty** venv, and a `ModuleNotFoundError` much later at import
+time. A manager that reads `[project]` sees a `[tool.poetry]`-only manifest as having zero
+dependencies and faithfully installs zero. **So when deps are missing after a "successful" install,
+your first hypothesis is "wrong installer", NOT "wrong venv".** Do not create a second venv — that
+splits the app's deps from the instrumentation and neither venv can then run a traced service.
+
+**Verification gate (mandatory):** exit code 0 is not proof. Import a real dep before continuing:
+`<venv-python> -c "import fastapi, uvicorn; print('deps OK')"` (use this service's actual deps). If
+it raises `ModuleNotFoundError`, the install failed regardless of exit code — switch managers and
+retry into the SAME venv. Do not proceed to OTel or start the service until it prints.
+
+### Virtualenv — pin Python 3.13 (or 3.12)
+
+When you create a fresh venv, pin it to 3.13 (or 3.12) unless the manifest requires newer, and
+create it **with the project's own toolchain** (`poetry env use 3.13`, `uv venv --python 3.13`,
+`pdm use 3.13`, `python3.13 -m venv .venv`) so manager and venv agree. Given no explicit version,
+most tools pick the newest interpreter installed (often 3.14), for which many C-extension wheels
+don't exist yet on PyPI — forcing 5–15+ min source builds that burn your budget.
+
+### Install dependencies
+
+Run the repo's real install path — the one you detected in STEP 0 or the one the handbook documents,
+never a guessed default — so the tree is buildable. For a Python service, additionally install
+`tracelens` and the pinned OpenTelemetry instrumentation packages **into that same venv**:
+
+{tracelens_install_block}
+
+### Start the service under tracelens
+
+1. **Target packages are pre-computed — do not guess.** {_target_pkg_note}
+2. **Convert the launch command to Python-script form** so tracelens's `runpy` dispatch keeps the
+   AST hook installed: replace `uvicorn ARGS` with `python -m uvicorn ARGS`, and drop `--reload`
+   (reload forks workers and loses child-process spans).
+3. **Compose the wrapped command** with the exact `--target-package` flags below:
+
+   ```bash
+   {_tracelens_cmd} run \
+{_target_pkg_flags}     --output {_caps_base}/{tracelens_subdir}<service-name>/trace.jsonl \
+     --sample-rate 1.0 \
+     -- python -m <module> <original-args>
+   ```
+
+   {_tracelens_path_note}
+
+   The output path **must** include the `{_g0}` segment shown above — skipping it mingles traces
+   with prior projects' baselines and downstream identification misattributes spans.
+4. **Start the server as a long-running background process in its own terminal** — never as a
+   blocking/foreground call with a timeout. A tracelens-wrapped server never returns to the prompt;
+   a timeout would send SIGINT and kill it mid-startup (exit 130) before it finishes booting.
+5. **Poll for the app's OWN readiness marker, patiently.** Readiness is the server's startup-complete
+   log line (`Application startup complete` / `Uvicorn running on`), NOT an HTTP probe. Real apps
+   (uvicorn with DB pools, migrations, model loads) take **30–90s**, heavy ones **2–4 min**, to
+   finish startup. Until then the socket may be bound (so `lsof` shows LISTEN) but every request
+   returns an empty reply / HTTP `000` — that combination means **still booting**, not failed.
+   - **Two positive proofs it is alive and you must keep waiting:** the `trace.jsonl` line count is
+     **growing** (`wc -l {_caps_base}/{_g0}<service>/trace.jsonl` a few seconds apart), or the
+     process is in the table (`pgrep -af "tracelens run|<module>"`).
+   - Ignore benign `Attempting to instrument while already instrumented` noise — it is not a crash.
+   - **Do NOT relaunch a server that is still booting** — each relaunch resets the startup clock and
+     throws away all boot progress. As long as the log keeps advancing, keep waiting.
+   - Read the server's log **read-only**; run every `sleep` / `lsof` / `curl` / `wc -l` in a
+     **different** terminal so you never type into the running server and shut it down.
+   - Conclude failure only after a real **traceback**, the **process exiting**, or the log going
+     **completely silent** for ~30s+ while the trace count is flat.
+6. **Confirm it serves a real request.** Once startup is complete and the port is LISTENing, `curl`
+   a real endpoint (`/health`, `/docs`, `/`). A 2xx/3xx/401 **plus** a non-zero `trace.jsonl` line
+   count = **verified**. A 500 on every request means it booted but isn't really serving — check
+   tracelens flags / env / instrumentation conflicts.
+7. **Stop the service, then record the command.** The deliverable is the *verified start command*,
+   not a live process. Find the PID (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and `kill -TERM <pid>`
+   (tracelens flushes its JSONL and writes `<output>.summary.json` on the way out). Then write the
+   deliverable below.
+
+### REQUIRED DELIVERABLE — write the verified start command(s)
+
+After the service is confirmed alive (port LISTENing + serves a request, and for a Python service
+`trace.jsonl` has non-zero lines), write this JSON to `{start_commands_json}` with your file-writing
+tool:
+
+```json
+{{
+  "service": "{service}",
+  "verified": true,
+  "verification": {{
+    "port": <port-or-null>,
+    "listening": true,
+    "http_status": <code-or-null>,
+    "endpoint_checked": "http://localhost:<port>/health",
+    "trace_jsonl": "<path-or-null>",
+    "trace_lines": <int-or-null>,
+    "probe": {{"type": "port"}}
+  }},
+  "commands": [
+    {{
+      "purpose": "start {service} under tracelens",
+      "command": "{_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/trace.jsonl --sample-rate 1.0 -- python -m <module> <args>",
+      "working_directory": "{root}",
+      "session_name": "vinv_{service}"
+    }}
+  ]
+}}
+```
+
+**`verification.probe` selects the readiness oracle replayers use** — record the one matching what
+the service actually is: `{{"type": "port"}}` for an HTTP service (default when `port` is set);
+`{{"type": "stdio-jsonrpc"}}` for a stdio JSON-RPC server (MCP style — no port; readiness is
+writing one JSON-RPC initialize line to its stdin and getting a JSON line back on stdout; verify
+it that way yourself, set port/http_status/endpoint_checked to null, and optionally put the exact
+initialize object in `"request"`); `{{"type": "process"}}` for a portless worker/scheduler whose
+only oracle is staying alive past the grace window (an entry that exits immediately FAILS it even
+with exit code 0).
+
+Rules for the deliverable:
+
+- **`commands` holds ONLY the long-running start command(s)** — the precise strings that *launch a
+  process and keep it serving*. EXCLUDE every install (`pip`/`uv pip install`/`--reinstall`/the OTel
+  pin block/`npm|bun|poetry install`/`uv sync`), every diagnostic (`--help`/`--version`/`which`/
+  `python -c "import …"`), and every probe (`lsof`/`curl`/`wc -l`). The normal case is **exactly one**
+  tracelens entry; add a SECOND entry only for a separate long-running **service dependency** you
+  genuinely started (e.g. `docker compose up -d <db>`), ordered dependency-first.
+- **Writing this file is MANDATORY on every exit path**, including failure. If you could not bring
+  `{service}` up, set `"verified": false`, put what you observed in `verification` (port, last
+  `http_status` or `null`, the failure symptom), and still record the start command you ran or
+  intended — a `verified: false` file is the correct output of a failed bring-up.
+- Emit **valid JSON only** (no trailing commas, no comments, no Markdown fences in the file). Use the
+  **real** values you used — the actual port, the actual `--target-package` flags, the actual venv
+  `python` path, the real `{_caps_base}/{tracelens_subdir}{service}/trace.jsonl` output path.
+
+After writing the file, print a short final summary: what you started, which port, and the tracelens
+output path.

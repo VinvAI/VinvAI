@@ -1,0 +1,239 @@
+{
+  "started": "2026-07-15T08:54:06Z",
+  "reference": {
+    "symbol_ndcg10": 0.5600473022571028,
+    "file_ndcg10": 0.7923187525860254,
+    "context_tokens_mean": 3397.90625
+  },
+  "episodes": [
+    {
+      "episode": 1,
+      "mutation": "create probe module with 3 symbols",
+      "update": {
+        "epoch_before": 0,
+        "epoch_after": 1,
+        "reprocessed_files": 2,
+        "reused_files": 343,
+        "symbols": 2746
+      },
+      "freshness": {
+        "query": "episode token validation hex string",
+        "hit": true,
+        "top": [
+          "tests/e2e/episodes/probe.py",
+          "index/eval/run_episodes.py",
+          "tracelens/tests/test_determinism_rng_payload.py"
+        ]
+      },
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7923187525860254
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 18,
+        "hit_rate": 0.921875
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": -0.28985507246376807,
+        "dr_delta_ci95": [
+          -1.0292869269949068,
+          0.2888824884792627
+        ],
+        "candidate_support_ok": false
+      }
+    },
+    {
+      "episode": 2,
+      "mutation": "change compute_episode_checksum body (behavior change)",
+      "update": {
+        "epoch_before": 1,
+        "epoch_after": 2,
+        "reprocessed_files": 2,
+        "reused_files": 343,
+        "symbols": 2746
+      },
+      "freshness": {
+        "query": "episode payload checksum folded 16 bits",
+        "hit": true,
+        "top": [
+          "tests/e2e/episodes/probe.py",
+          "index/eval/run_episodes.py",
+          "index/eval/run_episodes.py"
+        ]
+      },
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7932764282149791
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 15,
+        "hit_rate": 0.96875
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": 0.0,
+        "dr_delta_ci95": [
+          -0.0379464285714286,
+          0.02678571428571419
+        ],
+        "candidate_support_ok": false
+      }
+    },
+    {
+      "episode": 3,
+      "mutation": "add schedule_episode_replay symbol",
+      "update": {
+        "epoch_before": 2,
+        "epoch_after": 3,
+        "reprocessed_files": 2,
+        "reused_files": 343,
+        "symbols": 2747
+      },
+      "freshness": {
+        "query": "schedule a delayed episode replay clamped to one hour",
+        "hit": true,
+        "top": [
+          "tests/e2e/episodes/probe.py",
+          "index/eval/run_episodes.py",
+          "index/eval/run_episodes.py"
+        ]
+      },
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7932764282149791
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 19,
+        "hit_rate": 0.96875
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": 0.022521077712609916,
+        "dr_delta_ci95": [
+          -0.015318627450980449,
+          0.08405401103565369
+        ],
+        "candidate_support_ok": false
+      }
+    },
+    {
+      "episode": 4,
+      "mutation": "rename compute_episode_checksum -> derive_episode_checksum",
+      "update": {
+        "epoch_before": 3,
+        "epoch_after": 4,
+        "reprocessed_files": 1,
+        "reused_files": 344,
+        "symbols": 2747
+      },
+      "freshness": {
+        "query": "derive episode checksum",
+        "hit": true,
+        "top": [
+          "tests/e2e/episodes/probe.py",
+          "index/eval/run_episodes.py",
+          "index/eval/run_episodes.py"
+        ]
+      },
+      "stale_symbol_gone": true,
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7932764282149791
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 15,
+        "hit_rate": 0.9375
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": -0.1905398745519713,
+        "dr_delta_ci95": [
+          -0.8066037068477646,
+          0.219716061827957
+        ],
+        "candidate_support_ok": false
+      }
+    },
+    {
+      "episode": 5,
+      "mutation": "add oversized symbol (exercises AST continuation chunking)",
+      "update": {
+        "epoch_before": 4,
+        "epoch_after": 5,
+        "reprocessed_files": 1,
+        "reused_files": 344,
+        "symbols": 2748
+      },
+      "freshness": {
+        "query": "episode entropy walk oversized",
+        "hit": true,
+        "top": [
+          "index/eval/run_episodes.py",
+          "index/eval/run_episodes.py",
+          "tests/e2e/episodes/probe.py"
+        ]
+      },
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7932764282149791
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 15,
+        "hit_rate": 0.921875
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": -0.3257098454301075,
+        "dr_delta_ci95": [
+          -0.9755323288058857,
+          0.07187499999999991
+        ],
+        "candidate_support_ok": false
+      }
+    },
+    {
+      "episode": 6,
+      "mutation": "delete the probe module (symbols must disappear)",
+      "update": {
+        "epoch_before": 5,
+        "epoch_after": 6,
+        "reprocessed_files": 0,
+        "reused_files": 344,
+        "symbols": 2739
+      },
+      "deleted_symbols_gone": true,
+      "holdout": {
+        "symbol_ndcg10": 0.5600473022571028,
+        "file_ndcg10": 0.7932764282149791
+      },
+      "telemetry": {
+        "decisions": 64,
+        "explored": 11,
+        "hit_rate": 0.96875
+      },
+      "ope": {
+        "decisions": 64,
+        "promotable": false,
+        "dr_delta": 0.03774282579726129,
+        "dr_delta_ci95": [
+          0.0,
+          0.10668682795698925
+        ],
+        "candidate_support_ok": false
+      }
+    }
+  ],
+  "failures": [],
+  "finished": "2026-07-15T09:09:35Z"
+}

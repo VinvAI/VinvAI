@@ -1,0 +1,288 @@
+{
+  "$defs": {
+    "CodeVersion": {
+      "additionalProperties": false,
+      "description": "Source-of-truth identifier for the running code.\n\nResolution priority (capture-side):\n    1. git_sha            \u2014 `git rev-parse HEAD` succeeds in target's cwd\n    2. build_id           \u2014 CI/CD env (BUILD_ID, etc.)\n    3. container_digest   \u2014 sha256 of the OCI image\n    4. content_hash       \u2014 sha256 of the target package's installed __file__ tree\n    5. \"unknown\"          \u2014 last resort; replay corpora become hash-only",
+      "properties": {
+        "build_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Id"
+        },
+        "container_digest": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container Digest"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
+        "git_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Sha"
+        },
+        "primary": {
+          "title": "Primary",
+          "type": "string"
+        },
+        "primary_kind": {
+          "enum": [
+            "git_sha",
+            "build_id",
+            "container_digest",
+            "content_hash",
+            "unknown"
+          ],
+          "title": "Primary Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "primary",
+        "primary_kind"
+      ],
+      "title": "CodeVersion",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "attributes": {
+      "additionalProperties": true,
+      "title": "Attributes",
+      "type": "object"
+    },
+    "code_version": {
+      "$ref": "#/$defs/CodeVersion"
+    },
+    "cost_usd": {
+      "anyOf": [
+        {
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cost Usd"
+    },
+    "duration_ns": {
+      "minimum": 0,
+      "title": "Duration Ns",
+      "type": "integer"
+    },
+    "kind": {
+      "const": "external",
+      "default": "external",
+      "title": "Kind",
+      "type": "string"
+    },
+    "process_id": {
+      "description": "ephemeral; pid+boot_time",
+      "title": "Process Id",
+      "type": "string"
+    },
+    "request_hash": {
+      "description": "blake2b-8 hex of canonical request",
+      "title": "Request Hash",
+      "type": "string"
+    },
+    "request_id": {
+      "default": "-",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "request_size_bytes": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Size Bytes"
+    },
+    "request_summary": {
+      "description": "canonical summary: SQL fingerprint, METHOD URL, etc.",
+      "title": "Request Summary",
+      "type": "string"
+    },
+    "response_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Hash"
+    },
+    "response_size_bytes": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Response Size Bytes"
+    },
+    "schema_version": {
+      "const": "1",
+      "default": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "service_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "type": "string"
+        }
+      ],
+      "default": "default",
+      "title": "Service Id"
+    },
+    "span_id": {
+      "title": "Span Id",
+      "type": "string"
+    },
+    "status": {
+      "default": "ok",
+      "enum": [
+        "ok",
+        "error",
+        "timeout"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "target_id": {
+      "description": "db.table | host+path | model name | queue name",
+      "title": "Target Id",
+      "type": "string"
+    },
+    "target_kind": {
+      "enum": [
+        "db",
+        "http",
+        "cache",
+        "queue",
+        "llm",
+        "fs",
+        "other"
+      ],
+      "title": "Target Kind",
+      "type": "string"
+    },
+    "tenant_id": {
+      "anyOf": [
+        {
+          "format": "uuid",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "type": "string"
+        }
+      ],
+      "default": "default",
+      "title": "Tenant Id"
+    },
+    "tokens_in": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tokens In"
+    },
+    "tokens_out": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tokens Out"
+    },
+    "trace_id": {
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "ts": {
+      "description": "ISO 8601 UTC",
+      "format": "date-time",
+      "title": "Ts",
+      "type": "string"
+    }
+  },
+  "required": [
+    "process_id",
+    "code_version",
+    "ts",
+    "trace_id",
+    "span_id",
+    "target_kind",
+    "target_id",
+    "request_summary",
+    "request_hash",
+    "duration_ns"
+  ],
+  "title": "ExternalCallEvent",
+  "type": "object"
+}

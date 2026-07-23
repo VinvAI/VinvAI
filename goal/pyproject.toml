@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "goal"
+version = "0.1.0"
+description = "goal — standalone goal-authoring prompt renderer (distills a working context into one actionable goal via the caller's coding-agent harness)"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "click>=8.1.0,<9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[project.scripts]
+goal = "goal.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

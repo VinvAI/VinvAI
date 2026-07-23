@@ -1,0 +1,45 @@
+{
+  "baseline": {
+    "clipped_fraction": 0.0,
+    "count": 64,
+    "direct_method": 0.96125,
+    "doubly_robust": 0.9596370967741935,
+    "effective_sample_size": 49.0,
+    "ips": 0.9475806451612905,
+    "matched_count": 49,
+    "max_importance_weight": 1.2903225806451615,
+    "overlap": 0.765625,
+    "snips": 0.9591836734693878,
+    "support_ok": false,
+    "target_top_k": 10,
+    "weight_clip_used": 1.2903225806451615
+  },
+  "candidate": {
+    "clipped_fraction": 0.0,
+    "count": 64,
+    "direct_method": 0.8385416666666666,
+    "doubly_robust": 0.7690972222222222,
+    "effective_sample_size": 5.0,
+    "ips": 0.8333333333333334,
+    "matched_count": 5,
+    "max_importance_weight": 13.333333333333334,
+    "overlap": 0.078125,
+    "snips": 0.7999999999999999,
+    "support_ok": false,
+    "target_top_k": 5,
+    "weight_clip_used": 13.333333333333334
+  },
+  "dr_delta": -0.1905398745519713,
+  "dr_delta_ci95": [
+    -0.8066037068477646,
+    0.219716061827957
+  ],
+  "epoch": "96adde1708bf18daf9b84a4a",
+  "promotable": false,
+  "telemetry_diagnostics": {
+    "explicit_feedback_rate": 1.0,
+    "fallback_decisions_excluded": 0,
+    "logged_decisions": 64,
+    "reward_source": "explicit"
+  }
+}

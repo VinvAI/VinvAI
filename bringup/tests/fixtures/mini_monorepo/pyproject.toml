@@ -1,0 +1,7 @@
+[project]
+name = "mini-root"
+version = "0.0.1"
+description = "Fixture monorepo root: compose app + celery worker + nested workspace members."
+
+[tool.uv.workspace]
+members = ["packages/member_svc", "mcp_server"]

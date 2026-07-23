@@ -1,0 +1,5 @@
+{
+  "name": "mini-root",
+  "private": true,
+  "workspaces": ["webapp"]
+}

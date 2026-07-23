@@ -1,0 +1,7 @@
+{pypi_warning}**No local tracelens path was resolvable at prompt-render time.**
+bringup looked for `pyproject.toml` at
+  - `$VINV_TRACELENS_PACKAGE_PATH` (env override, currently unset or empty), and
+  - the autodetected sibling path `<repo>/tracelens`,
+and found neither.
+
+**Abort this bring-up task immediately.** Do NOT try `pip install tracelens` from PyPI — it will SUCCEED and install an UNRELATED third-party evaluation framework that cannot wrap a service, poisoning the venv. Report the missing path so the operator can set `VINV_TRACELENS_PACKAGE_PATH` and re-run.

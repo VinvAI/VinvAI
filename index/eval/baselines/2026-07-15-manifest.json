@@ -1,0 +1,25 @@
+{
+  "date": "2026-07-15",
+  "dev_metrics_file": "2026-07-15-dev-nano-large.json",
+  "embedding_dim": 3072,
+  "embedding_model": "text-embedding-3-large",
+  "holdout_metrics_file": "2026-07-15-holdout-nano-large.json",
+  "index_stats": {
+    "edges": 2666,
+    "files": 322,
+    "symbols": 2121
+  },
+  "purpose": "frozen baseline for the self-run evolution program",
+  "store": {
+    "count": 2121,
+    "dim": 3072,
+    "embedding_backend": "gateway",
+    "embedding_model": "text-embedding-3-large",
+    "repo_path": "/Users/sohamacharya/Desktop/VinvAI/Vinv",
+    "representation_mode": "docstring",
+    "summary_model": "gpt-5.4-nano",
+    "updated_unix": 1784099742,
+    "version": 4
+  },
+  "summary_model": "gpt-5.4-nano"
+}

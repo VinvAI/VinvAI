@@ -1,0 +1,29 @@
+# Root uv workspace for the Vinv open-source monorepo.
+#
+#   uv sync                      # install every member (editable) into ./.venv
+#   uv run tracelens --help      # run any member's console script
+#   uv run --package <name> pytest
+#
+# The extension spawns the engine CLIs as `<repo>/.venv/bin/<engine>` after
+# `uv sync`, falling back to `uv run --project <repo> <engine>`.
+
+# Dev tooling shared by every member's test suite; installed by `uv sync`
+# (dev group is on by default), so `uv run pytest` works from any package dir.
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "pytest-cov>=5.0.0,<6.0.0",
+    "hypothesis>=6.100.0,<7.0.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "contracts",
+    "core",
+    "tracelens",
+    "identification",
+    "handbook",
+    "bringup",
+    "goal",
+    "embedder",
+]

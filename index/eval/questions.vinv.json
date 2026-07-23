@@ -1,0 +1,302 @@
+[
+  {
+    "q": "How does the native index combine semantic and lexical rankings for a query?",
+    "file": "index/src/search.rs",
+    "symbol": "hybrid",
+    "category": "behavior"
+  },
+  {
+    "q": "How are changed repository files incrementally synchronized into an existing index?",
+    "file": "index/src/pipeline.rs",
+    "symbol": "incremental",
+    "category": "behavior"
+  },
+  {
+    "q": "How does the index extract symbols from source code using tree-sitter?",
+    "file": "index/src/parse.rs",
+    "symbol": "extract_code",
+    "category": "behavior"
+  },
+  {
+    "q": "How is a persisted index store loaded from disk?",
+    "file": "index/src/store.rs",
+    "symbol": "load",
+    "category": "behavior"
+  },
+  {
+    "q": "How are external invariant expressions checked against function arguments and results?",
+    "file": "tracelens/src/tracelens/enrich/external_invariants.py",
+    "symbol": "check_invariants",
+    "category": "behavior"
+  },
+  {
+    "q": "How does TraceLens wrap a function call and record its runtime attributes?",
+    "file": "tracelens/src/tracelens/runtime/trace_fn.py",
+    "symbol": "wrap_call",
+    "category": "behavior"
+  },
+  {
+    "q": "How does the launcher decide whether to hand tracing off to the target Python interpreter?",
+    "file": "tracelens/src/tracelens/launcher/run.py",
+    "symbol": "_maybe_handoff_to_target_python",
+    "category": "behavior"
+  },
+  {
+    "q": "How is a JSONL trace summarized into run-level counts and timings?",
+    "file": "tracelens/src/tracelens/launcher/summary.py",
+    "symbol": "summarize_jsonl",
+    "category": "behavior"
+  },
+  {
+    "q": "How does TraceLens propagate context variables through ThreadPoolExecutor submissions?",
+    "file": "tracelens/src/tracelens/launcher/executor_context.py",
+    "symbol": "_patch_thread_pool_submit",
+    "category": "behavior"
+  },
+  {
+    "q": "Where is the BM25 lexical index type defined?",
+    "file": "index/src/bm25.rs",
+    "symbol": "Bm25",
+    "category": "identifier"
+  },
+  {
+    "q": "Find the Rust type representing one indexed code chunk.",
+    "file": "index/src/store.rs",
+    "symbol": "Chunk",
+    "category": "identifier"
+  },
+  {
+    "q": "Where is the function that maps file extensions to parser language names?",
+    "file": "index/src/parse.rs",
+    "symbol": "lang_for_extension",
+    "category": "identifier"
+  },
+  {
+    "q": "Find the function named build_embed_text.",
+    "file": "index/src/pipeline.rs",
+    "symbol": "build_embed_text",
+    "category": "identifier"
+  },
+  {
+    "q": "Where is the GatewayConfig runtime configuration struct?",
+    "file": "index/src/config.rs",
+    "symbol": "GatewayConfig",
+    "category": "identifier"
+  },
+  {
+    "q": "Where is JSONLFileSpanExporter implemented?",
+    "file": "tracelens/src/tracelens/otel/exporter.py",
+    "symbol": "JSONLFileSpanExporter",
+    "category": "identifier"
+  },
+  {
+    "q": "Find the TracelensSpanProcessor class.",
+    "file": "tracelens/src/tracelens/otel/processor.py",
+    "symbol": "TracelensSpanProcessor",
+    "category": "identifier"
+  },
+  {
+    "q": "Where is the AST import loader class named _InstrumentingLoader?",
+    "file": "tracelens/src/tracelens/launcher/import_hook.py",
+    "symbol": "_InstrumentingLoader",
+    "category": "identifier"
+  },
+  {
+    "q": "Where is the handbook CLI entry point?",
+    "file": "handbook/src/handbook/cli.py",
+    "symbol": "main",
+    "category": "identifier"
+  },
+  {
+    "q": "What does Vinv do by tracing, joining, and serving runtime evidence?",
+    "file": "README.md",
+    "symbol": "`// WHAT VINV DOES`",
+    "category": "doc"
+  },
+  {
+    "q": "How do users install the Vinv editor extension?",
+    "file": "README.md",
+    "symbol": "`// INSTALL`",
+    "category": "doc"
+  },
+  {
+    "q": "How is the native index binary built with the Rust toolchain?",
+    "file": "index/README.md",
+    "symbol": "`// 01 \u00b7 build`",
+    "category": "doc"
+  },
+  {
+    "q": "How are the index's embeddings configured?",
+    "file": "index/README.md",
+    "symbol": "`// 02 \u00b7 embeddings`",
+    "category": "doc"
+  },
+  {
+    "q": "How do I query and incrementally update the native code index?",
+    "file": "index/README.md",
+    "symbol": "`// 03 \u00b7 use`",
+    "category": "doc"
+  },
+  {
+    "q": "How do users run a service under TraceLens tracing?",
+    "file": "tracelens/README.md",
+    "symbol": "`// 03 \u00b7 trace a run`",
+    "category": "doc"
+  },
+  {
+    "q": "How do I trace a Python run with TraceLens?",
+    "file": "tracelens/README.md",
+    "symbol": "`// 03 \u00b7 trace a run`",
+    "category": "doc"
+  },
+  {
+    "q": "What artifacts and evidence does a TraceLens run produce?",
+    "file": "tracelens/README.md",
+    "symbol": "`// 05 \u00b7 what you get`",
+    "category": "doc"
+  },
+  {
+    "q": "Why is the eBPF trace stored separately instead of merged into trace.jsonl?",
+    "file": "tracelens/docs/adr/ADR-ebpf-second-trace.md",
+    "symbol": "Why a separate file, not merged into `trace.jsonl`",
+    "category": "doc"
+  },
+  {
+    "q": "How does the eBPF sidecar degrade gracefully without breaking the target?",
+    "file": "tracelens/docs/adr/ADR-ebpf-second-trace.md",
+    "symbol": "Graceful degradation (never break the target)",
+    "category": "doc"
+  },
+  {
+    "q": "How are retrieval questions scored in the evaluation harness?",
+    "file": "index/eval/README.md",
+    "symbol": "How it works",
+    "category": "doc"
+  },
+  {
+    "q": "Which function builds graph edges and PageRank scores from indexed chunks?",
+    "file": "index/src/graph.rs",
+    "symbol": "build",
+    "category": "graph"
+  },
+  {
+    "q": "Which graph function returns neighboring symbols for a query result?",
+    "file": "index/src/graph.rs",
+    "symbol": "neighbors",
+    "category": "graph"
+  },
+  {
+    "q": "What function resolves context symbol names before hybrid search is called?",
+    "file": "index/src/pipeline.rs",
+    "symbol": "resolve_context",
+    "category": "graph"
+  },
+  {
+    "q": "What query handler calls hybrid retrieval and renders each search hit?",
+    "file": "index/src/pipeline.rs",
+    "symbol": "cmd_query",
+    "category": "graph"
+  },
+  {
+    "q": "Which function applies computed PageRank values back onto stored chunks?",
+    "file": "index/src/pipeline.rs",
+    "symbol": "apply_ranks",
+    "category": "graph"
+  },
+  {
+    "q": "Which function discovers graph adjacency around context symbols for structural boosting?",
+    "file": "index/src/graph.rs",
+    "symbol": "adjacent_to",
+    "category": "graph"
+  },
+  {
+    "q": "What launcher entry point coordinates flag parsing, handoff, hooks, and the traced command?",
+    "file": "tracelens/src/tracelens/launcher/run.py",
+    "symbol": "run_main",
+    "category": "graph"
+  },
+  {
+    "q": "Which launcher function installs tracing, executor, determinism, and import hooks?",
+    "file": "tracelens/src/tracelens/launcher/run.py",
+    "symbol": "_install_hooks",
+    "category": "graph"
+  },
+  {
+    "q": "Which AST transformation function uses _split_wrapped to instrument a module?",
+    "file": "tracelens/src/tracelens/launcher/import_hook.py",
+    "symbol": "_instrument_module",
+    "category": "graph"
+  },
+  {
+    "q": "Which span processor method classifies child spans as database or HTTP side effects?",
+    "file": "tracelens/src/tracelens/otel/processor.py",
+    "symbol": "_classify_span_for_side_effect",
+    "category": "graph"
+  },
+  {
+    "q": "Which report function assembles discovered API views and renders the TraceLens HTML report?",
+    "file": "tracelens/src/tracelens/analysis/report.py",
+    "symbol": "write_report",
+    "category": "graph"
+  },
+  {
+    "q": "How does the local embedding sidecar recover when the GPU runs out of memory mid-batch?",
+    "file": "embedder/src/vinv_embedder/engine.py",
+    "symbol": "_encode_with_oom_retry",
+    "category": "behavior"
+  },
+  {
+    "q": "How does indexing resume from the last durable row after the process dies mid-embedding?",
+    "file": "index/src/resume.rs",
+    "symbol": "embed_with_resume",
+    "category": "behavior"
+  },
+  {
+    "q": "What happens when an MPS kernel fails repeatedly during embedding \u2014 how does the engine degrade?",
+    "file": "embedder/src/vinv_embedder/engine.py",
+    "symbol": "_mps_cpu_fallback",
+    "category": "behavior"
+  },
+  {
+    "q": "Which function picks cuda, mps, or cpu for the embedding model?",
+    "file": "embedder/src/vinv_embedder/config.py",
+    "symbol": "detect_device",
+    "category": "identifier"
+  },
+  {
+    "q": "Which CLI entry starts the local embeddings HTTP server?",
+    "file": "embedder/src/vinv_embedder/cli.py",
+    "symbol": "_cmd_serve",
+    "category": "identifier"
+  },
+  {
+    "q": "What builds the threading HTTP server that answers /v1/embeddings requests?",
+    "file": "embedder/src/vinv_embedder/server.py",
+    "symbol": "make_server",
+    "category": "identifier"
+  },
+  {
+    "q": "What are the contribution ground rules about network calls and telemetry?",
+    "file": "CONTRIBUTING.md",
+    "symbol": "Ground rules",
+    "category": "doc"
+  },
+  {
+    "q": "Where is the repository layout of the monorepo documented?",
+    "file": "README.md",
+    "symbol": "`// REPO LAYOUT`",
+    "category": "doc"
+  },
+  {
+    "q": "What does the embedding engine call to spin up its multi-process pool for large CPU batches?",
+    "file": "embedder/src/vinv_embedder/engine.py",
+    "symbol": "_ensure_pool",
+    "category": "graph"
+  },
+  {
+    "q": "Which helper clears persisted embedding progress once a store save commits?",
+    "file": "index/src/resume.rs",
+    "symbol": "clear",
+    "category": "graph"
+  }
+]

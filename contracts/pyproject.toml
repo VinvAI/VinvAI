@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lens-contracts"
+version = "0.1.0"
+description = "Canonical data contract for the lens system: SpanEvent, SampleEvent, ExternalCallEvent, ReplayCorpusRow, DeterminismBoundaryRecord."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "pydantic>=2.0.0,<3.0.0",
+    "jsonschema>=4.20.0,<5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+    "mypy>=1.10.0,<2.0.0",
+    "hypothesis>=6.100.0,<7.0.0",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lens_contracts = ["schemas/*.json"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+packages = ["lens_contracts"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

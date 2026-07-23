@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vinv-embedder"
+version = "0.1.0"
+description = "Local embedding sidecar: OpenAI-compatible /v1/embeddings server for the Vinv index engine (default model: nomic-ai/CodeRankEmbed)"
+requires-python = ">=3.10,<3.15"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "sentence-transformers>=3.0.0,<6.0.0",
+    "torch>=2.1.0",
+    "huggingface-hub>=0.23.0",
+    # Required by CodeRankEmbed's trust_remote_code modeling (hf_nomic_bert).
+    "einops>=0.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[project.scripts]
+vinv-embedder = "vinv_embedder.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+uv.lock.orig
+
+# Rust
+target/
+
+# Node
+node_modules/
+out/
+dist/
+*.vsix
+.vscode-test/
+
+# Vinv workspace state (per-repo runtime data)
+.vinv/
+
+# Local env & secrets
+.env
+*.pem
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+*.stackdump
+
+# Models & large artifacts
+models/
+*.gguf
+*.safetensors
+
+# Local build output, logs, and stray virtualenvs
+/_winbuild/
+/_wintest_venv/
+/list/
+/.ccache/
+build/
+*.log
+nuitka-crash-report.xml
+
+# Local editor / agent config (not part of the public release).
+/.claude/
+.vscode/
+
+# CI workflows + repo assets — kept out of the public tree (README images are
+# served from a CDN instead of ./.github/assets).
+/.github/

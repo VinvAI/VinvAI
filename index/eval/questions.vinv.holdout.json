@@ -1,0 +1,170 @@
+[
+  {
+    "q": "How is project filesystem authority isolated between concurrent agent tasks?",
+    "file": "core/src/core/components/project_context.py",
+    "symbol": "bind_project_root",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "How are raw node-wise p-values adjusted to control false discoveries?",
+    "file": "tracelens/src/tracelens/analysis/circa.py",
+    "symbol": "_benjamini_hochberg",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "How are flat runtime enter and exit events reconstructed into call forests?",
+    "file": "identification/src/identification/runner.py",
+    "symbol": "_reconstruct_forest",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "How does the agent locate the packaged index binary before searching the PATH?",
+    "file": "core/src/core/index.py",
+    "symbol": "discover_index_binary",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "How are wall-clock reads intercepted so replays can detect nondeterminism?",
+    "file": "tracelens/src/tracelens/launcher/determinism_capture.py",
+    "symbol": "_wrap_clock",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "How are traceable Python packages discovered inside a target project?",
+    "file": "bringup/src/bringup/runner.py",
+    "symbol": "_discover_traceable_packages",
+    "category": "behavior",
+    "split": "holdout"
+  },
+  {
+    "q": "Find the canonical typed representation of a traced external side effect.",
+    "file": "contracts/src/lens_contracts/span_event.py",
+    "symbol": "SideEffect",
+    "category": "identifier",
+    "split": "holdout"
+  },
+  {
+    "q": "Find the Rust enum that routes embedding requests to the gateway or the local model.",
+    "file": "index/src/embed.rs",
+    "symbol": "Embedder",
+    "category": "identifier",
+    "split": "holdout"
+  },
+  {
+    "q": "Which contract model represents one normalized replay corpus row?",
+    "file": "contracts/src/lens_contracts/replay_corpus_row.py",
+    "symbol": "ReplayCorpusRow",
+    "category": "identifier",
+    "split": "holdout"
+  },
+  {
+    "q": "Find the exception raised when an index CLI invocation exits non-zero.",
+    "file": "core/src/core/index.py",
+    "symbol": "IndexCommandError",
+    "category": "identifier",
+    "split": "holdout"
+  },
+  {
+    "q": "Find the function that asks the gateway chat endpoint to describe one code symbol.",
+    "file": "index/src/summarize.rs",
+    "symbol": "summarize",
+    "category": "identifier",
+    "split": "holdout"
+  },
+  {
+    "q": "How are the canonical lens contracts imported and consumed?",
+    "file": "contracts/README.md",
+    "symbol": "`// 02 \u00b7 use`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How does an embedder use the shared Vinv agent core?",
+    "file": "core/README.md",
+    "symbol": "`// 01 \u00b7 embed the agent runtime (optional)`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How is service bring-up used to boot a service with tracing?",
+    "file": "bringup/README.md",
+    "symbol": "`// 02 \u00b7 use`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How is repository handbook generation invoked?",
+    "file": "handbook/README.md",
+    "symbol": "`// 02 \u00b7 use`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How is the identification CLI used to explore entry points and call trees?",
+    "file": "identification/README.md",
+    "symbol": "`// 02 \u00b7 use`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How is the lens-contracts package installed?",
+    "file": "contracts/README.md",
+    "symbol": "`// 01 \u00b7 install`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "How are entry points and call trees listed from the identification CLI?",
+    "file": "identification/README.md",
+    "symbol": "`// 02 \u00b7 use`",
+    "category": "doc",
+    "split": "holdout"
+  },
+  {
+    "q": "Which handbook entry point renders the documentation discovery prompt?",
+    "file": "handbook/src/handbook/generator.py",
+    "symbol": "render_documentation_prompt",
+    "category": "graph",
+    "split": "holdout"
+  },
+  {
+    "q": "Which core helper runs a natural-language query against the packaged index for agent tools?",
+    "file": "core/src/core/index.py",
+    "symbol": "retrieve_code",
+    "category": "graph",
+    "split": "holdout"
+  },
+  {
+    "q": "Which agent tool searches project code with ripgrep and a Python fallback?",
+    "file": "core/src/core/components/tools/code/editor.py",
+    "symbol": "grep_code",
+    "category": "graph",
+    "split": "holdout"
+  },
+  {
+    "q": "Which routine embeds one CPU chunk inside a worker pool and rebuilds the pool if a worker died?",
+    "file": "embedder/src/vinv_embedder/engine.py",
+    "symbol": "_encode_multiprocess",
+    "category": "graph",
+    "split": "holdout"
+  },
+  {
+    "q": "What loads the sentence-transformers model lazily so tests can stub it?",
+    "file": "embedder/src/vinv_embedder/engine.py",
+    "symbol": "_sentence_transformer_cls",
+    "category": "graph",
+    "split": "holdout"
+  },
+  {
+    "q": "Which function estimates prompt token usage for an embeddings response?",
+    "file": "embedder/src/vinv_embedder/server.py",
+    "symbol": "_estimate_tokens",
+    "category": "identifier",
+    "split": "holdout"
+  }
+]

@@ -1,0 +1,47 @@
+**Install the OTel pins with the installer that matches THIS venv's toolchain — detect it, do not assume it.** Not every venv has `pip` inside it: venvs created by `uv`, PDM and similar are often pip-less, so `python -m pip` fails with `No module named pip`. That error means "wrong installer for this venv" — NOT "broken venv", and NOT "abort".
+
+**Pick your installer from the toolchain you detected in STEP 0:**
+
+| The project's toolchain   | Install the pins with                                               |
+| :------------------------ | :------------------------------------------------------------------ |
+| Poetry                    | `poetry run python -m pip install --force-reinstall <pins>`          |
+| uv                        | `uv pip install --python <venv-python> --reinstall <pins>`           |
+| PDM                       | `pdm run python -m pip install --force-reinstall <pins>`             |
+| Pipenv                    | `pipenv run python -m pip install --force-reinstall <pins>`          |
+| conda                     | `conda run -n <env> python -m pip install --force-reinstall <pins>`  |
+| plain `venv` / virtualenv | `<venv-python> -m pip install --force-reinstall <pins>`              |
+
+`<venv-python>` is the venv's own interpreter — `./.venv/bin/python` on macOS/Linux,
+`.\.venv\Scripts\python.exe` on Windows. Always target it **explicitly** so the pins land in the
+same site-packages the service imports from. `--force-reinstall` / `--reinstall` realigns any
+pre-existing mismatched OTel versions (e.g. core 1.29 with contrib 0.62) that would otherwise crash
+the contrib instrumenters with `ImportError: _StabilityMode` / `HTTP_DURATION_BUCKETS` and make the
+JSONL exporter silently emit zero spans. Do **not** pass `--no-deps` here — OTel's runtime deps
+(`Deprecated`, `wrapt`, `typing_extensions`) must resolve into the venv too.
+
+The pins to install:
+
+```
+{otel_pin_lines_uv}
+```
+
+**Sanity-check — run it with the venv interpreter explicitly, and do NOT skip it** even if OTel
+looks already installed (mixed versions are exactly what makes the exporter emit zero spans):
+
+```bash
+<venv-python> -c "import opentelemetry.instrumentation.fastapi, opentelemetry.instrumentation.asgi; from importlib.metadata import version; print('otel-api:', version('opentelemetry-api'), 'instrumentation:', version('opentelemetry-instrumentation'))"
+```
+
+It MUST print ``otel-api: {_OTEL_CORE_VERSION} instrumentation: {_OTEL_INSTRUMENTATION_VERSION}`` and import both instrumenters without an ``ImportError``.
+
+**If your first installer fails, SWITCH installers — do not abort.** `No module named pip` just means
+this venv has no pip: use the detected toolchain's own installer (or its `run` wrapper) from the table
+above and continue. Only abort after the installer matching the detected toolchain **and** a fallback
+have both genuinely failed — then report the exact failing command and its stderr, because tracelens
+spans will not land in ``trace.jsonl`` without these packages.
+
+**If the sanity-check fails with `ModuleNotFoundError` for the SERVICE's own packages** (e.g.
+`No module named 'fastapi'`) rather than for OTel, that is not an OTel problem at all: the service's
+dependency install never populated this venv. Go back to STEP 0, confirm you used the manager the
+**manifest** names, and re-run the real install into this **same** venv before retrying here. Do not
+create a second venv.

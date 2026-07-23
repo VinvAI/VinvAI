@@ -1,0 +1,490 @@
+{
+	"name": "VinvAI",
+	"displayName": "VinvAI",
+	"description": "Runtime ground truth for your coding agent. AI writes the code — Vinv watches it run, joins every call to source, and serves that evidence over MCP.",
+	"version": "0.0.6",
+	"publisher": "VinvAI",
+	"license": "Elastic-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/VinvAI/VinvAI.git"
+	},
+	"homepage": "https://github.com/VinvAI/VinvAI",
+	"icon": "media/vinv-logo.png",
+	"galleryBanner": {
+		"color": "#0a0a0a",
+		"theme": "dark"
+	},
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"categories": [
+		"Debuggers",
+		"Other"
+	],
+	"keywords": [
+		"vinv",
+		"observability",
+		"apm",
+		"tracing",
+		"flamegraph",
+		"debug",
+		"trace"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"configuration": {
+			"title": "Vinv",
+			"properties": {
+				"vinv.enginesPath": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Path of the Vinv engines monorepo checkout. Leave empty to auto-detect (`~/.vinv/engines`, or the checkout the extension itself lives in)."
+				}
+			}
+		},
+		"mcpServerDefinitionProviders": [
+			{
+				"id": "vinv.mcp",
+				"label": "VinvAI"
+			}
+		],
+		"customEditors": [
+			{
+				"viewType": "vinv.smokeReport",
+				"displayName": "Vinv Smoke Report",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/smoke-*.html"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "vinv.callTree",
+				"displayName": "Vinv Call Tree",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/calltree-*.json"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "vinv.graphExplorer",
+				"displayName": "Vinv Graph Explorer",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/graph.json"
+					}
+				],
+				"priority": "default"
+			}
+		],
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "vinv",
+					"title": "Vinv",
+					"icon": "media/vinv.svg"
+				}
+			]
+		},
+		"views": {
+			"vinv": [
+				{
+					"type": "webview",
+					"id": "vinv.flow",
+					"name": "Flow"
+				},
+				{
+					"id": "vinv.services",
+					"name": "Services"
+				},
+				{
+					"id": "vinv.sessions",
+					"name": "Sessions"
+				}
+			]
+		},
+		"viewsWelcome": [
+			{
+				"view": "vinv.services",
+				"contents": "Nothing to run yet.\nVinv finds this project's services when it scans the project — the Flow panel above shows progress and what to do next.\n[Scan Project](command:vinv-vs.indexProject)"
+			},
+			{
+				"view": "vinv.sessions",
+				"contents": "Nothing has run yet.\nStart a service from the Services list and every request it handles will show up here, busiest first."
+			}
+		],
+		"walkthroughs": [
+			{
+				"id": "vinv.gettingStarted",
+				"title": "Get Started with Vinv",
+				"description": "Two clicks of setup, then hands off: install the engines, pick your coding agent, and watch Auto-Pilot run your project.",
+				"steps": [
+					{
+						"id": "vinv.step.engines",
+						"title": "Install the engines",
+						"description": "One click installs the open-source Vinv engines — the tracer, the code index, and the analysis tools. Nothing leaves your machine.\n[Install Engines](command:vinv-vs.installEngines)",
+						"media": {
+							"markdown": "media/walkthrough/engines.md"
+						},
+						"completionEvents": [
+							"onContext:vinv.state.enginesInstalled"
+						]
+					},
+					{
+						"id": "vinv.step.agent",
+						"title": "Pick your coding agent",
+						"description": "Vinv does its thinking through a coding agent you already use (Claude Code, Cursor, and others) — no API keys, no extra spend.\n[Choose Agent](command:vinv-vs.configureProject)",
+						"media": {
+							"markdown": "media/walkthrough/agent.md"
+						},
+						"completionEvents": [
+							"onCommand:vinv-vs.configureProject"
+						]
+					},
+					{
+						"id": "vinv.step.autopilot",
+						"title": "Watch Auto-Pilot do the rest",
+						"description": "Auto-Pilot scans the project, works out how each service starts, runs everything with tracing on, and sends anything broken to your agent to fix. It usually starts by itself; this button starts it any time.\n[Run Auto-Pilot](command:vinv-vs.autoPilot)",
+						"media": {
+							"markdown": "media/walkthrough/autopilot.md"
+						},
+						"completionEvents": [
+							"onCommand:vinv-vs.autoPilot",
+							"onContext:vinv.state.traced"
+						]
+					},
+					{
+						"id": "vinv.step.flow",
+						"title": "Follow along in the Flow panel",
+						"description": "The Vinv sidebar shows the whole journey — what was found, what ran, where time went, and the one thing to do next when something needs you.\n[Open the Vinv Sidebar](command:workbench.view.extension.vinv)",
+						"media": {
+							"markdown": "media/walkthrough/flow.md"
+						},
+						"completionEvents": [
+							"onContext:vinv.state.discovered"
+						]
+					}
+				]
+			}
+		],
+		"commands": [
+			{
+				"command": "vinv-vs.openDebugPanel",
+				"title": "Open Debug Panel",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.runInsights",
+				"title": "Build Insights Now (Call Trees + Reports + Issues)",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.runProbes",
+				"title": "Run Endpoint I/O Probes Now",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.openCallTree",
+				"title": "Open Call Tree",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.refreshSessions",
+				"title": "Refresh",
+				"category": "Vinv",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "vinv-vs.filterSessionsByTime",
+				"title": "Filter by Time Range",
+				"category": "Vinv",
+				"icon": "$(history)"
+			},
+			{
+				"command": "vinv-vs.configureProject",
+				"title": "Configure Project",
+				"category": "Vinv",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "vinv-vs.runTracelens",
+				"title": "Open Trace Terminal",
+				"category": "Vinv",
+				"icon": "$(terminal)"
+			},
+			{
+				"command": "vinv-vs.runIndex",
+				"title": "Open Index Terminal",
+				"category": "Vinv",
+				"icon": "$(database)"
+			},
+			{
+				"command": "vinv-vs.indexProject",
+				"title": "Discover Project",
+				"category": "Vinv",
+				"icon": "$(search-fuzzy)"
+			},
+			{
+				"command": "vinv-vs.rediscover",
+				"title": "Re-discover Project",
+				"category": "Vinv",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "vinv-vs.rediscoverForce",
+				"title": "Re-discover Project (Force Rebuild)",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.stopDiscovery",
+				"title": "Stop Discovery",
+				"category": "Vinv",
+				"icon": "$(debug-stop)"
+			},
+			{
+				"command": "vinv-vs.autoPilot",
+				"title": "Auto-Pilot — set up, run, and fix everything",
+				"category": "Vinv",
+				"icon": "$(rocket)"
+			},
+			{
+				"command": "vinv-vs.serviceStart",
+				"title": "Start Service",
+				"category": "Vinv",
+				"icon": "$(play)"
+			},
+			{
+				"command": "vinv-vs.serviceStop",
+				"title": "Stop Service",
+				"category": "Vinv",
+				"icon": "$(debug-stop)"
+			},
+			{
+				"command": "vinv-vs.serviceSetup",
+				"title": "Set Up Service",
+				"category": "Vinv",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "vinv-vs.refreshServices",
+				"title": "Refresh Services",
+				"category": "Vinv",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "vinv-vs.runService",
+				"title": "Run Service",
+				"category": "Vinv",
+				"icon": "$(play)"
+			},
+			{
+				"command": "vinv-vs.registerCursorMcp",
+				"title": "Register Vinv MCP in Agent Tools",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.installEngines",
+				"title": "Install Engines",
+				"category": "Vinv",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "vinv-vs.openGraphExplorer",
+				"title": "Open Graph Explorer",
+				"category": "Vinv",
+				"icon": "$(circuit-board)"
+			},
+			{
+				"command": "vinv-vs.askVinv",
+				"title": "Ask Vinv",
+				"category": "Vinv",
+				"icon": "$(comment-discussion)"
+			},
+			{
+				"command": "vinv-vs.fixWithHarness",
+				"title": "Fix with Harness (Closed-Loop Episode)",
+				"category": "Vinv",
+				"icon": "$(tools)"
+			},
+			{
+				"command": "vinv-vs.setGoal",
+				"title": "Set Standing Goal for Episodes",
+				"category": "Vinv",
+				"icon": "$(target)"
+			},
+			{
+				"command": "vinv-vs.setEpisodeBudget",
+				"title": "Set Episode Budget",
+				"category": "Vinv",
+				"icon": "$(settings-gear)"
+			},
+			{
+				"command": "vinv-vs.enhanceGraph",
+				"title": "Enhance Graph (Resolve Ambiguous References)",
+				"category": "Vinv",
+				"icon": "$(wand)"
+			},
+			{
+				"command": "vinv-vs.optimizeHotspots",
+				"title": "Optimize Latency Hotspots (Dispatch to Coding Agent)",
+				"category": "Vinv",
+				"icon": "$(dashboard)"
+			},
+			{
+				"command": "vinv-vs.showTrajectory",
+				"title": "Show Trajectory (Episodes, Rewards, Goals)",
+				"category": "Vinv",
+				"icon": "$(graph-line)"
+			},
+			{
+				"command": "vinv-vs.resumeJudgment",
+				"title": "Resume Judgment (Waiting Episode)",
+				"category": "Vinv",
+				"icon": "$(bell)"
+			},
+			{
+				"command": "vinv-vs.disputeVerified",
+				"title": "Vinv: Dispute a Verified Fix (it's still wrong)"
+			},
+			{
+				"command": "vinv-vs.analyzeMemoryTrends",
+				"title": "Analyze Memory Trends (Leak Suspects Across Sessions)",
+				"category": "Vinv",
+				"icon": "$(pulse)"
+			},
+			{
+				"command": "vinv-vs.analyzeCacheOpportunities",
+				"title": "Analyze Cache Opportunities (Duplicate Recomputation)",
+				"category": "Vinv",
+				"icon": "$(database)"
+			},
+			{
+				"command": "vinv-vs.nextStep",
+				"title": "What Should I Do Next?",
+				"category": "Vinv",
+				"icon": "$(compass)"
+			},
+			{
+				"command": "vinv-vs.exportDiagnostics",
+				"title": "Export Diagnostics (for Support)",
+				"category": "Vinv",
+				"icon": "$(report)"
+			}
+		],
+		"keybindings": [
+			{
+				"command": "vinv-vs.runService",
+				"key": "ctrl+alt+r",
+				"mac": "cmd+alt+r"
+			}
+		],
+		"debuggers": [
+			{
+				"type": "vinv-service",
+				"label": "Vinv Service",
+				"languages": []
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"command": "vinv-vs.stopDiscovery",
+					"when": "view == vinv.flow && vinv.discovering",
+					"group": "navigation@0"
+				},
+				{
+					"command": "vinv-vs.rediscover",
+					"when": "view == vinv.flow && !vinv.discovering",
+					"group": "navigation@0"
+				},
+				{
+					"command": "vinv-vs.openGraphExplorer",
+					"when": "view == vinv.flow",
+					"group": "navigation@1"
+				},
+				{
+					"command": "vinv-vs.askVinv",
+					"when": "view == vinv.flow",
+					"group": "navigation@2"
+				},
+				{
+					"command": "vinv-vs.configureProject",
+					"when": "view == vinv.flow",
+					"group": "navigation@9"
+				},
+				{
+					"command": "vinv-vs.filterSessionsByTime",
+					"when": "view == vinv.sessions",
+					"group": "navigation@0"
+				},
+				{
+					"command": "vinv-vs.refreshSessions",
+					"when": "view == vinv.sessions",
+					"group": "navigation@1"
+				},
+				{
+					"command": "vinv-vs.serviceStart",
+					"when": "view == vinv.services",
+					"group": "navigation@0"
+				},
+				{
+					"command": "vinv-vs.refreshServices",
+					"when": "view == vinv.services",
+					"group": "navigation@1"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "vinv-vs.serviceStart",
+					"when": "view == vinv.services && viewItem == vinv.service.ready",
+					"group": "inline"
+				},
+				{
+					"command": "vinv-vs.serviceStop",
+					"when": "view == vinv.services && viewItem == vinv.service.running",
+					"group": "inline"
+				},
+				{
+					"command": "vinv-vs.serviceSetup",
+					"when": "view == vinv.services && viewItem == vinv.service.unverified",
+					"group": "inline"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run check && npm run bundle",
+		"package": "vsce package --no-rewrite-relative-links",
+		"compile": "tsc -p ./",
+		"check": "tsc -p ./ --noEmit",
+		"bundle": "node ./esbuild.mjs",
+		"watch": "tsc -watch -p ./",
+		"pretest": "npm run compile && npm run lint",
+		"lint": "eslint src",
+		"test": "vscode-test",
+		"test:packaged": "npm run bundle && node scripts/test-packaged.mjs"
+	},
+	"devDependencies": {
+		"@types/mocha": "^10.0.10",
+		"@types/node": "22.x",
+		"@types/vscode": "^1.75.0",
+		"@vscode/test-cli": "^0.0.15",
+		"@vscode/test-electron": "^2.5.2",
+		"@vscode/vsce": "^3.9.2",
+		"esbuild": "^0.28.1",
+		"eslint": "^9.39.3",
+		"typescript": "^5.9.3",
+		"typescript-eslint": "^8.56.1"
+	},
+	"overrides": {
+		"diff": "^8.0.3",
+		"serialize-javascript": "^7.0.7"
+	}
+}

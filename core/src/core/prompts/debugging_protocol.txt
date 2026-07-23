@@ -1,0 +1,75 @@
+
+═══════════════════════════════════════════════════════════════
+🔍 DEBUGGING PROTOCOL (language-agnostic)
+═══════════════════════════════════════════════════════════════
+
+HOW TO THINK ABOUT DEBUGGING:
+1. OBSERVE — What symptom? (crash, wrong output, slow, stuck, leak)
+2. HYPOTHESIZE — Where in the stack? (frontend, backend, network, OS)
+3. INSTRUMENT — Use the debug tool closest to the suspected layer
+4. ANALYZE — Read output, identify root cause vs symptom
+5. FIX or ESCALATE — Fix if capable, request collaboration if not
+
+SYMPTOM → TOOL MAP:
+
+Browser / Frontend:
+• App crashes / page blank → read_browser_errors() + read_browser_console()
+• API returns wrong data → read_browser_network('/api/') check status + body
+• App slow / high latency → run_with_profiling() with language profiler
+• Frontend wrong state → debug_evaluate_in_page() inspect DOM/JS vars
+• CORS blocked → read_browser_network() status 0 + 'CORS' in error
+• Auth failure (401/403) → read_browser_network() check token/header
+• DNS / network → read_browser_network() 'DNS' or 'net::ERR'
+• SSL / cert error → read_browser_network() 'SSL' or 'certificate'
+
+Service / Infrastructure (DB, API, cache):
+• DB connection refused → terminal: check if service running on expected port
+    lsof -i -P | grep <service_name>  (POSIX) or
+    netstat -ano | findstr <port>     (Windows) — find ACTUAL port
+    Compare with .env URI — if different, .env is STALE → update it
+    Common cause: docker remapped port, or service reinstalled on default
+• DB auth failure → terminal: check if auth is enabled — using THAT
+    database's own probe (examples: Neo4j responds on its HTTP port 7474;
+    Postgres auth rules live in pg_hba.conf; MySQL in its user table;
+    Mongo in its config). Read .env for credentials — try them — if wrong,
+    check the service's docs.
+    Last resort: reset password or disable auth in service config
+• Service not responding → terminal: get_process_info() or the platform's
+    service manager status (systemctl status on Linux, brew services list
+    on macOS, Get-Service on Windows) / docker ps
+    If not running: START it. If running on wrong port: update .env
+• Port conflict → get_process_info() shows who owns the port
+    Kill orphaned process or pick a different port and update .env
+• Config drift (works in one script, fails in another) →
+    grep -r 'old_value' project/ — find ALL stale references
+    Update every file. Config must be consistent across project.
+
+General:
+• Server not responding → get_process_info() check running + ports
+• High memory / OOM → get_process_info() twice with gap, compare mem growth
+• Memory leak → profile with tracemalloc/heapdump, check growing allocations
+• Deadlock / hang → get_process_info() alive but 0% CPU = blocked waiting
+• Race condition → intermittent failure, add logging, check timing
+• Broken pipe / conn reset → read_browser_network() 'refused'/'reset' errors
+• Process restarting → get_process_info() PID changes between calls
+
+CONFIG LIFECYCLE (keep .env as live source of truth):
+• BEFORE connecting to any service: read .env, probe the URI, fix if stale
+• DURING work — when you create/change ANY of these, update .env IMMEDIATELY:
+    - New database, new collection, new schema → add DB_URI/DB_NAME to .env
+    - Generated API key, token, password → add to .env, never leave in code
+    - Started a service on a port → add SERVICE_URL=http://localhost:PORT
+    - Changed a port, URI, or auth method → update .env + grep old value
+      across entire project and update ALL references (scripts, docs, configs)
+    - Installed a service (docker / OS package manager / project package
+      manager) → record connection details in .env
+• AFTER finishing: update .env.example (placeholders) + PROJECT_STATE.md
+
+TOOLS:
+• read_browser_console(level) — JS console log/error/warn
+• read_browser_network(filter) — HTTP traffic with status codes
+• read_browser_errors() — uncaught exceptions and page crashes
+• run_with_profiling(command) — YOU build the profiler command
+• debug_evaluate_in_page(expr) — run JS in browser page context
+• get_process_info(filter) — CPU, memory, ports of processes
+═══════════════════════════════════════════════════════════════

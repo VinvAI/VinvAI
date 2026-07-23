@@ -1,0 +1,316 @@
+## Vinv discovery — service handbook (Markdown only)
+
+You are **TerminalExecutor** on an **Vinv / onboarding discovery** task. There is **no**
+preloaded research payload, no slide deck, and no brand theme: treat **optional inputs**
+(`content_data`, `theme`, collaboration) as **unused** — they are intentionally empty.
+
+### Goal
+
+Produce **one** Markdown file that explains the **service / repository** well enough that a
+new engineer can work on it without tribal knowledge. The file must be **real onboarding material**:
+concrete facts, commands, paths, and names taken from what you actually read in the tree—not a
+skeleton, not an outline that defers every answer, not boilerplate that could apply to any repo.
+
+### Where this work lives
+
+The tree you are describing is rooted here:
+
+**`{root}`**
+
+The single handbook file the pipeline expects, in Markdown, is here:
+
+**`{vinv_md}`**
+
+The parent directory for that file is `{root}/.vinv/` — it should exist by the time you are done.
+
+### Shell / terminal (tool order)
+
+1. **First call:** **`initialize_terminal`** with **`working_directory`** = repo root (`{root}`) and the default session (or omit `session_name`) **before** any **`send_terminal_command`**. That opens the main host tab and pins cwd.
+2. **Each separate runnable application** (distinct API, web dev server, worker, broker, etc.): call **`initialize_terminal`** again with a **new, unique `session_name`** for that component (for example `vinv_api`, `vinv_web`, `vinv_worker`) and the **`working_directory`** the handbook implies for that command, **then** run that app’s install/start commands in that tab. Reusing one shell for unrelated long-running servers makes logs and ports hard to reason about; one tab per app is **preferred** when the stack has multiple always-on processes.
+3. To work again in the **root** tab for this task, call **`initialize_terminal`** with the default session name (or omit `session_name`) before the next commands.
+
+If you omit the first init, the first command still auto-creates a session, but explicit init is **preferred**.
+
+### `send_terminal_command` — exact call signature
+
+The PTY parameter is named **`keystrokes`** (not `command`). Use this shape:
+
+```
+send_terminal_command(keystrokes="ls -la", duration=5, block=True)
+send_terminal_command(session_name="vinv_explore",
+                      keystrokes="cat README.md",
+                      duration=10, block=True)
+```
+
+Set `block=True` for any short read/verify command whose output you need (`ls`, `cat` of a small file, `wc`); use `block=False` only for long-running daemons.
+
+**Large/noisy output discipline:** never pull a long command's full output into your context. Redirect it to a log file and inspect the log with targeted reads:
+
+```
+send_terminal_command(keystrokes="<the-repo's-install-cmd> > /tmp/vinv_out.log 2>&1; echo EXIT=$? >> /tmp/vinv_out.log", duration=300, block=True)
+send_terminal_command(keystrokes="tail -5 /tmp/vinv_out.log", duration=5, block=True)
+send_terminal_command(keystrokes="grep -in 'error\|fail\|warn' /tmp/vinv_out.log | head -20", duration=5, block=True)
+```
+
+(`<the-repo's-install-cmd>` is whatever installer THIS repo declares — `poetry install`, `uv sync`,
+`pip install -r requirements.txt`, `npm ci`, `pnpm i`, `cargo build`, … — never a guessed default.)
+
+If a big capture still reaches you, it arrives as a digest with a log path — grep that path for what you need (`grep -n`, `sed -n 'A,Bp'`, `tail`); never request the entire log.
+
+### Quality bar (read this as part of the task)
+
+- **Substance:** Several major sections (for example overview, how to run locally, how to test,
+  configuration, and dependencies) each filled with **specific** information from this repository.
+  A reader should need **several minutes** of reading to get through it; if it feels like a one-
+  page cheat sheet with empty sections, you are not done.
+- **Evidence-based:** Prefer quoting or paraphrasing what you saw in READMEs, manifests, Makefiles,
+  Docker files, CI configs, and source layout. If something is genuinely absent after you looked,
+  say that in plain English—do **not** pad with invented detail.
+- **No unfinished voice:** Do not use bracket-style stand-ins such as `[To be documented]`,
+  `[path]`, `[VAR_NAME]`, or generic “TODO” blocks that replace explanation. Do not ship lorem
+  ipsum, placeholder Latin, or a table of headings with one-line stubs under each. Unknowns are
+  fine as honest sentences (“No `.env.example` found in the root.”).
+- **Single artifact:** exactly `{vinv_md}` as the final Markdown handbook (not JSON-only as the
+  final deliverable).
+
+### How to think through the task (not a checklist)
+
+Start by forming a mental model of the repository: what kind of system this is, how big it is,
+and where the signals of truth live (entrypoints, packaging, automation, docs, config). Let your
+curiosity drive what you open first; there is no fixed order. As you read and observe, revise your
+picture when evidence contradicts an earlier guess.
+
+When you have enough substance to be useful to a newcomer—not perfection, but honest coverage—
+compose one coherent narrative. Organize it with clear headings so someone can scan it. Weave in
+what you actually saw; where the tree gave you nothing, say so plainly instead of padding with
+fiction.
+
+Only when you believe the write-up reflects the workspace should you commit it to the path above.
+Pause and ask yourself whether another pass would catch an obvious gap; if not, treat the artifact
+as complete. Close the loop in your own mind: does this file answer “what is this and how do I
+work on it?” without hand-waving?
+
+### Themes to cover (as far as the repo allows)
+
+| Section | What to document |
+| --- | --- |
+| **Service overview** | What this project is for, who uses it, boundaries |
+| **Architecture** | Main components, data flow, important directories/modules |
+| **Local runbook** | Commands, cwd, ports, how to start/stop |
+| **Service enumeration (exhaustive)** | See dedicated protocol below — REQUIRED input to the bring-up tables |
+| **Bring-up recipe (host vs container)** | See dedicated section below — REQUIRED |
+| **Configuration** | `.env` / `.env.example`, required secrets, feature flags |
+| **Dependencies** | Runtimes, the **detected** package manager(s) + exact install command(s), OS/native deps |
+| **External systems** | DBs, queues, HTTP APIs, auth — how to reach them in dev |
+| **Tests & CI** | How to run tests and linters locally |
+| **Troubleshooting** | Common failures and fixes found in README/CI/docs |
+
+### REQUIRED — Service enumeration protocol (exhaustive)
+
+Before you write the bring-up tables, enumerate **every runnable thing in this
+repo** — nested or not, monorepo or not, any language. Do it the way mature
+platforms do (buildpack detection, monorepo target inference, manifest
+mining): **declared runnables first, inferred ones second**, walking the tree
+so nested members are never missed. Run the passes in this order and keep a
+working list of candidates as you go:
+
+1. **Manifests — what the author DECLARED runnable.** Read, at every level of
+   the tree (not just the root): `Procfile` process types; `docker-compose.yml`
+   / `compose.yaml` service definitions (and any k8s manifests); `pyproject.toml`
+   `[project.scripts]` / `[tool.poetry.scripts]` console scripts;
+   `package.json` `scripts` (dev/start/serve/preview) **and** `workspaces`;
+   `Cargo.toml` `[[bin]]` targets; `Makefile` / `justfile` run/serve/dev
+   targets; `.vscode/launch.json` configurations; CI workflow files' `run:`
+   commands (`.github/workflows/*.yml` and equivalents). Anything these name
+   is a candidate with its exact declared command.
+2. **Framework signals — servers the code implies.** Grep for the app servers
+   and frameworks the repo imports or invokes: uvicorn / gunicorn / hypercorn,
+   flask / django (`manage.py runserver`) / fastapi, express / koa / fastify,
+   vite / next / webpack-dev-server. Each app object or dev-server config is a
+   candidate even when no manifest names it.
+3. **Stdlib / raw servers — no framework at all.** `http.server`
+   (`BaseHTTPRequestHandler`, `ThreadingHTTPServer`), `socketserver`, `wsgiref`
+   `make_server`, `serve_forever` call sites; Node `net.createServer` /
+   `http.createServer`. These are real services that framework greps miss.
+4. **Non-HTTP long-runners.** Queue workers (celery / dramatiq / rq / bull);
+   schedulers (celery beat, apscheduler, cron entries, node-cron); **stdio
+   JSON-RPC servers** (MCP servers — `FastMCP`, `mcp.server` stdio transports,
+   `StdioServerTransport`; they serve over stdin/stdout, no port); websocket
+   servers. These never show up in a port scan — find them from the code and
+   manifests above.
+5. **Nested repos & workspace members — recurse.** git submodules
+   (`.gitmodules`), `[tool.uv.workspace]` members, npm/pnpm/yarn `workspaces`
+   globs, and any nested `pyproject.toml` / `package.json` / `Cargo.toml` deeper
+   in the tree: each member gets the SAME passes 1–4 applied inside it.
+
+For **each candidate**, record: **kind** (`http-service` | `stdio-server` |
+`worker` | `scheduler` | `cli` | `frontend-dev-server` | `library`), how to
+**install** its deps, how to **start** it, its **port or transport** (a port
+for HTTP; `stdio` for JSON-RPC-over-stdio; `none` for workers/CLIs), and your
+**confidence with the evidence file** (e.g. "high — `Procfile` line 2" or
+"medium — inferred from `src/app/server.py` ThreadingHTTPServer"). A package
+with no runnable process of its own is kind `library` — it still appears in
+the enumeration, excluded from the run tables **with the reason stated**.
+Do not stop at the first service you find; the enumeration is complete only
+when every pass above has been applied to every workspace member.
+
+### REQUIRED — "Bring-up recipe (host vs container)" section
+
+The downstream Stage 2 (bring-up) agent uses this section to decide what to run
+on the host versus inside Docker. The handbook **must** include it as its own
+top-level section, with the heading **`## Bring-up recipe (host vs container)`**
+and the structure below. Even a single-process Python app needs this section —
+a one-line "all on host, no containers needed" body is fine, but the section
+must exist so bring-up doesn't have to guess.
+
+**Hard rule for this section** (do not rephrase or soften it):
+
+> Application code we want to instrument — every long-running app process the
+> repo defines (web apps, APIs, workers, schedulers, consumers in Python;
+> frontend dev servers; app processes in any other language) — **must run on
+> the host**, never inside a Docker container. Tracelens AST-rewrites Python
+> imports in the host interpreter; it cannot reach inside a container. Docker
+> is only acceptable for **stateful infrastructure** we don't instrument:
+> databases, caches, brokers, search engines, object stores, and observability
+> backends (Postgres, MySQL, Redis, ClickHouse, Kafka, MongoDB, Elasticsearch,
+> Supabase, OpenTelemetry collector, Jaeger, Grafana, Neo4j, MinIO, and the
+> like). If a component is neither app code nor stateful infrastructure,
+> classify it by whether we would want spans from it: yes → host, no → Docker.
+
+The section body must include two clearly-labelled tables (use exactly these
+two H3 headings so bring-up can grep for them):
+
+```markdown
+### Run on host (instrumented by tracelens)
+
+| Service name | Kind | Install command | Start command | Working directory | Port / transport | Notes |
+| ------------ | ---- | --------------- | ------------- | ----------------- | ---------------- | ----- |
+| (one row per runnable from the enumeration protocol: web app, worker, scheduler, stdio server, frontend dev server, CLI) |
+
+### Run in Docker (stateful infrastructure only)
+
+| Service name | Compose file / image | Port(s) | Notes |
+| ------------ | -------------------- | ------- | ----- |
+| (one row per database, broker, OTel collector, etc. — empty table is fine if the project has none) |
+```
+
+The **Kind** column carries the enumeration taxonomy (`http-service` |
+`stdio-server` | `worker` | `scheduler` | `cli` | `frontend-dev-server`), and
+**Port / transport** carries the port for HTTP services, `stdio` for
+JSON-RPC-over-stdio servers, and `-` for workers/CLIs. **Every runnable
+candidate from the enumeration protocol must appear as a row** — including
+CLIs and frontend dev servers (mark on-demand CLIs as such in Notes; they are
+runnables, not always-on services). Libraries are the ONE thing excluded from
+the table: list each excluded library under the table with the reason (e.g.
+"`acme-common` — library, no console script / `__main__` / server; imported by
+the API service").
+
+How to fill these in:
+
+1. **Detect the project's package manager BEFORE writing any row — from evidence,
+   never from habit.** Read the manifest and the lockfile; each manager reads only
+   its own format and is blind to the others', so recording the wrong one makes
+   bring-up "install" zero packages while exiting 0. For Python: `[tool.poetry]`
+   in `pyproject.toml` / `poetry.lock` → `poetry install`; `[project]` +
+   `uv.lock` → `uv sync`; `[tool.pdm]` / `pdm.lock` → `pdm install`;
+   `Pipfile.lock` → `pipenv install`; `requirements*.txt`, `setup.py`, or a
+   `[project]` table with no lockfile → `pip install -r <file>` / `pip install -e .`;
+   `environment.yml` → conda. For other ecosystems use the same logic
+   (`package-lock.json` → `npm ci`, `yarn.lock` → `yarn install`,
+   `pnpm-lock.yaml` → `pnpm i --frozen-lockfile`, `bun.lockb` → `bun install`,
+   `Cargo.lock` → `cargo build`, `go.sum` → `go mod download`). A monorepo can
+   mix managers — detect **per service directory** and record each row's own
+   install command. If the repo documents a wrapper (`make setup`,
+   `just install`, a bootstrap script), record THAT — it is the project's real
+   install path.
+2. **The "Install command" column is REQUIRED for every host row.** Bring-up
+   treats this handbook as its source of truth for what to install; a row
+   without an install command forces it to guess, and a wrong guess fails
+   silently. Record the exact, copy-pasteable command (and the directory it
+   must run in, if not the row's working directory).
+3. **Read `compose.yaml` / `docker-compose.yml`** if present and split each
+   service: app code → "Run on host", infra → "Run in Docker".
+4. For each "Run on host" row, give the **native** start command — not
+   `docker compose up <svc>`. If the project documents a native alternative
+   (a Makefile/justfile target, `npm run dev`, a documented server command,
+   a `[tool.poetry.scripts]` / `[project.scripts]` entrypoint), use that.
+   If only the Docker path is documented, derive the native command from the
+   service's Dockerfile `CMD` / `ENTRYPOINT` and the install steps in its
+   manifest (`pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, …).
+5. For a Python service, record the start command **the project itself
+   declares** — whatever server or entrypoint it actually uses (uvicorn,
+   gunicorn, hypercorn, `manage.py runserver`, `flask run`, a celery worker, a
+   plain `python -m <pkg>` console script). Do not normalise every app to one
+   server's syntax. Two adjustments for tracing: write the command in
+   `python -m <server> …` form when the server supports it (keeps the
+   instrumentation hook in-process), and drop auto-reload flags such as
+   `--reload` (reload forks workers, which loses spans). Note in the row if the
+   server forks workers by design (gunicorn masters, celery pools) — traces
+   then cover only the master. The bring-up agent will wrap the command in
+   `tracelens run -- …` itself. **Copy the port from the project's own config —
+   never invent one.** If a package is a library with no runnable process, say
+   so in Notes instead of fabricating a command for it.
+6. Make sure the .env / config notes call out that the host-running app should
+   point at `localhost:<infra-port>` for each Docker-running infra service,
+   using the port the compose file actually maps (e.g. a Redis mapped to
+   `6380:6379` is reached at `localhost:6380`).
+7. **stdio servers (MCP and other JSON-RPC-over-stdio processes) get a row
+   too**, kind `stdio-server`, `stdio` in the Port / transport column. Their
+   start command is whatever the repo declares (a console script, `python -m
+   <pkg>`, `node dist/server.js`); note in the row that readiness is a
+   JSON-RPC `initialize` round-trip over stdin/stdout, **not** a port probe —
+   downstream bring-up verifies them that way.
+
+### How to write the file
+
+You have a `save_file(content, file_path)` tool wired into this run.
+**Use it.** It writes the file in one call with no PTY size limits and
+no heredoc choreography. Compose the full handbook body as a single
+string in your reasoning, then call:
+
+```
+save_file(content=<full markdown body>, file_path="{vinv_md}")
+```
+
+`save_file` returns `{{"status": "success", "file_path": "...", "size_bytes": N}}`
+on success. After that call, confirm the file landed on disk at the
+expected size with one `send_terminal_command` — `wc -c '{vinv_md}'` in a
+POSIX shell, or `(Get-Item '{vinv_md}').Length` in PowerShell / `ls -l` if
+`wc` is unavailable — then end the trajectory.
+
+Do **not** try to write the handbook through `send_terminal_command`
+heredocs. The terminal bridge rejects heredocs larger than ~4 KB
+(you will see `Heredoc command too large (NNNNN B)`), and even
+chunked-append approaches tend to silently lose sections. `save_file`
+exists precisely to bypass that whole class of failure — use it.
+
+### Finish — what "done" actually means
+
+You are not done when you have *figured out* what the handbook should say. You are
+done only when the **handbook actually exists on disk** at this exact path:
+
+`{vinv_md}`
+
+That means three things must have happened, in this order:
+
+1. You called `save_file(content=<full markdown>, file_path="{vinv_md}")`
+   with the complete handbook body — not a draft, not a stub, not a plan
+   to write it later.
+2. `save_file` returned `status: success`. If it returned an error,
+   read the error and address it (e.g. fix the path) before retrying.
+3. You verified the file exists and has a non-trivial size on disk (via
+   `wc -c '{vinv_md}'`, or any equivalent size check your shell supports).
+   If the size is much smaller than the body you
+   composed, the write didn't fully land — call `save_file` again with
+   the full content and re-verify.
+
+Until those are observed in this run, keep working. Do **not** end the
+trajectory because you have a clear mental picture of the handbook, because you
+think the content is good enough, or because you have read enough of the repo.
+Reading and thinking are not a substitute for writing the file.
+
+Ending the trajectory without the file on disk is a task failure — the
+orchestrator checks the path and rejects the run if the handbook is missing.
+
+When the file is genuinely written and verified, end the trajectory with a
+short success note that includes the path and the size of the file you wrote.

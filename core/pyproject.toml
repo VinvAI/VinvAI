@@ -1,0 +1,54 @@
+# Install with uv: `uv sync`. The litellm dependency is satisfied by the
+# in-tree OpenAI-SDK shim in vendor/litellm_stub (no BerriAI package).
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vinv-core"
+version = "0.1.0"
+description = "core — shared Vinv Engine agent runtime (BaseSwarmAgent, TerminalExecutor, tools) for standalone CLIs"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "pydantic>=2.10.5",
+    "dspy-ai>=3.1.0",
+    # Satisfied by the in-tree OpenAI-SDK shim (vendor/litellm_stub), not BerriAI.
+    "litellm",
+    "openai>=1.59.0",
+    "pexpect>=4.9",
+    "httpx>=0.24.0",
+    "pyyaml>=6.0.0",
+    "websocket-client>=1.8.0",
+    # dspy imports jsonschema at module load (adapters/types/tool.py).
+    "jsonschema>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the adaptive-timeout YAML and the plaintext agent prompts inside the
+# wheel so the timeout registry and prompt store find them at runtime.
+"core" = ["config/*.yaml", "prompts/*.txt"]
+
+[tool.uv.sources]
+litellm = { path = "vendor/litellm_stub", editable = true }
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

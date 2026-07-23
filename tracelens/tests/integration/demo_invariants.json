@@ -1,0 +1,3 @@
+{
+  "demo_app.main.wrong": "result.get('got') == result.get('expected')"
+}

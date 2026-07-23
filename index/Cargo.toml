@@ -1,0 +1,56 @@
+[package]
+name = "vinv-index"
+version = "0.1.0"
+edition = "2021"
+description = "index — semantic code-index CLI (index / query / update)"
+readme = "README.md"
+license = "Apache-2.0"
+repository = "https://github.com/vinv-ai/vinv"
+
+# The binary is called `index`; the crate is `vinv-index` to avoid colliding
+# with the (reserved) `index` crate name.
+[[bin]]
+name = "index"
+path = "src/main.rs"
+
+[features]
+# TLS (rustls) is on by default so https gateways work out of the box. It can
+# be turned off (`--no-default-features`) for all-http/localhost use — e.g.
+# the default local embedding sidecar — which also avoids compiling the crypto
+# backend, handy on machines without a full C toolchain.
+default = ["tls"]
+tls = ["ureq/tls"]
+
+[dependencies]
+# CLI parsing.
+clap = { version = "4.5", features = ["derive"] }
+# JSON everywhere (config responses, store files, command output).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Blocking HTTP. `json` adds serde request/response helpers; TLS (rustls) is
+# pulled in only via this crate's `tls` feature above.
+ureq = { version = "2.9", features = ["json"], default-features = false }
+# Content hashing for the incremental-update manifest and resume fingerprints.
+sha2 = "0.10"
+# Home-directory resolution for the legacy INDEX_STORE_DIR root.
+dirs = "5"
+# Precise AST parsing for symbol extraction (compiles the grammars via gcc).
+tree-sitter = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.23"
+# Lightweight lexical scanning for calls/bases and doc chunking.
+regex = "1"
+# Gitignore-aware repository walking.
+ignore = "0.4.28"
+
+[dev-dependencies]
+# Unique temp-dir names in tests.
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+panic = "abort"

@@ -1,0 +1,43 @@
+{pypi_warning}Install tracelens **editable** from its on-disk path and pin the OTel suite to one mutually-compatible version pair, into the same venv the service uses. Run BOTH commands; do NOT skip the second one even if OTel is already installed in the venv (mixed versions are exactly what makes the JSONL exporter silently emit zero spans):
+
+```bash
+# IMPORTANT: <venv-python> below means THIS venv's own interpreter —
+# ./.venv/bin/python on macOS/Linux, .\.venv\Scripts\python.exe on
+# Windows. Target it explicitly so packages land in the site-packages
+# the service imports from.
+#
+# NOT every venv contains pip: venvs created by uv, PDM and similar are
+# often pip-less, so ``python -m pip`` fails with ``No module named
+# pip``. That means "wrong installer for this venv", not "abort" —
+# switch to the installer matching the toolchain you detected in STEP 0
+# and keep the same flags, e.g.:
+#   uv     → uv pip install --python <venv-python> --no-deps -e <path>
+#   Poetry → poetry run python -m pip install --no-deps -e <path>
+#   PDM    → pdm run python -m pip install --no-deps -e <path>
+# The ``python -m pip`` form shown below is for a venv that HAS pip.
+
+# Step 1 — install tracelens itself, editable, no deps.
+<venv-python> -m pip install --no-deps --ignore-requires-python -e {tl_pkg}
+
+# Step 2 — pin every OTel package to a coherent release
+# pair. ``--force-reinstall`` realigns any pre-existing
+# mismatched versions (e.g. core 1.29 with contrib 0.62)
+# that would crash the contrib instrumenters with
+# ImportError: _StabilityMode / HTTP_DURATION_BUCKETS.
+# We INTENTIONALLY do NOT pass --no-deps here so pip
+# resolves OTel's runtime deps (``Deprecated``, ``wrapt``,
+# ``typing_extensions``) into the venv too.
+<venv-python> -m pip install --force-reinstall \
+  {otel_pin_lines}
+
+# Step 3 — sanity-check the pin landed AND imports work.
+<venv-python> -c "import opentelemetry.instrumentation.fastapi, opentelemetry.instrumentation.asgi; from importlib.metadata import version; print('otel-api:', version('opentelemetry-api'), 'instrumentation:', version('opentelemetry-instrumentation'))"
+```
+
+The third command MUST print ``otel-api: {_OTEL_CORE_VERSION} instrumentation: {_OTEL_INSTRUMENTATION_VERSION}`` and import both instrumenters without an ``ImportError``. If it does not after trying the installer that matches the detected toolchain **and** a fallback, abort the bring-up: tracelens spans will not land in ``trace.jsonl``.
+
+If Step 3 instead fails with ``ModuleNotFoundError`` for the **service's own** packages (e.g. ``No module named 'fastapi'``), the service's dependency install never populated this venv — that is a STEP 0 problem, not an OTel one. Re-check which manager the manifest names and re-install into this same venv; do not create a second venv.
+
+If `{tl_pkg}` does not exist on this machine (e.g. a packaged build with a different layout), the operator can override with the `VINV_TRACELENS_PACKAGE_PATH` env var before launching bringup.
+
+**Instrumentation is required, but self-heal before giving up.** If the editable install fails (filesystem, build error, missing OTel wheels, `No module named pip`), FIRST diagnose and apply the obvious fix per the Prime Directive (use `uv pip install` for uv venvs, the venv interpreter explicitly, install a missing build tool) and RETRY. Do NOT proceed without instrumentation — downstream stages depend on `tracelens run` — but do NOT quit on the first error. Only stop and report (exact failing command + stderr) after exhausting the fixes.

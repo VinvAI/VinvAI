@@ -1,0 +1,385 @@
+/**
+ * Cross-session runtime analyses over raw tracelens captures: memory-leak
+ * trends and cache (memoization) opportunities. Both feed the same episode
+ * mechanism as the latency-hotspot trigger — evidence in, episode out.
+ *
+ * Design constraints, same as everywhere else in the cockpit:
+ * - NO absolute thresholds. "Leaking" and "cacheable" are defined relative to
+ *   this app's own traces (robust trend statistics, Pareto-relative
+ *   selection), so the same rules work for a 10MB toy and a 10GB service.
+ * - Joins are exact: components map to graph rows through the shared
+ *   segment-aligned qualname matcher; ambiguous names are skipped, never
+ *   guessed.
+ *
+ * Memory trend: tracelens records `mem_delta_bytes` on every function exit
+ * (net RSS-attributed delta across the call). Per capture session we sum a
+ * symbol's net delta; a symbol is a LEAK SUSPECT when it retains memory in
+ * every observed session (≥3 sessions) and the per-session retention trend
+ * is positive under the Theil–Sen estimator — the median of all pairwise
+ * slopes, robust to a single noisy session (breakdown point 29%), which a
+ * least-squares fit is not.
+ *
+ * Cache candidates: tracelens records `args_hash` on enter and duration on
+ * exit. For a symbol called n times with only d distinct argument hashes,
+ * (n−d) calls recomputed something already computed; their share of the
+ * symbol's total time is the reclaimable-by-memoization estimate. Symbols
+ * whose exits report error or non-empty determinism sources (time, random,
+ * I/O reads) are excluded — caching those changes behavior.
+ */
+import * as fs from 'fs';
+import * as path from 'path';
+import {
+	buildComponentMatcher,
+	findTraceFiles,
+	type GraphNode,
+	type RuntimeOverlay,
+} from '../graph/indexGraph';
+
+/** One symbol observed raising errors in the trace, with its evidence line. */
+export interface ErrorCluster {
+	row: number;
+	line: string;
+}
+
+/**
+ * Scans the runtime overlay for symbols that raised errors. The returned
+ * `signature` is order-independent and content-derived (file:name:errorTypes),
+ * so "the same errors as last time" is a computable fact — the auto-trigger
+ * uses it to dispatch each distinct failure picture exactly once.
+ */
+export function collectRuntimeErrorClusters(
+	nodes: GraphNode[],
+	overlay: Record<number, RuntimeOverlay>,
+): { clusters: ErrorCluster[]; signature: string } {
+	// CURRENT errors only (latest captured run per symbol): a fixed error whose
+	// re-run came back clean is retired here — it leaves the issue list AND the
+	// signature, so it can neither re-dispatch nor linger as a live problem.
+	const clusters = Object.entries(overlay)
+		.filter(([, rt]) => rt.current_errors > 0)
+		.sort((a, b) => b[1].current_errors - a[1].current_errors)
+		.map(([row, rt]) => {
+			const n = nodes[Number(row)];
+			const currentTypes = [
+				...new Set(
+					rt.failures.filter((f) => f.superseded === null).map((f) => f.error_type),
+				),
+			];
+			const types = currentTypes.length ? currentTypes : rt.error_types;
+			return {
+				row: Number(row),
+				line: `${n.name} at ${n.file}:${n.start_line} — ${rt.current_errors} error(s): ${types.join(', ')}`,
+				sig: `${n.file}:${n.name}:${[...types].sort().join('|')}`,
+			};
+		});
+	return {
+		clusters: clusters.map(({ row, line }) => ({ row, line })),
+		signature: clusters
+			.map((c) => c.sig)
+			.sort()
+			.join('\n'),
+	};
+}
+
+/** One latency hotspot from the captured trace, with its share of total time. */
+export interface Hotspot {
+	row: number;
+	name: string;
+	file: string;
+	line: number;
+	calls: number;
+	total_ms: number;
+	/** Fraction of ALL traced time this symbol consumed (0..1). */
+	share: number;
+}
+
+/**
+ * The Pareto head of runtime cost: symbols in descending total time whose
+ * cumulative share covers `coverage` of everything the trace measured. No
+ * fixed milliseconds threshold — "expensive" is defined relative to THIS
+ * app's own trace, so the same rule works for a 5ms service and a 5s batch
+ * job. `cap` bounds the list (packs are budgeted).
+ */
+export function selectHotspots(
+	nodes: GraphNode[],
+	overlay: Record<number, RuntimeOverlay>,
+	coverage = 0.8,
+	cap = 8,
+): Hotspot[] {
+	const entries = Object.entries(overlay)
+		.map(([row, rt]) => ({ row: Number(row), rt }))
+		.filter(({ rt }) => rt.total_ms > 0);
+	const totalMs = entries.reduce((sum, e) => sum + e.rt.total_ms, 0);
+	if (totalMs <= 0) {
+		return [];
+	}
+	entries.sort((a, b) => b.rt.total_ms - a.rt.total_ms);
+	const out: Hotspot[] = [];
+	let covered = 0;
+	for (const { row, rt } of entries) {
+		if (out.length >= cap || covered / totalMs >= coverage) {
+			break;
+		}
+		covered += rt.total_ms;
+		const n = nodes[row];
+		if (!n) {
+			continue;
+		}
+		out.push({
+			row,
+			name: n.name,
+			file: n.file,
+			line: n.start_line,
+			calls: rt.calls,
+			total_ms: rt.total_ms,
+			share: rt.total_ms / totalMs,
+		});
+	}
+	return out;
+}
+
+/** One symbol retaining memory across sessions, with its trend. */
+export interface MemoryLeakSuspect {
+	row: number;
+	name: string;
+	file: string;
+	line: number;
+	/** Number of capture sessions the symbol appeared in. */
+	sessions: number;
+	/** Net bytes retained summed over all sessions. */
+	total_retained_bytes: number;
+	/** Theil–Sen slope: bytes of additional retention per session. */
+	slope_bytes_per_session: number;
+}
+
+/** One memoization opportunity, with the evidence behind it. */
+export interface CacheCandidate {
+	row: number;
+	name: string;
+	file: string;
+	line: number;
+	calls: number;
+	distinct_args: number;
+	/** Estimated ms reclaimable by caching: total_ms × (calls−distinct)/calls. */
+	reclaimable_ms: number;
+	/** Fraction of ALL reclaimable time this symbol accounts for (0..1). */
+	share: number;
+}
+
+/** Theil–Sen slope: median of pairwise slopes over (index, value) points. */
+export function theilSenSlope(values: number[]): number {
+	const slopes: number[] = [];
+	for (let i = 0; i < values.length; i++) {
+		for (let j = i + 1; j < values.length; j++) {
+			slopes.push((values[j] - values[i]) / (j - i));
+		}
+	}
+	if (slopes.length === 0) {
+		return 0;
+	}
+	slopes.sort((a, b) => a - b);
+	const mid = Math.floor(slopes.length / 2);
+	return slopes.length % 2 === 1 ? slopes[mid] : (slopes[mid - 1] + slopes[mid]) / 2;
+}
+
+interface SessionTrace {
+	/** Session key: the capture directory that groups one run. */
+	session: string;
+	mtimeMs: number;
+	file: string;
+}
+
+/** Groups trace files into sessions ordered oldest → newest by mtime. */
+function sessionTraces(workspaceRoot: string): SessionTrace[] {
+	const out: SessionTrace[] = [];
+	for (const file of findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'))) {
+		try {
+			const st = fs.statSync(file);
+			if (st.size === 0) {
+				continue;
+			}
+			// Session = the trace's own directory (captures/<session>/<service>).
+			out.push({ session: path.dirname(file), mtimeMs: st.mtimeMs, file });
+		} catch {
+			// Vanished between listing and stat — skip.
+		}
+	}
+	return out.sort((a, b) => a.mtimeMs - b.mtimeMs);
+}
+
+interface ExitEvent {
+	event?: string;
+	component?: string;
+	mem_delta_bytes?: number | string;
+	duration_ms?: number | string;
+	error_type?: string | null;
+	determinism_sources?: unknown[];
+	args_hash?: string;
+}
+
+function* eventsOf(file: string): Generator<ExitEvent> {
+	let text: string;
+	try {
+		text = fs.readFileSync(file, 'utf8');
+	} catch {
+		return;
+	}
+	for (const line of text.split('\n')) {
+		if (!line.trim()) {
+			continue;
+		}
+		try {
+			yield JSON.parse(line) as ExitEvent;
+		} catch {
+			// Torn tail line — skip.
+		}
+	}
+}
+
+/**
+ * Per-symbol memory retention per session → leak suspects. `minSessions` is
+ * the statistical floor for a trend (3 points = 3 pairwise slopes), not a
+ * tunable business rule.
+ */
+export function collectMemoryTrends(
+	workspaceRoot: string,
+	nodes: GraphNode[],
+	minSessions = 3,
+): MemoryLeakSuspect[] {
+	const rowsFor = buildComponentMatcher(nodes);
+	// row -> session -> net bytes
+	const perRow = new Map<number, Map<string, number>>();
+	const sessions = sessionTraces(workspaceRoot);
+	for (const s of sessions) {
+		for (const ev of eventsOf(s.file)) {
+			if (ev.event !== 'exit' || !ev.component) {
+				continue;
+			}
+			const bytes = Number(ev.mem_delta_bytes ?? 0) || 0;
+			if (bytes === 0) {
+				continue;
+			}
+			const rows = rowsFor(ev.component);
+			if (rows.length !== 1) {
+				continue; // ambiguous joins never contribute evidence
+			}
+			const bySession = perRow.get(rows[0]) ?? new Map<string, number>();
+			bySession.set(s.session, (bySession.get(s.session) ?? 0) + bytes);
+			perRow.set(rows[0], bySession);
+		}
+	}
+	const sessionOrder = [...new Set(sessions.map((s) => s.session))];
+	const suspects: MemoryLeakSuspect[] = [];
+	for (const [row, bySession] of perRow) {
+		const series = sessionOrder
+			.filter((s) => bySession.has(s))
+			.map((s) => bySession.get(s) as number);
+		if (series.length < minSessions) {
+			continue;
+		}
+		// Retention in EVERY observed session + positive robust trend: memory
+		// that comes back and grows. A symbol that frees in any session is a
+		// working allocator, not a leak.
+		if (series.some((v) => v <= 0)) {
+			continue;
+		}
+		const slope = theilSenSlope(series);
+		if (slope <= 0) {
+			continue;
+		}
+		const n = nodes[row];
+		suspects.push({
+			row,
+			name: n.name,
+			file: n.file,
+			line: n.start_line,
+			sessions: series.length,
+			total_retained_bytes: series.reduce((a, b) => a + b, 0),
+			slope_bytes_per_session: slope,
+		});
+	}
+	return suspects.sort((a, b) => b.total_retained_bytes - a.total_retained_bytes);
+}
+
+/**
+ * Memoization opportunities from argument-hash duplication. Selection is the
+ * Pareto head of reclaimable time (relative to this trace), capped for pack
+ * budgets — the exact policy the latency-hotspot trigger uses.
+ */
+export function collectCacheCandidates(
+	workspaceRoot: string,
+	nodes: GraphNode[],
+	coverage = 0.8,
+	cap = 8,
+): CacheCandidate[] {
+	const rowsFor = buildComponentMatcher(nodes);
+	interface Acc {
+		calls: number;
+		args: Set<string>;
+		totalMs: number;
+		impure: boolean;
+	}
+	const perRow = new Map<number, Acc>();
+	for (const s of sessionTraces(workspaceRoot)) {
+		for (const ev of eventsOf(s.file)) {
+			if (!ev.component) {
+				continue;
+			}
+			const rows = rowsFor(ev.component);
+			if (rows.length !== 1) {
+				continue;
+			}
+			const acc = perRow.get(rows[0]) ?? {
+				calls: 0,
+				args: new Set<string>(),
+				totalMs: 0,
+				impure: false,
+			};
+			if (ev.event === 'enter' && typeof ev.args_hash === 'string') {
+				acc.calls += 1;
+				acc.args.add(ev.args_hash);
+			} else if (ev.event === 'exit') {
+				acc.totalMs += Number(ev.duration_ms ?? 0) || 0;
+				const errored = ev.error_type && ev.error_type !== 'None';
+				const nondeterministic =
+					Array.isArray(ev.determinism_sources) && ev.determinism_sources.length > 0;
+				if (errored || nondeterministic) {
+					acc.impure = true; // caching would change behavior — never suggest it
+				}
+			}
+			perRow.set(rows[0], acc);
+		}
+	}
+	const raw: CacheCandidate[] = [];
+	for (const [row, acc] of perRow) {
+		const dup = acc.calls - acc.args.size;
+		if (acc.impure || acc.calls === 0 || dup <= 0 || acc.totalMs <= 0) {
+			continue;
+		}
+		const n = nodes[row];
+		raw.push({
+			row,
+			name: n.name,
+			file: n.file,
+			line: n.start_line,
+			calls: acc.calls,
+			distinct_args: acc.args.size,
+			reclaimable_ms: (acc.totalMs * dup) / acc.calls,
+			share: 0,
+		});
+	}
+	const total = raw.reduce((s, c) => s + c.reclaimable_ms, 0);
+	if (total <= 0) {
+		return [];
+	}
+	raw.sort((a, b) => b.reclaimable_ms - a.reclaimable_ms);
+	const out: CacheCandidate[] = [];
+	let covered = 0;
+	for (const c of raw) {
+		if (out.length >= cap || covered / total >= coverage) {
+			break;
+		}
+		covered += c.reclaimable_ms;
+		out.push({ ...c, share: c.reclaimable_ms / total });
+	}
+	return out;
+}

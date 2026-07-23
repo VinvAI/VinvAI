@@ -1,0 +1,14 @@
+# In-tree replacement for BerriAI litellm: OpenAI SDK only (DSPy + Vinv Engine call sites).
+[project]
+name = "litellm"
+version = "1.81.13+vinv_engine.openai"
+description = "Vinv Engine OpenAI-compatible shim (replaces BerriAI litellm package)."
+requires-python = ">=3.12"
+dependencies = ["openai>=1.59.0"]
+
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["litellm"]

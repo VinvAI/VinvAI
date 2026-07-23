@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="360" viewBox="0 0 1440 360" role="img" aria-label="Vinv — gives vibe coders and their coding agents eyes. Your agent says it's done. Vinv says prove it.">
+  <rect width="1440" height="360" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="1439" height="359" fill="none" stroke="#d9d9d9" stroke-width="1"/>
+  <text x="72" y="64" font-family="Menlo, Consolas, monospace" font-size="17" letter-spacing="4" fill="#6a6a6a">// v0.0.x &#183; RUNTIME EVIDENCE &amp; VERIFICATION &#183; PYTHON FIRST &#183; EXTENSION LIVE</text>
+  <text x="72" y="196" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-size="118" fill="#0a0a0a">vinv</text>
+  <rect x="76" y="228" width="252" height="3" fill="#d71921"/>
+  <text x="72" y="286" font-family="Menlo, Consolas, monospace" font-size="25" fill="#1a1a1a">Gives vibe coders and their coding agents eyes.</text>
+  <text x="72" y="326" font-family="Menlo, Consolas, monospace" font-size="18" fill="#6a6a6a">Your agent says it's done. <tspan fill="#d71921">Vinv says prove it.</tspan></text>
+  <text x="1368" y="326" text-anchor="end" font-family="Menlo, Consolas, monospace" font-size="18" letter-spacing="3" fill="#d71921">vinv.ai</text>
+</svg>

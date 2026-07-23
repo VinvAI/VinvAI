@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bringup"
+version = "0.1.0"
+description = "bringup — standalone Stage 2 bring-up runbook renderer (reads .vinv/vinv.md, prints the harness runbook that starts services under tracelens)"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "click>=8.1.0,<9.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[project.scripts]
+bringup = "bringup.cli:main"
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the plaintext bring-up task templates as package data so the renderer
+# can read them at runtime.
+"bringup" = ["prompts/*.txt"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
