@@ -59,6 +59,12 @@ The engines it drives — the zero-edit Python tracer (`tracelens`), the semanti
 
 ---
 
+## Proof on a repo you know
+
+One run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all local: **0/23 → 23/23 endpoints executed**, symbol coverage **18 → 37/44** via the authenticated sweep, **125 regression cases banked**, and **4 real bugs found and fixed** — a 500 on `GET /users/`, an IntegrityError escaping an unvalidated private endpoint, a crashing `assert` in email config, and an unsanitized header in password-recovery HTML. Full story with screenshots in the [repo README](https://github.com/VinvAI/VinvAI#-we-ran-it-on-a-repo-you-know).
+
+---
+
 ## How it works — the engines
 
 Vinv's engines are open source and run entirely on your machine:
@@ -120,6 +126,20 @@ Once the engines are installed and an agent is picked, **Auto-Pilot** takes over
 Vinv **never calls a model provider itself**. All of its thinking runs through a coding-agent CLI you already have installed and pay for — **Claude Code, Cursor CLI, Codex, Gemini CLI, Copilot Chat, Cascade**, and others. Open **Configure Project**, pick your agent, and save. That's the last decision Vinv asks you to make.
 
 ---
+
+### 🧨 Exercises your API — no traffic needed *(new)*
+
+Traffic only covers what users happen to hit. The **behavior exerciser** drives every endpoint itself: schema-derived valid/boundary/negative inputs, values mined from real traces, and multi-step auth scenarios — strategy picked per endpoint by a Thompson-sampling bandit rewarded by newly covered code. Every response becomes a permanent regression case; a state ledger tears down what the tests created and separates *your code regressed* from *test residue changed the world*.
+
+### 🧭 Journey & Findings — walk everything, see what got fixed *(new)*
+
+**Vinv: Open Journey** steps through every verified service and endpoint — call tree with live runtime, latency flamegraph, the exact inputs → outputs exercised, and a form to add your own test inputs (replayed forever after). **Vinv: Open Findings** shows issue clusters, optimization episodes with paired-bootstrap 95% confidence intervals, regression diffs by kind, and writes the same data machine-readable to `.vinv/reports/findings.json` for your agent.
+
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/journey-walkthrough.gif" alt="Vinv Journey walkthrough of a FastAPI app: coverage, call trees, flamegraphs, exercised inputs and outputs" width="100%" />
+
+### 🛡 No reward hacking, no doom loops
+
+Acceptance tests are authored **before** the fix and never shown to the agent. A "faster" change that alters any observable output is auto-reverted (byte-identical replay + CI must exclude zero). A **doom-loop guard** catches an agent repeating itself; an adaptive silence watchdog catches a hung one; and when two attempts stop progressing, a **Nash-bargaining stall judge** either forces a genuinely different approach or hands you a judgment panel — never a token bonfire. Wrongly "verified"? **Vinv: Dispute a Verified Fix** feeds it back as evidence.
 
 ### 📈 Insights & analysis
 

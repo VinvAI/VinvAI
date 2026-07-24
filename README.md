@@ -41,9 +41,20 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 
 You've lived the search query *"claude code says done but tests fail"*: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start. It has never watched your code run, so it argues from static text and vibes. Vinv is the vibe coding safety net — it records a real run, ties every request to the exact line that served it, and refuses to accept "done" without proof.
 
+## 🔍 You searched for this
+
+| The 2 a.m. search | What Vinv does about it |
+|---|---|
+| *"claude code says done but tests fail"* | independent verification: replayed start, live port, acceptance tests the agent never sees |
+| *"cursor agent stuck in a loop"* | doom-loop guard + adaptive watchdog + Nash stall judge — mutate the approach or escalate to you, never spin |
+| *"how to test fastapi endpoints automatically"* | the behavior exerciser drives every endpoint with schema/boundary/negative/auth inputs, banks every response as a regression case |
+| *"AI broke code that was working"* | byte-identical behavior replay gates every change; one-click revert of everything an episode touched |
+| *"find memory leak python without profiler"* | Theil–Sen retention trends across sessions name leak suspects from real runs |
+| *"why is my api slow"* | per-call flamegraphs from live traffic + Pareto hotspots + CI-gated optimization episodes |
+
 ## 👁 What Vinv does
 
-Give your coding agent runtime context — eight capabilities, one loop:
+Give your coding agent runtime context — ten capabilities, one loop:
 
 - **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
 - **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph.gif" alt="interactive Code Graph" width="640">
@@ -53,6 +64,8 @@ Give your coding agent runtime context — eight capabilities, one loop:
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
 - **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
 - **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
+- **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph.
+- **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
 - **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
 > **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).

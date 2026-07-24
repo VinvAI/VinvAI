@@ -19,17 +19,27 @@
 		"vscode": "^1.75.0"
 	},
 	"categories": [
+		"AI",
+		"Testing",
 		"Debuggers",
 		"Other"
 	],
 	"keywords": [
-		"vinv",
-		"observability",
-		"apm",
-		"tracing",
+		"ai coding agent",
+		"mcp",
+		"claude code",
+		"cursor",
+		"copilot",
+		"agent verification",
+		"vibe coding",
+		"api testing",
+		"runtime tracing",
+		"code graph",
 		"flamegraph",
-		"debug",
-		"trace"
+		"observability",
+		"llm",
+		"python",
+		"fastapi"
 	],
 	"activationEvents": [
 		"onStartupFinished"
