@@ -332,15 +332,35 @@ def build_plan(
             )
             prompt_file = store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json"
             # Preserve any reply the harness already authored — re-planning must
-            # not clobber the dispatched scenario.
+            # not clobber the dispatched scenario. An EXPIRED reply (run marked
+            # it stale after its scenario failed against the live environment)
+            # is preserved as history but no longer feeds the plan, and its
+            # failure is threaded into the prompt so re-authorship learns from it.
             existing = store.read_json(prompt_file)
             preserved_reply = existing.get("reply") if isinstance(existing, dict) else None
+            expired_reason = existing.get("reply_expired") if isinstance(existing, dict) else None
+            expired_for = existing.get("reply_expired_for") if isinstance(existing, dict) else None
+            if expired_reason and expired_for is not None and (
+                expired_for != store.reply_fingerprint(preserved_reply)
+            ):
+                # A fresh reply landed since the expiry — the flag is spent.
+                expired_reason = expired_for = None
+            if expired_reason:
+                prompt += (
+                    "\n\nPREVIOUS ATTEMPT EXPIRED: your earlier scenario for this "
+                    f"endpoint failed against the live service — {expired_reason}. "
+                    "Author a fresh scenario that accounts for this (verify the "
+                    "credentials/resources it depends on actually exist, or create "
+                    "them in setup steps)."
+                )
             store.write_json(prompt_file, {
                 "api_id": ep.api_id,
                 "endpoint": f"{ep.method} {ep.path}",
                 "reply_schema": _SEMANTIC_REPLY_SCHEMA,
                 "prompt": prompt,
                 "reply": preserved_reply,  # the extension fills this after dispatch
+                **({"reply_expired": expired_reason,
+                    "reply_expired_for": expired_for} if expired_reason else {}),
             })
             record["semantic_prompt_file"] = str(prompt_file)
             semantic_prompts.append(str(prompt_file))
@@ -385,6 +405,11 @@ def _read_semantic_reply(prompt_file: Path) -> list[dict[str, Any]] | None:
     data = store.read_json(prompt_file)
     if not isinstance(data, dict):
         return None
+    if data.get("reply_expired") and (
+        data.get("reply_expired_for") is None
+        or data.get("reply_expired_for") == store.reply_fingerprint(data.get("reply"))
+    ):
+        return None  # stale scenario — awaiting harness re-authorship
     reply = data.get("reply")
     if isinstance(reply, dict) and isinstance(reply.get("plans"), list):
         return reply["plans"]

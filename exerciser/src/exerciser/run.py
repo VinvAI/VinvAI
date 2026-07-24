@@ -21,13 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import store
+from . import state, store
 from .bandit import STRATEGIES, EndpointBandit, bandit_summary
 from .baseline import apply_baselines, status_class
 from .coverage import endpoint_coverage
 from .execute import ProbeResult, execute_probe
 from .issues import cluster_failures, issues_document
-from .scenario import run_scenario
+from .scenario import run_scenario, substitute
 
 # Type of the injected probe executor (real one = execute.execute_probe), so the
 # loop is unit-testable against a fake service.
@@ -198,7 +198,17 @@ def run_exercise(
     # Stateful sequential scenarios: any endpoint whose semantic plan carries
     # SETUP steps (authored by the harness) is a multi-step flow — execute it with
     # variable capture/substitution so token/id state flows between steps.
-    scenarios = _run_scenarios(endpoints, base_url, exercise_id, probe_fn, log)
+    scenarios, live_auth_headers = _run_scenarios(
+        endpoints, base_url, exercise_id, probe_fn, log,
+    )
+    # A scenario whose SETUP failed (or whose endpoint step bounced on auth) is
+    # EXPIRED: its harness-authored reply no longer matches the environment.
+    # Mark it, and invalidate the stored reply so the next plan re-dispatches
+    # the prompt (with the failure threaded in) instead of silently replaying a
+    # dead scenario forever.
+    expired = _mark_expired_scenarios(scenarios)
+    for sc in expired:
+        _expire_semantic_reply(repo, sc, log)
     # A scenario step that 5xx'd or crashed is a real behavioral failure too —
     # cluster it into issues.json, but keep these synthetic rows OUT of
     # results.jsonl/profile (they carry no replayable request shape and their
@@ -231,6 +241,17 @@ def run_exercise(
     clusters = cluster_failures(executions + scenario_failures)
     store.write_json(store.issues_path(repo), issues_document(clusters))
 
+    # State ledger: what this run planted in the service, then best-effort
+    # unwind through the service's own DELETE endpoints (captured auth first).
+    # Whatever stays uncleaned is acknowledged pollution — regress reads the
+    # ledger to tell environment drift from real behavior regressions.
+    creations = state.record_creations(executions)
+    cleaned = state.attempt_teardown(
+        creations, endpoints, base_url, probe_fn,
+        auth_headers=live_auth_headers,
+    ) if creations else 0
+    state.append_ledger(repo, creations)
+
     # Golden behavior baselines from the healthy executions.
     observations = _baseline_observations(executions)
     baseline_verdicts = apply_baselines(repo, observations)
@@ -251,6 +272,9 @@ def run_exercise(
         "issue_clusters": len(clusters),
         "scenarios_run": len(scenarios),
         "scenarios_completed": sum(1 for s in scenarios if s.get("completed")),
+        "scenarios_expired": len(expired),
+        "state_created": len(creations),
+        "state_cleaned": cleaned,
         "baseline_recorded": sum(1 for v in baseline_verdicts.values() if v["verdict"] == "recorded"),
         "baseline_degraded": sum(1 for v in baseline_verdicts.values() if v["verdict"] == "degraded"),
         "bandit": summary["pooled"],
@@ -267,9 +291,15 @@ def _run_scenarios(
     exercise_id: str,
     probe_fn: ProbeFn,
     log: logging.Logger,
-) -> list[dict[str, Any]]:
-    """Execute each endpoint's authored stateful scenarios (setup + endpoint)."""
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Execute each endpoint's authored stateful scenarios (setup + endpoint).
+
+    Returns the scenario records plus every LIVE auth header set the scenarios
+    captured (a step's headers that resolved through captured variables) —
+    in-memory only, for the teardown pass; tokens are never persisted.
+    """
     out: list[dict[str, Any]] = []
+    auth_headers: list[dict[str, str]] = []
     for ep in endpoints:
         for splan in ep.get("semantic_inputs", []) or []:
             steps: list[dict[str, Any]] = []
@@ -295,21 +325,107 @@ def _run_scenarios(
                     base_url, f"{ep['method']} {ep['path']}", steps,
                     exercise_id=exercise_id, probe_fn=probe_fn,
                 )
-                out.append(res.to_json())
+                record = res.to_json()
+                record["api_id"] = ep["api_id"]
+                record["planned_steps"] = len(steps)
+                out.append(record)
+                for hdrs in _resolved_auth_headers(steps, res.variables):
+                    if hdrs not in auth_headers:
+                        auth_headers.append(hdrs)
             except Exception as exc:  # a scenario never fails the run
                 log.debug("scenario for %s failed: %s", ep["api_id"], exc)
+    return out, auth_headers
+
+
+def _resolved_auth_headers(
+    steps: list[dict[str, Any]], variables: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Header sets that resolved through captured variables (live credentials)."""
+    out: list[dict[str, str]] = []
+    for step in steps:
+        raw = (step.get("inputs") or {}).get("headers") or {}
+        if not raw:
+            continue
+        resolved = substitute(raw, variables)
+        if resolved == raw:
+            continue  # static headers — nothing captured flowed in
+        values = " ".join(str(v) for v in resolved.values())
+        if "${" in values:
+            continue  # a placeholder never resolved — not a live credential
+        out.append({str(k): str(v) for k, v in resolved.items()})
     return out
 
 
+def _mark_expired_scenarios(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark scenarios whose authored steps no longer fit the environment.
+
+    Expired = a SETUP step failed (the chain never reached its endpoint), or
+    the endpoint step itself bounced on auth (401/403) — the captured
+    credentials did not take. Either way the harness's authored reply is stale
+    and needs re-authorship, not silent replay.
+    """
+    expired: list[dict[str, Any]] = []
+    for sc in scenarios:
+        if sc.get("completed"):
+            continue
+        steps = sc.get("steps", [])
+        if not steps:
+            continue
+        last = steps[-1]
+        planned = sc.get("planned_steps", len(steps))
+        setup_failed = len(steps) < planned
+        auth_bounced = last.get("status") in (401, 403)
+        if setup_failed or auth_bounced:
+            sc["expired"] = True
+            sc["expired_reason"] = (
+                f"{'setup' if setup_failed else 'endpoint'} step "
+                f"{last.get('endpoint')} got "
+                f"{last.get('status') if last.get('status') is not None else last.get('error')}"
+            )
+            expired.append(sc)
+    return expired
+
+
+def _expire_semantic_reply(
+    repo: Path, scenario: dict[str, Any], log: logging.Logger,
+) -> None:
+    """Invalidate the stored harness reply behind an expired scenario.
+
+    Stamps ``reply_expired`` on the prompt record; ``plan`` treats such a reply
+    as absent (re-rendering the prompt for dispatch) while threading the
+    failure reason into the new prompt so the retry learns from it.
+    """
+    api_id = scenario.get("api_id")
+    if not api_id:
+        return
+    prompt_file = store.prompts_dir(repo) / f"{api_id}.json"
+    record = store.read_json(prompt_file)
+    if not isinstance(record, dict) or record.get("reply") is None:
+        return
+    record["reply_expired"] = scenario.get("expired_reason", "scenario failed")
+    # Bind the expiry to THIS reply: when the harness authors a fresh one the
+    # fingerprint no longer matches and the new reply feeds the plan again.
+    record["reply_expired_for"] = store.reply_fingerprint(record.get("reply"))
+    store.write_json(prompt_file, record)
+    log.info("expired semantic reply for %s: %s", api_id, record["reply_expired"])
+
+
 def _scenario_failure_rows(scenarios: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Execution-shaped rows for scenario steps that 5xx'd or crashed (for clustering)."""
+    """Execution-shaped rows for scenario steps that failed (for clustering).
+
+    5xx / crashes are service failures; a failed SETUP step (any status) is a
+    rig failure that silently zeroes the whole scenario's coverage — cluster
+    both so they surface in issues.json instead of degrading the run quietly.
+    """
     rows: list[dict[str, Any]] = []
     for sc in scenarios:
-        for step in sc.get("steps", []):
+        planned = sc.get("planned_steps", len(sc.get("steps", [])))
+        for idx, step in enumerate(sc.get("steps", [])):
             status = step.get("status")
+            is_setup = idx < planned - 1
             is_failure = (status is None and step.get("error")) or (
                 isinstance(status, int) and status >= 500
-            )
+            ) or (is_setup and not step.get("ok"))
             if not is_failure:
                 continue
             method, path = _split_endpoint(step.get("endpoint", ""))

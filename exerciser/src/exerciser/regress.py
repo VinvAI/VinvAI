@@ -16,9 +16,10 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from . import store
+from . import state, store
 from .baseline import apply_baselines, status_class
 from .execute import ProbeResult, execute_probe
+from .throughput import percentile
 
 ProbeFn = Callable[..., ProbeResult]
 
@@ -74,6 +75,10 @@ def replay_suite(
         return {"status": "error", "error": "no results.jsonl — run `exerciser run` first"}
     suite = _suite_from_results(executions)
 
+    # Values the engine itself planted and never cleaned (state ledger): a diff
+    # touching them is ENVIRONMENT drift (our own residue), not a regression.
+    planted = state.planted_values(repo)
+
     observations: list[dict[str, Any]] = []
     diffs: list[dict[str, Any]] = []
     for case in suite:
@@ -95,6 +100,18 @@ def replay_suite(
             "shapeHash": result.shape_hash,
         })
         diff = _case_diff(case, result, latency_regression_factor)
+        if diff and diff["kind"] == "perf":
+            diff = _confirm_perf_diff(
+                case, base_url, latency_regression_factor, probe_fn, exercise_id,
+            )
+        if diff and diff["kind"] == "behavior" and (
+            state.input_values(inp) & planted
+        ):
+            # The replayed input contains data the exerciser planted in an
+            # earlier run — the world changed, not the code. Report it as
+            # drift; the next `run` re-goldens the baseline (newest wins).
+            diff = {**diff, "kind": "environment",
+                    "detail": diff["detail"] + " [input matches engine-planted state]"}
         if diff:
             diffs.append(diff)
 
@@ -108,6 +125,7 @@ def replay_suite(
         "behavior_diffs": sum(1 for d in diffs if d["kind"] == "behavior"),
         "contract_diffs": sum(1 for d in diffs if d["kind"] == "contract"),
         "perf_diffs": sum(1 for d in diffs if d["kind"] == "perf"),
+        "environment_diffs": sum(1 for d in diffs if d["kind"] == "environment"),
         "degraded": sum(1 for v in verdicts.values() if v["verdict"] == "degraded"),
         "improved": sum(1 for v in verdicts.values() if v["verdict"] == "improved"),
         "same": sum(1 for v in verdicts.values() if v["verdict"] == "same"),
@@ -116,6 +134,48 @@ def replay_suite(
     log.info("regress: %d cases, %d degraded, %d diffs",
              len(suite), summary["degraded"], len(diffs))
     return summary
+
+
+def _confirm_perf_diff(
+    case: dict[str, Any],
+    base_url: str,
+    latency_factor: float,
+    probe_fn: ProbeFn,
+    exercise_id: str,
+    replays: int = 4,
+) -> dict[str, Any] | None:
+    """Re-measure a suspected perf regression before reporting it.
+
+    A single replay's latency includes cold caches, connection setup, and
+    first-hit warmup — measured live, one warm request dropped a "4.9ms →
+    19.4ms" phantom to baseline. Replay a few more times and keep the diff
+    only if the MEDIAN still exceeds the factor.
+    """
+    inp = case["input"]
+    latencies: list[float] = []
+    for _ in range(replays):
+        res = probe_fn(
+            base_url, case["method"], case["path"],
+            body=inp.get("body"),
+            path_params=inp.get("path_params") or {},
+            query=inp.get("query") or {},
+            exercise_id=exercise_id,
+        )
+        if isinstance(res.latency_ms, (int, float)):
+            latencies.append(float(res.latency_ms))
+    prev = case.get("prev_latency_ms")
+    if not latencies or not isinstance(prev, (int, float)):
+        return None
+    median = percentile(latencies, 0.5)
+    if median > prev * latency_factor:
+        return {
+            "kind": "perf",
+            "endpoint": f"{case['method']} {case['path']}",
+            "input_class": case["input_class"],
+            "detail": (f"latency {prev}ms → median {median}ms over "
+                       f"{len(latencies)} replays (>{latency_factor}x)"),
+        }
+    return None
 
 
 def _case_diff(

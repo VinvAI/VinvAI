@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import store
+from . import state, store
 
 
 def _traffic_only_baseline(repo: Path) -> dict[str, Any]:
@@ -84,6 +84,8 @@ def build_scorecard(
         "bandit_pooled": bandit.get("pooled", {}),
         "endpoints": per_endpoint,
         "input_source": plan.get("input_source"),
+        "scenarios": _scenario_health(repo),
+        "state_pollution": _state_pollution(repo),
     }
     store.write_json(store.exercise_dir(repo) / "scorecard.json", scorecard)
     (store.exercise_dir(repo) / "scorecard.md").write_text(
@@ -91,6 +93,34 @@ def build_scorecard(
     )
     scorecard["output_file"] = str(store.exercise_dir(repo) / "scorecard.json")
     return scorecard
+
+
+def _scenario_health(repo: Path) -> dict[str, Any]:
+    """Authored-scenario health — expiry is a loud signal, not a silent 401 run."""
+    doc = store.read_json(store.exercise_dir(repo) / "scenarios.json") or {}
+    scenarios = doc.get("scenarios", [])
+    return {
+        "run": len(scenarios),
+        "completed": sum(1 for s in scenarios if s.get("completed")),
+        "expired": [
+            {"name": s.get("name"), "reason": s.get("expired_reason")}
+            for s in scenarios if s.get("expired")
+        ],
+    }
+
+
+def _state_pollution(repo: Path) -> dict[str, Any]:
+    """What the engine planted in the service and could not unwind."""
+    rows = store.read_jsonl(state.ledger_path(repo))
+    uncleaned = [r for r in rows if not r.get("cleaned")]
+    return {
+        "created": len(rows),
+        "cleaned": sum(1 for r in rows if r.get("cleaned")),
+        "uncleaned": len(uncleaned),
+        "uncleaned_endpoints": sorted({
+            f"{r.get('method')} {r.get('path')}" for r in uncleaned
+        }),
+    }
 
 
 _IMPROVE_LOOP_MERMAID = """```mermaid

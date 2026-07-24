@@ -58,6 +58,15 @@ def apis_json_path(repo: Path) -> Path:
     return repo / ".vinv" / "identification" / "apis.json"
 
 
+def reply_fingerprint(reply: Any) -> str | None:
+    """Stable fingerprint of a harness reply (expiry is bound to one reply)."""
+    if reply is None:
+        return None
+    import hashlib
+    blob = json.dumps(reply, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def write_json(path: Path, data: Any) -> None:
     """Atomic pretty-printed JSON write."""
     path.parent.mkdir(parents=True, exist_ok=True)
