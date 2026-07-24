@@ -188,6 +188,17 @@ export function markGaveUp(svc: ServiceState, reason: string): ServiceState {
 }
 
 /**
+ * Marks a service blocked on a harness PRECONDITION failure (CLI needs login,
+ * quota exhausted, vendor unreachable). Terminal for THIS run — the human must
+ * act — but crucially it consumes NOTHING: no setup attempt, no fix episode,
+ * no per-signature spend. The next Auto-Pilot run (after `cursor-agent login`
+ * or the like) starts the service with its budgets intact.
+ */
+export function markBlockedOnHarness(svc: ServiceState, detail: string): ServiceState {
+	return { ...svc, phase: 'gave-up', reason: `blocked on you: ${detail}` };
+}
+
+/**
  * Marks a service as not-a-service: the replay ran to completion cleanly, so
  * this is a CLI/script misclassified as a service. Terminal like 'library' —
  * it must never re-enter setup or consume fix budgets (the historical

@@ -106,7 +106,19 @@ import {
 	isAcceptanceTestsEnabled,
 	isAutoEpisodesEnabled,
 } from '../config/settings';
-import { dispatchAgentPrompt, getHarness, isHarnessBusy, runHarnessPrompt } from './harnessRunner';
+import {
+	dispatchAgentPrompt,
+	getHarness,
+	getHarnessBlock,
+	harnessBlockRemediation,
+	INFRA_BLOCK_LABELS,
+	isHarnessBusy,
+	preflightHarnessAuth,
+	runHarnessPrompt,
+	type HarnessDef,
+	type HarnessInfraKind,
+	type HarnessRunResult,
+} from './harnessRunner';
 import { VINV_BASE_CSS } from '../views/webviewTheme';
 import {
 	isAskVinvOpen,
@@ -443,6 +455,37 @@ export async function verifyServiceReplay(
 		killProcessTree(child, 'SIGTERM');
 		setTimeout(() => killProcessTree(child, 'SIGKILL'), 4000);
 	}
+}
+
+/** How an episode ends when its harness hits a precondition failure. */
+export interface InfraStop {
+	kind: HarnessInfraKind;
+	/** Issue/Flow state label, e.g. 'blocked: agent CLI needs login'. */
+	endLabel: string;
+	/** The one actionable remediation sentence for the notification. */
+	remediation: string;
+}
+
+/**
+ * Pure gate between a harness run and ALL verification machinery: an infra
+ * precondition failure (CLI signed out, key invalid, quota exhausted, vendor
+ * unreachable) can never be fixed by retrying, so it ends the episode on the
+ * FIRST occurrence — one attempt, no re-dispatch, no stall judge, no dispute
+ * negotiation, objective:false (never composition-failure evidence for the
+ * bandit). Returns null for every other outcome (normal verification runs).
+ */
+export function gateAttemptRun(
+	run: Pick<HarnessRunResult, 'ok' | 'infra' | 'detail'>,
+	harness: HarnessDef,
+): InfraStop | null {
+	if (!run.infra) {
+		return null;
+	}
+	return {
+		kind: run.infra,
+		endLabel: INFRA_BLOCK_LABELS[run.infra],
+		remediation: run.detail ?? harnessBlockRemediation(harness, run.infra),
+	};
 }
 
 /** Escalation verdict from the user when evidence alone cannot decide. */
@@ -940,6 +983,24 @@ export async function runEpisode(
 		);
 		return false;
 	}
+	// Infra preflight: a signed-out (or quota-dead, or unreachable) CLI can
+	// never complete an episode — refuse to dispatch, and to spend acceptance
+	// tests or judge work, BEFORE any budget is touched. markHarnessBlocked
+	// already surfaced the remediation once this session; the chat note keeps
+	// the issue visibly blocked-on-you rather than "agent working". A later
+	// dispatch of the same issue re-probes and proceeds fresh after login.
+	const preflight = await preflightHarnessAuth(chosenHarness);
+	if (preflight !== 'ok') {
+		const block = getHarnessBlock(chosenHarness);
+		postEpisodeUpdate({
+			kind: 'note',
+			text:
+				`⛔ episode "${task.title}" not dispatched — ${INFRA_BLOCK_LABELS[preflight]}. ` +
+				(block?.remediation ?? harnessBlockRemediation(harness, preflight)),
+			sessionId,
+		});
+		return false;
+	}
 
 	const policy = loadEpisodePolicy();
 	const decision = selectEpisodeArm(policy);
@@ -965,6 +1026,10 @@ export async function runEpisode(
 	let attempts = 0;
 	let verified = false;
 	let aborted = false;
+	// Set when the harness hit a precondition failure (auth/quota/network):
+	// the episode ended as infra-blocked — terminal after ONE attempt, shown
+	// as blocked-on-you, and never trained into the bandit.
+	let infraBlocked: InfraStop | undefined;
 	// True only when the terminal verdict came from the OBJECTIVE oracle (service
 	// replay pass, or a definitive oracle failure the human did not override) —
 	// not from a human "approve as done", an abort, or a no-oracle general task.
@@ -1448,6 +1513,35 @@ export async function runEpisode(
 						},
 					);
 					const dispatchSeconds = (Date.now() - started) / 1000;
+
+					// Precondition failure (CLI signed out, quota exhausted, vendor
+					// unreachable): terminal on the FIRST occurrence. No retry can
+					// succeed, so none of the machinery below — directives, dispute,
+					// verify, stall judge, escalation — may engage; the episode ends
+					// blocked-on-you with the exact remediation, objective:false.
+					const infraStop = gateAttemptRun(run, harness);
+					if (infraStop) {
+						appendEpisodeEvent({
+							type: 'infra_blocked',
+							ts: new Date().toISOString(),
+							episode_id: episodeId,
+							attempt: attempts,
+							kind: infraStop.kind,
+							detail: infraStop.remediation.slice(0, 300),
+						});
+						postEpisodeUpdate({
+							kind: 'note',
+							text: `⛔ ${harness.label} could not run — ${infraStop.endLabel}. ${infraStop.remediation}`,
+							sessionId: owningSessionId,
+						});
+						lastEvidence = `${infraStop.endLabel} — ${infraStop.remediation}`;
+						infraBlocked = infraStop;
+						// Terminal (also suppresses the trajectory continuation): this
+						// is not negative evidence about the fix or the arm, so
+						// lastObjectiveFail stays false and the bandit learns nothing.
+						aborted = true;
+						return;
+					}
 
 					// Tri-directional channel: the USER can steer Vinv from the
 					// harness chat; the agent relays it as VINV: directives on stdout.
@@ -2114,7 +2208,16 @@ export async function runEpisode(
 		}
 		postEpisodeUpdate({
 			kind: 'end',
-			text: verified ? 'verified' : aborted ? 'stopped' : 'not verified',
+			// An infra block is neither "stopped" (the user did nothing) nor "not
+			// verified" (the fix was never judged) — it is blocked ON THE USER,
+			// and the label says exactly what unblocks it.
+			text: infraBlocked
+				? infraBlocked.endLabel
+				: verified
+					? 'verified'
+					: aborted
+						? 'stopped'
+						: 'not verified',
 			ok: verified,
 			sessionId: owningSessionId,
 			episodeId,
@@ -2126,6 +2229,9 @@ export async function runEpisode(
 			episode_id: episodeId,
 			verified,
 			aborted,
+			// Non-null when the episode ended on a harness precondition failure
+			// (auth/quota/network) — infra, never composition evidence.
+			infra: infraBlocked?.kind ?? null,
 			// Whether this outcome trains the composition bandit (oracle verdict)
 			// or is excluded (human discretion / abort / no-oracle general task).
 			objective: objectiveOutcome,
@@ -2176,7 +2282,13 @@ export async function runEpisode(
 					ts: new Date().toISOString(),
 					text:
 						`episode "${task.title}" ` +
-						(verified ? 'verified' : aborted ? 'stopped' : 'not verified') +
+						(infraBlocked
+							? infraBlocked.endLabel
+							: verified
+								? 'verified'
+								: aborted
+									? 'stopped'
+									: 'not verified') +
 						` after ${attempts} attempt(s)`,
 				},
 				owningSessionId,

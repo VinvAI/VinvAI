@@ -629,7 +629,7 @@ export function selectEpisodeArm(policy: EpisodePolicy, rng: () => number = Math
 }
 
 export interface EpisodeEvent {
-	type: 'episode_start' | 'attempt' | 'acceptance' | 'candidate_defect' | 'mutation_smoke' | 'stall' | 'dispute' | 'revert' | 'episode_end' | 'reconciliation' | 'policy_invalidated' | 'policy_updated';
+	type: 'episode_start' | 'attempt' | 'acceptance' | 'candidate_defect' | 'mutation_smoke' | 'stall' | 'dispute' | 'revert' | 'infra_blocked' | 'episode_end' | 'reconciliation' | 'policy_invalidated' | 'policy_updated';
 	ts: string;
 	episode_id?: string;
 	[key: string]: unknown;

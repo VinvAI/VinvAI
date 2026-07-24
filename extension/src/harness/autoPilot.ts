@@ -27,6 +27,7 @@ import {
 	failureSignature,
 	initialPipelineLedger,
 	initialServiceState,
+	markBlockedOnHarness,
 	markGaveUp,
 	markGreen,
 	markNotAService,
@@ -58,10 +59,13 @@ import {
 import { isServiceRunning, startService } from '../bringup/serviceRunner';
 import {
 	getHarness,
+	getHarnessBlock,
 	isHarnessAutonomous,
 	isHarnessBusy,
+	preflightHarnessAuth,
 	quickScanHarnesses,
 	runBringupStartViaHarness,
+	type HarnessBlock,
 } from './harnessRunner';
 import {
 	isEpisodeRunning,
@@ -110,6 +114,15 @@ export function showAutoPilotLog(): void {
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One-line "why blocked" for the ledger/summary when the harness cannot run. */
+function blockedDetail(block: HarnessBlock | undefined): string {
+	const label = getHarness(getHarnessId()).label;
+	if (!block) {
+		return `${label} cannot run (precondition failure) — fix the agent CLI, then re-run Auto-Pilot`;
+	}
+	return `${label} ${block.kind === 'auth' ? 'needs login' : block.kind === 'quota' ? 'is out of quota/credits' : 'cannot reach its service'} — ${block.remediation}`;
 }
 
 /**
@@ -404,6 +417,15 @@ async function drive(
 				if (!(await waitForHarnessIdle(token))) {
 					continue;
 				}
+				// Infra preflight BEFORE the attempt is counted: a signed-out CLI
+				// cannot set anything up, and burning setup attempts discovering
+				// that would also swallow the budget the human needs after login.
+				if ((await preflightHarnessAuth(getHarnessId())) !== 'ok') {
+					const block = getHarnessBlock(getHarnessId());
+					replace(markBlockedOnHarness(svc, blockedDetail(block)));
+					report(`${svc.name} blocked — ${blockedDetail(block)}`);
+					continue;
+				}
 				replace(noteSetupAttempt(svc));
 				const entry = readServices(workspaceRoot).find((s) => s.name === svc.name);
 				if (!entry) {
@@ -466,6 +488,17 @@ async function drive(
 		// ---- failure path: budget check → fix episode → retry ------------------
 		const step: PilotStep = action.kind === 'setup' ? 'setup' : 'start';
 		const current = services.find((s) => s.name === svc.name) ?? svc;
+		// Harness precondition failure (needs login / quota / network — the
+		// runner classified it and set the session block): terminal for this
+		// run WITHOUT consuming any fix budget, and no fix episode is
+		// dispatched — an unauthenticated CLI cannot fix anything. The next
+		// run, after the human acts, starts with the budgets intact.
+		const preBlock = getHarnessBlock(getHarnessId());
+		if (preBlock) {
+			replace(markBlockedOnHarness(current, blockedDetail(preBlock)));
+			report(`${svc.name} blocked — ${blockedDetail(preBlock)}`);
+			continue;
+		}
 		const signature = failureSignature(step, failureDetail ?? '');
 		const { state: budgeted, decision } = decideOnFailure(current, step, signature, budgets);
 		if (decision.next === 'give-up') {
@@ -496,6 +529,16 @@ async function drive(
 				workspaceRoot,
 				fixTask(svc.name, step, failureDetail ?? ''),
 			);
+			// The episode itself may have been the first to discover the harness
+			// precondition failure — then retrying the step is pointless: mark
+			// the service blocked-on-you and move on (budgets stay as they are).
+			const postBlock = getHarnessBlock(getHarnessId());
+			if (postBlock) {
+				const blocked = services.find((s) => s.name === svc.name) ?? budgeted;
+				replace(markBlockedOnHarness(blocked, blockedDetail(postBlock)));
+				report(`${svc.name} blocked — ${blockedDetail(postBlock)}`);
+				continue;
+			}
 			report(
 				verified
 					? `Fix episode for ${svc.name} verified — retrying ${step}`
