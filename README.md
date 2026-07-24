@@ -63,7 +63,18 @@ Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-templat
 
 - The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
 
-<!-- TRACE-FINDINGS: filled after run -->
+**Then we ran its backend under Vinv's zero-edit tracer** (inside Cursor desktop, DB deliberately down) and hit it with real traffic. From one run, Vinv produced:
+
+| What Vinv saw | Result |
+|---|---|
+| Hotspots (per-symbol, from live spans) | `login_access_token` 12× · 8.1ms avg → `authenticate` → `get_user_by_email` 22× |
+| Failing frame, named exactly | `crud.get_user_by_email` — 22× `sqlalchemy.exc.OperationalError` |
+| Caller chain for every failure | `login_access_token → authenticate → get_user_by_email` |
+| Trace | 274 events, 0 unparseable, finalized on SIGTERM |
+
+Your agent sees "500". **Vinv hands it the exact failing function, the error type, and the chain that led there** — before it opens a single file.
+
+*Bonus: this very demo caught a real Vinv bug (Python 3.14 broke OTel's contrib loader; the error was being swallowed). We fixed it the same day — [that's the loop working on ourselves.](#-proven-on-itself)*
 
 ## 🔌 Works with your agent
 
