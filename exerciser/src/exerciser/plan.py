@@ -364,10 +364,14 @@ def build_plan(
             })
             record["semantic_prompt_file"] = str(prompt_file)
             semantic_prompts.append(str(prompt_file))
-            # Fold in a reply if the extension already stored one.
-            reply = _read_semantic_reply(prompt_file)
-            if reply:
-                record["semantic_inputs"] = reply
+        # Fold in a stored reply for ANY endpoint, not just needs-semantics
+        # ones: the Journey view lets a user author input plans for ordinary
+        # endpoints too, and they ride the same prompts/<api_id>.json channel.
+        reply = _read_semantic_reply(
+            store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json"
+        )
+        if reply:
+            record["semantic_inputs"] = reply
         plans.append(record)
 
     result: dict[str, Any] = {

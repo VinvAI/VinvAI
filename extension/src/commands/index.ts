@@ -13,6 +13,7 @@ import { runBringupStartViaHarness } from '../harness/harnessRunner';
 import { pickHarness } from '../harness/harnessPicker';
 import { startService, stopService } from '../bringup/serviceRunner';
 import { openCallTree } from '../identification/callTreeView';
+import { openJourney } from '../views/journeyView';
 import type { CallSiteContext } from '../identification/callSiteContext';
 import { loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
@@ -205,6 +206,16 @@ export function registerCommands(
 				void openCallTree(context, root, apiId, label ?? apiId);
 			},
 		),
+		// One place to walk everything Vinv verified: services, then every
+		// endpoint's call tree + flamegraph + exercised IO, with next/prev.
+		vscode.commands.registerCommand('vinv-vs.openJourney', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showErrorMessage('Open a workspace folder to view the journey.');
+				return;
+			}
+			await openJourney(folder.uri.fsPath);
+		}),
 		vscode.commands.registerCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
 		vscode.commands.registerCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),
 		vscode.commands.registerCommand('vinv-vs.runIndex', () => openIndexTerminal(context)),

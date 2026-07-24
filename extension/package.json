@@ -82,6 +82,16 @@
 					}
 				],
 				"priority": "default"
+			},
+			{
+				"viewType": "vinv.journey",
+				"displayName": "Vinv Journey",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/journey.json"
+					}
+				],
+				"priority": "default"
 			}
 		],
 		"viewsContainers": {
@@ -193,6 +203,11 @@
 			{
 				"command": "vinv-vs.openCallTree",
 				"title": "Open Call Tree",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.openJourney",
+				"title": "Open Journey (walk the verified flow)",
 				"category": "Vinv"
 			},
 			{

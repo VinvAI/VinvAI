@@ -208,3 +208,24 @@ def test_perf_diff_needs_median_confirmation():
 
     confirmed = _confirm_perf_diff(case, "http://x", 2.0, slow, "t")
     assert confirmed and confirmed["kind"] == "perf" and "median" in confirmed["detail"]
+
+
+def test_user_authored_reply_feeds_plan_for_non_semantic_endpoint(tmp_path):
+    """The Journey view writes user plans for ORDINARY endpoints too — plan
+    must fold them in even when the endpoint never needed semantics."""
+    from exerciser.plan import build_plan
+
+    store.write_json(store.apis_json_path(tmp_path), {"apis": [{
+        "id": "GET_health", "method": "GET", "path": "/health",
+        "handler": "health", "file": "app.py", "line": 1,
+    }]})
+    store.write_json(store.prompts_dir(tmp_path) / "GET_health.json", {
+        "api_id": "GET_health",
+        "reply": {"plans": [{"endpoint": "GET /health",
+                             "inputs": {"query": {"verbose": True}},
+                             "user_authored": True}]},
+    })
+    result = build_plan(tmp_path)
+    ep = next(e for e in result["endpoints"] if e["api_id"] == "GET_health")
+    assert ep.get("semantic_inputs"), "user-authored plan must reach the plan"
+    assert ep["semantic_inputs"][0]["user_authored"] is True
