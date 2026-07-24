@@ -445,6 +445,20 @@ def _extract_bundled_source(zip_path: Path) -> str | None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _resolvable_executable(cmd0: str) -> bool:
+    """False only for a path-style argv[0] that points at nothing executable.
+
+    Bare names (``python``, ``uvicorn``) are left to PATH resolution at exec
+    time; only an explicit path (contains a separator) is checked here. That is
+    the mistyped-venv-interpreter case, which otherwise surfaces as a raw
+    ``FileNotFoundError`` traceback out of ``os.execvpe``.
+    """
+    if os.sep not in cmd0 and (os.altsep is None or os.altsep not in cmd0):
+        return True
+    p = Path(cmd0).expanduser()
+    return p.exists() and os.access(p, os.X_OK)
+
+
 def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
     """Re-exec the run inside the **target service's** Python interpreter.
 
@@ -462,6 +476,12 @@ def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
     Returns normally (no handoff) when the current interpreter can host the
     target itself. ``os.execvpe`` replaces this process on a successful handoff.
     """
+    if user and not _resolvable_executable(user[0]):
+        raise SystemExit(
+            f"tracelens run: target command not found: {user[0]!r} — the executable "
+            "after '--' does not exist (or is not executable). Check the path "
+            "(typo? venv not created yet?)."
+        )
     target_py = _external_target_python(user)
     if target_py is None:
         if _is_frozen() and not _is_python_command(user):
@@ -518,8 +538,15 @@ def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
                 f"tracelens run: failed to launch target interpreter {target_py!r}: {exc}"
             ) from None
         raise SystemExit(rc)
-    os.execvpe(target_py, [target_py, "-c", child, *argv], env)
-    # execvpe only returns on failure to launch the new image.
+    try:
+        os.execvpe(target_py, [target_py, "-c", child, *argv], env)
+    except OSError as exc:
+        # execvpe raises (rather than returns) on failure to launch the new image;
+        # without this the user sees a raw FileNotFoundError traceback.
+        raise SystemExit(
+            f"tracelens run: failed to exec target interpreter {target_py!r}: "
+            f"{exc.strerror or exc}"
+        ) from None
     raise SystemExit(f"tracelens run: failed to exec target interpreter {target_py!r}")
 
 
@@ -759,6 +786,18 @@ def run_main(argv: list[str] | None = None) -> None:
     # hand the whole run off to the target's own interpreter. On a successful
     # handoff os.execvpe replaces this process and never returns here.
     _maybe_handoff_to_target_python(argv, user)
+    # Preflight the core OTel SDK now — one clear line instead of a raw
+    # ModuleNotFoundError from deep inside the bootstrap (or, worse, from the
+    # injected `from tracelens.runtime import trace_fn` import inside the
+    # user's own rewritten modules). Only api+sdk are required; the contrib
+    # `opentelemetry-instrumentation` package is optional (see otel_setup).
+    _missing_dist = otel_setup.core_sdk_missing()
+    if _missing_dist is not None:
+        raise SystemExit(
+            f"tracelens run: this Python environment is missing '{_missing_dist}', "
+            "which tracelens needs to record spans. Install it into the target venv: "
+            "pip install opentelemetry-api opentelemetry-sdk"
+        )
     (
         output,
         targets,
