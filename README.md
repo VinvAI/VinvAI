@@ -40,11 +40,11 @@ You've lived the search query *"claude code says done but tests fail"*: the agen
 
 Give your coding agent runtime context — five engines, one loop:
 
-- **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/clips/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
-- **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/clips/code-graph.gif" alt="interactive Code Graph" width="640">
-- **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/clips/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
-- **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/clips/rank-suspects.gif" alt="fault-ranked suspects" width="640">
-- **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/clips/verified-fixes.gif" alt="independent fix verification" width="640">
+- **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
+- **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph.gif" alt="interactive Code Graph" width="640">
+- **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
+- **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
+- **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
 
 > **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).
 
@@ -64,7 +64,7 @@ Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-templat
 - The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
 
 <div align="center">
-<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/readme-real-repo-demo/.github/assets/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
+<img src="https://images.vinv.ai/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
 </div>
 
 *The actual run, captured frame by frame: install → 855-symbol graph → search hits → trace hotspots → the failing frame named → verified.*
