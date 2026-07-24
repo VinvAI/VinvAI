@@ -4,6 +4,30 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.8] — 2026-07-24
+
+### 🐛 Fixed
+
+- **Webview buttons never fail silently.** Every panel action (Flow, Graph
+  Explorer, Call Tree, Ask Vinv, and the judgment card) now resolves and
+  verifies the target file before opening it, and raises an actionable error
+  instead of doing nothing when a path is missing, relative, or moved.
+- **Tracing works on Python 3.14.** The tracer set up its TracerProvider through
+  OpenTelemetry's contrib loader, which imports the removed `pkg_resources` on
+  3.14; the error was swallowed and no spans were ever written. Tracelens now
+  configures its provider directly, so capture keeps working — and a missing
+  core SDK produces one clear message instead of a traceback.
+
+### 🚀 Improved
+
+- **Trace any target venv with zero installs.** A service whose virtualenv has
+  neither tracelens nor OpenTelemetry installed can now be traced without
+  installing anything into it.
+- **Agent CLI problems surface immediately.** When your coding-agent CLI isn't
+  signed in, is out of quota, or can't reach its service, Vinv now stops right
+  away with the exact fix to apply (for example, `cursor-agent login`) instead
+  of burning retries and fix budget on attempts that cannot succeed.
+
 ## [0.0.7] — 2026-07-24
 
 ### Changed
