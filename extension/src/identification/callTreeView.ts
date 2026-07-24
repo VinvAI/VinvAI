@@ -368,10 +368,10 @@ function getHtml(label: string): string {
 		}
 		.cov .bar span { display: block; height: 100%; background: var(--ink); }
 		.note { margin-top: 8px; font-size: 11px; color: var(--muted); }
-		.live { color: var(--accent); }
+		.live { color: var(--accent-fg); }
 		#status { color: var(--muted); padding: 8px 0; font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; }
-		#status::before { content: '// '; color: var(--accent); }
-		.error, #status.error { color: var(--accent); white-space: pre-wrap; text-transform: none; letter-spacing: normal; font-size: 12px; }
+		#status::before { content: '// '; color: var(--accent-fg); }
+		.error, #status.error { color: var(--accent-fg); white-space: pre-wrap; text-transform: none; letter-spacing: normal; font-size: 12px; }
 		#status.error::before { content: none; }
 
 		ul.tree { list-style: none; margin: 0; padding: 0; }
@@ -382,7 +382,7 @@ function getHtml(label: string): string {
 			padding: 2px 6px; border-radius: 0; max-width: 100%;
 		}
 		.node.clickable { cursor: pointer; }
-		.node.clickable:hover { background: var(--bg-2); box-shadow: inset 2px 0 0 var(--accent); }
+		.node.clickable:hover { background: var(--bg-2); box-shadow: inset 2px 0 0 var(--accent-fg); }
 		.node.notrun { opacity: 0.45; }
 		.caret {
 			cursor: pointer; width: 14px; display: inline-block; text-align: center;
@@ -396,7 +396,7 @@ function getHtml(label: string): string {
 		.rt { font-size: 10.5px; flex: none; }
 		.rt.ok { color: var(--muted); }
 		.rt.no { color: var(--muted-2); }
-		.rt.err { color: var(--accent); }
+		.rt.err { color: var(--accent-fg); }
 		.badge {
 			font-size: 9px; padding: 1px 6px; border-radius: 0;
 			letter-spacing: 0.16em; text-transform: uppercase;
@@ -421,7 +421,7 @@ function getHtml(label: string): string {
 			color: var(--muted); margin: 0 0 10px; padding-top: 12px;
 			border-top: 1px solid var(--ink); display: inline-block;
 		}
-		.gap h2::before { content: '// '; color: var(--accent); }
+		.gap h2::before { content: '// '; color: var(--accent-fg); }
 		.gap ul { list-style: none; margin: 0; padding: 0; }
 		.gap li { padding: 2px 0; font-size: 11.5px; color: var(--muted); }
 		.collapsed > ul { display: none; }
@@ -472,7 +472,7 @@ function getHtml(label: string): string {
 			font-size: 10.5px; line-height: 20px; padding: 0 5px;
 			border: 1px solid var(--line-strong); border-radius: 0;
 		}
-		.flame-frame:hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+		.flame-frame:hover { outline: 1px solid var(--accent-fg); outline-offset: -1px; }
 		.flame-hint { color: var(--muted); font-size: 11px; padding: 8px 0; }
 	</style>
 </head>
@@ -727,10 +727,16 @@ function getHtml(label: string): string {
 
 		// Neutral → brand red by share of the root's total (hotter = heavier on
 		// the metric), so the flamegraph reads in the site's white/black/red system.
-		// On dark themes the mix base (--bg-2) is near-black, so white text is
-		// legible from ~45% red; on light themes the mixed color stays pale much
-		// longer, and white-on-pink was unreadable — keep the dark ink until the
-		// frame is decisively red. Body theme classes are VS Code's own.
+		// Label color is fixed per theme, with the RED CAP chosen so the label
+		// clears 4.5:1 at the hottest frame (measured, not eyeballed):
+		// - dark: red over near-black darkens the frame, so white text works at
+		//   every mix (worst case 88% red = 6.3:1) — full 10–88% range.
+		// - light: red over near-white brightens the frame; white-on-pink fails
+		//   until ~88% and near-black ink fails ABOVE ~80%, so light keeps ink
+		//   text and caps the mix at 78% (ink = 4.85:1 there). Between 80–88%
+		//   NEITHER white nor ink reaches 4.5:1 — that band is unusable, which is
+		//   why the old 65% white-switch was still broken.
+		// Body theme classes are VS Code's own.
 		function isDarkTheme() {
 			const c = document.body.classList;
 			return c.contains('vscode-dark') ||
@@ -738,11 +744,11 @@ function getHtml(label: string): string {
 		}
 		function flameStyle(v, rootV) {
 			const frac = Math.max(0, Math.min(1, rootV > 0 ? v / rootV : 0));
-			const mix = Math.round(10 + 78 * frac);
-			const whiteFrom = isDarkTheme() ? 45 : 65;
+			const dark = isDarkTheme();
+			const mix = Math.round(10 + (dark ? 78 : 68) * frac);
 			return {
 				background: 'color-mix(in srgb, var(--accent) ' + mix + '%, var(--bg-2))',
-				color: mix > whiteFrom ? '#ffffff' : 'var(--ink)',
+				color: dark ? '#ffffff' : 'var(--ink)',
 			};
 		}
 
