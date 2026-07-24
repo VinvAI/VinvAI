@@ -7,6 +7,7 @@ path is ``$TRACELENS_HOME/baselines/<service>/trace.jsonl``.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import math
 import os
@@ -47,6 +48,41 @@ _PRESETS: dict[str, dict[str, object]] = {
 _DEFAULT_PRESET = "standard"
 _MAX_BUNDLED_SOURCE_FILES = 10_000
 _MAX_BUNDLED_SOURCE_BYTES = 256 * 1024 * 1024
+
+# Top-level distribution packages the in-process capture path imports and that a
+# *target* service venv should NOT have to install just to be traced. When we hand
+# off into a foreign target interpreter (see ``_maybe_handoff_to_target_python``)
+# we locate the directories that hold these packages in tracelens's OWN
+# environment and hand them to the child, which APPENDS them to ``sys.path`` (see
+# ``_install_capture_dep_fallback``). This is the whole design point of the
+# foreign-venv zero-install path: tracing a service in its own venv installs
+# nothing — not tracelens, not opentelemetry, not PyYAML — into that venv.
+#
+# The set is the transitive closure of the capture path's third-party imports:
+#   * span pipeline — ``opentelemetry`` (api + sdk + semconv share one namespace
+#     dir) and its runtime deps ``deprecated`` → ``wrapt`` and, on interpreters
+#     without the stdlib backport, ``importlib_metadata`` → ``zipp``;
+#   * ``typing_extensions`` (version-dependent OTel typing dep);
+#   * per-call enrichment — ``yaml`` (PyYAML), imported eagerly by
+#     ``tracelens.enrich.external_invariants`` which ``trace_fn`` pulls in.
+# All are pure-Python (or have a pure-Python fallback), so injecting tracelens's
+# 3.13 copies onto a 3.14 target works. We append (never prepend) the dirs so the
+# target's own copy of any package always wins — the injected copies only fill a
+# gap the target does not provide at all — and, crucially, appending to
+# ``sys.path`` (rather than a code-only ``meta_path`` finder) also exposes the
+# dependencies' ``.dist-info`` metadata, which ``opentelemetry`` needs for its
+# entry-point-based runtime-context lookup. tracelens itself is supplied
+# separately via the source root on ``PYTHONPATH`` (``_tracelens_source_root``).
+_CAPTURE_DEP_TOPLEVEL: tuple[str, ...] = (
+    "opentelemetry",
+    "deprecated",
+    "wrapt",
+    "importlib_metadata",
+    "zipp",
+    "typing_extensions",
+    "yaml",
+)
+_CAPTURE_DEP_ROOTS_ENV = "TRACELENS_CAPTURE_DEP_ROOTS"
 
 
 def _safe_service_name(value: str) -> str:
@@ -446,6 +482,76 @@ def _extract_bundled_source(zip_path: Path) -> str | None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _capture_dependency_roots() -> list[str]:
+    """Directories in *tracelens's own* interpreter that hold the capture path's
+    third-party dependencies (``_CAPTURE_DEP_TOPLEVEL``).
+
+    Resolved via ``find_spec`` on the CURRENTLY running interpreter — i.e. the
+    tracelens process about to hand off — so it names the exact dirs where
+    tracelens itself imports OTel / PyYAML / their deps. These are handed to the
+    foreign target interpreter (via ``TRACELENS_CAPTURE_DEP_ROOTS``) so the child
+    can import the capture stack without those packages being installed into the
+    target venv. Best-effort: a dependency that does not resolve to a real
+    directory (e.g. a built-in, or bundled inside a frozen binary) is skipped, and
+    the target's own copy — if any — always wins regardless (the child installs
+    these as a last-resort finder, never a shadow).
+    """
+    roots: list[str] = []
+    seen: set[str] = set()
+    for name in _CAPTURE_DEP_TOPLEVEL:
+        try:
+            spec = importlib.util.find_spec(name)
+        except (ImportError, AttributeError, ValueError):
+            continue
+        if spec is None:
+            continue
+        dirs: list[str] = []
+        locations = list(spec.submodule_search_locations or [])
+        if locations:  # a package — its parent dir is the sys.path entry
+            dirs = [str(Path(p).resolve().parent) for p in locations]
+        elif spec.origin and spec.origin not in ("built-in", "frozen"):
+            dirs = [str(Path(spec.origin).resolve().parent)]
+        for d in dirs:
+            if d and d not in seen and Path(d).is_dir():
+                seen.add(d)
+                roots.append(d)
+    return roots
+
+
+def _install_capture_dep_fallback() -> list[str]:
+    """Child-side: expose tracelens's capture dependencies as a last-resort import
+    fallback so a foreign target venv needs ZERO tracing installs.
+
+    Reads ``TRACELENS_CAPTURE_DEP_ROOTS`` (set by the parent in
+    ``_maybe_handoff_to_target_python``) and APPENDS each dir to ``sys.path``.
+    Appending — not prepending — is what makes the precedence correct: Python's
+    import machinery and ``importlib.metadata`` both walk ``sys.path`` front-to-
+    back, so the target venv's own site-packages (already earlier on the path)
+    shadow these injected dirs for every package the target actually ships; the
+    injected copies only satisfy imports (and ``.dist-info`` / entry-point lookups,
+    which ``opentelemetry`` relies on) the target cannot satisfy at all. Must run
+    BEFORE any ``opentelemetry`` / ``yaml`` import in ``run_main`` — including the
+    ``core_sdk_missing`` preflight and the span pipeline. No-op — and byte-identical
+    to the historical behaviour — when the env var is unset (in-process / same-venv
+    runs, where the deps are already importable). Idempotent. Returns the roots
+    added, for diagnostics and tests.
+    """
+    raw = os.environ.get(_CAPTURE_DEP_ROOTS_ENV)
+    if not raw:
+        return []
+    added: list[str] = []
+    for root in raw.split(os.pathsep):
+        if root and root not in sys.path:
+            sys.path.append(root)
+            added.append(root)
+    if added:
+        # Invalidate importlib's caches so the newly-appended dirs are visible to
+        # both module imports and metadata/entry-point discovery immediately.
+        importlib.invalidate_caches()
+        _log.info("tracelens: capture-dependency fallback active (sys.path+=%s)", added)
+    return added
+
+
 def _resolvable_executable(cmd0: str) -> bool:
     """False only for a path-style argv[0] that points at nothing executable.
 
@@ -509,6 +615,16 @@ def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
     env = dict(os.environ)
     prev = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = src_root + (os.pathsep + prev if prev else "")
+    # Foreign-venv zero-install: also tell the child where tracelens's own capture
+    # dependencies (OTel api/sdk, PyYAML, transitive deps) live, so it can import
+    # the capture stack even when the target venv has none of them installed. The
+    # child APPENDS these to ``sys.path`` (not PYTHONPATH, which would prepend and
+    # shadow), so a target that already ships a compatible opentelemetry keeps
+    # using its own — the injected copies only fill genuine gaps. See
+    # ``_install_capture_dep_fallback``.
+    dep_roots = _capture_dependency_roots()
+    if dep_roots:
+        env[_CAPTURE_DEP_ROOTS_ENV] = os.pathsep.join(dep_roots)
     _log_diag_dispatch("handoff")
     _log.info(
         "tracelens: handing off to target interpreter %s (PYTHONPATH+=%s)",
@@ -954,6 +1070,14 @@ def _install_hooks() -> None:
 def run_main(argv: list[str] | None = None) -> None:
     if argv is None:
         argv = sys.argv[1:]
+    # Foreign-venv zero-install: when a parent tracelens handed off into this
+    # target interpreter, expose tracelens's own capture dependencies (OTel
+    # api/sdk, PyYAML, …) as a last-resort import fallback. MUST precede any
+    # opentelemetry/yaml import below — including the ``core_sdk_missing``
+    # preflight and the span pipeline. No-op on same-venv / in-process runs
+    # (the env var is only set on handoff), keeping healthy-path behaviour and
+    # the trace JSONL byte-identical.
+    _install_capture_dep_fallback()
     _configure_diag()
     pre, user = _parse_user_command(argv)
     # Before doing any in-process instrumentation, decide whether THIS
