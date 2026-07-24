@@ -19,15 +19,29 @@ export const VINV_FONT_SERIF =
 	"'Instrument Serif', 'Iowan Old Style', Georgia, 'Times New Roman', serif";
 
 export const VINV_BASE_CSS = `
-	/* ===== Vinv palette (light default, mirrors vinv.ai styles.css) ===== */
+	/* ===== Vinv palette (light default, mirrors vinv.ai styles.css) =====
+	 *
+	 * Contrast contract (WCAG, against --bg):
+	 *   --muted     body-size secondary text   ≥ 4.5:1
+	 *   --muted-2   small detail text          ≥ 3:1 (kept ≥ 4:1 for comfort)
+	 *   --accent-fg accent used AS FOREGROUND (text, rings, strokes) ≥ 4.5:1
+	 *   --accent    accent used AS FILL — always paired with #ffffff text
+	 *               (white on #d71921 is 5.18:1 in both themes, so the fill
+	 *               stays the brand red everywhere)
+	 *   --accent-hover hover FILL — the same hue with lightness shifted per
+	 *               theme so white text stays ≥ 4.5:1 (darker in light,
+	 *               brighter in dark; #ff5a5f-style tints fail at 3.05:1)
+	 */
 	body {
 		--bg: #ffffff;
 		--bg-2: #f4f4f4;
 		--ink: #0a0a0a;
 		--ink-soft: #1a1a1a;
-		--muted: #6b6b6b;
-		--muted-2: #9a9a9a;
+		--muted: #616161;
+		--muted-2: #7a7a7a;
 		--accent: #d71921;
+		--accent-fg: #d71921;
+		--accent-hover: #b3151c;
 		--accent-soft: #ff5a5f;
 		--line: rgba(10, 10, 10, 0.14);
 		--line-strong: rgba(10, 10, 10, 0.32);
@@ -42,8 +56,10 @@ export const VINV_BASE_CSS = `
 		--ink: #ffffff;
 		--ink-soft: #ededed;
 		--muted: #8f8f8f;
-		--muted-2: #5c5c5c;
+		--muted-2: #6e6e6e;
 		--accent: #d71921;
+		--accent-fg: #ff4048;
+		--accent-hover: #e2262f;
 		--accent-soft: #ff5a5f;
 		--line: rgba(255, 255, 255, 0.14);
 		--line-strong: rgba(255, 255, 255, 0.32);
@@ -96,7 +112,7 @@ export const VINV_BASE_CSS = `
 		text-transform: uppercase;
 		color: var(--muted);
 	}
-	.v-label::before { content: '// '; color: var(--accent); }
+	.v-label::before { content: '// '; color: var(--accent-fg); }
 
 	/* serif-italic display heading */
 	.v-display {
@@ -147,7 +163,7 @@ export const VINV_BASE_CSS = `
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
-		background: var(--accent);
+		background: var(--accent-fg);
 		box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18);
 		animation: v-pulse 2.4s ease-in-out infinite;
 	}

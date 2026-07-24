@@ -196,10 +196,10 @@ function getFlowHtml(cspSource: string): string {
 
 		.next {
 			display: none; margin: 2px 0 12px; padding: 10px 12px;
-			border: 1px solid var(--accent);
+			border: 1px solid var(--accent-fg);
 		}
 		.next.on { display: block; }
-		.next .k { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent); margin-bottom: 4px; }
+		.next .k { font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent-fg); margin-bottom: 4px; }
 		.next .why { color: var(--muted); margin: 6px 0 10px; line-height: 1.5; }
 		.next button {
 			display: inline-flex; align-items: center; gap: 6px;
@@ -226,9 +226,9 @@ function getFlowHtml(cspSource: string): string {
 			border: 1.5px solid var(--muted-2); background: var(--bg);
 		}
 		.stage.done .dot { border-color: var(--ink); background: var(--ink); }
-		.stage.error .dot { border-color: var(--accent); background: var(--accent); }
+		.stage.error .dot { border-color: var(--accent-fg); background: var(--accent-fg); }
 		.stage.running .dot {
-			border-color: var(--accent); background: var(--accent);
+			border-color: var(--accent-fg); background: var(--accent-fg);
 			box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18);
 			animation: v-pulse 2.4s ease-in-out infinite;
 		}
@@ -242,11 +242,11 @@ function getFlowHtml(cspSource: string): string {
 			font-size: 8.5px; letter-spacing: 0.2em; text-transform: uppercase;
 			color: var(--muted-2);
 		}
-		.stage.error h2 .st, .stage.running h2 .st { color: var(--accent); }
+		.stage.error h2 .st, .stage.running h2 .st { color: var(--accent-fg); }
 		.stage.done h2 .st { color: var(--muted); }
 		.summary { color: var(--muted); margin: 3px 0 0; line-height: 1.5; }
-		.stage.error .summary { color: var(--accent); }
-		.activity { color: var(--accent); margin: 3px 0 0; line-height: 1.5; }
+		.stage.error .summary { color: var(--accent-fg); }
+		.activity { color: var(--accent-fg); margin: 3px 0 0; line-height: 1.5; }
 		.links { margin: 6px 0 0; }
 		.lnk {
 			display: flex; align-items: baseline; gap: 7px;
@@ -256,7 +256,7 @@ function getFlowHtml(cspSource: string): string {
 			border-radius: 0; color: var(--ink); font-family: inherit; font-size: 11px;
 			cursor: pointer; line-height: 1.45;
 		}
-		.lnk:hover { background: var(--bg-2); border-left-color: var(--accent); }
+		.lnk:hover { background: var(--bg-2); border-left-color: var(--accent-fg); }
 		.lnk:disabled { cursor: default; }
 		.lnk:disabled:hover { background: transparent; border-left-color: transparent; }
 		.lnk .b {
@@ -264,9 +264,9 @@ function getFlowHtml(cspSource: string): string {
 			align-self: center; background: var(--muted-2);
 		}
 		.lnk.s-ok .b { background: var(--ink); }
-		.lnk.s-error .b { background: var(--accent); }
+		.lnk.s-error .b { background: var(--accent-fg); }
 		.lnk.s-running .b {
-			background: var(--accent);
+			background: var(--accent-fg);
 			box-shadow: 0 0 0 3px rgba(215, 25, 33, 0.18);
 			animation: v-pulse 2.4s ease-in-out infinite;
 		}
@@ -275,7 +275,7 @@ function getFlowHtml(cspSource: string): string {
 		.lnk .det { color: var(--muted-2); font-size: 10px; min-width: 0; }
 
 		/* ---- issues ---- */
-		.issues { display: none; margin-top: 6px; border: 1px solid var(--accent); }
+		.issues { display: none; margin-top: 6px; border: 1px solid var(--accent-fg); }
 		.issues.on { display: block; }
 		.issues .hd {
 			padding: 7px 10px; background: var(--accent); color: #ffffff;
@@ -296,7 +296,7 @@ function getFlowHtml(cspSource: string): string {
 			transition: background 0.2s, color 0.2s, border-color 0.2s;
 		}
 		.issue .fix { background: var(--accent); border: 1px solid var(--accent); color: #ffffff; }
-		.issue .fix:hover { background: var(--accent-soft); border-color: var(--accent-soft); }
+		.issue .fix:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 		.issue .ev { background: transparent; border: 1px solid var(--line-strong); color: var(--ink); }
 		.issue .ev:hover { border-color: var(--ink); }
 		.issue .sent { align-self: center; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); border: 1px dashed var(--line-strong); padding: 3px 8px; }

@@ -30,14 +30,16 @@ export function getGraphHtml(): string {
 		   an explicit choice beats whatever the editor stamped on <body>. */
 		body.vinv-light {
 			--bg: #ffffff; --bg-2: #f4f4f4; --ink: #0a0a0a; --ink-soft: #1a1a1a;
-			--muted: #6b6b6b; --muted-2: #9a9a9a;
+			--muted: #616161; --muted-2: #7a7a7a;
+			--accent: #d71921; --accent-fg: #d71921; --accent-hover: #b3151c;
 			--line: rgba(10, 10, 10, 0.14); --line-strong: rgba(10, 10, 10, 0.32);
 			--grid: rgba(10, 10, 10, 0.05); --grain: rgba(10, 10, 10, 0.05);
 			--grain-blend: multiply;
 		}
 		body.vinv-dark {
 			--bg: #000000; --bg-2: #0b0b0b; --ink: #ffffff; --ink-soft: #ededed;
-			--muted: #8f8f8f; --muted-2: #5c5c5c;
+			--muted: #8f8f8f; --muted-2: #6e6e6e;
+			--accent: #d71921; --accent-fg: #ff4048; --accent-hover: #e2262f;
 			--line: rgba(255, 255, 255, 0.14); --line-strong: rgba(255, 255, 255, 0.32);
 			--grid: rgba(255, 255, 255, 0.05); --grain: rgba(255, 255, 255, 0.05);
 			--grain-blend: screen;
@@ -58,7 +60,7 @@ export function getGraphHtml(): string {
 			width: 250px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 0;
 			background: var(--bg); color: var(--ink); font-family: inherit; font-size: 11.5px;
 		}
-		#search:focus { outline: none; border-color: var(--accent); }
+		#search:focus { outline: none; border-color: var(--accent-fg); }
 		.mode-switch { display: inline-flex; border: 1px solid var(--line-strong); }
 		.mode-switch button {
 			background: transparent; color: var(--muted); border: none; padding: 5px 11px; cursor: pointer;
@@ -69,7 +71,7 @@ export function getGraphHtml(): string {
 		/* Dead Code is a standing accent call-to-action, not one mode among many —
 		   it reads as red-on-white at a glance whether or not it is engaged. */
 		.v-btn.dead { background: var(--accent); border-color: var(--accent); color: #ffffff; }
-		.v-btn.dead:hover { background: var(--accent-soft); border-color: var(--accent-soft); color: #ffffff; }
+		.v-btn.dead:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #ffffff; }
 		.v-btn.dead.active { box-shadow: inset 0 0 0 2px var(--bg); }
 		main { flex: 1; display: flex; min-height: 0; }
 		#canvas-wrap { flex: 1; position: relative; min-width: 0; }
@@ -131,10 +133,10 @@ export function getGraphHtml(): string {
 			padding: 5px 7px; cursor: pointer; border-left: 2px solid transparent;
 			display: flex; justify-content: space-between; gap: 6px; align-items: baseline;
 		}
-		.sym:hover, .link-row:hover { background: var(--bg-2); border-left-color: var(--accent); }
+		.sym:hover, .link-row:hover { background: var(--bg-2); border-left-color: var(--accent-fg); }
 		.sym .nm, .link-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 		.sym .rt, .link-row .dir { flex: none; font-size: 9.5px; color: var(--muted-2); text-transform: uppercase; letter-spacing: 0.1em; }
-		.sym .rt.err { color: var(--accent); }
+		.sym .rt.err { color: var(--accent-fg); }
 		#status {
 			position: absolute; top: 12px; right: 12px; padding: 6px 10px;
 			font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted);
@@ -205,10 +207,15 @@ export function getGraphHtml(): string {
 		config: '#a67c52',   // umber
 		scripts: '#3f9aa6',  // teal — direct complement of the brand red
 		tests: '#7e8a4f',    // olive
-		docs: '#8f8f8f',     // neutral gray (matches --muted)
-		other: '#5c5c5c',    // neutral dark (matches --muted-2)
+		docs: '#8f8f8f',     // neutral gray (matches dark --muted)
+		other: '#6e6e6e',    // neutral dark (matches dark --muted-2; was #5c5c5c,
+		                     // which sat at exactly the 3:1 floor on black)
 	};
-	const ACCENT = '#d71921';
+	// State red (errors, selection, changed-this-epoch) is read from the theme
+	// each time it is used: --accent-fg keeps the brand hue but shifts lightness
+	// per theme (#d71921 on white, #ff4048 on black), because the print red at
+	// 4.05:1 on black made the whole Runtime overlay unreadable in dark themes.
+	function accentFg() { return cssVar('--accent-fg'); }
 	// Layers that start hidden on big graphs — one legend click brings them back.
 	const NOISY_LAYERS = ['tests', 'docs'];
 	const BIG_GRAPH_FILES = 120;
@@ -855,6 +862,7 @@ export function getGraphHtml(): string {
 		ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
 		if (!snapshot) { return; }
 		const ink = cssVar('--ink'), line = cssVar('--line-strong'), muted = cssVar('--muted');
+		const accent = accentFg();
 
 		// Edges: when a node is selected only ITS edges render at full strength.
 		ctx.lineWidth = 0.6;
@@ -865,7 +873,7 @@ export function getGraphHtml(): string {
 			if (mode === 'dead' && (!isDead(a) || !isDead(b))) { continue; }
 			const [ax, ay] = worldToScreen(a.x, a.y);
 			const [bx, by] = worldToScreen(b.x, b.y);
-			ctx.strokeStyle = touchesSelection ? ACCENT : line;
+			ctx.strokeStyle = touchesSelection ? accent : line;
 			ctx.globalAlpha = touchesSelection ? 0.8 : Math.min(0.4, 0.08 + e.w * 0.03);
 			ctx.lineWidth = touchesSelection ? 1.2 : 0.6;
 			ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
@@ -891,7 +899,7 @@ export function getGraphHtml(): string {
 				// Red only for a call path that failed in its LATEST run — a
 				// fixed path returns to ink instead of staying red on history.
 				const flowLive = (f.current_errors ?? f.errors) > 0;
-				ctx.strokeStyle = flowLive ? ACCENT : ink;
+				ctx.strokeStyle = flowLive ? accent : ink;
 				ctx.globalAlpha = touchesSelection ? 0.9 : Math.min(0.75, 0.35 + Math.log1p(f.calls) * 0.12);
 				ctx.lineWidth = touchesSelection ? 1.6 : 1.1;
 				if (f.only) { ctx.setLineDash([5, 3]); }
@@ -923,29 +931,41 @@ export function getGraphHtml(): string {
 			if (x < -40 || y < -40 || x > canvas.width / dpr + 40 || y > canvas.height / dpr + 40) { continue; }
 			const alpha = nodeAlpha(n);
 			if (alpha <= 0.001) { continue; }
-			ctx.globalAlpha = alpha;
+			// Never-ran nodes in Runtime mode render as full-strength OUTLINES,
+			// not alpha-faded fills: an 18% fill composites to ~1.2:1 against
+			// either background (invisible on black), while a hollow disc at the
+			// layer color keeps every layer ≥3:1 on both themes and still reads
+			// as "did not run" next to the filled + ringed executed nodes.
+			// Selection isolation and search dimming still apply through alpha.
+			const hollow = mode === 'runtime' && !n.rt;
+			ctx.globalAlpha = hollow && !selected && !highlightFiles.size ? 1 : alpha;
 			ctx.fillStyle = LAYER_COLORS[n.layer] || LAYER_COLORS.other;
-			ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+			ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+			if (hollow) {
+				ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = 1.2; ctx.stroke();
+			} else {
+				ctx.fill();
+			}
 			if (n.kind === 'symbol') {
 				ctx.strokeStyle = ink; ctx.lineWidth = 0.8;
 				ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
 			}
 			if (mode === 'runtime' && n.rt && alpha > 0.5) {
 				const live = (n.rt.current_errors ?? n.rt.errors) > 0;
-				ctx.strokeStyle = live ? ACCENT : ink;
+				ctx.strokeStyle = live ? accent : ink;
 				ctx.lineWidth = live ? 2.2 : 1.2;
 				ctx.beginPath(); ctx.arc(x, y, r + 3, 0, Math.PI * 2); ctx.stroke();
 			}
 			if (mode === 'diff' && changedFiles.has(n.file) && alpha > 0.5) {
-				ctx.strokeStyle = ACCENT; ctx.lineWidth = 2;
+				ctx.strokeStyle = accent; ctx.lineWidth = 2;
 				ctx.beginPath(); ctx.arc(x, y, r + 3, 0, Math.PI * 2); ctx.stroke();
 			} else if (mode === 'diff' && impactedFiles.has(n.file) && alpha > 0.5) {
-				ctx.strokeStyle = ACCENT; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+				ctx.strokeStyle = accent; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
 				ctx.beginPath(); ctx.arc(x, y, r + 3, 0, Math.PI * 2); ctx.stroke();
 				ctx.setLineDash([]);
 			}
 			if (n.id === selected) {
-				ctx.strokeStyle = ACCENT; ctx.lineWidth = 2;
+				ctx.strokeStyle = accent; ctx.lineWidth = 2;
 				ctx.beginPath(); ctx.arc(x, y, r + 5, 0, Math.PI * 2); ctx.stroke();
 			}
 			if (n.id === hoverId && n.id !== selected) {
@@ -1160,13 +1180,13 @@ export function getGraphHtml(): string {
 			html += '<div class="aside-head"><span class="v-label">file · ' + esc(n.layer) + '</span>' + closeBtn + '</div>';
 			html += '<h2>' + esc(n.file) + '</h2>';
 			html += '<div class="sub">' + g.symbols + ' symbols · rank ' + g.rank.toFixed(3) +
-				(g.changed ? ' · <span style="color:' + ACCENT + '">changed this epoch</span>' : '') + '</div>';
+				(g.changed ? ' · <span style="color:var(--accent-fg)">changed this epoch</span>' : '') + '</div>';
 			if (n.rt) {
 				// Live error badge reflects the latest run; lifetime history is
 				// noted separately so a fixed file is not flagged red.
 				const liveErr = n.rt.current_errors ?? n.rt.errors;
 				const errBadge = liveErr
-					? ' · <span style="color:' + ACCENT + '">⚠' + liveErr + ' errors (latest run)</span>'
+					? ' · <span style="color:var(--accent-fg)">⚠' + liveErr + ' errors (latest run)</span>'
 					: (n.rt.errors ? ' · <span style="color:' + cssVar('--muted') + '">' + n.rt.errors + ' errors in history, none in latest run</span>' : '');
 				html += '<div class="sub">runtime: ' + n.rt.executed + ' symbols executed · ×' + n.rt.calls +
 					' · ' + Math.round(n.rt.ms) + 'ms' + errBadge + '</div>';
@@ -1183,7 +1203,7 @@ export function getGraphHtml(): string {
 				return (r.current_errors ?? r.errors) === 0 && (r.errors || 0) > 0;
 			});
 			if (errRows.length) {
-				html += '<div class="sub" style="color:' + ACCENT + '">failing: ' +
+				html += '<div class="sub" style="color:var(--accent-fg)">failing: ' +
 					errRows.map((row) => {
 						const s = snapshot.nodes[row];
 						const rt = snapshot.runtime[row];
@@ -1221,7 +1241,7 @@ export function getGraphHtml(): string {
 				const rt = snapshot.runtime[row];
 				const isNew = snapshot.store_epoch > 0 && s.epoch === snapshot.store_epoch;
 				html += '<div class="sym" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="jump to ' + esc(s.file) + ':' + s.start_line + '">' +
-					'<span class="nm">' + esc(s.name) + (isNew ? ' <span style="color:' + ACCENT + '">●</span>' : '') + '</span>' +
+					'<span class="nm">' + esc(s.name) + (isNew ? ' <span style="color:var(--accent-fg)">●</span>' : '') + '</span>' +
 					'<span class="rt' + (rt && rt.errors > 0 ? ' err' : '') + '">' + (rt ? rtLabel(rt) : '') + '</span></div>';
 			}
 			html += '</div></div>';
