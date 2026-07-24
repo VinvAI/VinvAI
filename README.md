@@ -29,6 +29,10 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 ```
 
 <div align="center">
+<sub>⭐ <b>Star the repo if your agent has ever said "done" and lied</b> — stars are how other vibe coders find the safety net.</sub>
+</div>
+
+<div align="center">
 <img src="https://images.vinv.ai/vinv-journey.gif" alt="Runtime tracing for AI coding agents: Vinv installs, discovers and runs every service under tracing, catches a real bug, dispatches the fix, and verifies it — on its own repo" width="720">
 <br><sub>The whole loop on Vinv's own repo: install → discover → trace → catch a real bug → dispatch → verified fix, zero clicks.</sub>
 </div>
@@ -46,6 +50,7 @@ Give your coding agent runtime context — five engines, one loop:
 - **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
 - **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
+- **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
 - **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
 - **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src=".github/assets/journey-endpoint.png" alt="Vinv Journey view: call tree with runtime overlay, latency flamegraph, and the exercised inputs and outputs for one FastAPI endpoint" width="640">
 - **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src=".github/assets/findings-full.png" alt="Vinv Findings view: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
@@ -219,6 +224,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 3. **Add your own test input** — on any Journey endpoint step, fill body/params/expected status and hit *Add input*. It lands in the same plan layer the AI-authored scenarios use, runs with the endpoint's auth setup on the next exercise, and becomes a permanent regression case.
 4. **See what got fixed** — Command Palette → **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The tab's backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
 5. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
+6. **Hunt waste on demand** — **"Vinv: Optimize Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** (recomputed-work finder) each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
 
 ## 🛠 MCP tools reference
 
