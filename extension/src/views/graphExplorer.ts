@@ -17,6 +17,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getGraphHtml } from './graphExplorerHtml';
+import { openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore, type GraphSnapshot } from '../graph/indexGraph';
 import { runIndexQuery, hitsToRows } from '../qna/answer';
 import { loadEntryPoints } from '../identification/identification';
@@ -26,7 +27,7 @@ import { endpointsForRows } from '../identification/endpointsForRow';
 export const GRAPH_VIEW_TYPE = 'vinv.graphExplorer';
 
 /** Messages the graph webview sends back to the extension. */
-interface OutboundMessage {
+export interface OutboundMessage {
 	type:
 		| 'openSource'
 		| 'semanticSearch'
@@ -40,6 +41,58 @@ interface OutboundMessage {
 	query?: string;
 	row?: number;
 	issue?: string;
+}
+
+/**
+ * Side effects a graph message can trigger, injected so the routing is testable
+ * without a live webview or index. Production binds these to the real closures
+ * in `resolveCustomEditor`; tests pass fakes and assert the exact call.
+ */
+export interface GraphActions {
+	openSource: (file: string | undefined, line?: number) => Promise<void>;
+	refresh: () => void;
+	semanticSearch: (query: string) => Promise<void>;
+	ask: (row?: number) => Promise<void>;
+	harness: (row?: number, issue?: string) => Promise<void>;
+	trace: (row?: number, file?: string) => Promise<void>;
+	trajectory: () => Promise<void>;
+}
+
+/**
+ * Routes one graph webview message to its side effect. Extracted from the inline
+ * onDidReceiveMessage closure so the wiring is unit-tested directly. openSource
+ * resolves its path to absolute, verifies existence, and reports an actionable
+ * error on failure (via the injected opener) instead of a silent no-op.
+ */
+export async function handleGraphMessage(
+	msg: OutboundMessage,
+	actions: GraphActions,
+): Promise<void> {
+	switch (msg.type) {
+		case 'openSource':
+			await actions.openSource(msg.file, msg.line);
+			return;
+		case 'refresh':
+			actions.refresh();
+			return;
+		case 'semanticSearch':
+			if (msg.query) {
+				await actions.semanticSearch(msg.query);
+			}
+			return;
+		case 'ask':
+			await actions.ask(msg.row);
+			return;
+		case 'harness':
+			await actions.harness(msg.row, msg.issue);
+			return;
+		case 'trace':
+			await actions.trace(msg.row, msg.file);
+			return;
+		case 'trajectory':
+			await actions.trajectory();
+			return;
+	}
 }
 
 function backingFilePath(workspaceRoot: string): string {
@@ -211,77 +264,62 @@ export class GraphExplorerEditorProvider implements vscode.CustomReadonlyEditorP
 			w.onDidCreate(scheduleRefresh);
 		}
 
-		const msgSub = webview.onDidReceiveMessage(async (msg: OutboundMessage) => {
+		const context = this.context;
+		const actions: GraphActions = {
+			openSource: async (file, line) => {
+				await openPathInEditor(file, {
+					workspaceRoot,
+					line: line ?? 1,
+					label: 'source file',
+					preview: true,
+					viewColumn: vscode.ViewColumn.Beside,
+				});
+			},
+			refresh: () => rebuild(),
+			semanticSearch: async (query) => {
+				try {
+					const snapshot = buildGraphSnapshot(workspaceRoot);
+					const hits = await runIndexQuery(context, workspaceRoot, query, 8);
+					void webview.postMessage({
+						type: 'searchResults',
+						rows: hitsToRows(snapshot, hits),
+						hits: hits.map((h) => ({
+							file: h.file,
+							name: h.name,
+							line: h.lines?.[0] ?? 1,
+							score: h.score,
+							summary: h.summary,
+						})),
+					});
+				} catch (e) {
+					void webview.postMessage({
+						type: 'searchResults',
+						rows: [],
+						hits: [],
+						error: e instanceof Error ? e.message : String(e),
+					});
+				}
+			},
+			ask: async (row) => {
+				await vscode.commands.executeCommand('vinv-vs.askVinv', { seedRow: row });
+			},
+			harness: async (row, issue) => {
+				await vscode.commands.executeCommand('vinv-vs.fixWithHarness', { row, issue });
+			},
+			// Infer which endpoint(s) reach the clicked node and open the call-tree
+			// view (with its latency/memory flamegraph) directly; only prompt when
+			// the node is ambiguous or unresolved.
+			trace: async (row, file) => openTraceForNode(context, workspaceRoot, row, file),
+			trajectory: async () => {
+				await vscode.commands.executeCommand('vinv-vs.showTrajectory');
+			},
+		};
+		const msgSub = webview.onDidReceiveMessage((msg: OutboundMessage) => {
 			const raw = msg as { type?: string; message?: unknown; stack?: unknown };
 			if (raw.type === 'webviewError') {
 				return;
 			}
-			switch (msg.type) {
-				case 'openSource': {
-					if (!msg.file) {
-						return;
-					}
-					const abs = path.isAbsolute(msg.file) ? msg.file : path.join(workspaceRoot, msg.file);
-					const pos = new vscode.Position(Math.max(0, (msg.line ?? 1) - 1), 0);
-					await vscode.window.showTextDocument(vscode.Uri.file(abs), {
-						selection: new vscode.Range(pos, pos),
-						preview: true,
-						viewColumn: vscode.ViewColumn.Beside,
-					});
-					return;
-				}
-				case 'refresh':
-					rebuild();
-					return;
-				case 'semanticSearch': {
-					if (!msg.query) {
-						return;
-					}
-					try {
-						const snapshot = buildGraphSnapshot(workspaceRoot);
-						const hits = await runIndexQuery(this.context, workspaceRoot, msg.query, 8);
-						void webview.postMessage({
-							type: 'searchResults',
-							rows: hitsToRows(snapshot, hits),
-							hits: hits.map((h) => ({
-								file: h.file,
-								name: h.name,
-								line: h.lines?.[0] ?? 1,
-								score: h.score,
-								summary: h.summary,
-							})),
-						});
-					} catch (e) {
-						void webview.postMessage({
-							type: 'searchResults',
-							rows: [],
-							hits: [],
-							error: e instanceof Error ? e.message : String(e),
-						});
-					}
-					return;
-				}
-				case 'ask':
-					await vscode.commands.executeCommand('vinv-vs.askVinv', {
-						seedRow: msg.row,
-					});
-					return;
-				case 'harness':
-					await vscode.commands.executeCommand('vinv-vs.fixWithHarness', {
-						row: msg.row,
-						issue: msg.issue,
-					});
-					return;
-				case 'trace':
-					// Infer which endpoint(s) reach the clicked node and open the
-					// call-tree view (with its latency/memory flamegraph) directly;
-					// only prompt when the node is ambiguous or unresolved.
-					await openTraceForNode(this.context, workspaceRoot, msg.row, msg.file);
-					return;
-				case 'trajectory':
-					await vscode.commands.executeCommand('vinv-vs.showTrajectory');
-					return;
-			}
+			return handleGraphMessage(msg, actions);
 		});
 
 		rebuild();

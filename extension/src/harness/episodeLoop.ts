@@ -120,6 +120,7 @@ import {
 	type HarnessRunResult,
 } from './harnessRunner';
 import { VINV_BASE_CSS } from '../views/webviewTheme';
+import { openPathInEditor } from '../support/openDocument';
 import {
 	isAskVinvOpen,
 	postEpisodeUpdate,
@@ -632,11 +633,9 @@ async function presentJudgment(j: ParkedJudgment): Promise<void> {
 				// Same courtesy as the dialog: show the brief before the next attempt.
 				// Not for an answer follow-up — that is a conversation, not a re-brief,
 				// and yanking a markdown file into the editor mid-question is noise.
-				try {
-					await vscode.window.showTextDocument(vscode.Uri.file(j.packPath), { preview: false });
-				} catch {
-					// Pack unopenable — the card still carried the evidence.
-				}
+				// openPathInEditor verifies + reports a missing pack rather than
+				// swallowing the failure; the retry proceeds regardless.
+				await openPathInEditor(j.packPath, { label: 'context pack', preview: false });
 			}
 			j.resolve(verdict);
 			return;
@@ -711,6 +710,67 @@ function escapeHtml(s: string): string {
 		.replace(/</g, '&lt;')
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;');
+}
+
+/** A message the judgment card posts back to the extension. */
+export interface JudgmentMessage {
+	type: string;
+	action?: string;
+	note?: string;
+	selectedProposals?: string[];
+	message?: unknown;
+	stack?: unknown;
+}
+
+/**
+ * Side effects a judgment-card message can trigger, injected so the routing is
+ * testable without a live webview. `openPack` opens the episode's context pack
+ * and — crucially — surfaces an actionable error when it cannot (missing/moved
+ * pack), replacing the empty catch that made "view context pack" a silent no-op.
+ */
+export interface JudgmentActions {
+	openPack: () => Promise<void>;
+	settle: (result: EscalationResult) => void;
+}
+
+/**
+ * Routes one judgment-card message. Extracted from the inline
+ * onDidReceiveMessage closure so the wiring is unit-tested directly. Both the
+ * "view context pack" button and "reject & retry" open the pack through
+ * `openPack`; a retry settles regardless of whether the pack opened, but the
+ * user is told when it didn't rather than left with a dead button.
+ */
+export async function handleJudgmentMessage(
+	m: JudgmentMessage,
+	actions: JudgmentActions,
+): Promise<void> {
+	if (m.type === 'webviewError') {
+		return;
+	}
+	if (m.type === 'openPack') {
+		// Inspection only — the dialog stays up, no verdict implied.
+		await actions.openPack();
+		return;
+	}
+	if (m.type !== 'verdict') {
+		return;
+	}
+	if (m.action === 'retry') {
+		// Show the pack so the user can inspect/edit before the next attempt.
+		await actions.openPack();
+		actions.settle({
+			action: 'retry',
+			note: m.note?.trim() || undefined,
+			selectedProposals: m.selectedProposals?.length ? m.selectedProposals : undefined,
+		});
+		return;
+	}
+	if (m.action === 'approve' || m.action === 'abort' || m.action === 'revert') {
+		actions.settle({
+			action: m.action,
+			selectedProposals: m.selectedProposals?.length ? m.selectedProposals : undefined,
+		});
+	}
 }
 
 /**
@@ -868,55 +928,20 @@ ${VINV_BASE_CSS}
 				panel.dispose();
 			}
 		};
-		panel.webview.onDidReceiveMessage(
-			async (m: {
-				type: string;
-				action?: string;
-				note?: string;
-				selectedProposals?: string[];
-				message?: unknown;
-				stack?: unknown;
-			}) => {
-				if (m.type === 'webviewError') {
-					return;
-				}
-				if (m.type === 'openPack' && packPath) {
-					// Inspection only — the dialog stays up, no verdict implied.
-					try {
-						await vscode.window.showTextDocument(vscode.Uri.file(packPath), {
-							preview: false,
-							viewColumn: vscode.ViewColumn.Beside,
-						});
-					} catch {
-						// Pack unopenable — the dialog still shows the evidence text.
-					}
-					return;
-				}
-				if (m.type !== 'verdict') {
-					return;
-				}
-				if (m.action === 'retry') {
-					// Show the pack so the user can inspect/edit before the next attempt.
-					try {
-						await vscode.window.showTextDocument(vscode.Uri.file(packPath), { preview: false });
-					} catch {
-						// Pack unopenable — continue regardless.
-					}
-					settle({
-						action: 'retry',
-						note: m.note?.trim() || undefined,
-						selectedProposals: m.selectedProposals?.length ? m.selectedProposals : undefined,
-					});
-					return;
-				}
-				if (m.action === 'approve' || m.action === 'abort' || m.action === 'revert') {
-					settle({
-						action: m.action,
-						selectedProposals: m.selectedProposals?.length ? m.selectedProposals : undefined,
-					});
-				}
+		const actions: JudgmentActions = {
+			// Absolute pack path from writeContextPack; the opener still resolves +
+			// verifies and, if the pack was moved/deleted, shows "context pack not
+			// found at <path>" instead of the old silent no-op.
+			openPack: async () => {
+				await openPathInEditor(packPath, {
+					label: 'context pack',
+					preview: false,
+					viewColumn: vscode.ViewColumn.Beside,
+				});
 			},
-		);
+			settle,
+		};
+		panel.webview.onDidReceiveMessage((m: JudgmentMessage) => handleJudgmentMessage(m, actions));
 		// Closed without a verdict (tab closed, editor reload): park it. The
 		// episode stays suspended on the operator rather than being aborted by
 		// an accident of window management.
