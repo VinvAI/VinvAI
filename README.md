@@ -17,6 +17,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-D71921?style=flat-square)](LICENSE)
 [![Open VSX Version](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![Open VSX Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI)
+[![Open VSX Rating](https://img.shields.io/open-vsx/rating/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI/reviews)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#-privacy)
 
 **Install:** [**Open VSX** (Cursor · VS Code · Windsurf)](https://open-vsx.org/extension/VinvAI/VinvAI) · [**vinv.ai/#install**](https://vinv.ai/#install) — or build everything from source:
@@ -45,8 +46,20 @@ Give your coding agent runtime context — five engines, one loop:
 - **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
 - **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
+- **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
+- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src=".github/assets/journey-endpoint.png" alt="Vinv Journey view: call tree with runtime overlay, latency flamegraph, and the exercised inputs and outputs for one FastAPI endpoint" width="640">
+- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src=".github/assets/findings-full.png" alt="Vinv Findings view: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
 > **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).
+
+## 🛡 Why agents don't reward-hack under Vinv
+
+Vinv ties **every runtime trace to the exact code segment that produced it** and hands your agent a context graph built from that join — so the agent argues from evidence, not vibes. And when the agent claims victory, Vinv doesn't take its word:
+
+- **Acceptance tests are authored *before* the fix** and never shown to the agent — it can't train to the test.
+- **A "faster" fix that changes any observable output is auto-reverted** — the behavior suite must replay byte-identical, and the speedup's paired-bootstrap 95% CI must exclude zero. Faster-but-wrong never lands.
+- **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game.
+- **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
 ## 🧪 We ran it on a repo you know
 
@@ -81,6 +94,31 @@ Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-templat
 Your agent sees "500". **Vinv hands it the exact failing function, the error type, and the chain that led there** — before it opens a single file.
 
 *Bonus: this very demo caught a real Vinv bug (Python 3.14 broke OTel's contrib loader; the error was being swallowed). We fixed it the same day — [that's the loop working on ourselves.](#-proven-on-itself)*
+
+### Then we let the exerciser loose on the same template
+
+Traffic only shows you the code paths users happen to hit. The behavior exerciser drives the rest — same repo, same laptop, one run:
+
+| Metric | Traffic only | Exercised |
+|---|---|---|
+| Endpoints executed | 0 / 23 | **23 / 23** |
+| Endpoints with symbol coverage | — | 6 → **16 / 23** (auth sweep) |
+| Symbols covered | — | 18 → **37 / 44** |
+| Regression cases banked | 0 | **125** (replayable forever) |
+
+The **authenticated sweep** (every endpoint replayed under credentials the login scenario captured, with freshly created resource IDs fed to the by-id endpoints) surfaced **four real bugs in a 35k★ template** that anonymous traffic can never reach:
+
+1. `GET /api/v1/users/` → **HTTP 500** — an invalid email stored by an unvalidated private endpoint poisons response serialization
+2. `POST /api/v1/private/users/` → **IntegrityError escapes as a 500** — `email: str` instead of `EmailStr`, no duplicate guard
+3. `POST /api/v1/utils/test-email/` → **HTTP 500** — `assert settings.emails_enabled` crashes instead of degrading
+4. `POST /api/v1/password-recovery-html-content/{email}` → **connection killed** — unsanitized header rendering
+
+The harness then **fixed all four**, and the regression suite now distinguishes *your code regressed* from *the test engine's own leftover data changed the world* (the state ledger) — so a re-run doesn't cry wolf. Phantom perf regressions are gone too: a latency diff must survive a median of 5 replays before it's reported.
+
+<div align="center">
+<img src=".github/assets/journey-overview.png" alt="Vinv Journey overview: verified services, endpoint and symbol coverage bars, and the four open issue clusters found on the FastAPI template" width="720">
+<br><sub>The Journey overview after the run: every service, coverage bars, and the four real bugs — walk them one by one with Next.</sub>
+</div>
 
 ## 🔌 Works with your agent
 
@@ -119,6 +157,9 @@ Registration is idempotent and never commits secrets. Both servers (`vinv-index`
 | Runtime | can't see it | real traces, values, flamegraphs per call |
 | Debugging | reads source, speculates | fault-ranked suspects with real error messages |
 | Bad fix | you diff and pray | one-click revert of everything the episode touched |
+| API testing | writes tests it then grades itself | exercises every endpoint, banks each response as an unseen regression case |
+| Perf claims | "should be faster now" | paired-bootstrap 95% CI must exclude zero, behavior byte-identical, or auto-revert |
+| Test data | pollutes your dev DB and forgets | state ledger: created resources tracked, torn down via your own API, drift labeled |
 | Cost | burns tokens re-exploring | evidence pack composed once, locally |
 
 ## 📊 Proven on itself
@@ -147,10 +188,37 @@ flowchart LR
 4. **Verify** — replayed start, live port, acceptance tests generated *before* the fix.
 5. **Learn** — propensity-logged decisions; retrieval updates only on off-policy-evaluation wins.
 
+<details><summary><b>🧠 The algorithms, named (for the skeptics)</b></summary>
+
+No black boxes — every decision Vinv makes has a published method behind it, and each one exists to keep the loop honest, not clever:
+
+| Decision | Algorithm | Why |
+|---|---|---|
+| Which input strategy to try next, per endpoint | **Thompson sampling** over Beta posteriors; reward = newly covered symbols; posteriors persist across runs with **50% evidence decay** | explores boundary/negative/auth inputs where they pay, without a hand-tuned schedule — and old lessons expire instead of ossifying |
+| Accept or revert an optimization | **Paired bootstrap** 95% CI on relative improvement **and** byte-identical behavior replay | "faster" must be statistically real and observably harmless |
+| Behavioral invariants | **Daikon-style** dynamic invariants, support ≥ 5, zero counterexamples, **Laplace** `(s+1)/(n+2)` confidence | properties earn their confidence from evidence, not assertion |
+| Memory-leak suspects | **Theil–Sen** slope over per-session retention (robust to 29% outliers) | one noisy session can't fabricate or hide a leak |
+| Cache opportunities | argument-hash distinctness × time share, **Pareto-relative** — no absolute thresholds | "expensive" is defined by *your* app's trace, 5ms service or 5s batch job |
+| Hung harness detection | **φ-accrual-inspired** adaptive silence watchdog (cadence-relative, startup grace) | a slow run isn't killed; a dead one doesn't spin |
+| Stall deadlock-breaking | **Nash-bargaining** unanimity: continue only if explorer *and* auditor stances both beat escalation | autonomy exactly when it's justified; a human panel when it's not |
+| Retrieval config promotion | **Off-policy evaluation** gates: promoted only on CI-backed wins over logged propensities | the learner can't grade its own homework either |
+| Fault localization | spectrum-based suspect ranking over real pass/fail requests | suspects come from executions, not embeddings |
+
+The whole test ontology — what exists, where it lives on disk, and the walk order an agent follows to know it covered everything — is one document: [`docs/testing-ontology.md`](docs/testing-ontology.md).
+</details>
+
 <details><summary><b>Deeper: the context graph, Auto-Pilot, and repo layout</b></summary>
 
 Vinv indexes **the code** and generates — from your own run — **the traces**, **the logs**, and **the metrics**, then ties all four to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → probe → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
 </details>
+
+## 🚀 Using the new views (60 seconds)
+
+1. **Exercise your API** — `exerciser plan <repo> && exerciser run <repo> --base-url http://127.0.0.1:PORT` (or let Auto-Pilot's `exercise` phase do it). An **environment canary** first dry-runs your login chains and tells you *loudly* if the database was reset or credentials unseeded — no more silently-401 runs.
+2. **Walk everything** — Command Palette → **"Vinv: Open Journey"**. Overview first (services, coverage, open issues), then `Next`/`→` through every endpoint: call tree with live runtime, flamegraph, and the exact inputs → outputs driven. Hover anything cryptic — every marker explains itself in plain language.
+3. **Add your own test input** — on any Journey endpoint step, fill body/params/expected status and hit *Add input*. It lands in the same plan layer the AI-authored scenarios use, runs with the endpoint's auth setup on the next exercise, and becomes a permanent regression case.
+4. **See what got fixed** — Command Palette → **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The tab's backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
+5. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
 
 ## 🛠 MCP tools reference
 
