@@ -135,41 +135,88 @@ def load_contrib_instrumenters() -> dict[str, str]:
     return status
 
 
-def bootstrap_autoinstrumentation(*, load_instrumentors: bool = True) -> dict[str, str]:
-    """Configure OTel auto-instrumentation in-process; return per-instrumenter load status.
+def core_sdk_missing() -> str | None:
+    """Preflight: name the missing core OTel distribution, or ``None`` when present.
 
-    Combines two paths:
-        1. The official OTel ``_load_instrumentors`` (entry-point-based, what
+    Uses ``find_spec`` (no imports) so the check is safe to run before any hook is
+    installed. Only ``opentelemetry-api`` + ``opentelemetry-sdk`` are *core* — the
+    contrib ``opentelemetry-instrumentation`` package is optional and its absence
+    (or breakage) must never block span capture.
+    """
+    core = (("opentelemetry", "opentelemetry-api"), ("opentelemetry.sdk", "opentelemetry-sdk"))
+    for mod, dist in core:
+        try:
+            if importlib.util.find_spec(mod) is None:
+                return dist
+        except (ImportError, ValueError):
+            return dist
+    return None
+
+
+def configure_tracer_provider() -> str:
+    """Install tracelens's TracerProvider + JSONL exporter DIRECTLY; return a status token.
+
+    This must never route through OTel's entry-point machinery: it needs only
+    ``opentelemetry-api`` + ``opentelemetry-sdk``, which tracelens requires anyway.
+    """
+    try:
+        from tracelens.otel.configurator import TracelensConfigurator
+
+        TracelensConfigurator().configure()
+        return "configured"
+    except BaseException as exc:  # noqa: BLE001 — never crash the target
+        _log.warning("tracelens: TracerProvider configuration failed: %s", exc)
+        return f"failed:{type(exc).__name__}"
+
+
+def bootstrap_autoinstrumentation(*, load_instrumentors: bool = True) -> dict[str, str]:
+    """Configure the span pipeline in-process; return per-instrumenter load status.
+
+    Step 1 — ALWAYS configure tracelens's own TracerProvider (JSONL exporter) by
+    calling ``TracelensConfigurator`` directly. This used to be routed through
+    OTel contrib's private entry-point loader
+    (``opentelemetry.instrumentation.auto_instrumentation._load``), which tied
+    core span export to the *contrib* package's importability: on Python 3.14
+    that module still imports the removed ``pkg_resources``, the resulting
+    ``ModuleNotFoundError`` was swallowed, no TracerProvider was ever installed,
+    every span went to the no-op ``ProxyTracerProvider`` — and the trace file was
+    silently never created (observed live on the fastapi demo repo).
+
+    Step 2 (only when ``load_instrumentors``) — best-effort contrib loading:
+        a. The official OTel ``_load_instrumentors`` (entry-point-based, what
            ``opentelemetry-instrument`` would do).
-        2. Tracelens's own ``_CONTRIB_MAP`` walk so we work even when the target's env
-           does not register entry-points (custom installs).
+        b. Tracelens's own ``_CONTRIB_MAP`` walk so we work even when the
+           target's env does not register entry-points (custom installs).
+    With ``--no-otel-autoinst`` no ``opentelemetry.instrumentation`` module is
+    imported at all, so a venv that lacks (or ships a broken) contrib package
+    still captures spans in minimal mode.
     Returns the merged status dict so the launcher can fold it into summary.json (T1.4).
     """
     status: dict[str, str] = {}
-    # 1) ALWAYS load configurators (this triggers our TracelensConfigurator → TracerProvider).
-    #    The ``load_instrumentors`` flag only gates the contrib library wrapping in step 2/3,
-    #    NOT the configurator that sets up the JSONL exporter — without it, no spans get
-    #    written to disk regardless of how the user invokes their app.
+    status["__tracelens_configurator__"] = configure_tracer_provider()
+    if not load_instrumentors:
+        status["__otel_entry_points__"] = "skipped:no_autoinst"
+        return status
     try:
         from opentelemetry.instrumentation.auto_instrumentation._load import (
-            _load_configurators,
             _load_distro,
             _load_instrumentors,
         )
 
         distro = _load_distro()
         distro.configure()
-        # Configures TracerProvider via our entry point; upstream keeps this private API untyped.
-        _load_configurators()  # type: ignore[no-untyped-call]
-        if load_instrumentors:
-            _load_instrumentors(distro)  # type: ignore[no-untyped-call]
-            status["__otel_entry_points__"] = "loaded"
-        else:
-            status["__otel_entry_points__"] = "configurator_only"
+        _load_instrumentors(distro)  # type: ignore[no-untyped-call]
+        status["__otel_entry_points__"] = "loaded"
     except BaseException as exc:  # noqa: BLE001
         status["__otel_entry_points__"] = f"failed:{type(exc).__name__}"
-        _log.info("tracelens: OTel entry-point loader produced no instrumenters (%s)", exc)
-    # 2) Tracelens's own probe — idempotent: instrumenters loaded twice are no-ops.
-    if load_instrumentors:
-        status.update(load_contrib_instrumenters())
+        _log.warning(
+            "tracelens: OTel auto-instrumentation unavailable (%s: %s) — span capture "
+            "continues, but contrib instrumenters were not loaded. Install/upgrade "
+            "'opentelemetry-instrumentation' in the target env or pass --no-otel-autoinst "
+            "to silence this.",
+            type(exc).__name__,
+            exc,
+        )
+    # Tracelens's own probe — idempotent: instrumenters loaded twice are no-ops.
+    status.update(load_contrib_instrumenters())
     return status
