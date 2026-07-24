@@ -82,8 +82,15 @@ def _emit(rec: dict[str, Any]) -> None:
             if _fh is not None:
                 _fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
                 _fh.flush()
-    except BaseException:  # noqa: BLE001
-        pass
+    except BaseException as exc:  # noqa: BLE001 — never break the wrapped clock/RNG call
+        from tracelens import _health
+
+        _health.record("determinism_emit_errors", note=repr(exc))
+        _health.warn_once(
+            "determinism_emit",
+            f"determinism ledger write failed ({type(exc).__name__}: {exc}) — "
+            "determinism capture is degraded (disk full?)",
+        )
 
 
 def _wrap_clock(name: str, orig: Any) -> Any:

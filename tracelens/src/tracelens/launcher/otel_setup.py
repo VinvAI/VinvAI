@@ -11,6 +11,8 @@ import logging
 import os
 from pathlib import Path
 
+from tracelens import _health
+
 _log = logging.getLogger("tracelens.diag")
 
 
@@ -153,6 +155,25 @@ def core_sdk_missing() -> str | None:
     return None
 
 
+def core_sdk_import_error() -> str | None:
+    """Preflight the EXACT imports the span pipeline performs; None when healthy.
+
+    ``core_sdk_missing`` only proves the distributions are installed. An ancient
+    or mismatched pairing (e.g. new ``opentelemetry-sdk`` over an old pinned
+    ``opentelemetry-api``) still explodes at import time — historically as a deep
+    traceback out of the bootstrap, or worse, swallowed into a status string.
+    Import the three modules the configurator actually uses and translate any
+    failure into a one-line description for the caller to present.
+    """
+    try:
+        importlib.import_module("opentelemetry.trace")
+        importlib.import_module("opentelemetry.sdk.trace")
+        importlib.import_module("opentelemetry.sdk.trace.export")
+    except BaseException as exc:  # noqa: BLE001 — translated to a one-liner by the caller
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 def configure_tracer_provider() -> str:
     """Install tracelens's TracerProvider + JSONL exporter DIRECTLY; return a status token.
 
@@ -165,8 +186,18 @@ def configure_tracer_provider() -> str:
         TracelensConfigurator().configure()
         return "configured"
     except BaseException as exc:  # noqa: BLE001 — never crash the target
+        # This failing means TOTAL capture loss (spans go to the no-op
+        # ProxyTracerProvider), so the status keeps the message and the warning
+        # goes to stderr, not just a maybe-unconfigured logger. The launcher
+        # aborts the run on this status (_ensure_span_pipeline); other callers
+        # (attach) at least get the loud line.
+        msg = f"{type(exc).__name__}: {exc}"
+        _health.warn_once(
+            "configurator_failed",
+            f"TracerProvider configuration failed ({msg}) — NO spans will be recorded",
+        )
         _log.warning("tracelens: TracerProvider configuration failed: %s", exc)
-        return f"failed:{type(exc).__name__}"
+        return f"failed:{msg}"
 
 
 def bootstrap_autoinstrumentation(*, load_instrumentors: bool = True) -> dict[str, str]:

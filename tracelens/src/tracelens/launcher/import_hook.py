@@ -423,6 +423,15 @@ class _InstrumentingLoader(importlib.machinery.SourceFileLoader):
             return compile(new_tree, self.path, "exec", dont_inherit=True)
         except BaseException as exc:  # noqa: BLE001 — never crash the target's import
             _module_status[fullname] = f"failed:{type(exc).__name__}:{exc}"
+            from tracelens import _health
+
+            _health.record("rewrite_errors", note=f"{fullname}: {exc!r}")
+            _health.warn_once(
+                "rewrite_failed",
+                f"AST instrumentation failed for {fullname} ({type(exc).__name__}) — the "
+                "module runs uninstrumented (no spans from it); all affected modules are "
+                "listed under modules_rewrite_failed in the trace summary",
+            )
             _log.warning(
                 "tracelens AST rewrite failed for %s (%s); falling back to original bytecode",
                 fullname,

@@ -18,6 +18,7 @@ from typing import Any
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 
+from tracelens import _health
 from tracelens.context import (
     get_request_id_from_baggage,
     synthetic_request_id_from_span,
@@ -266,9 +267,16 @@ class TracelensSpanProcessor(SpanProcessor):
             with _rid_lock:
                 _request_id_by_span_id[sid] = rid
             span.set_attribute("tracelens.request_id", rid)
-        except BaseException:
+        except BaseException as exc:  # noqa: BLE001 — never break span start; count + warn once
             global _dropped
             _dropped += 1
+            _health.record("span_bookkeeping_errors", note=repr(exc))
+            _health.warn_once(
+                "span_bookkeeping",
+                f"span bookkeeping failed on start ({type(exc).__name__}: {exc}) — "
+                "depth/parent/request_id annotations may be missing for some spans "
+                "(counted as dropped_events in the trace summary)",
+            )
 
     def on_end(self, span: ReadableSpan) -> None:
         try:
@@ -318,9 +326,16 @@ class TracelensSpanProcessor(SpanProcessor):
             # G5 — drain request-id map; bounded by span lifetime
             with _rid_lock:
                 _request_id_by_span_id.pop(sid, None)
-        except BaseException:
+        except BaseException as exc:  # noqa: BLE001 — never break span end; count + warn once
             global _dropped
             _dropped += 1
+            _health.record("span_bookkeeping_errors", note=repr(exc))
+            _health.warn_once(
+                "span_bookkeeping",
+                f"span bookkeeping failed on end ({type(exc).__name__}: {exc}) — "
+                "side-effect/stack accounting may be incomplete for some spans "
+                "(counted as dropped_events in the trace summary)",
+            )
 
     def shutdown(self) -> None:
         return

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import threading
+import weakref
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,9 +17,19 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import StatusCode
 
+from tracelens import _health
 from tracelens.enrich.summaries import summarize
 
 _log = logging.getLogger("tracelens.diag")
+
+# Process-wide count of spans successfully written as JSONL pairs. Read by the
+# launcher's capture self-check ("is anything actually flowing?") and folded into
+# the summary's capture_health block.
+_exported_count = 0
+
+
+def exported_span_count() -> int:
+    return _exported_count
 
 
 def _iso_ms_utc(ns: int) -> str:
@@ -116,6 +128,45 @@ class JSONLFileSpanExporter(SpanExporter):
         if diagnostic_path:
             Path(diagnostic_path).parent.mkdir(parents=True, exist_ok=True)
             self._diag = open(diagnostic_path, "a", encoding="utf-8")  # noqa: SIM115
+        # os.fork() in the traced target (multiprocessing, gunicorn-style prefork,
+        # bare os.fork) duplicates this exporter — including the buffered file
+        # handle — into the child. Two processes writing one handle can interleave
+        # partial lines and tear the parent's JSONL. Redirect the CHILD's spans to
+        # a pid-suffixed sidecar file instead; the parent's file stays untouched.
+        if output_path != "-" and hasattr(os, "register_at_fork"):
+            ref = weakref.ref(self)
+
+            def _after_fork_in_child() -> None:
+                inst = ref()
+                if inst is not None:
+                    inst._reopen_in_child()
+
+            os.register_at_fork(after_in_child=_after_fork_in_child)
+
+    def _reopen_in_child(self) -> None:
+        """Post-``fork`` (child side): abandon the inherited handle, open a sidecar.
+
+        The inherited handle is deliberately NOT closed — closing would flush any
+        buffered bytes duplicated from the parent into the shared file. On any
+        failure the exporter disables itself in the child (``_fh = None``): losing
+        the child's spans loudly beats corrupting the parent's trace.
+        """
+        try:
+            self._lock = threading.Lock()  # the inherited lock may be held forever
+            self._fh = None
+            sidecar = f"{self._path}.fork-{os.getpid()}"
+            self._fh = open(sidecar, "a", encoding="utf-8")  # noqa: SIM115
+            self._path = sidecar
+            _health.record("fork_sidecars", note=sidecar)
+            _log.info("tracelens: fork child pid=%s spans go to sidecar %s", os.getpid(), sidecar)
+        except BaseException as exc:  # noqa: BLE001 — never crash the forked child
+            self._fh = None
+            _health.record("fork_sidecar_open_errors", note=repr(exc))
+            _health.warn_once(
+                "fork_sidecar_open",
+                f"could not open fork sidecar trace file ({type(exc).__name__}: {exc}) — "
+                f"spans from forked child pid={os.getpid()} will be lost",
+            )
 
     def _write_line(self, obj: dict[str, Any]) -> None:
         line = json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
@@ -128,13 +179,29 @@ class JSONLFileSpanExporter(SpanExporter):
                 self._fh.flush()
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        global _exported_count
         for span in spans:
             try:
                 self._export_one(span)
+                _exported_count += 1
             except BaseException as exc:
+                # Degraded capture must be LOUD + accounted, never silently eaten:
+                # a full disk / revoked handle here used to only reach a logger
+                # nobody had configured while the run "succeeded" with a hole in
+                # the trace.
+                _health.record("export_errors", note=repr(exc))
+                _health.warn_once(
+                    "export_error",
+                    f"span export to {self._path} failed ({type(exc).__name__}: {exc}) — "
+                    "capture is degraded (disk full / file removed?); see "
+                    "capture_health in the trace summary",
+                )
                 _log.exception("export span failed: %s", exc)
-                if self._diag:
-                    self._diag.write(f"export error: {exc!r}\n")
+                try:
+                    if self._diag:
+                        self._diag.write(f"export error: {exc!r}\n")
+                except OSError:
+                    pass  # the diag sidecar is best-effort; the warning above is the signal
         return SpanExportResult.SUCCESS
 
     def _export_one(self, span: ReadableSpan) -> None:
@@ -270,10 +337,17 @@ class JSONLFileSpanExporter(SpanExporter):
         try:
             if self._fh and self._path != "-":
                 self._fh.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            # close() flushes — a failure here (disk full at the very end) can
+            # drop the trace tail, so it must not vanish into a bare pass.
+            _health.record("shutdown_close_errors", note=repr(exc))
+            _health.warn_once(
+                "shutdown_close_error",
+                f"closing trace output {self._path} failed ({type(exc).__name__}: {exc}) — "
+                "the tail of the trace may be missing",
+            )
         try:
             if self._diag:
                 self._diag.close()
         except Exception:
-            pass
+            pass  # diag sidecar only; never capture-affecting
