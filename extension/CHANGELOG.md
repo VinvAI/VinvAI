@@ -4,6 +4,13 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.7] — 2026-07-24
+
+### Changed
+
+- **Relicensed to the Apache License 2.0.** Vinv is now open source under Apache
+  2.0 (previously the Elastic License 2.0).
+
 ## [0.0.6] — 2026-07-23
 
 ### 🎉 Vinv is now open source
