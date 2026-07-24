@@ -4,6 +4,33 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.9] — 2026-07-25
+
+### ✨ Added
+
+- **Behavior exerciser.** Vinv no longer waits for traffic — it drives **every
+  discovered endpoint itself** with schema-derived valid/boundary/negative
+  inputs, values mined from real traces, and multi-step auth scenarios, picking
+  strategies with a coverage-rewarded Thompson-sampling bandit and banking every
+  response as a permanent regression case.
+- **Journey view.** One walkthrough of everything verified — every service, then
+  each endpoint's call tree, latency flamegraph, and the exact inputs → outputs
+  exercised, with a form to add your own test inputs that replay forever after.
+- **Findings view.** What Vinv found and fixed, with the statistical evidence —
+  issue clusters, optimization episodes with paired-bootstrap confidence
+  intervals, regression diff kinds, and a machine-readable `findings.json` your
+  agent can consume directly.
+
+### 🐛 Fixed
+
+- **Correct 4xx responses are no longer treated as defects.** Handlers that
+  deliberately raise `HTTPException` with a 4xx status are normal control flow,
+  not errors — they're excluded from the runtime-error clusters, so the agent is
+  never handed the unfixable goal of "fixing" code that works.
+- **Silent-but-working runs are no longer killed.** The watchdog gives the first
+  output a startup grace period, and Python children run unbuffered, so a long
+  legitimate silence (auth, model spin-up) isn't mistaken for a hang.
+
 ## [0.0.8] — 2026-07-24
 
 ### 🐛 Fixed

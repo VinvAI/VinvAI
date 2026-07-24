@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "Runtime ground truth for your coding agent. AI writes the code — Vinv watches it run, joins every call to source, and serves that evidence over MCP.",
-	"version": "0.0.8",
+	"version": "0.0.9",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
