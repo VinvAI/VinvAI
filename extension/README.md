@@ -135,7 +135,7 @@ Traffic only covers what users happen to hit. The **behavior exerciser** drives 
 
 **Vinv: Open Journey** steps through every verified service and endpoint — call tree with live runtime, latency flamegraph, the exact inputs → outputs exercised, and a form to add your own test inputs (replayed forever after). **Vinv: Open Findings** shows issue clusters, optimization episodes with paired-bootstrap 95% confidence intervals, regression diffs by kind, and writes the same data machine-readable to `.vinv/reports/findings.json` for your agent.
 
-<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/journey-walkthrough.gif" alt="Vinv Journey walkthrough of a FastAPI app: coverage, call trees, flamegraphs, exercised inputs and outputs" width="100%" />
+<img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough of a FastAPI app: coverage, call trees, flamegraphs, exercised inputs and outputs" width="100%" />
 
 ### 🛡 No reward hacking, no doom loops
 
