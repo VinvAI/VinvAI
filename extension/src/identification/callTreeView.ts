@@ -8,6 +8,7 @@ import { generateSmokeReport } from '../tracelens/report';
 import { openSmokeReport } from './smokeReportView';
 import { offerEpisodeForRuntimeErrors } from '../harness/autoTrigger';
 import { backingFilePath, buildCallSiteContext } from './callSiteContext';
+import { openPathInEditor } from '../support/openDocument';
 
 /** How often the runtime trace overlay is refreshed while the panel is open. */
 const TRACEMAP_POLL_MS = 1000;
@@ -22,12 +23,43 @@ const SMOKE_REPORT_SUPPORTED = process.platform !== 'win32';
 export const CALLTREE_VIEW_TYPE = 'vinv.callTree';
 
 /** Messages the call-tree webview sends back to the extension. */
-interface OutboundMessage {
+export interface OutboundMessage {
 	type: 'openSource' | 'runSmokeReport' | 'ask';
 	file?: string;
 	line?: number;
 	/** Symbol name — sent with 'ask' so the node can be located in the tree. */
 	name?: string;
+}
+
+/**
+ * Side effects a call-tree message can trigger, injected so the routing is
+ * testable without a live webview. Production binds these to the real closures
+ * in `openCallTree`; tests pass fakes and assert the exact call.
+ */
+export interface CallTreeActions {
+	openSource: (file: string | undefined, line?: number) => Promise<void>;
+	ask: (file?: string, name?: string) => Promise<void>;
+	runSmokeReport: () => Promise<void>;
+	smokeReportSupported: boolean;
+}
+
+/**
+ * Routes one call-tree webview message to its side effect. Extracted from the
+ * inline onDidReceiveMessage closure so the wiring is unit-tested directly.
+ * openSource resolves to absolute, verifies existence, and reports an actionable
+ * error on failure (via the injected opener) rather than a silent no-op.
+ */
+export async function handleCallTreeMessage(
+	msg: OutboundMessage,
+	actions: CallTreeActions,
+): Promise<void> {
+	if (msg.type === 'openSource') {
+		await actions.openSource(msg.file, msg.line);
+	} else if (msg.type === 'ask') {
+		await actions.ask(msg.file, msg.name);
+	} else if (msg.type === 'runSmokeReport' && actions.smokeReportSupported) {
+		await actions.runSmokeReport();
+	}
 }
 
 /** Recovers the workspace root from a backing file at <root>/.vinv/reports/<f>. */
@@ -148,33 +180,38 @@ function wireCallTree(
 	let disposed = false;
 	let polling = false;
 
-	const msgSub = webview.onDidReceiveMessage(async (msg: OutboundMessage) => {
-		const raw = msg as { type?: string; message?: unknown; stack?: unknown };
-		if (raw.type === 'webviewError') {
-			return;
-		}
-		if (msg.type === 'openSource' && msg.file) {
-			const abs = path.isAbsolute(msg.file) ? msg.file : path.join(workspaceRoot, msg.file);
-			const pos = new vscode.Position(Math.max(0, (msg.line ?? 1) - 1), 0);
-			await vscode.window.showTextDocument(vscode.Uri.file(abs), {
-				selection: new vscode.Range(pos, pos),
+	const actions: CallTreeActions = {
+		openSource: async (file, line) => {
+			await openPathInEditor(file, {
+				workspaceRoot,
+				line: line ?? 1,
+				label: 'source file',
 				preview: true,
 				viewColumn: vscode.ViewColumn.Beside,
 			});
-		} else if (msg.type === 'ask') {
+		},
+		ask: async (file, name) => {
 			// Resolve the clicked node against the snapshot this view just wrote,
 			// so the question carries the entry-point→symbol path and its
 			// endpoint-scoped runtime — not just "some symbol". Resolution is
 			// best-effort: an unresolvable node still opens the panel, unseeded.
 			let callSite;
 			try {
-				callSite = buildCallSiteContext(workspaceRoot, apiId, { file: msg.file, name: msg.name });
-			} catch (e) {
+				callSite = buildCallSiteContext(workspaceRoot, apiId, { file, name });
+			} catch {
+				// Node unresolved — open Ask Vinv unseeded rather than dropping the click.
 			}
 			await vscode.commands.executeCommand('vinv-vs.askVinv', { callSite });
-		} else if (msg.type === 'runSmokeReport' && SMOKE_REPORT_SUPPORTED) {
-			await runSmokeReport(context, workspaceRoot, apiId, label);
+		},
+		runSmokeReport: async () => runSmokeReport(context, workspaceRoot, apiId, label),
+		smokeReportSupported: SMOKE_REPORT_SUPPORTED,
+	};
+	const msgSub = webview.onDidReceiveMessage((msg: OutboundMessage) => {
+		const raw = msg as { type?: string; message?: unknown; stack?: unknown };
+		if (raw.type === 'webviewError') {
+			return;
 		}
+		return handleCallTreeMessage(msg, actions);
 	});
 
 	// 1) Static call tree first — fast, no trace needed.

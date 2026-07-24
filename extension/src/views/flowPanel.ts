@@ -17,13 +17,14 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { openPathInEditor, resolveOpenTarget } from '../support/openDocument';
 import type { FlowStateSource } from './flowStateSource';
 import type { FlowLink, FlowModel } from './flowModel';
 
 export const FLOW_VIEW_ID = 'vinv.flow';
 
 /** Messages the Flow webview sends back to the extension. */
-interface OutboundMessage {
+export interface OutboundMessage {
 	type: 'link' | 'fix' | 'evidence' | 'action';
 	link?: FlowLink;
 	fixArgs?: { issue: string; service?: string; row?: number };
@@ -31,6 +32,57 @@ interface OutboundMessage {
 	line?: number;
 	command?: string;
 	args?: unknown[];
+}
+
+/**
+ * Side effects a Flow message can trigger, injected so the routing is testable
+ * without a live webview. Production wires these to the real vscode surfaces
+ * (see `resolveWebviewView`); tests pass fakes and assert the exact call.
+ */
+export interface FlowActions {
+	openLink: (link: FlowLink) => Promise<void>;
+	openFileAt: (fsPath: string | undefined, line?: number) => Promise<void>;
+	runCommand: (command: string, ...args: unknown[]) => Promise<void>;
+	showError: (message: string) => void;
+}
+
+/**
+ * Routes one Flow webview message to its side effect. Extracted from the inline
+ * onDidReceiveMessage closure so the wiring is unit-tested directly. Every arm
+ * guards its payload and reports an actionable error rather than a silent
+ * no-op — a malformed `fix`/`action` message tells the user why nothing opened.
+ */
+export async function handleFlowMessage(
+	msg: OutboundMessage,
+	actions: FlowActions,
+): Promise<void> {
+	switch (msg.type) {
+		case 'link':
+			if (msg.link) {
+				await actions.openLink(msg.link);
+			} else {
+				actions.showError('Vinv: this link is missing its target.');
+			}
+			return;
+		case 'fix':
+			if (msg.fixArgs?.issue) {
+				await actions.runCommand('vinv-vs.fixWithHarness', msg.fixArgs);
+			} else {
+				actions.showError('Vinv: cannot start a fix — no issue was attached to this action.');
+			}
+			return;
+		case 'evidence':
+			// openFileAt itself reports missing/relative/unreadable paths.
+			await actions.openFileAt(msg.path, msg.line);
+			return;
+		case 'action':
+			if (msg.command) {
+				await actions.runCommand(msg.command, ...(msg.args ?? []));
+			} else {
+				actions.showError('Vinv: this action has no command to run.');
+			}
+			return;
+	}
 }
 
 export class FlowViewProvider implements vscode.WebviewViewProvider {
@@ -57,30 +109,19 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 		});
 		post(this.source.getModel());
 
-		view.webview.onDidReceiveMessage(async (msg: OutboundMessage) => {
-			switch (msg.type) {
-				case 'link':
-					if (msg.link) {
-						await openLink(msg.link);
-					}
-					return;
-				case 'fix':
-					if (msg.fixArgs) {
-						await vscode.commands.executeCommand('vinv-vs.fixWithHarness', msg.fixArgs);
-					}
-					return;
-				case 'evidence':
-					if (msg.path) {
-						await openFileAt(msg.path, msg.line);
-					}
-					return;
-				case 'action':
-					if (msg.command) {
-						await vscode.commands.executeCommand(msg.command, ...(msg.args ?? []));
-					}
-					return;
-			}
-		}, undefined, this.context.subscriptions);
+		const actions: FlowActions = {
+			openLink,
+			openFileAt: (fsPath, line) => openFileAt(fsPath, line),
+			runCommand: async (command, ...args) => {
+				await vscode.commands.executeCommand(command, ...args);
+			},
+			showError: (message) => void vscode.window.showErrorMessage(message),
+		};
+		view.webview.onDidReceiveMessage(
+			(msg: OutboundMessage) => handleFlowMessage(msg, actions),
+			undefined,
+			this.context.subscriptions,
+		);
 	}
 }
 
@@ -91,10 +132,20 @@ async function openLink(link: FlowLink): Promise<void> {
 		return;
 	}
 	if (!link.openPath) {
+		void vscode.window.showErrorMessage('Vinv: this link has no file to open.');
 		return;
 	}
 	if (link.markdownPreview) {
-		await vscode.commands.executeCommand('markdown.showPreview', vscode.Uri.file(link.openPath));
+		// Verify existence first so a moved handbook reports where, not nothing.
+		const resolved = resolveOpenTarget(link.openPath, undefined, 'document');
+		if (!resolved.ok || !resolved.absPath) {
+			void vscode.window.showErrorMessage(resolved.error ?? 'Vinv: could not open document.');
+			return;
+		}
+		await vscode.commands.executeCommand(
+			'markdown.showPreview',
+			vscode.Uri.file(resolved.absPath),
+		);
 		return;
 	}
 	// vscode.open resolves the registered default editor, so calltree-*.json
@@ -102,18 +153,19 @@ async function openLink(link: FlowLink): Promise<void> {
 	await openFileAt(link.openPath, link.openLine);
 }
 
-async function openFileAt(fsPath: string, line?: number): Promise<void> {
-	const uri = vscode.Uri.file(fsPath);
-	const ext = path.extname(fsPath);
-	if (line && ext !== '.html') {
-		const pos = new vscode.Position(Math.max(0, line - 1), 0);
-		await vscode.window.showTextDocument(uri, {
-			selection: new vscode.Range(pos, pos),
-			preview: true,
-		});
-		return;
-	}
-	await vscode.commands.executeCommand('vscode.open', uri);
+async function openFileAt(fsPath: string | undefined, line?: number): Promise<void> {
+	const ext = fsPath ? path.extname(fsPath) : '';
+	// .html (smoke reports) and extension-less custom docs go through the default
+	// editor so their registered viewers claim them; everything else opens as
+	// text at the requested line. Either way openPathInEditor verifies existence
+	// and surfaces an actionable error instead of a silent no-op.
+	const useDefaultEditor = ext === '.html' || !line;
+	await openPathInEditor(fsPath, {
+		label: 'file',
+		line,
+		preview: true,
+		useDefaultEditor,
+	});
 }
 
 function getFlowHtml(cspSource: string): string {

@@ -8,8 +8,8 @@
  * bandit ledger as explicit rewards.
  */
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore } from '../graph/indexGraph';
 import {
 	buildQnaPrompt,
@@ -124,6 +124,64 @@ interface AskMessage {
 	note?: string;
 	/** Proposals ticked on an answer-mode card, queued as their own episodes. */
 	selectedProposals?: string[];
+}
+
+/**
+ * Side effects the "pure action" Ask Vinv messages trigger, injected so the
+ * routing is testable without a live webview. Production binds these to the real
+ * vscode surfaces; tests pass fakes and assert the exact call.
+ */
+export interface AskVinvActions {
+	openSource: (file: string | undefined, line?: number) => Promise<void>;
+	openPack: (file: string | undefined) => Promise<void>;
+	runCommand: (command: string, ...args: unknown[]) => Promise<void>;
+	showError: (message: string) => void;
+}
+
+/**
+ * Routes the stateless "open something / run a command" Ask Vinv messages,
+ * extracted from the big inline switch so the wiring is unit-tested directly.
+ * Returns true when it handled the message (the caller then returns early);
+ * false leaves the stateful cases (ask, dispatch, feedback, …) to the switch.
+ * openSource/viewPack go through the shared opener, which resolves to absolute,
+ * verifies existence, and reports a missing file instead of a silent no-op.
+ */
+export async function handleAskVinvAction(
+	msg: AskMessage,
+	actions: AskVinvActions,
+): Promise<boolean> {
+	switch (msg.type) {
+		case 'openSource':
+			await actions.openSource(msg.file, msg.line);
+			return true;
+		case 'viewPack':
+			await actions.openPack(msg.file);
+			return true;
+		case 'disputeStart':
+			// Inline "still wrong?" affordance — carries the clicked block's episode id.
+			await actions.runCommand('vinv-vs.disputeVerified', msg.episodeId);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Dispatches a harness fix from Ask Vinv. Extracted + guarded so an empty issue
+ * reports an error rather than firing a blank episode; a real issue routes to
+ * the (registered, arg-tolerant) fixWithHarness command with its seed rows.
+ */
+export async function dispatchAskVinvFix(
+	actions: Pick<AskVinvActions, 'runCommand' | 'showError'>,
+	issue: string,
+	rows: number[],
+): Promise<void> {
+	const trimmed = issue.trim();
+	if (!trimmed) {
+		actions.showError('Vinv: cannot dispatch a fix — the question was empty.');
+		return;
+	}
+	await actions.runCommand('vinv-vs.fixWithHarness', { issue: trimmed, rows });
 }
 
 /** The operator's answer to an escalation raised inside the chat transcript. */
@@ -339,12 +397,36 @@ export function openAskVinv(
 		pendingRetractionConfirm = undefined;
 	});
 
+	const askActions: AskVinvActions = {
+		openSource: async (file, line) => {
+			await openPathInEditor(file, {
+				workspaceRoot,
+				line: line ?? 1,
+				label: 'source file',
+				preview: true,
+				viewColumn: vscode.ViewColumn.One,
+			});
+		},
+		openPack: async (file) => {
+			await openPathInEditor(file, { label: 'context pack', preview: false });
+		},
+		runCommand: async (command, ...args) => {
+			await vscode.commands.executeCommand(command, ...args);
+		},
+		showError: (message) => void vscode.window.showErrorMessage(message),
+	};
+
 	panel.webview.onDidReceiveMessage(async (msg: AskMessage) => {
 		if (!panel) {
 			return;
 		}
 		const raw = msg as { type?: string; message?: unknown; stack?: unknown };
 		if (raw.type === 'webviewError') {
+			return;
+		}
+		// Stateless open/command messages route through the extracted, tested
+		// handler; the switch below owns the stateful ones.
+		if (await handleAskVinvAction(msg, askActions)) {
 			return;
 		}
 		switch (msg.type) {
@@ -369,19 +451,8 @@ export function openAskVinv(
 				postModeLabel();
 				return;
 			}
-			case 'openSource': {
-				if (!msg.file) {
-					return;
-				}
-				const abs = path.isAbsolute(msg.file) ? msg.file : path.join(workspaceRoot, msg.file);
-				const pos = new vscode.Position(Math.max(0, (msg.line ?? 1) - 1), 0);
-				await vscode.window.showTextDocument(vscode.Uri.file(abs), {
-					selection: new vscode.Range(pos, pos),
-					preview: true,
-					viewColumn: vscode.ViewColumn.One,
-				});
-				return;
-			}
+			// 'openSource', 'viewPack' and 'disputeStart' are handled by
+			// handleAskVinvAction above (extracted + tested).
 			case 'feedback':
 				if (msg.decisionId && typeof msg.reward === 'number') {
 					recordQnaFeedback(workspaceRoot, msg.decisionId, msg.reward);
@@ -434,12 +505,6 @@ export function openAskVinv(
 				settle?.(choice);
 				return;
 			}
-			case 'disputeStart':
-				// Inline "still wrong?" affordance on a verified episode-end block —
-				// carries that block's episode id so the dispute targets what was
-				// clicked, not whatever verified most recently.
-				void vscode.commands.executeCommand('vinv-vs.disputeVerified', msg.episodeId);
-				return;
 			case 'episodeVerdict':
 				if (msg.action && pendingVerdict) {
 					const settle = pendingVerdict.resolve;
@@ -449,15 +514,6 @@ export function openAskVinv(
 						note: msg.note?.trim() || undefined,
 						selectedProposals: msg.selectedProposals?.length ? msg.selectedProposals : undefined,
 					});
-				}
-				return;
-			case 'viewPack':
-				if (msg.file) {
-					try {
-						await vscode.window.showTextDocument(vscode.Uri.file(msg.file), { preview: false });
-					} catch {
-						// Pack unopenable — the card still carries the evidence text.
-					}
 				}
 				return;
 			case 'dispatch':
@@ -522,10 +578,9 @@ export function openAskVinv(
 				// An unchanged goal is a no-op inside setGoal, so this cannot
 				// silently reset episodes_used on a plain confirm.
 				setGoal(workspaceRoot, (msg.note ?? '').trim());
-				await vscode.commands.executeCommand('vinv-vs.fixWithHarness', {
-					issue: pending.question,
-					rows: pending.rows,
-				});
+				// Guarded, tested dispatch: an empty question reports why instead of
+				// firing a blank episode.
+				await dispatchAskVinvFix(askActions, pending.question, pending.rows);
 				return;
 			}
 			case 'dispatchCancel':
