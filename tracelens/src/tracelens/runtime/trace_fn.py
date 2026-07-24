@@ -24,6 +24,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.trace import Span
 
+from tracelens import _health
 from tracelens.enrich.external_invariants import check_invariants
 from tracelens.enrich.hashing import canonical_hash, type_schema_str
 from tracelens.enrich.summaries import summarize
@@ -103,27 +104,49 @@ def _try_bind(
         return None
 
 
-def _apply_entry_attrs(span: Span, bound: inspect.BoundArguments | None) -> None:
+def _apply_entry_attrs(span: Span, bound: inspect.BoundArguments | None, qual: str = "") -> None:
     if bound is None:
         return
     try:
         span.set_attribute("tracelens.args_hash", _args_hash_for_bound(bound))
         span.set_attribute("tracelens.args_schema", _args_schema_str(bound))
         span.set_attribute("tracelens.args_summary_json", json.dumps(_args_summary_dict(bound)))
-    except BaseException:  # noqa: BLE001 — arg summarization must never break the call
-        pass
+    except BaseException as exc:  # noqa: BLE001 — arg summarization must never break the call
+        _health.record("entry_enrichment_errors", note=f"{qual}: {exc!r}")
+        _health.warn_once(
+            "entry_enrichment",
+            f"argument enrichment failed for {qual or '<span>'} ({type(exc).__name__}) — "
+            "spans still record, without argument attributes",
+        )
+
+
+def _apply_result_enrichment(
+    span: Span, bound: inspect.BoundArguments | None, out: Any, qual: str
+) -> None:
+    """Post-call enrichment (invariants + result attrs). MUST never raise into the
+    wrapped call: before this guard, a pathological ``__repr__``/hash on the return
+    value could surface as an exception the *user's* code never raised."""
+    try:
+        viol = check_invariants(qual, dict(bound.arguments) if bound else {}, out)
+        _apply_exit_attrs(span, bound, out, viol)
+    except BaseException as exc:  # noqa: BLE001 — see docstring
+        _health.record("result_enrichment_errors", note=f"{qual}: {exc!r}")
+        _health.warn_once(
+            "result_enrichment",
+            f"result enrichment failed for {qual} ({type(exc).__name__}) — "
+            "spans still record, without result attributes",
+        )
 
 
 def wrap_call(qual: str, impl: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     bound = _try_bind(impl, args, kwargs)
     tracer = trace.get_tracer("tracelens.runtime")
     with tracer.start_as_current_span(qual) as span:
-        _apply_entry_attrs(span, bound)
+        _apply_entry_attrs(span, bound, qual)
         mem_before = _mem_now()
         out = impl(*args, **kwargs)
         _apply_mem_attr(span, mem_before)
-        viol = check_invariants(qual, dict(bound.arguments) if bound else {}, out)
-        _apply_exit_attrs(span, bound, out, viol)
+        _apply_result_enrichment(span, bound, out, qual)
         return out
 
 
@@ -131,10 +154,9 @@ async def wrap_call_async(qual: str, impl: Callable[..., Any], *args: Any, **kwa
     bound = _try_bind(impl, args, kwargs)
     tracer = trace.get_tracer("tracelens.runtime")
     with tracer.start_as_current_span(qual) as span:
-        _apply_entry_attrs(span, bound)
+        _apply_entry_attrs(span, bound, qual)
         mem_before = _mem_now()
         out = await impl(*args, **kwargs)
         _apply_mem_attr(span, mem_before)
-        viol = check_invariants(qual, dict(bound.arguments) if bound else {}, out)
-        _apply_exit_attrs(span, bound, out, viol)
+        _apply_result_enrichment(span, bound, out, qual)
         return out

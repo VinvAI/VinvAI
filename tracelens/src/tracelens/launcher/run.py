@@ -19,6 +19,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
+from tracelens import _health
 from tracelens.launcher import coverage_scan as _scan_mod
 from tracelens.launcher import executor_context as _exec_ctx
 from tracelens.launcher import otel_setup
@@ -550,6 +551,134 @@ def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
     raise SystemExit(f"tracelens run: failed to exec target interpreter {target_py!r}")
 
 
+def _preflight_output_writable(output: str) -> None:
+    """A bad output location must be ONE clear line, not total silent capture loss.
+
+    Without this, a read-only (or uncreatable) output directory only surfaced as
+    an exception inside ``TracelensConfigurator`` — historically swallowed into a
+    status string, leaving spans on the no-op ProxyTracerProvider and no trace
+    file at all. Runs before the supervisor fork so the error is printed exactly
+    once, before any instrumentation side effects.
+    """
+    if not output or output == "-":
+        return
+    path = Path(output).expanduser()
+    parent = path.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SystemExit(
+            f"tracelens run: cannot create trace output directory {parent}: "
+            f"{exc.strerror or exc}. Choose a writable --output/-o path."
+        ) from None
+    if not os.access(parent, os.W_OK | os.X_OK):
+        raise SystemExit(
+            f"tracelens run: trace output directory {parent} is not writable. "
+            "Choose a writable --output/-o path."
+        )
+    if path.exists() and not os.access(path, os.W_OK):
+        raise SystemExit(
+            f"tracelens run: trace output file {path} exists but is not writable. "
+            "Choose a writable --output/-o path."
+        )
+
+
+def _ensure_span_pipeline(instrumenters: dict[str, str]) -> None:
+    """Abort the run when the TracerProvider could not be installed.
+
+    A failed configurator means every span goes to the no-op ProxyTracerProvider
+    — running the target anyway would reproduce the fastapi-demo defect (months
+    of "successful" runs with an empty trace). Fail fast with the underlying
+    cause instead.
+    """
+    cfg = str(instrumenters.get("__tracelens_configurator__", ""))
+    if cfg.startswith("failed:"):
+        raise SystemExit(
+            f"tracelens run: span pipeline setup failed ({cfg[len('failed:'):]}) — "
+            "no spans would be recorded, so the run is aborted rather than "
+            "producing an empty trace. Check that the --output/-o path is writable "
+            "and that opentelemetry-api/opentelemetry-sdk import cleanly in the "
+            "target venv."
+        )
+
+
+def _capture_selfcheck(output: str) -> list[str]:
+    """One-shot capture health probe, fired ~5s after startup (see _start_capture_selfcheck).
+
+    Verifies the three things that were all silently untrue in the fastapi-demo
+    defect: the TracerProvider is real (not the no-op proxy), the trace file
+    exists and is writable, and spans are actually flowing when instrumented
+    modules were imported. Emits at most one loud warning per problem and records
+    the result for the summary's ``capture_health`` block. Never raises.
+    """
+    problems: list[str] = []
+    try:
+        from opentelemetry import trace as _t
+
+        provider = _t.get_tracer_provider()
+        if type(provider).__name__ == "ProxyTracerProvider":
+            problems.append(
+                "TracerProvider is still the no-op ProxyTracerProvider — spans are NOT "
+                "being recorded (the span pipeline was never configured)"
+            )
+        elif hasattr(provider, "force_flush"):
+            try:
+                # Flush so the exported-span counter below reflects reality even
+                # inside the BatchSpanProcessor's first scheduling window.
+                provider.force_flush(2000)
+            except Exception:  # noqa: S110 — flush is advisory here; the counter check follows
+                pass
+        if output and output != "-":
+            p = Path(output)
+            if not p.is_file():
+                problems.append(
+                    f"trace output {output} does not exist — no span has been written"
+                )
+            elif not os.access(p, os.W_OK):
+                problems.append(f"trace output {output} is not writable")
+        from tracelens.launcher.import_hook import rewrite_status as _rs
+        from tracelens.otel.exporter import exported_span_count
+
+        rewritten = sorted(m for m, s in _rs().items() if s.startswith("ok:"))
+        if exported_span_count() == 0 and rewritten:
+            problems.append(
+                f"0 spans exported although {len(rewritten)} instrumented module(s) were "
+                f"imported (e.g. {rewritten[0]}) — likely cause: spans sampled out "
+                "(--sample-rate), instrumented functions not called yet, or a broken "
+                "span pipeline"
+            )
+        for prob in problems:
+            _health.warn_once("selfcheck:" + prob[:60], "capture self-check: " + prob)
+        _run_state["capture_selfcheck"] = problems or ["ok"]
+    except BaseException as exc:  # noqa: BLE001 — the probe must never hurt the target
+        _log.warning("tracelens capture self-check failed: %s", exc)
+    return problems
+
+
+def _start_capture_selfcheck(output: str) -> None:
+    """Schedule :func:`_capture_selfcheck` on a daemon timer (default 5s).
+
+    ``TRACELENS_SELFCHECK_DELAY_S`` tunes the delay; ``0`` (or
+    ``TRACELENS_NO_SELFCHECK=1``) disables it. Daemon, so a target that exits
+    before the delay simply never runs the probe (its summary still carries
+    capture_health).
+    """
+    if os.environ.get("TRACELENS_NO_SELFCHECK") == "1":
+        return
+    try:
+        delay = float(os.environ.get("TRACELENS_SELFCHECK_DELAY_S", "5"))
+    except ValueError:
+        delay = 5.0
+    if delay <= 0:
+        return
+    import threading
+
+    t = threading.Timer(delay, _capture_selfcheck, args=(output,))
+    t.daemon = True
+    t.name = "tracelens-selfcheck"
+    t.start()
+
+
 def _child_status_to_exit_code(status: int) -> int:
     """Map a ``waitpid`` status to the wrapper's exit code (128+N for signals)."""
     if os.WIFSIGNALED(status):
@@ -559,41 +688,57 @@ def _child_status_to_exit_code(status: int) -> int:
     return 1
 
 
-def _finalize_trace_output(output: str) -> None:
+def _finalize_trace_output(output: str) -> int:
     """Wrapper-side trace finalization once the child is gone.
 
     The child owns the JSONL handle and flushes one complete line per event, so
     on a clean exit there is nothing to do. If the child was killed mid-write
-    (e.g. SIGKILL landing inside ``write()``), the file can end in a partial
-    line — truncate back to the last complete line so every consumer reads the
-    file as valid JSONL. Best-effort: never raises.
+    (e.g. SIGKILL landing inside ``write()``, or ENOSPC truncating a line), the
+    file can end in a partial line — truncate back to the last complete line so
+    every consumer reads the file as valid JSONL. Returns the number of torn
+    bytes removed (0 when the tail was already clean) so the supervisor can note
+    the truncation in the summary. Best-effort: never raises, but a failure to
+    repair is LOUD because it leaves a corrupt tail behind.
     """
     try:
         if not output or output == "-":
-            return
+            return 0
         path = Path(output)
         if not path.is_file():
-            return
+            return 0
         with open(path, "rb+") as fh:
             fh.seek(0, os.SEEK_END)
             size = fh.tell()
             if size == 0:
-                return
+                return 0
             fh.seek(size - 1)
             if fh.read(1) == b"\n":
-                return
+                return 0
             window = min(size, 1 << 20)
             fh.seek(size - window)
             tail = fh.read(window)
             cut = tail.rfind(b"\n")
-            fh.truncate(size - window + cut + 1 if cut >= 0 else 0)
+            keep = size - window + cut + 1 if cut >= 0 else 0
+            fh.truncate(keep)
             fh.flush()
             os.fsync(fh.fileno())
-    except OSError:
-        pass
+            removed = size - keep
+        _health.warn_once(
+            "torn_tail_truncated",
+            f"trace {output} ended mid-line (child died mid-write?); truncated "
+            f"{removed} torn byte(s) to keep the file valid JSONL",
+        )
+        return removed
+    except OSError as exc:
+        _health.warn_once(
+            "finalize_failed",
+            f"could not repair the trace tail of {output} ({exc.strerror or exc}) — "
+            "the last line may be corrupt",
+        )
+        return 0
 
 
-def _write_summary_if_missing(output: str) -> None:
+def _write_summary_if_missing(output: str, *, extra: dict[str, object] | None = None) -> None:
     """After a signal death the child never ran its shutdown path — produce the
     post-hoc ``<output>.summary.json`` from the wrapper instead (best-effort)."""
     try:
@@ -604,9 +749,13 @@ def _write_summary_if_missing(output: str) -> None:
             return
         if log_path.with_name(log_path.name + ".summary.json").exists():
             return
-        _summary_mod.write_summary(log_path)
+        _summary_mod.write_summary(log_path, extra=extra)
     except BaseException as exc:  # noqa: BLE001 — supervisor must always exit
-        _log.warning("tracelens supervisor summary write failed: %s", exc)
+        _health.warn_once(
+            "supervisor_summary_failed",
+            f"post-mortem summary for {output} could not be written "
+            f"({type(exc).__name__}: {exc})",
+        )
 
 
 def _supervise_user_command(output: str) -> int | None:
@@ -690,9 +839,12 @@ def _supervise_user_command(output: str) -> int | None:
     except OSError:
         pass
     exit_code = _child_status_to_exit_code(status)
-    _finalize_trace_output(output)
-    if os.WIFSIGNALED(status):
-        _write_summary_if_missing(output)
+    torn_bytes = _finalize_trace_output(output)
+    if os.WIFSIGNALED(status) or torn_bytes:
+        extra: dict[str, object] | None = (
+            {"capture_health": {"truncated_tail_bytes": torn_bytes}} if torn_bytes else None
+        )
+        _write_summary_if_missing(output, extra=extra)
     return exit_code
 
 
@@ -706,15 +858,21 @@ def _flush_tracer() -> None:
             provider.force_flush(30000)
         if hasattr(provider, "shutdown"):
             provider.shutdown()
-    except Exception:
-        pass
+    except Exception as exc:
+        # A failed final flush drops the tail of the trace — say so once.
+        _health.record("flush_errors", note=repr(exc))
+        _health.warn_once(
+            "flush_error",
+            f"final span flush failed ({type(exc).__name__}: {exc}) — "
+            "the tail of the trace may be missing",
+        )
     # Give the batch processor a moment to fsync before the summary writer reads the file.
     try:
         import time as _t
 
         _t.sleep(0.25)
     except Exception:
-        pass
+        pass  # sleep is a scheduling nicety only — nothing capture-affecting can fail here
 
 
 def _write_run_summary() -> None:
@@ -727,8 +885,22 @@ def _write_run_summary() -> None:
         from tracelens.otel.processor import dropped_events as _de
 
         log_path = Path(str(out))
-        if not log_path.is_file() or log_path.stat().st_size == 0:
+        # NOTE: an EMPTY trace file is not a reason to skip — it is exactly the
+        # failure mode this summary must document (capture_health says why).
+        if not log_path.is_file():
             return
+        from tracelens.otel.exporter import exported_span_count as _esc
+
+        health: dict[str, object] = {"spans_exported": _esc(), **_health.snapshot()}
+        inst = _run_state.get("instrumenters_loaded")
+        if isinstance(inst, dict):
+            health["configurator"] = inst.get("__tracelens_configurator__")
+        selfcheck = _run_state.get("capture_selfcheck")
+        if selfcheck:
+            health["selfcheck"] = selfcheck
+        sidecars = sorted(p.name for p in log_path.parent.glob(log_path.name + ".fork-*"))
+        if sidecars:
+            health["fork_sidecar_files"] = sidecars
         _summary_mod.write_summary(
             log_path,
             coverage_scan=_run_state.get("coverage_scan"),  # type: ignore[arg-type]
@@ -736,9 +908,13 @@ def _write_run_summary() -> None:
             instrumenters_loaded=_run_state.get("instrumenters_loaded"),  # type: ignore[arg-type]
             dispatch_token=_run_state.get("dispatch_token"),  # type: ignore[arg-type]
             dropped_events=int(_de()),
+            extra={"capture_health": health},
         )
     except BaseException as exc:  # noqa: BLE001
-        _log.warning("tracelens summary write failed: %s", exc)
+        _health.warn_once(
+            "summary_write_failed",
+            f"trace summary could not be written ({type(exc).__name__}: {exc})",
+        )
 
 
 def _install_signal_handlers() -> None:
@@ -798,6 +974,18 @@ def run_main(argv: list[str] | None = None) -> None:
             "which tracelens needs to record spans. Install it into the target venv: "
             "pip install opentelemetry-api opentelemetry-sdk"
         )
+    # Version-skew preflight: the distributions may exist yet fail to import
+    # together (ancient sdk under a new api, or PYTHONPATH shadowing either one).
+    # One actionable line beats a deep traceback — or a swallowed one.
+    _skew = otel_setup.core_sdk_import_error()
+    if _skew is not None:
+        raise SystemExit(
+            "tracelens run: opentelemetry-api/opentelemetry-sdk are installed but "
+            f"failed to import ({_skew}). This usually means version skew between "
+            "opentelemetry-api and opentelemetry-sdk in the target venv (or a "
+            "PYTHONPATH entry shadowing them). Fix: "
+            "pip install -U opentelemetry-api opentelemetry-sdk"
+        )
     (
         output,
         targets,
@@ -808,6 +996,10 @@ def run_main(argv: list[str] | None = None) -> None:
         memory_enabled,
         capture_determinism,
     ) = _parse_run_flags(pre, user_command=user)
+    # Output preflight before the fork: a read-only/uncreatable output location
+    # is a user-facing one-liner here, not a swallowed configurator exception
+    # (and an empty trace) later.
+    _preflight_output_writable(output)
     # Wrapper/child split: the parent becomes a supervisor (reap + signal
     # forwarding + trace finalization) and exits with the child's status; only
     # the child continues past this point to instrument and run the command.
@@ -824,6 +1016,7 @@ def run_main(argv: list[str] | None = None) -> None:
         user_command=user,
     )
     instrumenters = otel_setup.bootstrap_autoinstrumentation(load_instrumentors=not no_autoinst)
+    _ensure_span_pipeline(instrumenters)
     # Patch ThreadPoolExecutor.submit + loop.run_in_executor so the
     # parent's contextvars (our ``_stack_cv`` *and* OTel ``current_span``)
     # ride along into worker threads. Without this, ``run_in_executor``
@@ -833,6 +1026,7 @@ def run_main(argv: list[str] | None = None) -> None:
     _run_state["executor_context_propagation"] = executor_ctx_status
     _install_hooks()
     _install_signal_handlers()
+    _start_capture_selfcheck(output)
 
     # Partition targets into import names vs. source-root directories (e.g. a
     # ``--target-package <repo-dir>`` whose real app package has a different import
@@ -853,7 +1047,15 @@ def run_main(argv: list[str] | None = None) -> None:
     if capture_determinism:
         from tracelens.launcher import determinism_capture as _dc
 
-        _dc.install(output)
+        try:
+            _dc.install(output)
+        except OSError as exc:
+            # Explicitly requested capture that cannot record is a fail-fast,
+            # not a raw traceback (and never a silent no-op).
+            raise SystemExit(
+                "tracelens run: --capture-determinism could not open its ledger next "
+                f"to {output}: {exc.strerror or exc}"
+            ) from None
         _run_state["determinism_captured"] = True
 
     # T1.3 — pre-import scan of the universe of instrumentable functions.
