@@ -1,0 +1,7 @@
+# Code owners for VinvAI/VinvAI
+# Docs: https://docs.github.com/articles/about-code-owners
+#
+# Every change to this repository requires review from the Engineering team.
+# The team must have write access to the repo for this to take effect.
+
+* @VinvAI/engineering

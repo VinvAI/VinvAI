@@ -55,3 +55,4 @@ nuitka-crash-report.xml
 # .github/assets/clips/ (larger media stays on the CDN).
 /.github/*
 !/.github/assets/
+!/.github/CODEOWNERS
