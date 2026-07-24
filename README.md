@@ -63,6 +63,12 @@ Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-templat
 
 - The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
 
+<div align="center">
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/readme-real-repo-demo/.github/assets/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
+</div>
+
+*The actual run, captured frame by frame: install → 855-symbol graph → search hits → trace hotspots → the failing frame named → verified.*
+
 **Then we ran its backend under Vinv's zero-edit tracer** (inside Cursor desktop, DB deliberately down) and hit it with real traffic. From one run, Vinv produced:
 
 | What Vinv saw | Result |
