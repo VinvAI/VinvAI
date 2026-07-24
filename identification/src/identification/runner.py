@@ -918,10 +918,13 @@ def list_service_apis(
 
             for kind, trigger, line, framework in entrypoints:
                 frameworks.add(framework)
-                # __main__ is a module-level entry, not attached to a function;
-                # every other kind decorates the handler just below it.
+                # __main__ is a module-level entry, not attached to a function —
+                # resolve the handler from what the guard block CALLS (usually
+                # main()), so the call tree has a real function to root at.
+                # Every other kind decorates the handler just below it.
                 handler = (
-                    None if kind == "script_main"
+                    _main_guard_handler(text, line, symbols)
+                    if kind == "script_main"
                     else _enclosing_handler(symbols, line)
                 )
                 ekey = (kind, rel, line)
@@ -1066,6 +1069,42 @@ def _entrypoint_id(
     return f"{prefix}_{slug or 'entry'}"
 
 
+_RE_CALL_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# Bare function references handed to a runner: typer.run(main), Process(target=main)
+_RE_RUNNER_REF = re.compile(
+    r"(?:typer\.run|sys\.exit|asyncio\.run|target\s*=)\s*\(?\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]"
+)
+
+
+def _main_guard_handler(
+    text: str, guard_line: int, symbols: list[dict[str, Any]],
+) -> str | None:
+    """The same-file function a ``__main__`` guard block calls, if any.
+
+    Scans the indented block under ``if __name__ == "__main__":`` for call
+    names (plus bare references passed to runners like ``typer.run(main)``)
+    and returns the first that matches a symbol defined in this file — the
+    function the call tree should root at. Returns None for guards that only
+    call externals (such scripts get a degraded, non-erroring tree).
+    """
+    lines = text.splitlines()
+    if guard_line < 1 or guard_line > len(lines):
+        return None
+    guard = lines[guard_line - 1]
+    guard_indent = len(guard) - len(guard.lstrip())
+    names: list[str] = []
+    for raw in lines[guard_line:]:
+        if raw.strip() and (len(raw) - len(raw.lstrip())) <= guard_indent:
+            break  # dedent — guard block ended
+        names.extend(_RE_CALL_NAME.findall(raw))
+        names.extend(_RE_RUNNER_REF.findall(raw))
+    local = {s["name"] for s in symbols if s.get("name")}
+    for name in names:
+        if name in local:
+            return name
+    return None
+
+
 def _enclosing_handler(symbols: list[dict[str, Any]], route_line: int) -> str | None:
     """Best-effort handler name for a route declared at ``route_line``.
 
@@ -1170,10 +1209,42 @@ def build_api_call_tree(
     rel_file = target.get("file")
     route_line = int(target.get("line") or 0)
     if not handler or not rel_file:
-        raise LookupError(
-            f"Entry point '{target.get('id')}' has no resolved handler symbol to "
-            "root the call tree at (e.g. a bare __main__ has no function)."
+        # A guard that only calls externals (uvicorn.run(...), library mains)
+        # has no in-repo function to root at. That is a fact about the script,
+        # not a failure — return a degraded-but-valid document so the webview
+        # renders the entry instead of a red error.
+        note = (
+            "This entry calls no function defined in this repository "
+            "(e.g. its __main__ guard only invokes library code), so there is "
+            "no in-repo call tree to build."
         )
+        return {
+            "status": "ok",
+            "degraded": note,
+            "entrypoint": {
+                "id": target.get("id"),
+                "kind": target.get("kind", "http_api"),
+                "service_kind": target.get("service_kind", "http-service"),
+                "method": target.get("method"),
+                "path": target.get("path"),
+                "trigger": target.get("trigger"),
+                "handler": None,
+                "file": rel_file,
+                "line": route_line,
+                "framework": target.get("framework"),
+            },
+            "code_root": str(root),
+            "index_store": store_dir,
+            "store_kind": None,
+            "max_depth": max_depth,
+            "stats": {"internal_functions": 0, "external_calls": 0,
+                      "max_depth_reached": 0},
+            "tree": {
+                "name": target.get("trigger") or target.get("id"),
+                "file": rel_file, "line": route_line,
+                "resolved": False, "children": [], "note": note,
+            },
+        }
 
     store = open_identification_store(root, store_dir)
     _find_by_name: dict[str, list[dict[str, Any]]] = {}

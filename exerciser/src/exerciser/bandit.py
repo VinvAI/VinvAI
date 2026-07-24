@@ -107,6 +107,26 @@ class EndpointBandit:
         return {s: self.arms[s].to_json() for s in self.strategies}
 
 
+def seed_from_prior(
+    bandit: EndpointBandit, prior: dict[str, Any] | None, decay: float = 0.5,
+) -> EndpointBandit:
+    """Warm-start arms from a previous run's posteriors, decayed toward Beta(1,1).
+
+    ``decay`` is the survival fraction of accumulated evidence per run: 0.5
+    halves it every run it goes unrefreshed. This is the expiry mechanism for
+    learned strategy state — persistent enough to skip re-exploring what
+    worked yesterday, mortal enough that a lesson learned against a
+    since-changed environment cannot dominate forever.
+    """
+    for strat, arm_json in (prior or {}).items():
+        arm = bandit.arms.get(strat)
+        if arm is None or not isinstance(arm_json, dict):
+            continue
+        arm.alpha = 1.0 + (float(arm_json.get("alpha", 1.0)) - 1.0) * decay
+        arm.beta = 1.0 + (float(arm_json.get("beta", 1.0)) - 1.0) * decay
+    return bandit
+
+
 def bandit_summary(bandits: dict[str, EndpointBandit]) -> dict[str, Any]:
     """A compact posterior report over all endpoints (written to bandit.json)."""
     per_endpoint = {ep: b.to_json() for ep, b in sorted(bandits.items())}

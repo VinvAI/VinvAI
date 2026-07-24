@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import state, store
-from .bandit import STRATEGIES, EndpointBandit, bandit_summary
+from .bandit import STRATEGIES, EndpointBandit, bandit_summary, seed_from_prior
 from .baseline import apply_baselines, status_class
 from .coverage import endpoint_coverage
 from .execute import ProbeResult, execute_probe
@@ -122,6 +122,13 @@ def run_exercise(
         return {"status": "error", "error": "no plan.json — run `exerciser plan` first"}
     endpoints = plan["endpoints"]
 
+    # Warm-start each endpoint's posterior from the previous run's bandit.json,
+    # DECAYED toward the uniform prior — learned strategy preferences persist
+    # across runs but expire geometrically, so a stale lesson (learned against
+    # an environment that has since changed) cannot dominate forever.
+    prior_doc = store.read_json(store.bandit_path(repo)) or {}
+    priors = prior_doc.get("per_endpoint", {})
+
     bandits: dict[str, EndpointBandit] = {}
     grouped_by_ep: dict[str, dict[str, list[Candidate]]] = {}
     covered_ids_by_ep: dict[str, set[str]] = {}
@@ -132,8 +139,18 @@ def run_exercise(
         if not avail:
             continue
         grouped_by_ep[api_id] = grouped
-        bandits[api_id] = EndpointBandit(strategies=avail)
+        bandits[api_id] = seed_from_prior(
+            EndpointBandit(strategies=avail), priors.get(api_id),
+        )
         covered_ids_by_ep[api_id] = set()
+
+    # Environment canary: before spending the budget, dry-run the FIRST setup
+    # step of every authored scenario (the login chains). A reset database, a
+    # missing seed user, or rotated credentials fails HERE, loudly, with the
+    # step and status — instead of silently 401-ing the whole run. Proven
+    # necessary live: a reset Postgres with no seeded superuser degraded a
+    # 23/23 run to 5/23 with zero signal about why.
+    canary = _environment_canary(endpoints, base_url, exercise_id, probe_fn, log)
 
     executions: list[dict[str, Any]] = []
     spent = 0
@@ -215,6 +232,24 @@ def run_exercise(
     # endpoint id is the raw "METHOD path", not an api_id).
     scenario_failures = _scenario_failure_rows(scenarios)
 
+    # Authenticated permutation sweep: every endpoint replayed WITH the
+    # credentials the scenarios captured (the "checked as superuser" pass),
+    # substituting real created-resource ids into path params — a generated
+    # UUID can never hit a real row, but an id WE created can, which is what
+    # flips DELETE/PATCH-by-id endpoints from 0 coverage to real coverage.
+    # Runs BEFORE persistence so its rows feed coverage, issues, and baselines.
+    ledger_ids = sorted(
+        {v for row in state.record_creations(executions)
+         for v in row.get("response_values", [])}
+        | {v for row in store.read_jsonl(state.ledger_path(repo))
+           if not row.get("cleaned") for v in row.get("response_values", [])}
+    )
+    authed_rows = _auth_sweep(
+        endpoints, base_url, exercise_id, probe_fn,
+        live_auth_headers, ledger_ids, log,
+    )
+    executions.extend(authed_rows)
+
     # Persist executions (append-only durable record) + scenarios.
     if store.results_path(repo).exists():
         store.append_jsonl(store.results_path(repo), executions)
@@ -264,6 +299,7 @@ def run_exercise(
         "status": "ok",
         "repo": str(repo),
         "base_url": base_url,
+        "environment_canary": canary,
         "rounds_run": round_no,
         "probes_spent": spent,
         "budget": budget,
@@ -273,6 +309,8 @@ def run_exercise(
         "scenarios_run": len(scenarios),
         "scenarios_completed": sum(1 for s in scenarios if s.get("completed")),
         "scenarios_expired": len(expired),
+        "auth_sweep_probes": len(authed_rows),
+        "auth_credential_sets": len(live_auth_headers),
         "state_created": len(creations),
         "state_cleaned": cleaned,
         "baseline_recorded": sum(1 for v in baseline_verdicts.values() if v["verdict"] == "recorded"),
@@ -335,6 +373,139 @@ def _run_scenarios(
             except Exception as exc:  # a scenario never fails the run
                 log.debug("scenario for %s failed: %s", ep["api_id"], exc)
     return out, auth_headers
+
+
+def _environment_canary(
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    exercise_id: str,
+    probe_fn: ProbeFn,
+    log: logging.Logger,
+) -> dict[str, Any]:
+    """Dry-run each authored scenario's first setup step; report failures loudly.
+
+    Deduped by (method, path) so ten scenarios sharing one login chain cost one
+    probe. Failure means the environment no longer satisfies the scenario's
+    preconditions (reset database, unseeded credentials) — the run continues,
+    but the summary and log carry the exact failing step and remediation hint.
+    """
+    seen: set[tuple[str, str]] = set()
+    failed: list[dict[str, Any]] = []
+    checked = 0
+    for ep in endpoints:
+        for splan in ep.get("semantic_inputs", []) or []:
+            setup = splan.get("setup") or []
+            if not setup:
+                continue
+            method, path = _split_endpoint(setup[0].get("endpoint", ""))
+            if not method or (method, path) in seen:
+                continue
+            seen.add((method, path))
+            inputs = setup[0].get("inputs") or {}
+            try:
+                res = probe_fn(
+                    base_url, method, path,
+                    body=inputs.get("body"),
+                    path_params=inputs.get("path_params") or {},
+                    query=inputs.get("query") or {},
+                    headers=inputs.get("headers") or {},
+                    content_type=inputs.get("content_type"),
+                    exercise_id=exercise_id,
+                )
+            except Exception as exc:
+                failed.append({"step": f"{method} {path}", "status": None,
+                               "error": str(exc)})
+                continue
+            checked += 1
+            if not (isinstance(res.status, int) and 200 <= res.status < 300):
+                failed.append({"step": f"{method} {path}", "status": res.status})
+    if failed:
+        log.warning(
+            "environment canary FAILED for %d setup step(s): %s — the service "
+            "environment no longer satisfies the authored scenarios' "
+            "preconditions (reset database? unseeded credentials?). Re-run the "
+            "service's seeding/prestart, or the scenarios will expire and be "
+            "re-dispatched for authorship.",
+            len(failed), "; ".join(f"{f['step']} -> {f.get('status') or f.get('error')}"
+                                   for f in failed),
+        )
+    return {"checked": checked, "failed": failed}
+
+
+def _auth_sweep(
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    exercise_id: str,
+    probe_fn: ProbeFn,
+    auth_headers: list[dict[str, str]],
+    ledger_ids: list[str],
+    log: logging.Logger,
+    max_id_substitutions: int = 2,
+) -> list[dict[str, Any]]:
+    """Replay every endpoint's valid input under each captured credential set.
+
+    Rows carry ``strategy="authed"`` and ``auth=True``: regress replays them
+    only after re-capturing fresh credentials (tokens in results.jsonl would
+    be both a leak and expired), and the bandit never sees them — this is a
+    deterministic completeness pass, not an explored arm.
+    """
+    if not auth_headers:
+        return []
+    # Creators before consumers: a 2xx authed POST mints a real id that the
+    # GET/PATCH/DELETE-by-id endpoints later in the SAME sweep can target.
+    method_order = {"POST": 0, "PUT": 1, "GET": 2, "PATCH": 3, "DELETE": 4}
+    ordered = sorted(endpoints,
+                     key=lambda e: method_order.get(str(e.get("method")), 5))
+    live_ids: list[str] = list(ledger_ids)
+    rows: list[dict[str, Any]] = []
+    for hdrs in auth_headers:
+        for ep in ordered:
+            valid = [i for i in ep.get("inputs", []) if i.get("class") == "valid"]
+            if not valid:
+                continue
+            base = valid[0]
+            variants: list[dict[str, Any]] = [base]
+            pparams = base.get("path_params") or {}
+            if pparams:
+                # Real ids we created beat generated ones for hitting rows;
+                # most recent first (this sweep's own creations).
+                for vid in list(reversed(live_ids))[:max_id_substitutions]:
+                    variants.append(
+                        {**base, "path_params": {k: vid for k in pparams}}
+                    )
+            for inp in variants:
+                candidate = Candidate(
+                    strategy="authed",
+                    provenance="auth_permutation",
+                    input_class="authed_valid",
+                    body=inp.get("body"),
+                    path_params=inp.get("path_params") or {},
+                    query=inp.get("query") or {},
+                    headers={**(inp.get("headers") or {}), **hdrs},
+                )
+                try:
+                    result = probe_fn(
+                        base_url, ep["method"], ep["path"],
+                        body=candidate.body, path_params=candidate.path_params,
+                        query=candidate.query, headers=candidate.headers,
+                        exercise_id=exercise_id,
+                    )
+                except Exception as exc:
+                    log.debug("auth sweep probe failed for %s: %s", ep["api_id"], exc)
+                    continue
+                row = _execution_row(0, ep, candidate, result)
+                row["auth"] = True
+                rows.append(row)
+                # Harvest ids minted by this sweep for later endpoints.
+                if (ep["method"] in state._MUTATING
+                        and isinstance(result.status, int)
+                        and 200 <= result.status < 300):
+                    for v in sorted(state.scalar_values(result.body)):
+                        if v not in live_ids:
+                            live_ids.append(v)
+    log.info("auth sweep: %d probes across %d credential sets",
+             len(rows), len(auth_headers))
+    return rows
 
 
 def _resolved_auth_headers(

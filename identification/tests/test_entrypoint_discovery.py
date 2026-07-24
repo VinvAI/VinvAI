@@ -419,3 +419,73 @@ def test_production_declaration_wins_route_attribution_over_fixture(
     assert api["handler"] == "dup"
     assert api["is_test"] is False
     assert result["summary"] == {"apis": 1, "test_apis": 0}
+
+
+_SCRIPT_MAIN = '''\
+import logging
+
+logger = logging.getLogger(__name__)
+
+def init() -> None:
+    logger.info("seeding")
+
+def main() -> None:
+    logger.info("start")
+    init()
+
+if __name__ == "__main__":
+    main()
+'''
+
+_SCRIPT_MAIN_EXTERNAL_ONLY = '''\
+import uvicorn
+
+if __name__ == "__main__":
+    uvicorn.run("app:app", port=8000)
+'''
+
+_SCRIPT_MAIN_RUNNER_REF = '''\
+import typer
+
+def cli() -> None:
+    pass
+
+if __name__ == "__main__":
+    typer.run(cli)
+'''
+
+
+def test_script_main_resolves_guard_called_handler(tmp_path: Path) -> None:
+    """A __main__ guard that calls a same-file function roots the tree there.
+
+    Regression: MAIN_* entries carried handler=None, so build_call_tree raised
+    'no resolved handler symbol' and the webview rendered a red error for
+    every operational script (initial_data, backend_pre_start, ...).
+    """
+    (tmp_path / "seed.py").write_text(_SCRIPT_MAIN, encoding="utf-8")
+    (tmp_path / "tool.py").write_text(_SCRIPT_MAIN_RUNNER_REF, encoding="utf-8")
+    _write_index(
+        tmp_path,
+        [
+            _chunk("seed.py:5-6:init", "seed.py", "init", 5, 6),
+            _chunk("seed.py:8-11:main", "seed.py", "main", 8, 11),
+            _chunk("tool.py:3-4:cli", "tool.py", "cli", 3, 4),
+        ],
+        [],
+    )
+    result = list_service_apis(tmp_path)
+    mains = {e["file"]: e for e in result["entrypoints"] if e["kind"] == "script_main"}
+    assert mains["seed.py"]["handler"] == "main"
+    # A runner reference (typer.run(cli)) resolves the bare function name.
+    assert mains["tool.py"]["handler"] == "cli"
+
+
+def test_external_only_guard_has_no_handler() -> None:
+    """A guard that only calls library code resolves no handler — the call
+    tree builder returns a degraded document for these instead of raising."""
+    from identification.runner import _main_guard_handler
+    guard_line = _SCRIPT_MAIN_EXTERNAL_ONLY.splitlines().index(
+        'if __name__ == "__main__":') + 1
+    assert _main_guard_handler(
+        _SCRIPT_MAIN_EXTERNAL_ONLY, guard_line, [{"name": "unrelated"}]
+    ) is None

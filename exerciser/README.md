@@ -49,3 +49,22 @@ Artifacts land under `<repo>/.vinv/exercise/`:
   counterexamples).
 
 See `docs/learning.md §7` for how these tie into the existing learning ledger.
+
+## What persists across runs (and what expires)
+
+Everything the engine learns lives under `<repo>/.vinv/exercise/` and survives
+restarts, new sessions, and machine reboots:
+
+| Artifact | Persistence | Expiry |
+| --- | --- | --- |
+| `plan.json` | rewritten by `plan` | superseded by the next plan |
+| `prompts/*.json` | harness replies preserved across re-plans | a reply expires (`reply_expired`, fingerprint-bound) when its scenario fails live; a fresh reply auto-revives it |
+| `results.jsonl` | append-only IO record of every probe (input, status, shape, latency) | never; regress rebuilds its suite newest-wins |
+| `baselines/` | golden behavior per probe | re-goldened newest-wins each run |
+| `bandit.json` | strategy posteriors | warm-starts the next run with evidence DECAYED 50% per run — learned preferences persist but cannot outlive the environment they were learned in |
+| `state_ledger.jsonl` | append-only record of state the engine planted | rows marked `cleaned` when teardown unwinds them; uncleaned rows drive regress's environment-drift classification forever |
+| `invariants.json`, `profile.json`, `scorecard.json` | rewritten per profile/scorecard | superseded |
+
+Credentials are the deliberate exception: tokens captured by scenarios are used
+in-memory (sweep + teardown) and re-captured fresh by `regress` from the
+scenario setup chains — they are never written to disk.
