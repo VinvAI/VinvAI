@@ -43,7 +43,7 @@ You've lived the search query *"claude code says done but tests fail"*: the agen
 
 ## 👁 What Vinv does
 
-Give your coding agent runtime context — five engines, one loop:
+Give your coding agent runtime context — eight capabilities, one loop:
 
 - **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
 - **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph.gif" alt="interactive Code Graph" width="640">
