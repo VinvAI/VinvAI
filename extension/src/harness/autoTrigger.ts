@@ -21,7 +21,14 @@ import { onServiceExit, type ServiceExitEvent } from '../bringup/serviceRunner';
 import { readBringupOutcome } from '../bringup/bringup';
 import { runEpisode, isEpisodeRunning, type EpisodeTask } from './episodeLoop';
 import { classifyIntent, criteriaFor } from './taskIntent';
-import { getHarness, isHarnessAutonomous, isHarnessBusy, quickScanHarnesses } from './harnessRunner';
+import {
+	getHarness,
+	getHarnessBlock,
+	isHarnessAutonomous,
+	isHarnessBusy,
+	preflightHarnessAuth,
+	quickScanHarnesses,
+} from './harnessRunner';
 import { pickHarness } from './harnessPicker';
 import { loadRuntimeOverlay, loadNodes, indexStoreDir } from '../graph/indexGraph';
 import { readAndClearRequests, restoreEpisodeRequests } from './requestQueue';
@@ -75,6 +82,12 @@ async function offerOrDispatch(
 	const harnessReady =
 		quickScanHarnesses()[harnessId] === true && isHarnessAutonomous(getHarness(harnessId));
 	if (isAutoEpisodesEnabled() && harnessReady) {
+		// Infra preflight: an unauthenticated CLI must not consume the dispatch
+		// (markHarnessBlocked already surfaced the remediation once) — the issue
+		// stays blocked-on-you and re-dispatches fresh after login.
+		if ((await preflightHarnessAuth(harnessId)) !== 'ok') {
+			return;
+		}
 		void vscode.window.showInformationMessage(`Vinv: ${summary} — dispatching a fix episode…`);
 		await runEpisode(context, workspaceRoot, task);
 		return;
@@ -131,12 +144,25 @@ export async function dispatchIssueEpisode(
 	const harnessReady =
 		quickScanHarnesses()[harnessId] === true && isHarnessAutonomous(getHarness(harnessId));
 	if (isAutoEpisodesEnabled() && harnessReady) {
+		// Infra preflight: a blocked CLI (needs login / quota / network) must
+		// not consume the dispatch. Returning false keeps every issue eligible,
+		// so the same signatures re-dispatch fresh once the human has logged in
+		// — blocked is never recorded as dispatched.
+		if ((await preflightHarnessAuth(harnessId)) !== 'ok') {
+			return false;
+		}
 		void vscode.window.showInformationMessage(
 			`Vinv: ${issues.length} issue(s) identified from the live trace — dispatching a fix episode…`,
 		);
 		// Fire-and-observe: runEpisode owns the busy-lock (it refuses to start
 		// while a harness run or episode is in flight, which we checked above).
 		await runEpisode(context, workspaceRoot, task);
+		// The dispatch itself may have discovered the precondition failure —
+		// then nothing was actually attempted-to-completion: report "not handed
+		// off" so the caller leaves the signatures eligible for re-dispatch.
+		if (getHarnessBlock(harnessId)) {
+			return false;
+		}
 		return true;
 	}
 	const choice = await vscode.window.showWarningMessage(
@@ -152,7 +178,9 @@ export async function dispatchIssueEpisode(
 		return false;
 	}
 	await runEpisode(context, workspaceRoot, task, picked);
-	return true;
+	// Same rule as the auto path: a dispatch that ended infra-blocked was not
+	// handed off — the issues stay eligible for a fresh dispatch after login.
+	return !getHarnessBlock(picked);
 }
 
 /**
@@ -419,6 +447,13 @@ export function registerRuntimeErrorTrigger(context: vscode.ExtensionContext): v
 			runtimeErrorTask(clusters),
 			`the live trace shows ${clusters.length} function(s) raising errors`,
 		);
+		// Blocked ≠ dispatched: if the dispatch ran into a harness precondition
+		// failure (needs login / quota / network), un-record the signature so
+		// the SAME failure picture re-arms and dispatches fresh after login —
+		// otherwise the dedup would bury it forever.
+		if (getHarnessBlock(getHarnessId())) {
+			await context.workspaceState.update(RUNTIME_ERROR_SIG_KEY, undefined);
+		}
 	};
 	const schedule = (): void => {
 		if (timer) {

@@ -51,6 +51,19 @@ export interface HarnessDef {
 	installCommand: string | null;
 	/** The step after installing (sign-in etc.), shown in the install guide. */
 	postInstall: string;
+	/**
+	 * The exact remediation shown when a run fails on authentication (CLI not
+	 * signed in / key invalid). One actionable sentence — it is the whole
+	 * notification body, so it must name the command to run.
+	 */
+	authRemediation?: string;
+	/**
+	 * Cheap auth-preflight probe: args (appended to the resolved executable)
+	 * whose non-zero exit with auth-classified output proves the CLI cannot
+	 * serve a dispatch. Only set where the vendor ships such a probe — a
+	 * `--version` that succeeds while logged out is NOT one.
+	 */
+	authProbeArgs?: string[];
 	/** ide-chat only: how the hand-off prompt reaches the panel. */
 	chat?: {
 		mechanism: 'chat-command' | 'deeplink' | 'clipboard';
@@ -101,6 +114,10 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 			? 'irm https://claude.ai/install.ps1 | iex'
 			: 'curl -fsSL https://claude.ai/install.sh | bash',
 		postInstall: 'Then run `claude` once in a terminal to sign in. Note: the Claude desktop app or IDE extension does not include this CLI.',
+		authRemediation:
+			'Run `claude` in a terminal and sign in with `/login` (or fix ANTHROPIC_API_KEY), then retry the episode.',
+		// No probe: `claude --version` succeeds while logged out, and there is no
+		// documented cheap status subcommand — the run itself classifies instead.
 	},
 	{
 		id: 'codex',
@@ -113,6 +130,10 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 		installHint: 'Install with `npm install -g @openai/codex` and run `codex` once to sign in.',
 		installCommand: 'npm install -g @openai/codex',
 		postInstall: 'Then run `codex` once in a terminal to sign in.',
+		authRemediation:
+			'Run `codex login` in a terminal (or fix OPENAI_API_KEY), then retry the episode.',
+		// `codex login status` exits non-zero with "Not logged in" when signed out.
+		authProbeArgs: ['login', 'status'],
 	},
 	{
 		id: 'cursor',
@@ -130,6 +151,11 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 			? "irm 'https://cursor.com/install?win32=true' | iex"
 			: 'curl https://cursor.com/install -fsS | bash',
 		postInstall: 'Then sign in with `agent login` (older installs: `cursor-agent login`).',
+		authRemediation:
+			'Run `cursor-agent login` (newer installs: `agent login`) in a terminal, then retry the episode.',
+		// `cursor-agent status` exits non-zero and prints the same
+		// "Authentication required" text as a dispatch when signed out.
+		authProbeArgs: ['status'],
 	},
 	{
 		id: 'gemini',
@@ -141,6 +167,9 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 		installHint: 'Install with `npm install -g @google/gemini-cli` and run `gemini` once to sign in.',
 		installCommand: 'npm install -g @google/gemini-cli',
 		postInstall: 'Then run `gemini` once in a terminal to sign in.',
+		authRemediation:
+			'Run `gemini` in a terminal and complete the Google sign-in (or fix GEMINI_API_KEY), then retry the episode.',
+		// No probe: the CLI has no documented cheap logged-out status command.
 	},
 	// IDE-chat hand-offs: the task goes to the editor's agent panel via the
 	// .vinv/handoff file protocol (see ideChat.ts). Copilot Chat's documented
@@ -203,6 +232,270 @@ export function isHarnessAutonomous(h: HarnessDef): boolean {
 
 export function getHarness(id: string): HarnessDef {
 	return HARNESSES.find((h) => h.id === id) ?? HARNESSES[0];
+}
+
+// ---- infrastructure-failure classification ---------------------------------
+//
+// A precondition failure (CLI not signed in, key invalid/expired, quota
+// exhausted, vendor unreachable) can never be fixed by retrying, mutating the
+// pack, or judging a stall — every consumer of a harness run must recognize it
+// on the FIRST occurrence and stop, surfacing the one remediation the human
+// actually needs ("run `cursor-agent login`"). The patterns are data, kept
+// here next to the HARNESSES catalog they describe.
+
+/** Classification of a failed harness run. Only 'other' is retryable. */
+export type HarnessFailureKind = 'auth' | 'quota' | 'network' | 'other';
+
+/** A HarnessFailureKind that terminates work (everything except 'other'). */
+export type HarnessInfraKind = Exclude<HarnessFailureKind, 'other'>;
+
+interface InfraPattern {
+	kind: HarnessInfraKind;
+	re: RegExp;
+	/**
+	 * Strong patterns are unambiguous error sentences and match regardless of
+	 * exit code. Weak patterns (bare env-var names, generic connectivity words)
+	 * only count on a non-zero exit — an agent legitimately answering "set
+	 * ANTHROPIC_API_KEY" must never classify its own success as an auth failure.
+	 */
+	strong: boolean;
+}
+
+/** Per-CLI (plus a few vendor-neutral) precondition-failure fingerprints. */
+const INFRA_PATTERNS: ReadonlyArray<InfraPattern> = [
+	// -- auth: cursor ----------------------------------------------------------
+	{ kind: 'auth', re: /authentication required/i, strong: true },
+	{ kind: 'auth', re: /cursor-agent login/i, strong: true },
+	{ kind: 'auth', re: /CURSOR_API_KEY/, strong: false },
+	// -- auth: claude ----------------------------------------------------------
+	{ kind: 'auth', re: /please run \/login/i, strong: true },
+	{ kind: 'auth', re: /OAuth token has expired/i, strong: true },
+	{ kind: 'auth', re: /invalid api key/i, strong: true },
+	{ kind: 'auth', re: /ANTHROPIC_API_KEY/, strong: false },
+	// -- auth: codex -----------------------------------------------------------
+	{ kind: 'auth', re: /not (?:currently )?logged in/i, strong: true },
+	{ kind: 'auth', re: /\bcodex login\b/i, strong: true },
+	{ kind: 'auth', re: /OPENAI_API_KEY/, strong: false },
+	// -- auth: gemini ----------------------------------------------------------
+	{ kind: 'auth', re: /api key not valid/i, strong: true },
+	{ kind: 'auth', re: /GEMINI_API_KEY|GOOGLE_API_KEY/, strong: false },
+	// -- auth: vendor-neutral --------------------------------------------------
+	{ kind: 'auth', re: /api key.{0,40}\b(?:expired|revoked|disabled)\b/i, strong: true },
+	{ kind: 'auth', re: /\bnot authenticated\b/i, strong: true },
+	{ kind: 'auth', re: /\b(?:401|403)\b.{0,40}\bunauthorized\b|\bunauthorized\b.{0,40}\b(?:401|403)\b/i, strong: true },
+	// -- quota -----------------------------------------------------------------
+	{ kind: 'quota', re: /credit balance is too low/i, strong: true }, // anthropic
+	{ kind: 'quota', re: /exceeded your current quota/i, strong: true }, // openai
+	{ kind: 'quota', re: /insufficient_quota/i, strong: true }, // openai error code
+	{ kind: 'quota', re: /RESOURCE_EXHAUSTED/, strong: true }, // google
+	{ kind: 'quota', re: /quota (?:has been )?(?:exhausted|exceeded)/i, strong: true },
+	{ kind: 'quota', re: /usage limit (?:reached|exceeded)/i, strong: true },
+	{ kind: 'quota', re: /out of (?:free )?credits/i, strong: true },
+	// -- network (vendor unreachable) ------------------------------------------
+	{ kind: 'network', re: /\b(?:ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH)\b/, strong: true },
+	{ kind: 'network', re: /getaddrinfo/i, strong: true },
+	{ kind: 'network', re: /network is unreachable/i, strong: true },
+	{ kind: 'network', re: /\bfetch failed\b/i, strong: false },
+	{ kind: 'network', re: /(?:unable|could not|failed) to connect/i, strong: false },
+];
+
+/** Precedence when several kinds match at once: sign-in beats billing beats pipes. */
+const INFRA_PRECEDENCE: ReadonlyArray<HarnessInfraKind> = ['auth', 'quota', 'network'];
+
+/**
+ * Classifies one harness run's output as an infrastructure/precondition
+ * failure — 'auth' | 'quota' | 'network' — or 'other' (a normal, retryable
+ * failure). Pure; safe on any consumer of run output.
+ *
+ * Guards against false positives:
+ *  - a ZERO exit with substantial output is a real agent answer, never infra
+ *    (an agent explaining "set CURSOR_API_KEY" must not classify itself);
+ *  - weak patterns (bare env-var names, generic connect words) require a
+ *    non-zero exit; strong ones (exact vendor error sentences) do not, because
+ *    some CLIs print the auth refusal and still exit 0.
+ */
+export function classifyHarnessFailure(
+	output: string,
+	exitCode: number | null,
+): HarnessFailureKind {
+	const tail = output.slice(-4000);
+	if (!tail.trim()) {
+		return 'other';
+	}
+	// A clean exit that produced a real answer (not just an error line).
+	if (exitCode === 0 && output.length > 2000) {
+		return 'other';
+	}
+	const failed = exitCode !== 0; // null (killed / never ran) counts as failed
+	const matched = new Set<HarnessInfraKind>();
+	for (const p of INFRA_PATTERNS) {
+		if ((p.strong || failed) && p.re.test(tail)) {
+			matched.add(p.kind);
+		}
+	}
+	for (const kind of INFRA_PRECEDENCE) {
+		if (matched.has(kind)) {
+			return kind;
+		}
+	}
+	return 'other';
+}
+
+/** Short state label per kind — used for issue/Flow surfaces and end labels. */
+export const INFRA_BLOCK_LABELS: Readonly<Record<HarnessInfraKind, string>> = {
+	auth: 'blocked: agent CLI needs login',
+	quota: 'blocked: agent CLI quota exhausted',
+	network: 'blocked: agent CLI cannot reach its service',
+};
+
+/** The one actionable remediation sentence for a blocked harness. */
+export function harnessBlockRemediation(h: HarnessDef, kind: HarnessInfraKind): string {
+	if (kind === 'auth') {
+		return h.authRemediation ?? `Sign in to ${h.label} in a terminal, then retry the episode. ${h.postInstall}`;
+	}
+	if (kind === 'quota') {
+		return `${h.label} reports its usage quota or credits are exhausted — resolve billing or wait for the quota to reset, then retry the episode.`;
+	}
+	return `${h.label} could not reach its service — check your network/VPN/proxy, then retry the episode.`;
+}
+
+/** A harness currently known to be unable to run (precondition failure). */
+export interface HarnessBlock {
+	kind: HarnessInfraKind;
+	/** The remediation sentence shown to the user. */
+	remediation: string;
+}
+
+// Session-scoped blocked registry. A block means "do not burn attempts, tests,
+// or judges on this harness until the human acts" — it is NOT a permanent
+// verdict: a later dispatch re-probes (or simply re-runs) and a success clears
+// it, so re-dispatching the same issue after login proceeds fresh.
+const harnessBlocks = new Map<string, HarnessBlock>();
+// One notification per harness+kind per session — the remediation is the same
+// whichever issue tripped it; repeating it per issue is noise, not signal.
+const notifiedBlocks = new Set<string>();
+
+/** The current block for a harness, if any. */
+export function getHarnessBlock(harnessId: string): HarnessBlock | undefined {
+	return harnessBlocks.get(harnessId);
+}
+
+/** Clears a harness's block (a successful run or probe proves it works). */
+export function clearHarnessBlock(harnessId: string): void {
+	harnessBlocks.delete(harnessId);
+	preflightPassed.delete(harnessId); // a fresh dispatch re-establishes it
+}
+
+/**
+ * Records a precondition failure for a harness and surfaces the remediation —
+ * once per session per harness+kind, never per issue. Returns the block.
+ */
+export function markHarnessBlocked(
+	harnessId: string,
+	kind: HarnessInfraKind,
+	options?: { notify?: boolean },
+): HarnessBlock {
+	const harness = getHarness(harnessId);
+	const block: HarnessBlock = { kind, remediation: harnessBlockRemediation(harness, kind) };
+	harnessBlocks.set(harnessId, block);
+	preflightPassed.delete(harnessId);
+	const noteKey = `${harnessId}:${kind}`;
+	if ((options?.notify ?? true) && !notifiedBlocks.has(noteKey)) {
+		notifiedBlocks.add(noteKey);
+		void vscode.window.showErrorMessage(
+			`Vinv: ${harness.label} cannot run — ${INFRA_BLOCK_LABELS[kind].replace('blocked: ', '')}. ${block.remediation}`,
+		);
+	}
+	return block;
+}
+
+/** Test hook: wipes the session block/notification/preflight state. */
+export function resetHarnessBlockStateForTests(): void {
+	harnessBlocks.clear();
+	notifiedBlocks.clear();
+	preflightPassed.clear();
+}
+
+// Harness ids whose auth preflight passed this session — a passed probe is
+// cached (auth state rarely regresses mid-session); a FAILED probe is never
+// cached, so the first dispatch after the human logs in re-probes and proceeds.
+const preflightPassed = new Set<string>();
+
+/** Wall-clock cap for one auth probe — it must stay cheap. */
+const AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Cheap auth preflight for a harness: where the vendor ships a status probe
+ * (see authProbeArgs), run it BEFORE spending any dispatch/test/judge work.
+ * Resolves 'ok' when the harness can be dispatched (probe passed, no probe
+ * exists, CLI missing — the missing-CLI path has its own message) and the
+ * infra kind when the probe proves the precondition failure. A failed probe
+ * marks the session block (notifying once); a passed probe clears it.
+ */
+export async function preflightHarnessAuth(harnessId: string): Promise<'ok' | HarnessInfraKind> {
+	const harness = getHarness(harnessId);
+	if (harness.kind !== 'cli' || !harness.bin || !harness.authProbeArgs?.length) {
+		// No probe exists: never keep a stale block standing in the way of a
+		// fresh dispatch — the run itself re-classifies in one cheap failure.
+		harnessBlocks.delete(harnessId);
+		return 'ok';
+	}
+	if (preflightPassed.has(harnessId)) {
+		return 'ok';
+	}
+	const exe = resolveHarnessCli(harness);
+	if (!exe) {
+		return 'ok'; // missing CLI is handled by the existing install-hint paths
+	}
+	const probe = await new Promise<{ code: number | null; output: string }>((resolve) => {
+		let out = '';
+		let settled = false;
+		const settle = (code: number | null) => {
+			if (!settled) {
+				settled = true;
+				resolve({ code, output: out });
+			}
+		};
+		try {
+			const child = spawn(
+				`"${exe}" ${harness.authProbeArgs!.join(' ')}`,
+				hiddenBackgroundOptions({ shell: true, env: process.env }),
+			);
+			const timer = setTimeout(() => {
+				killProcessTree(child, 'SIGKILL');
+				settle(null);
+			}, AUTH_PROBE_TIMEOUT_MS);
+			const absorb = (c: string) => (out = (out + c).slice(-8000));
+			child.stdout?.setEncoding('utf8');
+			child.stdout?.on('data', absorb);
+			child.stderr?.setEncoding('utf8');
+			child.stderr?.on('data', absorb);
+			child.on('error', () => {
+				clearTimeout(timer);
+				settle(null);
+			});
+			child.on('close', (code) => {
+				clearTimeout(timer);
+				settle(code);
+			});
+		} catch {
+			settle(null);
+		}
+	});
+	if (probe.code !== 0) {
+		const kind = classifyHarnessFailure(probe.output, probe.code);
+		if (kind !== 'other') {
+			markHarnessBlocked(harnessId, kind);
+			return kind;
+		}
+		// Probe failed for an unrelated reason (unknown subcommand on an older
+		// CLI, timeout): inconclusive — let the dispatch itself decide.
+		harnessBlocks.delete(harnessId);
+		return 'ok';
+	}
+	preflightPassed.add(harnessId);
+	harnessBlocks.delete(harnessId);
+	return 'ok';
 }
 
 /**
@@ -511,6 +804,14 @@ export interface HarnessRunResult {
 	stdout: string;
 	/** Human-readable failure reason when ok is false. */
 	detail?: string;
+	/**
+	 * Set when the failure is an infrastructure PRECONDITION (CLI not signed
+	 * in, quota exhausted, vendor unreachable) that no retry, stall judge, or
+	 * pack mutation can fix. Consumers must treat it as terminal on the first
+	 * occurrence: end the work as infra-blocked (objective:false — never
+	 * composition-failure evidence) and surface `detail` (the remediation).
+	 */
+	infra?: HarnessInfraKind;
 }
 
 /**
@@ -546,6 +847,13 @@ export function dispatchAgentPrompt(
 ): Promise<string | null> {
 	const harness = getHarness(harnessId);
 	if (harness.kind !== 'cli' || !harness.bin) {
+		return Promise.resolve(null);
+	}
+	// A blocked harness (needs login / quota / network) cannot answer — resolve
+	// null immediately so verification agents degrade to their safe paths
+	// instead of fanning out N doomed spawns. The block is cleared by a later
+	// successful run or preflight, so this never outlives the precondition.
+	if (getHarnessBlock(harnessId)) {
 		return Promise.resolve(null);
 	}
 	const exe = resolveHarnessCli(harness);
@@ -633,10 +941,18 @@ export function dispatchAgentPrompt(
 			clearTimeout(timer);
 			settle(null);
 		});
-		child.on('exit', () => {
+		child.on('exit', (code) => {
 			clearTimeout(timer);
 			if (pending) {
 				decode(pending);
+			}
+			// One doomed spawn is enough: classify precondition failures here so
+			// the session block short-circuits every sibling agent immediately.
+			const infra = classifyHarnessFailure(out, code);
+			if (infra !== 'other') {
+				markHarnessBlocked(harnessId, infra);
+				settle(null);
+				return;
 			}
 			const answer =
 				harness.stream === 'claude-stream-json'
@@ -695,6 +1011,23 @@ export async function runHarnessPrompt(
 			stdout: '',
 			detail: `The ${harness.label} CLI ('${harness.bin}') was not found. ${harness.installHint}`,
 		};
+	}
+	// Known-blocked harness (auth/quota/network precondition): re-probe cheaply
+	// instead of burning a dispatch. Failed probes are never cached, so the
+	// first dispatch after the human logs in re-probes, passes, and proceeds
+	// fresh — blocked is a state, not a dedup.
+	if (getHarnessBlock(harnessId)) {
+		await preflightHarnessAuth(harnessId);
+		const block = getHarnessBlock(harnessId);
+		if (block) {
+			return {
+				ok: false,
+				exitCode: null,
+				stdout: '',
+				detail: block.remediation,
+				infra: block.kind,
+			};
+		}
 	}
 	const commandLine = `"${exe}" ${harness.args}`;
 	const childEnv: NodeJS.ProcessEnv = {
@@ -926,6 +1259,22 @@ export async function runHarnessPrompt(
 			flush();
 			if (options?.token?.isCancellationRequested) {
 				settle({ ok: false, exitCode: code, stdout: answerText(), detail: 'cancelled' });
+				return;
+			}
+			// Precondition failures (not signed in, quota, vendor unreachable)
+			// classify from the RAW channel output — some CLIs print the refusal
+			// and still exit 0, and a stream-json refusal is a bare error line.
+			// Terminal for every consumer; the detail is the remediation.
+			const infra = classifyHarnessFailure(out, code);
+			if (infra !== 'other') {
+				const block = markHarnessBlocked(harnessId, infra);
+				settle({
+					ok: false,
+					exitCode: code,
+					stdout: answerText(),
+					detail: block.remediation,
+					infra,
+				});
 			} else if (code !== 0) {
 				settle({
 					ok: false,
@@ -934,6 +1283,10 @@ export async function runHarnessPrompt(
 					detail: lastLine || `exited with code ${code ?? 'null'}`,
 				});
 			} else {
+				// A genuine success proves the precondition holds again.
+				if (getHarnessBlock(harnessId)) {
+					clearHarnessBlock(harnessId);
+				}
 				settle({ ok: true, exitCode: 0, stdout: answerText() });
 			}
 		});
@@ -983,6 +1336,12 @@ async function runHarnessTask(
 			void vscode.window.showErrorMessage(
 				`Vinv: The ${harness.label} CLI ('${harness.bin}') was not found on this machine. ${harness.installHint}`,
 			);
+			return false;
+		}
+		// Auth preflight: a signed-out CLI can never produce the deliverable —
+		// skip the dispatch entirely (markHarnessBlocked already surfaced the
+		// remediation once this session).
+		if ((await preflightHarnessAuth(harnessId)) !== 'ok') {
 			return false;
 		}
 	}
@@ -1084,9 +1443,13 @@ async function runHarnessTask(
 
 					let chunks = 0;
 					let lastLine = '';
+					// Classification ring: the last 4000 chars of raw output, so a
+					// precondition refusal (auth/quota/network) is recognized on close.
+					let tailRing = '';
 					const onData = (chunk: string) => {
 						log?.write(chunk);
 						chunks += 1;
+						tailRing = (tailRing + chunk).slice(-4000);
 						const line = chunk.trim().split('\n').pop() ?? '';
 						if (line) {
 							// Status label only — marked when clipped, never silently.
@@ -1122,7 +1485,17 @@ async function runHarnessTask(
 					child.on('close', (code) => {
 						if (token.isCancellationRequested || extToken?.isCancellationRequested) {
 							settle(false);
-						} else if (code !== 0) {
+							return;
+						}
+						// Precondition refusal: terminal, with the remediation as the
+						// failure detail (markHarnessBlocked notifies once per session).
+						const infra = classifyHarnessFailure(tailRing, code);
+						if (infra !== 'other') {
+							const block = markHarnessBlocked(harnessId, infra);
+							settle(false, block.remediation);
+							return;
+						}
+						if (code !== 0) {
 							settle(
 								false,
 								lastLine ||
