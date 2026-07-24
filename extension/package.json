@@ -92,6 +92,16 @@
 					}
 				],
 				"priority": "default"
+			},
+			{
+				"viewType": "vinv.findings",
+				"displayName": "Vinv Findings",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/findings.json"
+					}
+				],
+				"priority": "default"
 			}
 		],
 		"viewsContainers": {
@@ -208,6 +218,11 @@
 			{
 				"command": "vinv-vs.openJourney",
 				"title": "Open Journey (walk the verified flow)",
+				"category": "Vinv"
+			},
+			{
+				"command": "vinv-vs.openFindings",
+				"title": "Open Findings (what Vinv found and fixed)",
 				"category": "Vinv"
 			},
 			{

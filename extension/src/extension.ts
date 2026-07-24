@@ -13,6 +13,7 @@ import { SmokeReportEditorProvider } from './identification/smokeReportView';
 import { CallTreeEditorProvider } from './identification/callTreeView';
 import { GraphExplorerEditorProvider } from './views/graphExplorer';
 import { JourneyEditorProvider } from './views/journeyView';
+import { FindingsEditorProvider } from './views/findingsView';
 import { registerAutoTriggers } from './harness/autoTrigger';
 import { registerAutoPilotAutoStart } from './harness/autoPilot';
 import { initStatusBar } from './views/statusBar';
@@ -138,6 +139,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		CallTreeEditorProvider.register(context),
 		GraphExplorerEditorProvider.register(context),
 		JourneyEditorProvider.register(context),
+		FindingsEditorProvider.register(context),
 	);
 
 	registerCommands(context, sessionsProvider, servicesProvider);

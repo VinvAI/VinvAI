@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -188,6 +189,12 @@ def replay_suite(
     }
     log.info("regress: %d cases, %d degraded, %d diffs",
              len(suite), summary["degraded"], len(diffs))
+    # Durable history: every replay appends its summary, so the findings view
+    # (and any agent) can see diff kinds trend across runs, not just the last.
+    store.append_jsonl(
+        store.exercise_dir(repo) / "regress.jsonl",
+        [{**summary, "at": time.time()}],
+    )
     return summary
 
 

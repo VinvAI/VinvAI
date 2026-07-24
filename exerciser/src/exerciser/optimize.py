@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import random
 import statistics
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from . import store
 
 # Minimum practical relative improvement for an optimization to count (10%).
 DEFAULT_MIN_EFFECT = 0.10
@@ -235,3 +239,41 @@ def decide_optimization(
             learning, attempts,
         )
     return OptimizeDecision("revert-and-retry", learning, learning, attempts)
+
+
+# ---- durable episode log -----------------------------------------------------
+
+def episode_log_path(repo: Path) -> Path:
+    return store.exercise_dir(repo) / "optimize.jsonl"
+
+
+def record_episode(
+    repo: Path,
+    opportunity: Opportunity | dict[str, Any],
+    decision: OptimizeDecision,
+    *,
+    files_changed: list[str] | None = None,
+    label: str | None = None,
+) -> None:
+    """Append one optimization episode's full record to ``optimize.jsonl``.
+
+    This is the durable evidence trail behind "what Vinv improved": every
+    attempt with its paired-bootstrap CI, whether the behavior suite held,
+    and the accept/revert outcome — consumed by the findings view (human)
+    and the machine summary (agent). Callers (the extension's episode
+    runner) invoke it once per finished episode.
+    """
+    opp = opportunity.to_json() if isinstance(opportunity, Opportunity) else dict(opportunity)
+    store.append_jsonl(episode_log_path(repo), [{
+        "at": time.time(),
+        "label": label or opp.get("endpoint") or opp.get("endpoint_id"),
+        "opportunity": opp,
+        "action": decision.action,
+        "reason": decision.reason,
+        "attempts": [a.to_json() for a in decision.attempts],
+        "files_changed": files_changed or [],
+    }])
+
+
+def read_episodes(repo: Path) -> list[dict[str, Any]]:
+    return store.read_jsonl(episode_log_path(repo))

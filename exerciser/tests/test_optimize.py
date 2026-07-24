@@ -88,3 +88,25 @@ def test_reverting_optimization_informs_the_retry():
     # The second decision carries BOTH attempts' learning forward.
     assert len(d2.attempts) == 2
     assert d2.attempts[0].reverted and d2.attempts[1].reverted
+
+
+def test_record_and_read_episodes(tmp_path):
+    """Episodes persist with CI evidence — the findings view's data source."""
+    from exerciser.optimize import (
+        MetricComparison, Opportunity, OptimizeAttempt, OptimizeDecision,
+        read_episodes, record_episode,
+    )
+    opp = Opportunity("latency-p95", "GET_items", "GET /items",
+                      "P95 240ms exceeds 200ms", "p95_ms", 240.0)
+    cmp_ = MetricComparison(240.0, 130.0, 0.46, 0.31, 0.58, True)
+    dec = OptimizeDecision("accept", "significant", "", [
+        OptimizeAttempt("add index on items.owner_id", cmp_, True, False, ""),
+    ])
+    record_episode(tmp_path, opp, dec,
+                   files_changed=["app/crud.py"], label="items index")
+    eps = read_episodes(tmp_path)
+    assert len(eps) == 1
+    assert eps[0]["action"] == "accept"
+    assert eps[0]["attempts"][0]["comparison"]["ci_low"] == 0.31
+    assert eps[0]["files_changed"] == ["app/crud.py"]
+    assert eps[0]["at"] > 0

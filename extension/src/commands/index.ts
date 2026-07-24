@@ -14,6 +14,7 @@ import { pickHarness } from '../harness/harnessPicker';
 import { startService, stopService } from '../bringup/serviceRunner';
 import { openCallTree } from '../identification/callTreeView';
 import { openJourney } from '../views/journeyView';
+import { openFindings } from '../views/findingsView';
 import type { CallSiteContext } from '../identification/callSiteContext';
 import { loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
@@ -215,6 +216,16 @@ export function registerCommands(
 				return;
 			}
 			await openJourney(folder.uri.fsPath);
+		}),
+		// "What Vinv found and fixed" — issues, optimization episodes with CI
+		// evidence, regress diff kinds, latency profile, state ledger.
+		vscode.commands.registerCommand('vinv-vs.openFindings', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showErrorMessage('Open a workspace folder to view findings.');
+				return;
+			}
+			await openFindings(folder.uri.fsPath);
 		}),
 		vscode.commands.registerCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
 		vscode.commands.registerCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),
