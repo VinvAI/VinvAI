@@ -423,6 +423,7 @@ function getHtml(label: string): string {
 		}
 		.gap h2::before { content: '// '; color: var(--accent-fg); }
 		.gap ul { list-style: none; margin: 0; padding: 0; }
+		.gap-hint { color: var(--muted-2); font-size: 10.5px; margin: -4px 0 8px; max-width: 640px; }
 		.gap li { padding: 2px 0; font-size: 11.5px; color: var(--muted); }
 		.collapsed > ul { display: none; }
 
@@ -510,7 +511,8 @@ function getHtml(label: string): string {
 	<ul class="tree" id="tree"></ul>
 	<div id="flame" style="display:none;"></div>
 	<div class="gap" id="gap" style="display:none;">
-		<h2>Ran but not predicted by the call graph</h2>
+		<h2 title="Functions the runtime trace caught that static analysis could not predict — usually dynamic calls like framework hooks, default factories, or callbacks. A short list here means the predicted graph is accurate.">Also ran (not in the predicted tree)</h2>
+		<div class="gap-hint">Caught at runtime but invisible to static analysis — dynamic calls such as framework hooks, default factories, and callbacks. A short list = an accurate prediction.</div>
 		<ul id="gap-list"></ul>
 	</div>
 
@@ -619,9 +621,12 @@ function getHtml(label: string): string {
 						txt += ' ⚠ ' + rt.error + ' err' + (rt.errors && rt.errors.length ? ' [' + rt.errors.join(', ') + ']' : '');
 					}
 					tag.textContent = txt;
+					tag.title = 'This function executed ' + rt.calls + ' time(s) during the captured traffic, spending ' + rt.total_ms + 'ms total' + (hasErr ? '; ' + rt.error + ' call(s) raised an exception' : '');
 					row.appendChild(tag);
 				} else {
-					row.appendChild(el('span', 'rt no', '✗ not run'));
+					const notRun = el('span', 'rt no', '✗ not run');
+					notRun.title = 'The call graph predicts this function CAN be reached from this endpoint, but no captured request has executed it yet — exercise the endpoint (or add an input in the Journey view) to cover it.';
+					row.appendChild(notRun);
 				}
 			}
 

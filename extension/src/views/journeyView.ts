@@ -343,7 +343,7 @@ function getHtml(): string {
 				(rt.total_ms != null ? ' (' + rt.total_ms + 'ms)' : '') +
 				(rt.error ? ' ⚠ ' + rt.error + ' err' : '') + '</span>';
 		} else if (rt && rt.executed === false) {
-			badge = ' <span class="rt">✗ not run</span>';
+			badge = ' <span class="rt" title="Reachable from this endpoint according to the call graph, but no captured request has executed it yet — add an input below to cover it">✗ not run</span>';
 		}
 		const cls = 'node' + (rt && rt.executed === false ? ' notrun' : '') + (ext ? ' ext' : '');
 		const open = n.file ? ' data-file="' + esc(n.file) + '" data-line="' + (n.line || 1) + '"' : '';
@@ -398,7 +398,7 @@ function getHtml(): string {
 			s.coverage.covered + '/' + s.coverage.total + '</span>' +
 			'<span class="stat">p50 <b>' + s.p50Ms + 'ms</b></span>' +
 			'<span class="stat">p95 <b>' + s.p95Ms + 'ms</b></span>' +
-			'<span class="stat">Handler ' + (s.handlerObserved ? '<b>observed</b>' : 'not observed') + '</span>' +
+			'<span class="stat" title="Observed = the endpoint&#39;s handler function actually ran in the trace. Not observed = every request so far was rejected before reaching it (auth, validation) — it still needs a valid input">Handler ' + (s.handlerObserved ? '<b>observed</b>' : 'not observed') + '</span>' +
 			'<span class="stat">Invariants <b>' + s.invariants + '</b></span>';
 
 		let html = '<h2>Call tree</h2>';
@@ -417,7 +417,7 @@ function getHtml(): string {
 			html += '<table><tr><th>Strategy</th><th>Auth</th><th>Status</th><th>Latency</th><th>Input</th><th>Output</th></tr>';
 			for (const r of s.io) {
 				html += '<tr><td>' + esc(r.strategy) + ' <span class="loc">' + esc(r.inputClass) + '</span></td>' +
-					'<td>' + (r.auth ? '🔑' : '—') + '</td>' +
+					'<td title="' + (r.auth ? 'Sent with real captured credentials (the superuser/user token the login scenario obtained)' : 'Sent anonymously — no credentials attached') + '">' + (r.auth ? '🔑' : '—') + '</td>' +
 					'<td class="' + stCls(r.status) + '">' + (r.status ?? (r.error ? 'ERR' : '—')) + '</td>' +
 					'<td>' + (r.latencyMs != null ? r.latencyMs + 'ms' : '—') + '</td>' +
 					'<td class="io-json">' + esc(r.input) + '</td>' +

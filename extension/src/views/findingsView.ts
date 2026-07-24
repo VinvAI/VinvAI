@@ -270,7 +270,7 @@ function getHtml(): string {
 				'<div class="why">' + esc(e.reason) + '</div>';
 			for (const a of e.attempts) {
 				html += '<div class="att"><span class="ap">' + esc(a.approach) + '</span>' +
-					'<span class="suite' + (a.behaviorSuitePassed ? '' : ' fail') + '">' +
+					'<span class="suite' + (a.behaviorSuitePassed ? '' : ' fail') + '" title="' + (a.behaviorSuitePassed ? 'Every recorded behavior still byte/shape-identical after this change' : 'This change altered observable outputs — a faster-but-wrong result, so it was reverted no matter how big the speedup') + '">' +
 					(a.behaviorSuitePassed ? 'suite ✓' : 'suite ✗') + '</span>' + ciBar(a) + '</div>';
 			}
 			if (e.filesChanged.length) html += '<div class="files">changed: ' + e.filesChanged.map(esc).join(', ') + '</div>';
@@ -296,7 +296,7 @@ function getHtml(): string {
 				'<span class="badge' + (r.behavior ? ' revert' : '') + '">behavior ' + r.behavior + '</span>' +
 				'<span class="badge' + (r.contract ? ' revert' : '') + '">contract ' + r.contract + '</span>' +
 				'<span class="badge' + (r.perf ? ' revert' : '') + '">perf ' + r.perf + '</span>' +
-				'<span class="badge env">environment ' + r.environment + '</span>' +
+				'<span class="badge env" title="Differences caused by data the test engine itself planted in earlier runs (its own residue) — the world changed, not your code">environment ' + r.environment + '</span>' +
 				(r.authSkipped ? '<span class="badge">auth skipped ' + r.authSkipped + '</span>' : '') + '</div>';
 			for (const d of r.diffs) {
 				html += '<div class="att"><span class="badge' + (d.kind === 'environment' ? ' env' : ' revert') + '">' + esc(d.kind) + '</span>' +
@@ -320,7 +320,7 @@ function getHtml(): string {
 		html += '<table><tr><th>Endpoint</th><th>Coverage</th><th>p50</th><th>p95</th><th style="width:30%">p95 bar</th><th>Statuses</th></tr>';
 		for (const e of f.endpoints) {
 			const hot = e.p95Ms >= 200;
-			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge">handler unseen</span>') + '</td>' +
+			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge" title="No request has reached this endpoint&#39;s handler function yet — usually it needs auth or a valid multi-step setup">handler unseen</span>') + '</td>' +
 				'<td>' + esc(e.coverage) + '</td><td>' + e.p50Ms + 'ms</td><td' + (hot ? ' class="badge revert"' : '') + '>' + e.p95Ms + 'ms</td>' +
 				'<td><span class="bar' + (hot ? ' hot' : '') + '"><span style="width:' + Math.max(1, (e.p95Ms / maxP95) * 100) + '%"></span></span></td>' +
 				'<td>' + esc(Object.entries(e.statuses).map(([k, v]) => k + '×' + v).join(' ')) + '</td></tr>';
