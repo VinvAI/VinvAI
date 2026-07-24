@@ -51,6 +51,7 @@ nuitka-crash-report.xml
 /.claude/
 .vscode/
 
-# CI workflows + repo assets — kept out of the public tree (README images are
-# served from a CDN instead of ./.github/assets).
-/.github/
+# CI workflows — kept out of the public tree. README feature clips live in
+# .github/assets/clips/ (larger media stays on the CDN).
+/.github/*
+!/.github/assets/
