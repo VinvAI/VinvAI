@@ -42,10 +42,44 @@ export interface ErrorCluster {
 }
 
 /**
- * Scans the runtime overlay for symbols that raised errors. The returned
+ * Is this raised exception the service REJECTING a request on purpose,
+ * rather than failing? `raise HTTPException(404, ...)` is FastAPI/Starlette's
+ * normal control flow for a 4xx response — a handler that raises it is
+ * working exactly as designed. Counting these as defects is the false
+ * positive that produced "Fix 17 runtime error clusters" on a healthy
+ * template (135 of 185 traced errors were deliberate 4xx raises), handed the
+ * agent an unfixable goal, and stalled the episode: you cannot converge on
+ * fixing code that is not broken.
+ *
+ * The rule is deliberately narrow: the exception class must end with
+ * `HTTPException` AND its message must carry a parseable status below 500
+ * (tracelens records the exception's str(), which for HTTPException starts
+ * "404: Not Found"). A 5xx HTTPException, an unparseable message, or any
+ * other exception type stays a defect — when unsure, keep it on the list.
+ */
+export function isExpectedRejection(
+	errorType: string | null | undefined,
+	errorMessage: string | null | undefined,
+): boolean {
+	if (!errorType || !/(^|\.)HTTPException$/.test(errorType)) {
+		return false;
+	}
+	const m = /^\s*(\d{3})\b/.exec(errorMessage ?? '');
+	if (!m) {
+		return false;
+	}
+	const status = Number(m[1]);
+	return status >= 400 && status < 500;
+}
+
+/**
+ * Scans the runtime overlay for symbols that raised DEFECTS. The returned
  * `signature` is order-independent and content-derived (file:name:errorTypes),
  * so "the same errors as last time" is a computable fact — the auto-trigger
  * uses it to dispatch each distinct failure picture exactly once.
+ *
+ * Deliberate 4xx rejections (see `isExpectedRejection`) are excluded: they
+ * are the service saying "no" correctly, not the service breaking.
  */
 export function collectRuntimeErrorClusters(
 	nodes: GraphNode[],
@@ -56,18 +90,29 @@ export function collectRuntimeErrorClusters(
 	// signature, so it can neither re-dispatch nor linger as a live problem.
 	const clusters = Object.entries(overlay)
 		.filter(([, rt]) => rt.current_errors > 0)
-		.sort((a, b) => b[1].current_errors - a[1].current_errors)
 		.map(([row, rt]) => {
+			const current = rt.failures.filter((f) => f.superseded === null);
+			const defects = current.filter(
+				(f) => !isExpectedRejection(f.error_type, f.error_message),
+			);
+			// Older captures carry counts but no failure records — nothing to
+			// classify, so keep them defects (when unsure, keep on the list).
+			const unclassifiable = current.length === 0;
+			const defectCount = unclassifiable
+				? rt.current_errors
+				: defects.reduce((sum, f) => sum + (f.count ?? 1), 0);
+			return { row, rt, defects, defectCount, unclassifiable };
+		})
+		.filter(({ defects, unclassifiable }) => unclassifiable || defects.length > 0)
+		.sort((a, b) => b.defectCount - a.defectCount)
+		.map(({ row, rt, defects, defectCount, unclassifiable }) => {
 			const n = nodes[Number(row)];
-			const currentTypes = [
-				...new Set(
-					rt.failures.filter((f) => f.superseded === null).map((f) => f.error_type),
-				),
-			];
-			const types = currentTypes.length ? currentTypes : rt.error_types;
+			const types = unclassifiable
+				? rt.error_types
+				: [...new Set(defects.map((f) => f.error_type))];
 			return {
 				row: Number(row),
-				line: `${n.name} at ${n.file}:${n.start_line} — ${rt.current_errors} error(s): ${types.join(', ')}`,
+				line: `${n.name} at ${n.file}:${n.start_line} — ${defectCount} error(s): ${types.join(', ')}`,
 				sig: `${n.file}:${n.name}:${[...types].sort().join('|')}`,
 			};
 		});

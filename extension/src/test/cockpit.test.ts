@@ -83,6 +83,7 @@ import {
 } from '../harness/stallBreaker';
 import { isServiceStarted, readBringupOutcome, readStartCommands } from '../bringup/bringup';
 import { collectRuntimeErrorClusters, selectHotspots } from '../harness/autoTrigger';
+import { isExpectedRejection } from '../harness/runtimeAnalysis';
 import { composeTrajectoryReport, readEpisodeEvents } from '../harness/trajectoryReport';
 import {
 	collectCacheCandidates,
@@ -1561,6 +1562,58 @@ suite('Hotspot selection (Pareto head of traced time)', () => {
 });
 
 suite('Stall breaker (Nash bargaining)', () => {
+	test('deliberate 4xx HTTPException raises are NOT defects; real errors are', () => {
+		// The live false-positive: 135 of 185 traced "errors" were handlers
+		// correctly raising 4xx (delete_user 404/403, reset_password 400) —
+		// clustered as defects, they handed the agent an unfixable goal.
+		const fail = (error_type: string, error_message: string, count = 4) => ({
+			error_type, error_message, error_stack: null, request_id: 'r',
+			count, capture_epoch: null, superseded: null as null,
+			caller_chain: [], args_schema: null, args_summary: null, duration_ms: 1,
+		});
+		const nodes = [0, 1, 2].map((r) => makeNode(r));
+		const overlay: Record<number, RuntimeOverlay> = {
+			// register_user: ONLY deliberate 4xx → must not cluster at all.
+			0: { executed: true, calls: 20, total_ms: 40, errors: 18, error_types: ['fastapi.exceptions.HTTPException'],
+				failures: [fail('fastapi.exceptions.HTTPException', '400: The user with this email already exists', 18)],
+				current_errors: 18, latest_epoch: null },
+			// create_user (private): real IntegrityError → clusters.
+			1: { executed: true, calls: 6, total_ms: 10, errors: 4, error_types: ['sqlalchemy.exc.IntegrityError'],
+				failures: [fail('sqlalchemy.exc.IntegrityError', '(psycopg.errors.UniqueViolation) duplicate key', 4)],
+				current_errors: 4, latest_epoch: null },
+			// mixed: a 404 rejection AND a 500-class HTTPException → clusters on the 5xx only.
+			2: { executed: true, calls: 8, total_ms: 12, errors: 5, error_types: ['fastapi.exceptions.HTTPException'],
+				failures: [
+					fail('fastapi.exceptions.HTTPException', '404: User not found', 3),
+					fail('fastapi.exceptions.HTTPException', '503: upstream unavailable', 2),
+				], current_errors: 5, latest_epoch: null },
+		};
+		const { clusters } = collectRuntimeErrorClusters(nodes, overlay);
+		assert.deepStrictEqual(clusters.map((c) => c.row), [1, 2], 'pure-4xx symbol excluded');
+		assert.ok(clusters[0].line.includes('IntegrityError'));
+		assert.ok(clusters[1].line.includes('2 error(s)'), 'only the 5xx failures counted');
+		// The predicate itself: narrow on type AND parsed status.
+		assert.strictEqual(isExpectedRejection('fastapi.exceptions.HTTPException', '404: nope'), true);
+		assert.strictEqual(isExpectedRejection('fastapi.exceptions.HTTPException', '500: boom'), false);
+		assert.strictEqual(isExpectedRejection('fastapi.exceptions.HTTPException', 'no status here'), false);
+		assert.strictEqual(isExpectedRejection('sqlalchemy.exc.IntegrityError', '409: fake'), false);
+		assert.strictEqual(isExpectedRejection('MyHTTPExceptionFactory', '404: x'), false);
+	});
+
+	test('the live stall-judge utilities escalate via the Nash rule', () => {
+		// Verbatim from the stalled run's judge log: both stances preferred
+		// escalation, so the Nash product for continue is 0 → the judgment
+		// panel. The deadlock breaker DID work; the goal upstream was fake.
+		const v = nashDecision({
+			explorer_continue: 0.42, explorer_escalate: 0.58,
+			auditor_continue: 0.18, auditor_escalate: 0.86,
+			mutation: 'run clusters serially with PYTHONUNBUFFERED=1',
+		});
+		assert.strictEqual(v.action, 'escalate');
+		assert.strictEqual(v.nash_continue, 0);
+	});
+
+
 	test('similarity is 1 for identical evidence and low for unrelated', () => {
 		const a = 'replay failed: port 8080 never opened; ModuleNotFoundError: vinv_payment';
 		assert.strictEqual(evidenceSimilarity(a, a), 1);
