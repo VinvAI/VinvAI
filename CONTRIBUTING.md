@@ -40,4 +40,4 @@ engines in your checkout — a dev checkout is auto-detected, no extra config.
 ## License
 
 By contributing you agree your contributions are licensed under the
-[Elastic License 2.0](LICENSE).
+[Apache License 2.0](LICENSE).

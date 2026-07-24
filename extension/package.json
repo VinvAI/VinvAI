@@ -4,7 +4,7 @@
 	"description": "Runtime ground truth for your coding agent. AI writes the code — Vinv watches it run, joins every call to source, and serves that evidence over MCP.",
 	"version": "0.0.6",
 	"publisher": "VinvAI",
-	"license": "Elastic-2.0",
+	"license": "Apache-2.0",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/VinvAI/VinvAI.git"

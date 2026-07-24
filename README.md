@@ -10,7 +10,7 @@
 
 **Vinv records a real run of your Python backend and checks your coding agent's "done" — replayed start, live port, acceptance tests the agent never sees.**
 
-[**vinv.ai**](https://vinv.ai) · **Free & source-available · Elastic License 2.0** · Python first · TS & Go next
+[**vinv.ai**](https://vinv.ai) · **Free & open source · Apache License 2.0** · Python first · TS & Go next
 
 **No account. No API keys. No telemetry. Everything runs on your machine.**
 
@@ -124,7 +124,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Quick version: `uv sync` for the Python 
 
 ## `// LICENSE`
 
-[Elastic License 2.0](LICENSE) © 2026 VinvAI.
+[Apache License 2.0](LICENSE) © 2026 VinvAI.
 
 <div align="center">
 <sub>Python first, TS & Go next · <b>Your agent says it's done. Vinv says prove it.</b></sub>

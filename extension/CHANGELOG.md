@@ -8,7 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ### 🎉 Vinv is now open source
 
-Vinv is free and source-available under the Elastic License 2.0 — everything runs on your
+Vinv is free and open source under the Apache License 2.0 — everything runs on your
 machine, with no account, no API keys, and no telemetry.
 
 - **Added** a one-time welcome notice announcing the open-source release, with

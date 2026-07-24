@@ -2,7 +2,7 @@
 
 **Runtime ground truth for your coding agent.** Your agent writes the code — Vinv watches it run, joins every call to source, serves that evidence over MCP, and independently verifies the agent's "done".
 
-This is the editor front-end of the source-available Vinv monorepo (Elastic License 2.0). The engines it drives — the zero-edit Python tracer (`tracelens`), the semantic index (`index`, Rust), the analysis agents (`handbook`, `bringup`, `identification`, `goal`), and the local embedding sidecar (`vinv-embedder`) — live in this same repository and run from source on your machine. No accounts, no API keys, no telemetry.
+This is the editor front-end of the open-source Vinv monorepo (Apache License 2.0). The engines it drives — the zero-edit Python tracer (`tracelens`), the semantic index (`index`, Rust), the analysis agents (`handbook`, `bringup`, `identification`, `goal`), and the local embedding sidecar (`vinv-embedder`) — live in this same repository and run from source on your machine. No accounts, no API keys, no telemetry.
 
 ## What it does
 
@@ -33,4 +33,4 @@ npm test         # vscode-test suites
 
 ## License
 
-Elastic License 2.0 — see [LICENSE](./LICENSE).
+Apache License 2.0 — see [LICENSE](./LICENSE).
