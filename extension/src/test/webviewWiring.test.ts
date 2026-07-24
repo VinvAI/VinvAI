@@ -33,7 +33,13 @@ function makeWorkspace(): { root: string; existing: string; cleanup: () => void 
 	fs.mkdirSync(dir, { recursive: true });
 	const existing = path.join(dir, 'pack-1.md');
 	fs.writeFileSync(existing, '# pack\n', 'utf8');
-	return { root, existing, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+	// force+retries: on Windows a file just opened in the editor stays locked
+	// briefly, so a bare rmSync throws ENOTEMPTY; retry until the handle drops.
+	return {
+		root,
+		existing,
+		cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+	};
 }
 
 /**

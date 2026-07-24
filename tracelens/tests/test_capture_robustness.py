@@ -99,7 +99,7 @@ def _components(trace_path: Path) -> set[str]:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root ignores directory permissions")
 def test_readonly_output_dir_is_one_clear_error(tmp_path: Path) -> None:
     proj, script = _write_target_project(tmp_path, script_body="print('hi')\n")
     ro = tmp_path / "ro"
@@ -118,7 +118,7 @@ def test_readonly_output_dir_is_one_clear_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root ignores directory permissions")
 def test_uncreatable_output_dir_is_one_clear_error(tmp_path: Path) -> None:
     proj, script = _write_target_project(tmp_path, script_body="print('hi')\n")
     ro = tmp_path / "ro"
