@@ -205,6 +205,49 @@ export function publishProbeState(next: ProbeState): void {
 	probeEmitter.fire(next);
 }
 
+// ---- behavioral exercise stage ----------------------------------------------
+
+/** Where the behavioral-exercise stage currently sits. */
+export type ExercisePhase = 'idle' | 'running' | 'done' | 'failed' | 'skipped';
+
+/** A point-in-time snapshot of the behavioral-exercise stage for the UI. */
+export interface ExerciseState {
+	phase: ExercisePhase;
+	/** Short status line ("exercising POST /utils/test-email (3/23)…"). */
+	label: string;
+	/** Endpoints the exerciser reached with real coverage. */
+	endpointsCovered: number;
+	/** Total endpoints discovered for this service. */
+	total: number;
+	/** Invariants learned across all endpoints. */
+	invariants: number;
+	/** Behavioral issue clusters (5xx/crash/invariant-violation). */
+	issues: number;
+	/** Failure detail when phase === 'failed'. */
+	error?: string;
+}
+
+let exerciseState: ExerciseState = {
+	phase: 'idle',
+	label: '',
+	endpointsCovered: 0,
+	total: 0,
+	invariants: 0,
+	issues: 0,
+};
+const exerciseEmitter = new vscode.EventEmitter<ExerciseState>();
+/** Fires whenever the behavioral-exercise stage starts, progresses, or settles. */
+export const onExerciseStateChange = exerciseEmitter.event;
+/** The latest exercise-stage snapshot. */
+export function getExerciseState(): ExerciseState {
+	return exerciseState;
+}
+/** Producer-side: publish a new exercise snapshot (exerciseRunner only). */
+export function publishExerciseState(next: ExerciseState): void {
+	exerciseState = next;
+	exerciseEmitter.fire(next);
+}
+
 // ---- graph enhancement (once per index epoch) -------------------------------
 
 /** Terminal-per-epoch enhancement record (.vinv/index/enhance_state.json). */
@@ -279,6 +322,7 @@ export type PipelinePhase =
 	| 'services'
 	| 'insights'
 	| 'probes'
+	| 'exercise'
 	| 'done';
 
 let pipelinePhase: PipelinePhase = 'idle';

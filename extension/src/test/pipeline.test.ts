@@ -65,13 +65,15 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(action, { kind: 'setup', service: 'api' });
 	});
 
-	test('after green comes insights, then probes, then done', () => {
+	test('after green comes insights, then probes, then exercise, then done', () => {
 		let ledger = initialPipelineLedger();
 		const services = [svc()];
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'insights' });
 		ledger = applyStageOutcome(ledger, 'insights', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'probes' });
 		ledger = applyStageOutcome(ledger, 'probes', 'done');
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
+		ledger = applyStageOutcome(ledger, 'exercise', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'done' });
 	});
 
@@ -87,6 +89,8 @@ suite('pipeline machine: scheduling', () => {
 		let ledger = applyStageOutcome(initialPipelineLedger(), 'insights', 'skipped');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'probes' });
 		ledger = applyStageOutcome(ledger, 'probes', 'failed');
+		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'exercise' });
+		ledger = applyStageOutcome(ledger, 'exercise', 'skipped');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'done' });
 	});
 

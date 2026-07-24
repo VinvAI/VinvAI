@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "bringup",
+    "exerciser",
     "goal",
     "handbook",
     "identification",
@@ -678,6 +679,30 @@ sdist = { url = "https://files.pythonhosted.org/packages/9c/5c/745b228ea398ce75f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/29/27/090c2a363451c8c5aea1f51c0ec598313da3ad5dabb5a95791521409a3ef/evidently-0.4.36-py3-none-any.whl", hash = "sha256:332849bd2dd4b3e2ee551a9ece8f813cb32e90065e2f0e153d253f958a5df13f", size = 3408070, upload-time = "2024-08-15T17:34:17.229Z" },
 ]
+
+[[package]]
+name = "exerciser"
+version = "0.1.0"
+source = { editable = "exerciser" }
+dependencies = [
+    { name = "click" },
+    { name = "identification" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click", specifier = ">=8.1.0,<9.0.0" },
+    { name = "identification", editable = "identification" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0,<10.0.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0,<0.9.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "faker"

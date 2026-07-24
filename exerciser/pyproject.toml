@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exerciser"
+version = "0.1.0"
+description = "Universal behavioral testing engine: exercise every discovered endpoint, profile outputs, learn invariants, close the coverage loop"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "click>=8.1.0,<9.0.0",
+    "identification",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0,<10.0.0",
+    "ruff>=0.6.0,<0.9.0",
+]
+
+[project.scripts]
+# `vinv-exerciser` is the documented public console script; `exerciser` mirrors
+# the engine-name→`.venv/bin/<name>` convention the extension uses to spawn
+# engines (getBinPath(context, 'exerciser')).
+vinv-exerciser = "exerciser.cli:main"
+exerciser = "exerciser.cli:main"
+
+[tool.uv.sources]
+identification = { workspace = true }
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

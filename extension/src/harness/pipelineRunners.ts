@@ -9,14 +9,20 @@
  * (insightRunner dispatches through autoTrigger). Called from
  * registerCommands during activation.
  */
-import type * as vscode from 'vscode';
+import * as vscode from 'vscode';
 import { registerInsightRunner } from './insightRunner';
 import { registerChangeAwareness } from '../index/diffImpact';
 import { registerAutoEnhance } from '../index/enhanceRunner';
+import { primeExerciseState } from './exerciseRunner';
 
 /** Wires every pipeline background runner. Idempotent per activation. */
 export function registerPipelineRunners(context: vscode.ExtensionContext): void {
 	registerInsightRunner(context);
 	registerChangeAwareness(context);
 	registerAutoEnhance(context);
+	// Surface any persisted behavioral-exercise artifacts immediately on reload.
+	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (root) {
+		primeExerciseState(root);
+	}
 }

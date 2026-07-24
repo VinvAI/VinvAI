@@ -78,7 +78,7 @@ export interface FlowFacts {
 	diffImpact?: { changedSymbols: number; impactedSymbols: number };
 	autoPilot: { running: boolean; label: string };
 	/** Coarse pipeline phase from the harness hub — refines the spine. */
-	pipelinePhase?: 'idle' | 'discovering' | 'services' | 'insights' | 'probes' | 'done';
+	pipelinePhase?: 'idle' | 'discovering' | 'services' | 'insights' | 'probes' | 'exercise' | 'done';
 	/** Live insight-build state from the hub (call trees + reports). */
 	insight?: {
 		phase: 'idle' | 'running' | 'done' | 'failed' | 'skipped';
@@ -87,6 +87,17 @@ export interface FlowFacts {
 	};
 	/** Live probe-run state from the hub. */
 	probe?: { phase: 'idle' | 'running' | 'done' | 'failed' | 'skipped'; label: string };
+	/** Live behavioral-exercise state from the hub (coverage + invariants + issues). */
+	exercise?: {
+		phase: 'idle' | 'running' | 'done' | 'failed' | 'skipped';
+		label: string;
+		endpointsCovered: number;
+		total: number;
+		invariants: number;
+		issues: number;
+		/** Absolute path of the behavior scorecard, when written. */
+		scorecardPath?: string;
+	};
 	/** The onboarding compass's answer (computed by nextStep.ts). */
 	nextStep?: { label: string; detail: string; command: string; args?: unknown[] };
 }
@@ -159,6 +170,8 @@ export function pipelineStage(
 		case 'insights':
 			return 'insights';
 		case 'probes':
+			return 'verify';
+		case 'exercise':
 			return 'verify';
 		default:
 			return undefined;
@@ -422,8 +435,35 @@ function insightsStage(f: FlowFacts): FlowStage {
 	};
 }
 
+/** The behavioral-coverage summary row + scorecard link for the Verify stage. */
+function exerciseLinks(f: FlowFacts): FlowLink[] {
+	const ex = f.exercise;
+	if (!ex || (ex.total === 0 && ex.phase === 'idle')) {
+		return [];
+	}
+	const parts = [`Behavior coverage ${ex.endpointsCovered}/${ex.total} endpoints`];
+	if (ex.invariants > 0) {
+		parts.push(`${ex.invariants} invariants`);
+	}
+	if (ex.issues > 0) {
+		parts.push(`${ex.issues} behavioral issue${ex.issues === 1 ? '' : 's'}`);
+	}
+	const links: FlowLink[] = [
+		{
+			label: parts.join(' · '),
+			detail:
+				ex.phase === 'running'
+					? ex.label || 'exercising every discovered endpoint…'
+					: 'Vinv drove every discovered endpoint itself, not just observed traffic',
+			openPath: ex.scorecardPath,
+			state: ex.phase === 'running' ? 'running' : ex.issues > 0 ? 'error' : 'ok',
+		},
+	];
+	return links;
+}
+
 function verifyStage(f: FlowFacts): FlowStage {
-	const links: FlowLink[] = [];
+	const links: FlowLink[] = exerciseLinks(f);
 	let status: FlowStageStatus;
 	let summary: string;
 	if (f.probe?.phase === 'running') {

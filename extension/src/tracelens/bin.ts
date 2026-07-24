@@ -17,6 +17,7 @@ export const ENGINE_NAMES: ReadonlyArray<string> = [
 	'bringup',
 	'identification',
 	'goal',
+	'exerciser',
 ];
 
 /** The vinv.enginesPath setting (an explicit engines-root override). */

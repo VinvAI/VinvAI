@@ -26,4 +26,5 @@ members = [
     "bringup",
     "goal",
     "embedder",
+    "exerciser",
 ]

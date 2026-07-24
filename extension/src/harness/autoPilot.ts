@@ -41,6 +41,7 @@ import {
 } from './autoPilotMachine';
 import { runInsightPass } from './insightRunner';
 import { runProbePass } from './probeRunner';
+import { runExercisePass } from './exerciseRunner';
 import { maybeAutoEnhance } from '../index/enhanceRunner';
 import { publishPipelinePhase } from './pipelineState';
 import { enginesReady } from '../engines/install';
@@ -314,11 +315,17 @@ async function drive(
 			return;
 		}
 
-		// ---- post-green stages: insights, then probes -------------------------
-		if (action.kind === 'insights' || action.kind === 'probes') {
+		// ---- post-green stages: insights, then probes, then exercise ----------
+		if (action.kind === 'insights' || action.kind === 'probes' || action.kind === 'exercise') {
 			const stage = action.kind;
 			publishPipelinePhase(stage);
-			report(stage === 'insights' ? 'Building insights (call trees + reports)…' : 'Probing endpoints (I/O checks)…');
+			report(
+				stage === 'insights'
+					? 'Building insights (call trees + reports)…'
+					: stage === 'probes'
+						? 'Probing endpoints (I/O checks)…'
+						: 'Exercising every endpoint (behavioral coverage)…',
+			);
 			let outcome: 'done' | 'failed' | 'skipped' = 'failed';
 			let failureDetail = '';
 			try {
@@ -328,6 +335,21 @@ async function drive(
 					failureDetail = result.error ?? '';
 					if (outcome === 'done') {
 						report(`Insights built — ${result.endpoints} endpoint(s), ${result.issues} issue(s) identified`);
+					}
+				} else if (stage === 'exercise') {
+					// The exerciser drives EVERY discovered endpoint itself, closing the
+					// coverage loop and clustering behavioral failures into the same
+					// issue→episode path. A 'done' pass with issues is a stage failure
+					// only for RETRY accounting (the pass already dispatched).
+					const result = await runExercisePass(context, workspaceRoot);
+					outcome = result.outcome;
+					failureDetail = result.error ?? '';
+					if (outcome === 'done' && result.issues > 0) {
+						outcome = 'failed';
+						failureDetail = `behavioral issues found: ${result.issues} cluster(s)`;
+						report(`Exercised ${result.endpointsCovered}/${result.total} endpoints — ${result.issues} behavioral issue(s), retrying after the fix`);
+					} else if (outcome === 'done') {
+						report(`Exercised ${result.endpointsCovered}/${result.total} endpoints — ${result.invariants} invariant(s), no issues`);
 					}
 				} else {
 					// The probe pass itself dispatches fix episodes for failing probes

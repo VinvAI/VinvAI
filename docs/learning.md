@@ -196,6 +196,56 @@ HTTP server end-to-end (`extension/src/test/probeBaseline.test.ts`).
   `scratch_allocation → +60 B` (buffer freed), landing in the JSONL and in
   the aggregation (`extension/src/test/traceMemory.test.ts`).
 
+## 7. The behavioral exerciser: coverage bandit + invariant confidence
+
+The `exerciser` engine drives EVERY discovered endpoint itself (not just observed
+traffic), coverage-guided. Its two learning quantities match the conventions
+above.
+
+**Coverage-guided bandit (Thompson over generation strategies).** Per endpoint,
+each probe picks a generation strategy from
+`{schema_valid, schema_boundary, schema_negative, observed, semantic}`. Each
+`(endpoint, strategy)` carries a `Beta(α, β)` posterior with uniform priors
+`α₀ = β₀ = 1` (`exerciser/src/exerciser/bandit.py`). A probe's reward is
+Bernoulli — `1` iff it covered ≥1 previously-uncovered symbol, else `0` — and the
+update is `α += successes, β += failures`, the same Beta/Bernoulli update §2 uses
+for the composition bandit. Selection is Thompson sampling: draw
+`θ_s ~ Beta(α_s, β_s)` for every available strategy and play `argmax_s θ_s`, with
+a seeded RNG so the walk is reproducible (pinned in `tests/test_bandit.py`). The
+loop stops when a whole round covers no new symbol (`rounds` no-improvement
+patience) or the probe budget is spent. Coverage itself is computed by REUSING
+identification's `map_trace_to_tree` — the exerciser never re-implements the
+coverage denominator (`exerciser/src/exerciser/coverage.py`).
+
+**Invariant confidence (Daikon-lite, Laplace).** Over the successful responses of
+an endpoint, candidate invariants (never-null field, stable enum set, numeric
+bound, `len(output) ≤ len(input)`, id monotonicity) are kept only with **support
+≥ 5** observations and **0 counterexamples**; confidence is the **Laplace
+estimate `(s+1)/(n+2)`** over `n` relevant observations (with no counterexamples
+`s = n`). Verified live on the full-stack-fastapi demo:
+`POST /api/v1/password-recovery/{email}` learned `'message' is never null` and
+`len(output) ≤ len(input)` at support 6 → confidence `(6+1)/(6+2) = 7/8 = 0.875`
+(`tests/test_invariants.py` pins the threshold, counterexample rejection, and the
+exact Laplace value).
+
+**Optimization cycle (improve → verify → revert → learn → retry).** Opportunities
+(P95 outliers) are detected from the profile and dispatched as optimization
+episodes through the EXISTING autoTrigger/episode path. The acceptance oracle is
+paired: the full learned behavior suite must still pass byte/shape-identically
+AND the target metric must improve by a minimum practical effect (default 10%)
+with a paired bootstrap 95% CI on the relative improvement that EXCLUDES zero
+(`exerciser/src/exerciser/optimize.py`). On a behavior break or no-gain the change
+auto-reverts, the what-was-tried-and-why-it-failed note threads into the bounded
+retry's context, and the decision is unit-tested including the degrading-reverts
+and retry-informed cases (`tests/test_optimize.py`).
+
+Golden BEHAVIOR baselines reuse §4's exact degraded/same/improved semantics in a
+sibling `.vinv/exercise/baselines/*` store (`exerciser/src/exerciser/baseline.py`,
+a line-for-line port of `probeBaseline.ts` so a Python regression pass and a
+TypeScript probe pass agree on a shape hash). Behavioral failure clusters
+(5xx/crash/invariant-violation) are deduped by the digit-normalized sha-prefix
+signature the rest of Vinv uses and fed into the same issue→episode dispatch.
+
 ## 6. Why symbol-level + runtime-join context is ahead
 
 The chain Vinv serves to an agent is

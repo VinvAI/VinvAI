@@ -53,7 +53,7 @@ suite('Extension Test Suite', () => {
 		}
 	});
 
-	test('every shipped engine, including goal authoring, is known', () => {
+	test('every shipped engine, including goal authoring and the exerciser, is known', () => {
 		assert.deepStrictEqual(ENGINE_NAMES, [
 			'index',
 			'tracelens',
@@ -61,6 +61,7 @@ suite('Extension Test Suite', () => {
 			'bringup',
 			'identification',
 			'goal',
+			'exerciser',
 		]);
 	});
 

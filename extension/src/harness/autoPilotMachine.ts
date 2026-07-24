@@ -72,7 +72,7 @@ export type PilotAction =
 	| { kind: 'done' };
 
 /** Which step a failure happened in (drives budget accounting). */
-export type PilotStep = 'setup' | 'start' | 'insights' | 'probes';
+export type PilotStep = 'setup' | 'start' | 'insights' | 'probes' | 'exercise';
 
 /** What to do about a failed step. */
 export type FailureDecision =
@@ -284,17 +284,28 @@ export type StagePhase = 'pending' | 'done' | 'failed' | 'skipped';
 export interface PipelineLedger {
 	insights: StagePhase;
 	probes: StagePhase;
+	/**
+	 * The behavioral-exercise stage: after probes, the exerciser plans, executes,
+	 * profiles and learns invariants for EVERY discovered endpoint (not just the
+	 * ones traffic happened to hit). Same fix-episode budget accounting as the
+	 * other stages.
+	 */
+	exercise: StagePhase;
 	/** Fix episodes spent on stage failures, keyed by failure signature. */
 	fixEpisodes: Record<string, number>;
 }
 
-/** A fresh ledger: both stages pending. */
+/** A fresh ledger: all post-green stages pending. */
 export function initialPipelineLedger(): PipelineLedger {
-	return { insights: 'pending', probes: 'pending', fixEpisodes: {} };
+	return { insights: 'pending', probes: 'pending', exercise: 'pending', fixEpisodes: {} };
 }
 
 /** The next thing the FULL pipeline (services + post-green stages) should do. */
-export type PipelineAction = PilotAction | { kind: 'insights' } | { kind: 'probes' };
+export type PipelineAction =
+	| PilotAction
+	| { kind: 'insights' }
+	| { kind: 'probes' }
+	| { kind: 'exercise' };
 
 /**
  * The full-pipeline scheduler: services drain first (planNextAction), then —
@@ -323,13 +334,19 @@ export function planPipelineAction(
 	if (ledger.probes === 'pending') {
 		return { kind: 'probes' };
 	}
+	if (ledger.exercise === 'pending') {
+		return { kind: 'exercise' };
+	}
 	return { kind: 'done' };
 }
+
+/** The post-green stages, in the order the scheduler drains them. */
+export type PipelineStage = 'insights' | 'probes' | 'exercise';
 
 /** Records how a stage attempt settled. */
 export function applyStageOutcome(
 	ledger: PipelineLedger,
-	stage: 'insights' | 'probes',
+	stage: PipelineStage,
 	outcome: StagePhase,
 ): PipelineLedger {
 	return { ...ledger, [stage]: outcome };
@@ -343,7 +360,7 @@ export function applyStageOutcome(
  */
 export function decideOnStageFailure(
 	ledger: PipelineLedger,
-	stage: 'insights' | 'probes',
+	stage: PipelineStage,
 	signature: string,
 	budgets: AutoPilotBudgets = DEFAULT_BUDGETS,
 ): { ledger: PipelineLedger; decision: FailureDecision } {

@@ -30,12 +30,14 @@ import { getAutoPilotStatus, onAutoPilotStateChange } from '../harness/autoPilot
 import {
 	getDiffImpact,
 	getEnhanceState,
+	getExerciseState,
 	getInsightState,
 	getIssueList,
 	getPipelinePhase,
 	getProbeState,
 	onDiffImpactChange,
 	onEnhanceStateChange,
+	onExerciseStateChange,
 	onInsightStateChange,
 	onIssueListChange,
 	onPipelinePhaseChange,
@@ -213,6 +215,7 @@ export class FlowStateSource implements vscode.Disposable {
 			onInsightStateChange(() => this.refreshSoon()),
 			onIssueListChange(() => this.refreshSoon()),
 			onProbeStateChange(() => this.refreshSoon()),
+			onExerciseStateChange(() => this.refreshSoon()),
 			onEnhanceStateChange(() => this.refreshSoon()),
 			onDiffImpactChange(() => this.refreshSoon()),
 			onPipelinePhaseChange(() => this.refreshSoon()),
@@ -374,6 +377,22 @@ export class FlowStateSource implements vscode.Disposable {
 							: undefined),
 				})),
 		);
+
+		// Behavioral exercise: coverage/invariants/issues from the exerciser, plus
+		// the scorecard artifact when it has been written.
+		const exercise = getExerciseState();
+		if (exercise.total > 0 || exercise.phase !== 'idle') {
+			const scorecard = path.join(root, '.vinv', 'exercise', 'scorecard.md');
+			facts.exercise = {
+				phase: exercise.phase,
+				label: exercise.label,
+				endpointsCovered: exercise.endpointsCovered,
+				total: exercise.total,
+				invariants: exercise.invariants,
+				issues: exercise.issues,
+				scorecardPath: fs.existsSync(scorecard) ? scorecard : undefined,
+			};
+		}
 
 		// Enhancement is once-per-epoch and terminal: after a run (or while one
 		// is in flight) the remaining ambiguity is a recorded fact, not a nag —
