@@ -228,7 +228,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 
 ## 🛠 MCP tools reference
 
-<details><summary><b>All 10 tools across both servers</b></summary>
+<details><summary><b>10 tools, 19 capabilities — few names on purpose (agents pick better from short menus; the session tool multiplexes)</b></summary>
 
 **`vinv-index`** — the codebase and the session:
 
@@ -236,7 +236,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 |---|---|
 | `vinv_query` | Ranked symbols with paths + a decision id — any by-meaning search, before grep |
 | `vinv_feedback` | ack — reward −1..1 after acting on results; trains retrieval |
-| `vinv_session` | trajectory · status · issues · hotspots · memory_trends · cache_candidates; actions `fix` · `run_sweep` · `set_goal` · `set_budget` |
+| `vinv_session` | **10 actions in one tool** — read: trajectory · status · issues · hotspots · memory_trends · cache_candidates; act: `fix` (dispatch an evidence-seeded episode) · `run_sweep` · `set_goal` · `set_budget` — your agent can drive the whole verify/optimize loop from chat |
 
 **`vinv-runtime`** — the captured runs (read-only, provenance-stamped):
 
