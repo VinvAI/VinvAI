@@ -9,11 +9,16 @@
 
 # Dev tooling shared by every member's test suite; installed by `uv sync`
 # (dev group is on by default), so `uv run pytest` works from any package dir.
+# ruff belongs here too: every member declares it, but member dev-groups are
+# NOT installed by a root `uv sync`, so `uv run ruff` — what the lint workflow
+# and any developer runs from the repo root — had no binary to spawn. Pinned
+# identically to the members so root and per-package linting agree.
 [dependency-groups]
 dev = [
     "pytest>=8.0.0,<10.0.0",
     "pytest-cov>=5.0.0,<6.0.0",
     "hypothesis>=6.100.0,<7.0.0",
+    "ruff>=0.6.0,<0.9.0",
 ]
 
 [tool.uv.workspace]
