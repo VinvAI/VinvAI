@@ -33,16 +33,29 @@ _log = logging.getLogger("tracelens.diag")
 _run_state: dict[str, object] = {}
 
 # Observability presets. A bare `tracelens run` uses ``standard``. All collection now flows
-# through the single AST-rewrite path (``wrap_call``), which captures BOTH latency (span
-# duration) and memory (``tracelens.mem_delta_bytes``) per function. ``minimal`` drops the
-# extra axes (memory + determinism capture) for the lowest-overhead bare-span baseline;
-# ``standard`` keeps memory but requires determinism to be explicitly requested because
-# RNG payloads can contain credentials; ``full`` enables both for controlled experiments. The
-# heavy out-of-process/sampling profilers (CPU/alloc/gc/rss sampler, eBPF) have been removed.
-# Granular flags (``--memory`` / ``--capture-determinism``) override the preset per axis.
+# through the single AST-rewrite path (``wrap_call``), which captures latency, cpu/blocked
+# and (when the memory axis is on) ``tracelens.mem_delta_bytes`` per function.
+#
+# Latency honesty (confirmed observer-effect audit): ``tracemalloc`` hooks EVERY
+# allocation the user's own code makes, so its cost lands inside the timed window
+# and — unlike enrichment, which wrap_call keeps outside the perf-counter pair —
+# cannot be subtracted out. Sampling it per-call is not viable either: the cost
+# is the process-global allocation hook, not the counter read. The chosen design
+# is therefore: ``standard`` keeps tracemalloc OFF so its duration_ms reflects
+# uninstrumented allocation behaviour, and memory-focused capture opts in via the
+# ``memory`` preset (or the granular ``--memory`` flag / ``TRACELENS_MEMORY=1``),
+# which retains full tracemalloc. Every run's startup ``tracer_calibration``
+# header records which axes were live, so a trace is always self-describing
+# about the overhead regime it was captured under.
+#
+# ``minimal`` remains the lowest-overhead bare-span baseline; ``full`` enables
+# memory + determinism for controlled experiments (determinism stays explicit
+# elsewhere because RNG payloads can contain credentials). Granular flags
+# (``--memory`` / ``--capture-determinism``) override the preset per axis.
 _PRESETS: dict[str, dict[str, object]] = {
     "minimal": {"determinism": False, "memory": False},
-    "standard": {"determinism": False, "memory": True},
+    "standard": {"determinism": False, "memory": False},
+    "memory": {"determinism": False, "memory": True},
     "full": {"determinism": True, "memory": True},
 }
 _DEFAULT_PRESET = "standard"
@@ -147,8 +160,9 @@ def _parse_run_flags(
     accept_fork_loss, memory_enabled, capture_determinism)``.
 
     ``memory_enabled`` / ``capture_determinism`` are resolved from the active preset
-    (``--minimal`` / ``--standard`` (default) / ``--full``); a matching granular flag or env
-    var overrides the preset for just that axis."""
+    (``--minimal`` / ``--standard`` (default) / ``--full``, or ``TRACELENS_PRESET`` —
+    which also accepts ``memory``, the memory-focused preset with full tracemalloc);
+    a matching granular flag or env var overrides the preset for just that axis."""
     output: str | None = None
     targets: list[str] = []
     sample = "1.0"
@@ -1181,6 +1195,19 @@ def run_main(argv: list[str] | None = None) -> None:
                 f"to {output}: {exc.strerror or exc}"
             ) from None
         _run_state["determinism_captured"] = True
+
+    # Observer-effect self-calibration: time wrapped no-op calls through the real
+    # span pipeline under the axes JUST configured above (memory/determinism), and
+    # write the per-call overhead distribution as a tracer_calibration header line
+    # in the trace (surfaced into summary.json by summarize_jsonl). Must run after
+    # the axes are set and before the target executes.
+    from tracelens.launcher import calibration as _calibration_mod
+
+    _run_state["tracer_calibration"] = _calibration_mod.run_calibration(
+        output,
+        memory_enabled=memory_enabled,
+        capture_determinism=capture_determinism,
+    )
 
     # T1.3 — pre-import scan of the universe of instrumentable functions.
     coverage = (

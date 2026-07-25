@@ -58,12 +58,18 @@ def run_cmd(args: tuple[str, ...]) -> None:
     \b
     Observability presets (a bare `run` uses --standard; pick at most one):
       --standard                     DEFAULT. AST + OTel spans capturing per-function latency
-                                     AND per-function memory (tracelens.mem_delta_bytes), plus
-                                     determinism capture.
+                                     (plus cpu/blocked split). Latency-honest: tracemalloc
+                                     stays OFF because its allocation hook taxes the user's
+                                     own code inside the timed window. A tracer_calibration
+                                     header line records the measured per-call overhead and
+                                     the active axes for every run.
       --minimal                      Bare AST + OTel spans (latency only). No memory, no
                                      determinism capture. Lowest overhead.
-      --full                         Same axes as --standard (kept for compatibility).
-      Granular flags below override the preset per-axis (e.g. --standard --no-memory).
+      --full                         Memory (full tracemalloc) AND determinism capture, for
+                                     controlled experiments.
+      TRACELENS_PRESET=memory        Memory-focused preset: full tracemalloc, no determinism
+                                     (same axes as `--memory` on the default preset).
+      Granular flags below override the preset per-axis (e.g. --standard --memory).
 
     \b
     Flags (all optional except --target-package for useful coverage):
@@ -90,22 +96,24 @@ def run_cmd(args: tuple[str, ...]) -> None:
                                      the preset). Captured via tracemalloc byte deltas around
                                      each instrumented call and emitted as `mem_delta_bytes` on
                                      every exit span — the same AST-rewrite path as latency.
-                                     On by default (standard/full); off for minimal.
+                                     On for full and the memory preset; off for standard and
+                                     minimal (tracemalloc distorts user-code latency).
       --capture-determinism          Force clock + RNG capture on (time.* / random.* / uuid4 /
                                      secrets per request) to a sidecar <output>.determinism.jsonl.
       --no-capture-determinism       Force determinism capture off (overrides the preset).
 
     \b
     Examples:
-      # Standard (default): rich, zero-distortion. No flags needed:
+      # Standard (default): latency-honest capture. No flags needed:
       tracelens run --target-package myapp -- \\
         python -m uvicorn myapp.api:app --host 0.0.0.0 --port 8000
 
-      # Bare spans only, latency without memory (lowest overhead):
+      # Bare spans only (lowest overhead):
       tracelens run -t myapp --minimal -- python -m myapp.main
 
-      # Latency only, but keep determinism capture:
-      tracelens run -t myapp --no-memory -- python -m myapp.main
+      # Memory-focused capture (full tracemalloc; distorts latency, and the
+      # tracer_calibration header says so):
+      tracelens run -t myapp --memory -- python -m myapp.main
 
       # Stream JSONL to stdout instead of a file:
       tracelens run -t myapp -o - -- python -m myapp.main
