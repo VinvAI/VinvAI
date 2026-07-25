@@ -528,6 +528,63 @@ export async function offerEpisodeForHotspots(
 }
 
 /**
+ * Scoped sibling of offerEpisodeForHotspots: dispatches an optimization episode
+ * for ONE symbol (the row the user clicked in the Optimization panel). A
+ * single-symbol pack is smaller, faster, and — the point of the predicted→proven
+ * loop — cleanly attributable: the after-run's measured delta belongs to this
+ * one change, not a batch. Falls back to the whole-Pareto sweep when the row
+ * carries no runtime evidence (nothing to scope to).
+ */
+export async function offerEpisodeForHotspot(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	row: number,
+): Promise<void> {
+	let node: { name: string; file: string; start_line: number } | undefined;
+	let totalMs = 0;
+	let calls = 0;
+	try {
+		const nodes = loadNodes(indexStoreDir(workspaceRoot));
+		const overlay = loadRuntimeOverlay(workspaceRoot, nodes);
+		node = nodes[row];
+		const rt = overlay[row];
+		totalMs = rt?.total_ms ?? 0;
+		calls = rt?.calls ?? 0;
+	} catch {
+		return;
+	}
+	if (!node) {
+		// Row is not resolvable against the current store — do the safe thing.
+		await offerEpisodeForHotspots(context, workspaceRoot);
+		return;
+	}
+	const task: EpisodeTask = {
+		kind: 'general',
+		trigger: 'smoke-errors',
+		title: `Optimize ${node.name}`,
+		issue:
+			`The captured runtime trace spends significant time in \`${node.name}\` ` +
+			`at ${node.file}:${node.start_line}` +
+			(totalMs > 0 ? ` — ${Math.round(totalMs)}ms across ${calls} call(s).` : '.') +
+			'\n\nDecide whether the win is a better algorithm, caching, batching, or ' +
+			'making the work async/parallel — and change only what the evidence ' +
+			'supports. Do not alter behavior. Re-run the same flow afterwards so a ' +
+			'fresh trace can show the time dropped.',
+		seedRows: [row],
+		successCriteria: [
+			`\`${node.name}\` spends measurably less total time on the same exercised flow`,
+			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
+		],
+	};
+	await offerOrDispatch(
+		context,
+		workspaceRoot,
+		task,
+		`optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`,
+	);
+}
+
+/**
  * Memory sweep: symbols that retain memory in EVERY capture session with
  * a positive Theil–Sen trend become a leak-fix episode, seeded with the
  * suspects so the pack's graph slice surrounds the retention sites.

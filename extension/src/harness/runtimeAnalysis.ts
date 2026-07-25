@@ -259,6 +259,11 @@ interface ExitEvent {
 	error_type?: string | null;
 	determinism_sources?: unknown[];
 	args_hash?: string;
+	/** Request-tree fields (present on every raw-capture event). */
+	request_id?: string;
+	thread_id?: number | string;
+	ts?: string;
+	side_effects?: unknown[];
 }
 
 function* eventsOf(file: string): Generator<ExitEvent> {
@@ -427,4 +432,189 @@ export function collectCacheCandidates(
 		out.push({ ...c, share: c.reclaimable_ms / total });
 	}
 	return out;
+}
+
+/** One symbol's cost in ONE capture session — the unit the proof loop diffs. */
+export interface SymbolSessionTiming {
+	/** Capture directory grouping this run. */
+	session: string;
+	/** Wall time this symbol accumulated in this session (sum of exit durations). */
+	total_ms: number;
+	/** Completed calls (exits) observed for this symbol in this session. */
+	calls: number;
+}
+
+/**
+ * Per-symbol wall time and call count of SUCCESSFUL calls, split BY SESSION and
+ * ordered oldest → newest. Calls that raised are excluded — their time measures
+ * a failure, not optimizable latency. The runtime overlay (loadRuntimeOverlay)
+ * reports LIFETIME totals that only ever grow, so it cannot answer "did this
+ * symbol get faster after the fix"; the predicted→proven loop needs per-session
+ * cost to diff a before-run against an after-run. Rows join through the same
+ * segment-aligned qualname matcher as every other cross-session analysis;
+ * ambiguous names never contribute (a mis-joined timing would corrupt the
+ * measured delta).
+ */
+export function collectSymbolTimings(
+	workspaceRoot: string,
+	nodes: GraphNode[],
+): Map<number, SymbolSessionTiming[]> {
+	const rowsFor = buildComponentMatcher(nodes);
+	// row -> session -> {ms, calls}
+	const perRow = new Map<number, Map<string, { ms: number; calls: number }>>();
+	const sessions = sessionTraces(workspaceRoot);
+	// Session identity for the proof loop must change when a run is RE-TRACED.
+	// A service commonly overwrites the same capture directory in place (same
+	// dirname, new trace.jsonl), so the directory alone cannot tell "the fix's
+	// after-run" from "the same run I already measured" — the before/after diff
+	// would never fire and the candidate would stick on 'dispatched' forever.
+	// Folding the trace mtime into the key makes every genuine re-trace a new
+	// session, so reconcileOutcome sees the after-run the moment it lands.
+	const keyOf = (s: SessionTrace): string => `${s.session}@${Math.round(s.mtimeMs)}`;
+	const sessionOrder = [...new Set(sessions.map(keyOf))];
+	for (const s of sessions) {
+		const sessionKey = keyOf(s);
+		for (const ev of eventsOf(s.file)) {
+			// Exit carries the duration AND marks one completed call — counting
+			// exits (not enters) keeps ms and calls on the same event so a torn
+			// enter/exit pair never inflates one without the other.
+			if (ev.event !== 'exit' || !ev.component) {
+				continue;
+			}
+			// Skip calls that RAISED. A function's time on a failing call measures
+			// the failure/timeout (a missing token, an unreachable host), not
+			// optimizable work — treating it as latency flags an error path as a
+			// hotspot and hands the agent an un-optimizable target. Errors are the
+			// runtime-error trigger's job; the optimizer only ranks SUCCESSFUL time.
+			const errored = ev.error_type && ev.error_type !== 'None';
+			if (errored) {
+				continue;
+			}
+			const rows = rowsFor(ev.component);
+			if (rows.length !== 1) {
+				continue; // ambiguous joins never contribute evidence
+			}
+			const bySession = perRow.get(rows[0]) ?? new Map<string, { ms: number; calls: number }>();
+			const acc = bySession.get(sessionKey) ?? { ms: 0, calls: 0 };
+			acc.ms += Number(ev.duration_ms ?? 0) || 0;
+			acc.calls += 1;
+			bySession.set(sessionKey, acc);
+			perRow.set(rows[0], bySession);
+		}
+	}
+	const out = new Map<number, SymbolSessionTiming[]>();
+	for (const [row, bySession] of perRow) {
+		const ordered = sessionOrder
+			.filter((sess) => bySession.has(sess))
+			.map((sess) => {
+				const acc = bySession.get(sess) as { ms: number; calls: number };
+				return { session: sess, total_ms: acc.ms, calls: acc.calls };
+			});
+		if (ordered.length > 0) {
+			out.set(row, ordered);
+		}
+	}
+	return out;
+}
+
+/**
+ * One call in the reconstructed per-request call tree. Unlike the aggregated
+ * timings, spans preserve STRUCTURE (who called whom, in what order, for how
+ * long), which is what the request-shaped detectors need: N+1 (a callee
+ * repeated under one parent), staircase (independent I/O children run
+ * sequentially), and self-time / critical path (time spent IN a symbol vs its
+ * callees).
+ */
+export interface TraceSpan {
+	/** Resolved graph row, or null when the component didn't join a symbol. */
+	row: number | null;
+	component: string;
+	/** Wall-clock start (ms since epoch) from the enter event. */
+	startMs: number;
+	/** Duration from the exit event. */
+	durationMs: number;
+	/** This call raised. */
+	errored: boolean;
+	/** The exit recorded I/O side effects or I/O determinism sources. */
+	io: boolean;
+	children: TraceSpan[];
+}
+
+function parseTs(ts: string | undefined): number {
+	if (typeof ts !== 'string') {
+		return 0;
+	}
+	const t = Date.parse(ts);
+	return Number.isFinite(t) ? t : 0;
+}
+
+function isIoExit(ev: ExitEvent): boolean {
+	if (Array.isArray(ev.side_effects) && ev.side_effects.length > 0) {
+		return true;
+	}
+	return (
+		Array.isArray(ev.determinism_sources) &&
+		ev.determinism_sources.some((d) => /io|net|read|socket|http|file|db|query/i.test(String(d)))
+	);
+}
+
+/**
+ * Reconstructs the per-request call forest from the raw captures. Events are
+ * paired enter→exit on a stack keyed by (request_id, thread_id); a missing exit
+ * truncates cleanly rather than corrupting the tree. Returns every ROOT span
+ * across all sessions (children hang off their parents). Rows are joined with
+ * the same segment-aligned matcher as everywhere else; an unjoined component
+ * keeps `row: null` so its time still counts toward a parent's structure.
+ */
+export function collectRequestSpans(workspaceRoot: string, nodes: GraphNode[]): TraceSpan[] {
+	const rowsFor = buildComponentMatcher(nodes);
+	const resolve = (component: string): number | null => {
+		const rows = rowsFor(component);
+		return rows.length === 1 ? rows[0] : null;
+	};
+	const roots: TraceSpan[] = [];
+	for (const s of sessionTraces(workspaceRoot)) {
+		const stacks = new Map<string, TraceSpan[]>();
+		for (const ev of eventsOf(s.file)) {
+			if (!ev.component) {
+				continue;
+			}
+			const key = `${ev.request_id ?? ''} ${ev.thread_id ?? ''}`;
+			const stack = stacks.get(key) ?? [];
+			if (ev.event === 'enter') {
+				const span: TraceSpan = {
+					row: resolve(ev.component),
+					component: ev.component,
+					startMs: parseTs(ev.ts),
+					durationMs: 0,
+					errored: false,
+					io: false,
+					children: [],
+				};
+				const parent = stack[stack.length - 1];
+				if (parent) {
+					parent.children.push(span);
+				} else {
+					roots.push(span);
+				}
+				stack.push(span);
+				stacks.set(key, stack);
+			} else if (ev.event === 'exit') {
+				// Match the nearest open span of the same component from the top;
+				// truncate above it so a dropped exit can't wedge the stack.
+				for (let i = stack.length - 1; i >= 0; i -= 1) {
+					if (stack[i].component === ev.component) {
+						const span = stack[i];
+						span.durationMs = Number(ev.duration_ms ?? 0) || 0;
+						span.errored = Boolean(ev.error_type && ev.error_type !== 'None');
+						span.io = isIoExit(ev);
+						stack.length = i;
+						break;
+					}
+				}
+				stacks.set(key, stack);
+			}
+		}
+	}
+	return roots;
 }

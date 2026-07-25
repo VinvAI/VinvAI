@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "Your agent says done — Vinv runs the code and checks. Traces a real run, exercises every endpoint, grades fixes against tests the agent never sees. Runtime context bandits: commodity models out-fix frontier ones.",
-	"version": "0.0.10",
+	"version": "0.0.11",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
@@ -119,6 +119,16 @@
 				"selector": [
 					{
 						"filenamePattern": "**/.vinv/reports/findings.json"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "vinv.optimizationReport",
+				"displayName": "Vinv Optimize",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/optimization.json"
 					}
 				],
 				"priority": "default"
@@ -388,6 +398,24 @@
 				"icon": "$(dashboard)"
 			},
 			{
+				"command": "vinv-vs.optimizeHotspot",
+				"title": "Optimize This Hotspot (Predicted → Proven)",
+				"category": "Vinv",
+				"icon": "$(rocket)"
+			},
+			{
+				"command": "vinv-vs.openOptimization",
+				"title": "Open Optimize Panel (Recoverable Time)",
+				"category": "Vinv",
+				"icon": "$(rocket)"
+			},
+			{
+				"command": "vinv-vs.measureOptimization",
+				"title": "Measure Optimization (Re-trace the Flow)",
+				"category": "Vinv",
+				"icon": "$(pulse)"
+			},
+			{
 				"command": "vinv-vs.showTrajectory",
 				"title": "Show Trajectory (Episodes, Rewards, Goals)",
 				"category": "Vinv",
@@ -443,6 +471,12 @@
 			}
 		],
 		"menus": {
+			"commandPalette": [
+				{
+					"command": "vinv-vs.optimizeHotspot",
+					"when": "false"
+				}
+			],
 			"view/title": [
 				{
 					"command": "vinv-vs.stopDiscovery",
@@ -456,6 +490,11 @@
 				},
 				{
 					"command": "vinv-vs.openGraphExplorer",
+					"when": "view == vinv.flow",
+					"group": "navigation@1"
+				},
+				{
+					"command": "vinv-vs.openOptimization",
 					"when": "view == vinv.flow",
 					"group": "navigation@1"
 				},

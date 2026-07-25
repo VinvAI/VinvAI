@@ -7,11 +7,12 @@ import { ServicesProvider } from '../views/servicesView';
 import { openConfigureForm } from '../config/configureProject';
 import { openTracelensTerminal, openIndexTerminal } from '../tracelens/tracelens';
 import { runDiscovery, stopDiscovery } from '../index/discovery';
-import { readServices, isServiceStarted } from '../bringup/bringup';
+import { readServices, isServiceStarted, readStartCommands } from '../bringup/bringup';
 import { offerHintedRetry } from '../bringup/startHint';
 import { runBringupStartViaHarness } from '../harness/harnessRunner';
 import { pickHarness } from '../harness/harnessPicker';
-import { startService, stopService } from '../bringup/serviceRunner';
+import { startService, stopService, isServiceRunning } from '../bringup/serviceRunner';
+import { findTraceFiles } from '../graph/indexGraph';
 import { openCallTree } from '../identification/callTreeView';
 import { openJourney } from '../views/journeyView';
 import { openFindings } from '../views/findingsView';
@@ -25,10 +26,14 @@ import {
 	offerEpisodeForBringupFailure,
 	offerEpisodeForCacheCandidates,
 	offerEpisodeForHotspots,
+	offerEpisodeForHotspot,
 	offerEpisodeForMemoryTrends,
 } from '../harness/autoTrigger';
+import { optimizationSourceInstance } from '../views/optimizationSource';
+import { openOptimizationReport } from '../views/optimizationReportView';
 import {
 	disputeVerifiedEpisode,
+	isEpisodeRunning,
 	runEpisode,
 	resumeJudgment,
 	type EpisodeTask,
@@ -596,6 +601,134 @@ export function registerCommands(
 				return;
 			}
 			void offerEpisodeForHotspots(context, folder.uri.fsPath);
+		}),
+		// Scoped optimization: one symbol (the row clicked in the Optimization
+		// panel). Freezes the candidate's before-cost in the source BEFORE
+		// dispatching, so the predicted→proven loop measures the change against
+		// the pre-fix trace. No row → fall back to the whole-Pareto sweep.
+		vscode.commands.registerCommand('vinv-vs.optimizeHotspot', (row?: number) => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
+				return;
+			}
+			if (typeof row !== 'number') {
+				void offerEpisodeForHotspots(context, folder.uri.fsPath);
+				return;
+			}
+			// Only ONE episode runs at a time. Without this guard, clicking a
+			// second hotspot while the first is in flight stamped it 'dispatched'
+			// in the UI while offerOrDispatch silently refused it (busy-lock) — a
+			// phantom "Agent optimizing…" that never actually ran. Refuse loudly
+			// instead, and do not freeze a before-cost for a run that won't happen.
+			if (isEpisodeRunning()) {
+				void vscode.window.showWarningMessage(
+					'Vinv: an optimization episode is already running — wait for it to finish before optimizing another hotspot.',
+				);
+				return;
+			}
+			optimizationSourceInstance()?.markRowDispatched(folder.uri.fsPath, row);
+			void offerEpisodeForHotspot(context, folder.uri.fsPath, row);
+		}),
+		// Opens the full-page Optimization report (the evidence surface: ranked
+		// recoverable time + predicted→proven verdicts). The sidebar view is the
+		// ambient backlog; this is the tab you drag into chat.
+		vscode.commands.registerCommand('vinv-vs.openOptimization', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
+				return;
+			}
+			void openOptimizationReport(folder.uri.fsPath);
+		}),
+		// Measure now: re-run the recorded flow under tracing so a FRESH capture
+		// lands, which the OptimizationSource watcher picks up and reconciles into
+		// a measured before/after. This is the on-demand "prove it" step — the
+		// optimization episode itself verifies correctness (tests) but never
+		// re-traces, so the after-latency is only ever captured by re-running the
+		// flow here (or by the user running it by hand).
+		vscode.commands.registerCommand('vinv-vs.measureOptimization', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
+				return;
+			}
+			const root = folder.uri.fsPath;
+			// A "runnable" flow needs a VERIFIED start command on disk — that is the
+			// tracelens-wrapped command that produced the original capture.
+			const runnable = readServices(root).filter((s) => readStartCommands(root, s.name).length > 0);
+			if (runnable.length === 0) {
+				void vscode.window.showWarningMessage(
+					'Vinv: no service with a verified start command — complete bring-up (Discover → Services) so a runnable flow is recorded, then Measure again.',
+				);
+				return;
+			}
+			// Snapshot every trace's mtime; a fresh capture (mtime advanced or a new
+			// file) is the TRUE signal that a re-exercise happened — not a service
+			// verdict. Booting alone captures start-up, not the flow, so we drive
+			// traffic with runProbePass against the running service.
+			const traceMtimes = (): Map<string, number> => {
+				const m = new Map<string, number>();
+				for (const f of findTraceFiles(path.join(root, '.vinv', 'captures'))) {
+					try {
+						m.set(f, fs.statSync(f).mtimeMs);
+					} catch {
+						// vanished between listing and stat — ignore
+					}
+				}
+				return m;
+			};
+			await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: 'Vinv: re-tracing the flow to measure the optimization…',
+					cancellable: true,
+				},
+				async (progress, token) => {
+					const before = traceMtimes();
+					for (const s of runnable) {
+						if (token.isCancellationRequested) {
+							return;
+						}
+						if (!isServiceRunning(s.name)) {
+							progress.report({ message: `starting ${s.name} under tracing…` });
+							startService(root, s.name);
+							// Bounded wait for the service to come up before probing it.
+							for (let i = 0; i < 40 && !isServiceRunning(s.name); i += 1) {
+								if (token.isCancellationRequested) {
+									return;
+								}
+								await new Promise((r) => setTimeout(r, 500));
+							}
+						}
+					}
+					progress.report({ message: 'exercising the flow under tracing…' });
+					// runProbePass replays the captured request shapes against the live
+					// (tracelens-wrapped) service, landing fresh spans in .vinv/captures.
+					try {
+						await runProbePass(context, root, {});
+					} catch {
+						// Best-effort: even a partial exercise may have refreshed the trace.
+					}
+					const after = traceMtimes();
+					let refreshed = false;
+					for (const [f, mt] of after) {
+						if (!before.has(f) || (before.get(f) ?? 0) < mt) {
+							refreshed = true;
+							break;
+						}
+					}
+					if (refreshed) {
+						void vscode.window.showInformationMessage(
+							'Vinv: re-traced. The Optimize panel updates as the new capture is measured — a proven speedup needs the flow to run without new errors.',
+						);
+					} else {
+						void vscode.window.showWarningMessage(
+							'Vinv: re-ran the service but no fresh trace was captured. The flow may need config (e.g. an API token) or has no exercisable endpoints yet — start the service, drive the flow, then Measure again.',
+						);
+					}
+				},
+			);
 		}),
 		// Memory sweep: symbols retaining memory every session with a positive
 		// Theil–Sen trend become a leak-investigation episode.
