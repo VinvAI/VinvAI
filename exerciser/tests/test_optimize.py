@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from exerciser import store
 from exerciser.optimize import (
     MetricComparison,
     OptimizeAttempt,
     decide_optimization,
     detect_opportunities,
     paired_bootstrap_improvement,
+    policy_path,
 )
 
 
@@ -36,7 +38,7 @@ def test_noisy_no_effect_ci_includes_zero():
     assert cmp.ci_low <= 0.0 <= cmp.ci_high
 
 
-def _ep(api_id: str, p95: float, observed: bool = True) -> dict:
+def _ep_loo(api_id: str, p95: float, observed: bool = True) -> dict:
     return {"api_id": api_id, "method": "GET", "path": f"/{api_id.lower()}",
             "latency": {"p95_ms": p95}, "coverage": {"handler_observed": observed}}
 
@@ -44,7 +46,7 @@ def _ep(api_id: str, p95: float, observed: bool = True) -> dict:
 def test_detect_opportunities_relative_outlier():
     # Leave-one-out: 500ms vs the other endpoint's 10ms is an outlier even
     # with only two endpoints (the outlier cannot drag the median toward itself).
-    profile = {"endpoints": [_ep("A", 500.0), _ep("B", 10.0)]}
+    profile = {"endpoints": [_ep_loo("A", 500.0), _ep_loo("B", 10.0)]}
     ops = detect_opportunities(profile)
     assert len(ops) == 1 and ops[0].endpoint_id == "A"
     assert "median P95" in ops[0].detail
@@ -53,7 +55,7 @@ def test_detect_opportunities_relative_outlier():
 def test_detect_opportunities_local_fast_service():
     # The absolute-200ms bug: on a local service where everything is single-digit
     # ms, a 60ms endpoint IS the opportunity — the old floor returned [] forever.
-    profile = {"endpoints": [_ep("A", 5.0), _ep("B", 4.0), _ep("C", 60.0), _ep("D", 6.0)]}
+    profile = {"endpoints": [_ep_loo("A", 5.0), _ep_loo("B", 4.0), _ep_loo("C", 60.0), _ep_loo("D", 6.0)]}
     ops = detect_opportunities(profile)
     assert [o.endpoint_id for o in ops] == ["C"]
 
@@ -61,14 +63,69 @@ def test_detect_opportunities_local_fast_service():
 def test_detect_opportunities_uniformly_slow_service_has_none():
     # A uniformly slow service has a baseline, not an outlier — nothing to
     # single out even though every endpoint exceeds the old 200ms threshold.
-    profile = {"endpoints": [_ep("A", 300.0), _ep("B", 320.0), _ep("C", 340.0)]}
+    profile = {"endpoints": [_ep_loo("A", 300.0), _ep_loo("B", 320.0), _ep_loo("C", 340.0)]}
     assert detect_opportunities(profile) == []
 
 
 def test_detect_opportunities_needs_observed_handler_and_peers():
     # Unobserved handlers never contribute; a lone endpoint has no distribution.
-    profile = {"endpoints": [_ep("A", 500.0), _ep("B", 10.0, observed=False)]}
+    profile = {"endpoints": [_ep_loo("A", 500.0), _ep_loo("B", 10.0, observed=False)]}
     assert detect_opportunities(profile) == []
+
+def _ep(api_id, path, p95, observed=True):
+    return {"api_id": api_id, "method": "GET", "path": path,
+            "latency": {"p95_ms": p95}, "coverage": {"handler_observed": observed}}
+
+
+def test_detect_opportunities_relative_to_trace():
+    # 500ms vs a rest-of-trace median of ~10ms — an outlier at the default
+    # factor 3.0. NO absolute ms threshold anywhere.
+    profile = {"endpoints": [
+        _ep("A", "/slow", 500.0), _ep("B", "/fast", 10.0),
+        _ep("C", "/fast2", 12.0), _ep("D", "/unseen", 900.0, observed=False),
+    ]}
+    ops = detect_opportunities(profile)
+    assert [o.endpoint_id for o in ops] == ["A"]
+    assert "median P95" in ops[0].detail
+
+
+def test_detect_uniformly_slow_trace_yields_no_seeds():
+    # Everything equally slow → nothing is an outlier RELATIVE to the trace.
+    profile = {"endpoints": [_ep(f"E{i}", f"/e{i}", 400.0) for i in range(4)]}
+    assert detect_opportunities(profile) == []
+
+
+def test_detect_single_endpoint_has_no_reference():
+    assert detect_opportunities({"endpoints": [_ep("A", "/only", 999.0)]}) == []
+
+
+def test_outlier_factor_policy_override(tmp_path):
+    profile = {"repo": str(tmp_path), "endpoints": [
+        _ep("A", "/slow", 40.0), _ep("B", "/fast", 10.0), _ep("C", "/fast2", 12.0),
+    ]}
+    # Default factor 3.0: 40 >= 3 * median(10, 12) → detected.
+    assert [o.endpoint_id for o in detect_opportunities(profile)] == ["A"]
+    # The learned policy tightens the factor; detection reads it via the
+    # profile's own repo field — the build_profile call site needs no plumbing.
+    store.write_json(policy_path(tmp_path), {"optimize.outlier_factor": 5.0})
+    assert detect_opportunities(profile) == []
+    # An explicit argument still beats the policy (tests / callers with intent).
+    assert len(detect_opportunities(profile, outlier_factor=2.0)) == 1
+
+
+def test_min_effect_policy_override(tmp_path):
+    before = [100.0] * 40
+    after = [70.0] * 40  # a clear 30% improvement
+    assert paired_bootstrap_improvement(before, after, repo=tmp_path, seed=1).improved
+    store.write_json(policy_path(tmp_path), {"optimize.min_effect": 0.5})
+    assert not paired_bootstrap_improvement(before, after, repo=tmp_path, seed=1).improved
+
+
+def test_malformed_policy_falls_back_to_defaults(tmp_path):
+    store.write_json(policy_path(tmp_path), {"optimize.min_effect": "not-a-number"})
+    before = [100.0] * 40
+    after = [70.0] * 40
+    assert paired_bootstrap_improvement(before, after, repo=tmp_path, seed=1).improved
 
 
 def test_accept_when_improved_and_suite_passes():

@@ -99,6 +99,90 @@ def test_teardown_without_response_ids_is_a_noop():
     assert cleaned == 0 and not creation[0]["cleaned"]
 
 
+def test_teardown_stamps_attempt_counts_and_status():
+    creation = state.record_creations([_exec_row(body={"id": "user-uuid-1"})])
+    endpoints = [{"method": "DELETE", "path": "/users/{id}"}]
+    state.attempt_teardown(creation, endpoints, "http://x",
+                           lambda *a, **k: _probe(404))
+    assert creation[0]["teardown_attempts"] == 1
+    assert creation[0]["teardown_status"] == "failed"
+    state.attempt_teardown(creation, endpoints, "http://x",
+                           lambda *a, **k: _probe(404))
+    assert creation[0]["teardown_attempts"] == 2
+    assert creation[0]["teardown_status"] == "failed-again"
+    state.attempt_teardown(creation, endpoints, "http://x",
+                           lambda *a, **k: _probe(200))
+    assert creation[0]["teardown_attempts"] == 3
+    assert creation[0]["teardown_status"] == "cleaned"
+
+
+# ---- run-start re-attempt of prior pollution --------------------------------
+
+def test_reattempt_teardown_cleans_prior_runs_rows(tmp_path):
+    state.append_ledger(tmp_path, [
+        {"endpoint_id": "POST_users", "method": "POST", "path": "/users/signup",
+         "planted": ["stale@x.test"], "response_values": ["stale-uuid-1"],
+         "cleaned": False, "teardown_attempts": 1, "teardown_status": "failed"},
+        {"endpoint_id": "POST_done", "method": "POST", "path": "/users/signup",
+         "planted": ["done@x.test"], "response_values": ["done-uuid-9"],
+         "cleaned": True},
+    ])
+    auth_calls = []
+
+    def auth_fn():
+        auth_calls.append(1)
+        return [{"Authorization": "Bearer fresh-tok"}]
+
+    def probe(base, method, path, *, path_params=None, headers=None, **kw):
+        # Only the freshly-captured credentials can delete the stale row.
+        if headers and (path_params or {}).get("user_id") == "stale-uuid-1":
+            return _probe(200)
+        return _probe(401 if not headers else 404)
+
+    summary = state.reattempt_teardown(
+        tmp_path, [{"method": "DELETE", "path": "/users/{user_id}"}],
+        "http://x", probe, auth_headers_fn=auth_fn,
+    )
+    assert summary == {"reattempted": 1, "cleaned": 1}
+    assert auth_calls == [1], "credentials are earned once, lazily"
+    ledger = store.read_jsonl(state.ledger_path(tmp_path))
+    stale = next(r for r in ledger if r["endpoint_id"] == "POST_users")
+    assert stale["cleaned"] is True
+    assert stale["teardown_status"] == "cleaned"
+    assert stale["teardown_attempts"] == 2
+    # And the planted values stop polluting the drift classifier.
+    assert "stale@x.test" not in state.planted_values(tmp_path)
+
+
+def test_reattempt_teardown_marks_failed_again_and_skips_when_clean(tmp_path):
+    state.append_ledger(tmp_path, [
+        {"endpoint_id": "POST_users", "method": "POST", "path": "/users/signup",
+         "planted": ["stuck@x.test"], "response_values": ["stuck-uuid-2"],
+         "cleaned": False, "teardown_attempts": 1, "teardown_status": "failed"},
+    ])
+    summary = state.reattempt_teardown(
+        tmp_path, [{"method": "DELETE", "path": "/users/{user_id}"}],
+        "http://x", lambda *a, **k: _probe(404),
+    )
+    assert summary == {"reattempted": 1, "cleaned": 0}
+    row = store.read_jsonl(state.ledger_path(tmp_path))[0]
+    assert row["teardown_status"] == "failed-again"
+    assert row["teardown_attempts"] == 2
+
+    # An all-clean ledger short-circuits: no probes, no credential capture.
+    store.write_jsonl(state.ledger_path(tmp_path), [{**row, "cleaned": True}])
+
+    def exploding_auth():
+        raise AssertionError("auth must not be captured when nothing is stale")
+
+    summary = state.reattempt_teardown(
+        tmp_path, [], "http://x",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no probes")),
+        auth_headers_fn=exploding_auth,
+    )
+    assert summary == {"reattempted": 0, "cleaned": 0}
+
+
 # ---- ledger + planted values ------------------------------------------------
 
 def test_planted_values_skips_cleaned(tmp_path):

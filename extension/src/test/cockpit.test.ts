@@ -1864,6 +1864,83 @@ suite('Workspace snapshot + revert (pre-episode safety net)', () => {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
 	});
+
+	test('mutated lockfile round-trip: restored from snapshot + loud drift warning', async function () {
+		this.timeout(60000);
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-lock-'));
+		try {
+			sh(ws, 'git init -q && git config user.email t@t && git config user.name t');
+			fs.writeFileSync(path.join(ws, 'uv.lock'), 'locked-deps-v1');
+			fs.writeFileSync(path.join(ws, 'requirements-dev.txt'), 'pytest==8.0.0');
+			fs.writeFileSync(path.join(ws, 'app.py'), 'print("v1")');
+			sh(ws, 'git add -A && git commit -qm base');
+
+			const sha = await captureWorkspaceSnapshot(ws, 'ep-lock');
+			assert.ok(sha, 'snapshot commits in a git repo');
+
+			// The "agent" bumps a dependency, syncs, and edits code.
+			fs.writeFileSync(path.join(ws, 'uv.lock'), 'locked-deps-v2-agent-bumped');
+			fs.writeFileSync(path.join(ws, 'requirements-dev.txt'), 'pytest==9.9.9');
+			fs.writeFileSync(path.join(ws, 'app.py'), 'print("v2")');
+
+			const result = await revertToSnapshot(ws, 'ep-lock');
+			assert.strictEqual(
+				fs.readFileSync(path.join(ws, 'uv.lock'), 'utf8'),
+				'locked-deps-v1',
+				'diverged lockfile content restored from the snapshot',
+			);
+			assert.strictEqual(
+				fs.readFileSync(path.join(ws, 'requirements-dev.txt'), 'utf8'),
+				'pytest==8.0.0',
+			);
+			assert.deepStrictEqual(
+				result.lockfilesRestored.sort(),
+				['requirements-dev.txt', 'uv.lock'],
+				'both diverged lockfiles verified restored to their captured hashes',
+			);
+			assert.ok(result.environmentWarning, 'divergence must surface a loud warning');
+			assert.ok(
+				/ENVIRONMENT MAY HAVE DRIFTED/.test(result.environmentWarning!),
+				`warning is loud: ${result.environmentWarning}`,
+			);
+			assert.ok(
+				result.environmentWarning!.includes('uv.lock') &&
+					result.environmentWarning!.includes('requirements-dev.txt'),
+				'warning names the diverged lockfiles',
+			);
+			assert.ok(
+				/re-sync/.test(result.environmentWarning!),
+				'warning tells the caller how to recover the installed environment',
+			);
+		} finally {
+			rmGitWorkspace(ws);
+		}
+	});
+
+	test('untouched lockfiles produce no environment warning', async function () {
+		this.timeout(60000);
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-lockok-'));
+		try {
+			sh(ws, 'git init -q && git config user.email t@t && git config user.name t');
+			fs.writeFileSync(path.join(ws, 'package-lock.json'), '{"lockfileVersion": 3}');
+			fs.writeFileSync(path.join(ws, 'app.js'), 'console.log(1)');
+			sh(ws, 'git add -A && git commit -qm base');
+
+			await captureWorkspaceSnapshot(ws, 'ep-lockok');
+			fs.writeFileSync(path.join(ws, 'app.js'), 'console.log(2)'); // code only
+
+			const result = await revertToSnapshot(ws, 'ep-lockok');
+			assert.deepStrictEqual(result.lockfilesRestored, []);
+			assert.strictEqual(
+				result.environmentWarning,
+				undefined,
+				'no divergence, no drift noise',
+			);
+			assert.strictEqual(fs.readFileSync(path.join(ws, 'app.js'), 'utf8'), 'console.log(1)');
+		} finally {
+			rmGitWorkspace(ws);
+		}
+	});
 });
 
 suite('QnA subject section (deixis for seeded questions)', () => {
