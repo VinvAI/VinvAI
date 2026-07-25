@@ -16,7 +16,7 @@
 
 <br/>
 
-[**Install on VS Code**](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI) · [**Install on Cursor / Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**Report a Bug**](https://github.com/VinvAI/VinvAI/issues) · [**Request a Feature**](https://github.com/VinvAI/VinvAI/issues/new)
+[**Install from Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**Report a Bug**](https://github.com/VinvAI/VinvAI/issues) · [**Request a Feature**](https://github.com/VinvAI/VinvAI/issues/new)
 
 </div>
 
@@ -26,7 +26,7 @@
 
 Vinv is a free, open-source extension that puts a verification loop around the coding agent you already use. It runs your service under tracing, builds context from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
 
-**On five real bugs in a 35k★ FastAPI template: a cheap commodity model holding Vinv's evidence fixed 5. A frontier model working blind fixed 1. The same commodity model, blind, fixed 0.** One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#case-study-commodity-models-out-fix-frontier-ones)
+**Vinv found four bugs and one performance problem in a 35k★ FastAPI template. Handed all five: a cheap commodity model holding Vinv's evidence fixed every one. A frontier model working blind fixed a single bug. The same commodity model, blind, fixed nothing.** One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#case-study-commodity-models-out-fix-frontier-ones)
 
 **Before you install:** the extension is one click, but Vinv builds its engines on first run (`git clone` + `uv sync` + `cargo build` in a terminal you can watch) and fetches a one-time ~500 MB local embedding model. You need [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs), plus a coding-agent CLI you already pay for. No account, no API keys, about four minutes.
 

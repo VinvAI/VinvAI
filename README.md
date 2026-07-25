@@ -19,7 +19,7 @@
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
-**Install:** [**VS Code Marketplace**](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI) · [**Open VSX** (Cursor · Windsurf · VSCodium)](https://open-vsx.org/extension/VinvAI/VinvAI) · [**vinv.ai/#install**](https://vinv.ai/#install)
+**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) (VS Code · Cursor · Windsurf · VSCodium) · [**vinv.ai/#install**](https://vinv.ai/#install)
 
 <sub>Or build the engines from source (~4 min: compiles the Rust index and fetches a one-time ~500 MB local embedding model). First trace about a minute after that.</sub>
 
@@ -44,15 +44,15 @@ Both failures have one root cause: **the agent has never watched your code run.*
 
 ## Case study: commodity models out-fix frontier ones
 
-Five real bugs in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★) — four of them Vinv found itself. Same bugs, same prompts, one trial per condition, Vinv grading every run:
+Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★). We handed all five to each setup — same issues, same prompts, one trial per condition, Vinv grading every run:
 
-| Setup | Bugs fixed |
+| Setup | Fixed |
 |---|---|
-| **Cheap commodity model + Vinv context** | **5** |
-| Frontier model, working blind | 1 |
-| Cheap commodity model, working blind | 0 |
+| **Cheap commodity model + Vinv context** | **4 bugs + 1 optimization** |
+| Frontier model, working blind | 1 bug |
+| Cheap commodity model, working blind | nothing |
 
-**This is a demonstration, not a benchmark** — five bugs, one repo, one trial per condition. We're publishing it because it's checkable, not because n=5 settles anything.
+**This is a demonstration, not a benchmark** — five issues, one repo, one trial per condition. We're publishing it because it's checkable, not because n=5 settles anything.
 
 The claim isn't a model ranking — blind, the commodity model scored zero. The claim is that **a model holding the failing frame, the caller chain, and the real argument values beats a stronger model guessing from static code.** The evidence is what moved, not the weights.
 
