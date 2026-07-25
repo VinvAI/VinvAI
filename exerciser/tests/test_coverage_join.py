@@ -153,3 +153,48 @@ def test_reprofile_marks_planted_case_observed(tmp_path, monkeypatch):
     ep = next(e for e in prof["endpoints"] if e["path"] == "/api/v1/items/")
     assert ep["coverage"]["handler_observed"] is True
     assert ep["latency"]["p95_ms"] > 0
+
+
+def test_legacy_rows_do_not_pin_handler_to_none(tmp_path, monkeypatch):
+    """Append-only results.jsonl spans engine versions: rows written before the
+    handler field existed must not pin the join to None when newer rows know it."""
+    from exerciser import profile as profile_mod
+
+    seen = {}
+
+    def fake_endpoint_profile(repo, ep_execs, api_id, method, path, handler, **kw):
+        seen[api_id] = handler
+        return {
+            "api_id": api_id, "method": method, "path": path, "handler": handler,
+            "latency": {"p50_ms": 1.0, "p95_ms": 2.0},
+            "inputs_explored": {}, "status_distribution": {},
+            "status_classes": {}, "coverage": {"covered": 0, "total": 0, "pct": 0.0,
+                                               "uncovered": [], "handler_observed": False},
+            "side_effects": [], "invariants": [],
+        }
+
+    monkeypatch.setattr(profile_mod, "_endpoint_profile", fake_endpoint_profile)
+    from exerciser import store
+    rows = [
+        {"endpoint_id": "GET_x", "method": "GET", "path": "/x", "status": 200, "latency_ms": 1.0},
+        {"endpoint_id": "GET_x", "method": "GET", "path": "/x", "status": 200,
+         "latency_ms": 1.0, "handler": "x-read_x"},
+    ]
+    store.append_jsonl(store.results_path(tmp_path), rows)
+    profile_mod.build_profile(tmp_path)
+    assert seen["GET_x"] == "x-read_x", "the newer row's handler must win over the legacy None"
+
+
+def test_display_form_handler_normalizes_to_trace_symbol(tmp_path):
+    """'items-read_items()' (identification's display form) must match the
+    trace component '…routes.items.read_items'."""
+    import json as _json
+    from exerciser.coverage import handler_observed_in_trace
+    cap = tmp_path / ".vinv" / "captures" / "s0" / "app"
+    cap.mkdir(parents=True)
+    (cap / "trace.jsonl").write_text(_json.dumps({
+        "event": "enter", "component": "app.api.routes.items.read_items",
+        "request_id": "R", "thread_id": 1,
+    }) + "\n")
+    assert handler_observed_in_trace(tmp_path, "items-read_items()", trace=str(cap / "trace.jsonl"))
+    assert not handler_observed_in_trace(tmp_path, "items-missing()", trace=str(cap / "trace.jsonl"))

@@ -56,6 +56,15 @@ def handler_observed_in_trace(
     """
     if not handler:
         return False
+    # Identification hands the handler in display form ("items-read_items()"),
+    # while trace components carry the bare qualname ("…items.read_items").
+    # Normalize to the function name: strip a call-parens suffix and the
+    # "<tag>-" display prefix before matching.
+    handler = handler.removesuffix("()")
+    if "-" in handler:
+        handler = handler.rsplit("-", 1)[-1]
+    if not handler:
+        return False
     try:
         trace_path = _resolve_trace_file(Path(repo), service, trace)
     except (FileNotFoundError, OSError):

@@ -152,8 +152,15 @@ def build_profile(
     by_ep: dict[str, list[dict[str, Any]]] = {}
     meta: dict[str, tuple[str, str, str | None]] = {}
     for ex in executions:
-        by_ep.setdefault(ex["endpoint_id"], []).append(ex)
-        meta.setdefault(ex["endpoint_id"], (ex["method"], ex["path"], ex.get("handler")))
+        eid = ex["endpoint_id"]
+        by_ep.setdefault(eid, []).append(ex)
+        # results.jsonl is append-only across engine versions: rows written
+        # before the handler field existed carry None. Take method/path from
+        # the first sighting but UPGRADE the handler from any later row that
+        # knows it — otherwise one legacy row pins the join to None forever.
+        known = meta.get(eid)
+        if known is None or (known[2] is None and ex.get("handler")):
+            meta[eid] = (ex["method"], ex["path"], ex.get("handler"))
 
     profiles: list[dict[str, Any]] = []
     all_invariants: list[dict[str, Any]] = []
