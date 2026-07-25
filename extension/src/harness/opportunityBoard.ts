@@ -26,8 +26,14 @@
  *     floor collectMemoryTrends uses, defined against the app's own capture
  *     cadence — no wall-clock TTL.
  *   • Bounded growth — when the file holds more than COMPACTION_FACTOR lines
- *     per live entry, it is rewritten to one line per id (dropping expired
- *     entries, whose lifecycle has explicitly ended).
+ *     per retained entry, it is rewritten to one line per id, dropping
+ *     terminal entries (expired/evicted/exhausted) whose lifecycle ended
+ *     EXPIRY_MISSING_SESSIONS fresh capture sessions ago; the live 'posted'
+ *     surface itself is bounded at LIVE_POSTED_CAP (the analyzer's own cap ×
+ *     LIVE_POSTED_FACTOR) by evicting the lowest-predicted entries.
+ *   • Complete lifecycle — dispatches that hang (no ledger activity) or
+ *     resolve regressed re-open under one shared retry budget
+ *     (board.max_retries), then park loudly as 'exhausted'.
  *
  * The module is vscode-free so the MCP server (a separate bundled process)
  * walks the very same board the editor sweeps use.
@@ -54,9 +60,47 @@ import {
 	type OptimizationCandidate,
 } from './optimizationAnalysis';
 
-export type OpportunityStatus = 'posted' | 'dispatched' | 'resolved' | 'expired';
+/**
+ * The complete lifecycle:
+ *
+ *   posted ──dispatch──▶ dispatched ──outcome──▶ resolved (verdict kept)
+ *     │                     │  │
+ *     │                     │  └─ episode went quiet (hang) ─▶ posted (retry)
+ *     │                     └─ regressed/reverted verdict ────▶ posted (retry)
+ *     │                          …until the retry budget, then ▶ exhausted
+ *     ├─ outranked when the live surface overflows ──────────▶ evicted
+ *     └─ absent from fresh evidence for N sessions ──────────▶ expired
+ *        (resolved follows the same evidence expiry — a fix that removed the
+ *         waste sees its signature vanish, and the entry closes as expired)
+ *
+ * 'expired', 'evicted', and 'exhausted' are TERMINAL: they hold their id
+ * against silent re-posting while they live, then compaction drops them after
+ * EXPIRY_MISSING_SESSIONS further fresh capture sessions — bounded memory
+ * measured in the app's own sessions, never a wall clock.
+ */
+export type OpportunityStatus =
+	| 'posted'
+	| 'dispatched'
+	| 'resolved'
+	| 'expired'
+	| 'evicted'
+	| 'exhausted';
 
-/** One board line (contract shape; misses/last_session are expiry bookkeeping). */
+/** Terminal statuses: never re-dispatched; aged by session and eventually dropped. */
+const TERMINAL_STATUSES: ReadonlySet<OpportunityStatus> = new Set([
+	'expired',
+	'evicted',
+	'exhausted',
+]);
+
+/**
+ * One board line (contract shape). misses/last_session are the ONE
+ * session-relative sighting mechanism, whose "sighting" depends on status:
+ * for 'posted'/'resolved' a sighting is the signature appearing in fresh
+ * evidence (absence expiry); for 'dispatched' a sighting is ledger activity
+ * from its episode (hang detection); for terminal entries the counter just
+ * ages once per new session (compaction drop).
+ */
 export interface OpportunityEntry {
 	/** Content signature (see opportunitySignature) — the dedup identity. */
 	id: string;
@@ -79,10 +123,18 @@ export interface OpportunityEntry {
 	updated_at: number;
 	/** Verdict text once resolved/expired. */
 	resolution?: string;
-	/** Consecutive new capture sessions the signature was absent from. */
+	/** Session-relative sighting counter (see the interface doc for its
+	 * per-status meaning). */
 	misses?: number;
 	/** The capture-session key the miss counter last advanced on. */
 	last_session?: string;
+	/** Automatic re-opens consumed (hang retries + regressed retries share it). */
+	retry_count?: number;
+	/** Unix seconds of the newest dispatch — stable while hang bookkeeping
+	 * advances updated_at, so outcome/activity postdating stays correct. */
+	dispatched_at?: number;
+	/** Plain-language lifecycle note (why re-opened, why parked, why evicted). */
+	note?: string;
 }
 
 /** What a producer posts (identity + status are derived here). */
@@ -120,6 +172,55 @@ export const EXPIRY_MISSING_SESSIONS = 3;
  * mostly churn, and it is rewritten to one line per id.
  */
 export const COMPACTION_FACTOR = 4;
+
+/**
+ * The dispatch-attempt budget per opportunity — the policy default for the
+ * `board.max_retries` key in .vinv/exercise/policy.json (the same flat-key
+ * policy file the verdict engine's learned min-effect lives in). Despite the
+ * key's name it counts TOTAL dispatch attempts, first try included: the
+ * default 2 means the original attempt plus ONE automatic re-open (after a
+ * hung dispatch or a regressed/reverted verdict), after which the entry parks
+ * as terminal 'exhausted' — loud in the render, never silently re-dispatched.
+ */
+export const DEFAULT_BOARD_MAX_RETRIES = 2;
+
+/** The effective attempt budget: policy `board.max_retries`, else the default. */
+export function boardMaxRetries(workspaceRoot: string): number {
+	try {
+		const raw = fs.readFileSync(
+			path.join(workspaceRoot, '.vinv', 'exercise', 'policy.json'),
+			'utf8',
+		);
+		const policy = JSON.parse(raw) as Record<string, unknown>;
+		const value = policy['board.max_retries'];
+		if (typeof value === 'number' && Number.isFinite(value) && value >= 1) {
+			return Math.floor(value);
+		}
+	} catch {
+		// No policy yet — the documented default applies.
+	}
+	return DEFAULT_BOARD_MAX_RETRIES;
+}
+
+/**
+ * The list-length budget the board's analyzer feed requests from
+ * computeOptimizationCandidates (the same budget the panel path runs with).
+ * Passing it explicitly makes it THE cap by construction — the eviction bound
+ * below derives from it instead of a second free-floating count.
+ */
+export const OPPORTUNITY_ANALYZER_CAP = 12;
+
+/**
+ * Live-'posted' bound = the analyzer's own cap × this factor: room for one
+ * full turnover of the ranked head (the previous evidence's survivors plus the
+ * current head) before the board sheds its tail. Overflow evicts the
+ * lowest-predicted entries first — 'evicted' is terminal and distinct from
+ * 'expired' (outranked, not vanished-from-evidence).
+ */
+export const LIVE_POSTED_FACTOR = 2;
+
+/** The derived cap on live 'posted' entries (see LIVE_POSTED_FACTOR). */
+export const LIVE_POSTED_CAP = OPPORTUNITY_ANALYZER_CAP * LIVE_POSTED_FACTOR;
 
 export function opportunityBoardPath(workspaceRoot: string): string {
 	return path.join(workspaceRoot, '.vinv', 'reports', 'opportunities.jsonl');
@@ -194,14 +295,32 @@ function appendEntries(workspaceRoot: string, entries: OpportunityEntry[]): void
 }
 
 /**
- * Rewrites the board to one line per id — dropping expired entries, whose
- * explicit lifecycle end is exactly what licenses forgetting them — when the
- * append log exceeds COMPACTION_FACTOR lines per live entry. tmp+rename keeps
- * readers from ever seeing a torn file.
+ * A terminal entry is DROPPED once its explicit lifecycle end is
+ * EXPIRY_MISSING_SESSIONS fresh capture sessions old — the reconcile pass ages
+ * every terminal entry's miss counter once per new session, so this is
+ * session-relative, never a wall clock. 'expired' entries always enter their
+ * terminal state with misses exactly at the expiry threshold (the counter
+ * advances one per session and the transition fires at the floor), so their
+ * baseline is that threshold; evicted/exhausted enter with misses reset to 0.
+ */
+function terminalDropReady(entry: OpportunityEntry): boolean {
+	if (!TERMINAL_STATUSES.has(entry.status)) {
+		return false;
+	}
+	const baseline = entry.status === 'expired' ? EXPIRY_MISSING_SESSIONS : 0;
+	return (entry.misses ?? 0) - baseline >= EXPIRY_MISSING_SESSIONS;
+}
+
+/**
+ * Rewrites the board to one line per id — dropping terminal entries whose
+ * lifecycle end is EXPIRY_MISSING_SESSIONS fresh sessions old, exactly what
+ * licenses forgetting them — when the append log exceeds COMPACTION_FACTOR
+ * lines per retained entry. tmp+rename keeps readers from ever seeing a torn
+ * file.
  */
 function maybeCompact(workspaceRoot: string, board: BoardFile): void {
-	const live = [...board.entries.values()].filter((e) => e.status !== 'expired');
-	if (board.lineCount <= COMPACTION_FACTOR * Math.max(1, live.length)) {
+	const retained = [...board.entries.values()].filter((e) => !terminalDropReady(e));
+	if (board.lineCount <= COMPACTION_FACTOR * Math.max(1, retained.length)) {
 		return;
 	}
 	if (board.lineCount <= board.entries.size) {
@@ -209,7 +328,7 @@ function maybeCompact(workspaceRoot: string, board: BoardFile): void {
 	}
 	const file = opportunityBoardPath(workspaceRoot);
 	const tmp = `${file}.tmp-${process.pid}`;
-	const ordered = live.sort((a, b) => a.posted_at - b.posted_at);
+	const ordered = retained.sort((a, b) => a.posted_at - b.posted_at);
 	fs.writeFileSync(tmp, ordered.map((e) => `${JSON.stringify(e)}\n`).join(''), 'utf8');
 	fs.renameSync(tmp, file);
 	board.entries = new Map(ordered.map((e) => [e.id, e]));
@@ -224,11 +343,15 @@ export function loadOpportunityBoard(workspaceRoot: string): OpportunityEntry[] 
 }
 
 /**
- * Posts candidates: an id already live on the board (posted, dispatched, OR
- * resolved) is left untouched — dispatched/resolved never silently re-open —
- * while an unknown or expired id gets a fresh 'posted' line. Returns the
- * board's current entry for every input id, so the caller can partition its
- * candidates into dispatchable vs held.
+ * Posts candidates: an id already on the board in ANY status but 'expired' is
+ * left untouched — dispatched/resolved never silently re-open, and evicted/
+ * exhausted stay parked until compaction forgets them — while an unknown or
+ * expired id gets a fresh 'posted' line. When the live 'posted' surface then
+ * exceeds LIVE_POSTED_CAP (the analyzer's own cap × LIVE_POSTED_FACTOR), the
+ * lowest-predicted posted entries are EVICTED — terminal, so the same
+ * outranked signature does not churn back next sync. Returns the board's
+ * current entry for every input id, so the caller can partition its candidates
+ * into dispatchable vs held.
  */
 export function postOpportunities(
 	workspaceRoot: string,
@@ -236,7 +359,7 @@ export function postOpportunities(
 ): Map<string, OpportunityEntry> {
 	const board = readBoardFile(workspaceRoot);
 	const now = Math.floor(Date.now() / 1000);
-	const fresh: OpportunityEntry[] = [];
+	const changed: OpportunityEntry[] = [];
 	const out = new Map<string, OpportunityEntry>();
 	for (const input of inputs) {
 		const id = opportunitySignature(input.kind, input.file, input.name, input.evidence);
@@ -263,12 +386,32 @@ export function postOpportunities(
 			updated_at: now,
 			misses: 0,
 		};
-		fresh.push(entry);
+		changed.push(entry);
 		board.entries.set(id, entry);
 		out.set(id, entry);
 	}
-	appendEntries(workspaceRoot, fresh);
-	board.lineCount += fresh.length;
+	// EVICTION: bound the live 'posted' surface relative to the evidence feed.
+	const posted = [...board.entries.values()].filter((e) => e.status === 'posted');
+	if (posted.length > LIVE_POSTED_CAP) {
+		const overflow = posted
+			.sort((a, b) => a.predicted_ms - b.predicted_ms)
+			.slice(0, posted.length - LIVE_POSTED_CAP);
+		for (const victim of overflow) {
+			const evicted = transition(board, victim, {
+				status: 'evicted',
+				misses: 0,
+				note:
+					`outranked — the board already holds ${LIVE_POSTED_CAP} open opportunities ` +
+					'with more predicted recoverable time',
+			});
+			changed.push(evicted);
+			if (out.has(evicted.id)) {
+				out.set(evicted.id, evicted);
+			}
+		}
+	}
+	appendEntries(workspaceRoot, changed);
+	board.lineCount += changed.length;
 	maybeCompact(workspaceRoot, board);
 	return out;
 }
@@ -287,14 +430,22 @@ function transition(
 	return next;
 }
 
-/** Marks 'posted' entries dispatched. Idempotent: any other status is skipped. */
+/**
+ * Marks 'posted' entries dispatched. Idempotent: any other status is skipped.
+ * Records dispatched_at (the hang detector's and the outcome postdate check's
+ * anchor — updated_at keeps moving as bookkeeping advances) and resets the
+ * sighting counter so hang detection starts fresh for this attempt.
+ */
 export function markOpportunitiesDispatched(workspaceRoot: string, ids: string[]): void {
 	const board = readBoardFile(workspaceRoot);
 	const changed: OpportunityEntry[] = [];
+	const now = Math.floor(Date.now() / 1000);
 	for (const id of ids) {
 		const entry = board.entries.get(id);
 		if (entry && entry.status === 'posted') {
-			changed.push(transition(board, entry, { status: 'dispatched' }));
+			changed.push(
+				transition(board, entry, { status: 'dispatched', dispatched_at: now, misses: 0 }),
+			);
 		}
 	}
 	appendEntries(workspaceRoot, changed);
@@ -306,6 +457,40 @@ export function markOpportunitiesDispatched(workspaceRoot: string, ids: string[]
 export interface BoardReconcileResult {
 	resolved: number;
 	expired: number;
+	/** Entries automatically re-opened for another attempt (hang or regression). */
+	reopened: number;
+	/** Entries parked terminal after exhausting the attempt budget. */
+	exhausted: number;
+}
+
+/** Unix seconds of a ledger event: `at` (contract) or parsed `ts` (ISO). */
+function eventUnixTime(ev: LedgerEvent): number | undefined {
+	if (typeof ev.at === 'number' && Number.isFinite(ev.at)) {
+		return ev.at;
+	}
+	if (typeof ev.ts === 'string') {
+		const parsed = Date.parse(ev.ts);
+		if (Number.isFinite(parsed)) {
+			return parsed / 1000;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Whether the episode ledger shows ANY activity postdating a dispatch —
+ * an episode_end or optimization_outcome at/after dispatched_at (1s slop for
+ * same-second clocks). A timestamp-less line counts as activity: an unknown
+ * clock must never convict a dispatch of hanging.
+ */
+function ledgerActiveSince(events: ReadonlyArray<LedgerEvent>, since: number): boolean {
+	return events.some((ev) => {
+		if (ev.type !== 'episode_end' && ev.type !== 'optimization_outcome') {
+			return false;
+		}
+		const at = eventUnixTime(ev);
+		return at === undefined || at + 1 >= since;
+	});
 }
 
 /**
@@ -316,13 +501,27 @@ export interface BoardReconcileResult {
  *    (contract C1) whose row matches a 'dispatched' entry — and which
  *    postdates that dispatch — resolves it, with the verdict as resolution.
  *    When several dispatched entries share a row, the event's waste_kind picks
- *    the one it judged.
- * 2. EXPIRY: with `sessionKey` identifying the newest capture session and
- *    `freshIds` the signatures the ranker currently derives from evidence, an
- *    entry absent from freshIds advances its miss counter once per NEW session
- *    key; EXPIRY_MISSING_SESSIONS consecutive misses expire it. Presence
- *    resets the counter. Pass `freshIds: null` when the evidence could not be
- *    computed (store unreadable) — unknown is not absent, so nothing advances.
+ *    the one it judged. A 'regressed'/'reverted-behavior' verdict does NOT
+ *    park the entry as resolved: the failed optimization automatically
+ *    re-opens for ONE materially different attempt (the attempt store seeds
+ *    the learning) — sharing the same attempt budget as hang retrial — and
+ *    only exhausts once that budget is spent.
+ * 2. SESSION BOOKKEEPING, once per NEW `sessionKey` (the newest capture
+ *    session), through the ONE sighting mechanism (misses/last_session):
+ *    • 'posted'/'resolved' — evidence expiry: absent from `freshIds` (the
+ *      signatures the ranker currently derives) advances the counter;
+ *      EXPIRY_MISSING_SESSIONS consecutive misses expire the entry; presence
+ *      resets it. Pass `freshIds: null` when the evidence could not be
+ *      computed (store unreadable) — unknown is not absent, nothing advances.
+ *    • 'dispatched' — HANG DETECTION: a dispatch whose episode produced no
+ *      ledger activity at all (no episode_end, no optimization_outcome since
+ *      dispatched_at) advances the counter instead; after
+ *      EXPIRY_MISSING_SESSIONS quiet sessions the dispatch is presumed hung
+ *      (harness died, run lost) and re-opens for retry — or parks 'exhausted'
+ *      when the attempt budget (boardMaxRetries) is spent.
+ *    • terminal ('expired'/'evicted'/'exhausted') — the counter just ages, so
+ *      compaction can drop the entry EXPIRY_MISSING_SESSIONS sessions after
+ *      its lifecycle ended.
  */
 export function reconcileOpportunityBoard(
 	workspaceRoot: string,
@@ -332,8 +531,48 @@ export function reconcileOpportunityBoard(
 ): BoardReconcileResult {
 	const board = readBoardFile(workspaceRoot);
 	const changed: OpportunityEntry[] = [];
+	const maxAttempts = boardMaxRetries(workspaceRoot);
 	let resolved = 0;
 	let expired = 0;
+	let reopened = 0;
+	let exhausted = 0;
+
+	/**
+	 * The ONE retry mechanism (hang and regression share it): re-open for
+	 * another attempt while the budget allows, else park terminal 'exhausted'.
+	 */
+	const reopenOrExhaust = (
+		entry: OpportunityEntry,
+		why: string,
+		resolution?: string,
+	): void => {
+		const attempts = (entry.retry_count ?? 0) + 1; // dispatches consumed so far
+		const sessionPatch = sessionKey ? { last_session: sessionKey } : {};
+		if (attempts < maxAttempts) {
+			changed.push(
+				transition(board, entry, {
+					status: 'posted',
+					retry_count: attempts,
+					misses: 0,
+					note: `${why} — queued for attempt ${attempts + 1} of ${maxAttempts}`,
+					...(resolution ? { resolution } : {}),
+					...sessionPatch,
+				}),
+			);
+			reopened += 1;
+		} else {
+			changed.push(
+				transition(board, entry, {
+					status: 'exhausted',
+					misses: 0,
+					note: `${why} — tried ${attempts === 2 ? 'twice' : `${attempts} time(s)`}, no verified win — parked`,
+					...(resolution ? { resolution } : {}),
+					...sessionPatch,
+				}),
+			);
+			exhausted += 1;
+		}
+	};
 
 	// Pass 1 — resolution from episode outcomes.
 	for (const ev of events) {
@@ -352,7 +591,7 @@ export function reconcileOpportunityBoard(
 				e.row === row &&
 				// The outcome must postdate the dispatch (1s slop for same-second
 				// clocks): an old ledger line must not insta-resolve a fresh dispatch.
-				at + 1 >= e.updated_at,
+				at + 1 >= (e.dispatched_at ?? e.updated_at),
 		);
 		if (dispatched.length === 0) {
 			continue;
@@ -362,20 +601,68 @@ export function reconcileOpportunityBoard(
 			deltaMs !== undefined
 				? ` (measured ${Math.round(deltaMs)}ms vs predicted ${Math.round(predictedMs ?? target.predicted_ms)}ms)`
 				: '';
-		changed.push(
-			transition(board, target, {
-				status: 'resolved',
-				resolution: `${verdict}${delta}`,
-			}),
-		);
-		resolved += 1;
+		if (verdict === 'regressed' || verdict === 'reverted-behavior') {
+			// TERMINATION with retrial: the failed optimization gets one more
+			// materially different attempt before parking (attempt-store seeded).
+			reopenOrExhaust(
+				target,
+				`the optimization attempt was reverted (${verdict})`,
+				`${verdict}${delta}`,
+			);
+		} else {
+			changed.push(
+				transition(board, target, {
+					status: 'resolved',
+					resolution: `${verdict}${delta}`,
+					// The sighting counter switches meaning here (hang → evidence
+					// expiry): quiet-session counts must not bleed into absence counts.
+					misses: 0,
+				}),
+			);
+			resolved += 1;
+		}
 	}
 
-	// Pass 2 — relative expiry against fresh evidence.
-	if (freshIds !== null && sessionKey) {
+	// Pass 2 — session-relative bookkeeping (one advance per NEW session key).
+	if (sessionKey) {
 		for (const entry of [...board.entries.values()]) {
-			if (entry.status === 'expired') {
+			if (entry.status === 'dispatched') {
+				if (entry.last_session === sessionKey) {
+					continue; // this session's quiet was already counted
+				}
+				if (ledgerActiveSince(events, entry.dispatched_at ?? entry.updated_at)) {
+					if ((entry.misses ?? 0) > 0) {
+						changed.push(transition(board, entry, { misses: 0, last_session: sessionKey }));
+					}
+					continue; // the episode is (or was) alive — resolution judges it
+				}
+				const misses = (entry.misses ?? 0) + 1;
+				if (misses >= EXPIRY_MISSING_SESSIONS) {
+					reopenOrExhaust(
+						entry,
+						`the dispatched episode went quiet — no ledger activity across ${misses} capture sessions (the run likely died)`,
+					);
+				} else {
+					changed.push(transition(board, entry, { misses, last_session: sessionKey }));
+				}
 				continue;
+			}
+			if (TERMINAL_STATUSES.has(entry.status)) {
+				// Terminal aging: count fresh sessions since the lifecycle ended, so
+				// compaction knows when forgetting is licensed.
+				if (entry.last_session !== sessionKey) {
+					changed.push(
+						transition(board, entry, {
+							misses: (entry.misses ?? 0) + 1,
+							last_session: sessionKey,
+						}),
+					);
+				}
+				continue;
+			}
+			// 'posted' / 'resolved' — evidence-relative expiry.
+			if (freshIds === null) {
+				continue; // unknown evidence is not absent evidence
 			}
 			if (freshIds.has(entry.id)) {
 				if ((entry.misses ?? 0) > 0) {
@@ -406,7 +693,7 @@ export function reconcileOpportunityBoard(
 	appendEntries(workspaceRoot, changed);
 	board.lineCount += changed.length;
 	maybeCompact(workspaceRoot, board);
-	return { resolved, expired };
+	return { resolved, expired, reopened, exhausted };
 }
 
 // ---- the analyzer feed ------------------------------------------------------
@@ -436,7 +723,18 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 	// Same ranking-time calibration deflation as the panel path — the board and
 	// the panel must never rank the same evidence differently.
 	const calibration = loadOptimizationCalibration(workspaceRoot);
-	return computeOptimizationCandidates({ nodes, edges, timings, cacheByRow, spans, calibration });
+	return computeOptimizationCandidates({
+		nodes,
+		edges,
+		timings,
+		cacheByRow,
+		spans,
+		calibration,
+		// The board's own list budget — the eviction bound (LIVE_POSTED_CAP)
+		// derives from this cap, so it is passed explicitly rather than trusting
+		// the analyzer's default to stay in sync.
+		cap: OPPORTUNITY_ANALYZER_CAP,
+	});
 }
 
 /** Board input for one ranked candidate. */
@@ -537,13 +835,47 @@ const STATUS_ORDER: Record<OpportunityStatus, number> = {
 	posted: 0,
 	dispatched: 1,
 	resolved: 2,
-	expired: 3,
+	exhausted: 3,
+	evicted: 4,
+	expired: 5,
 };
+
+/**
+ * The status in plain language for the human block (the machine JSON below it
+ * keeps the raw fields — agents parse those, people read these).
+ */
+export function plainStatus(e: OpportunityEntry): string {
+	switch (e.status) {
+		case 'posted':
+			return (e.retry_count ?? 0) > 0
+				? `waiting to retry (attempt ${(e.retry_count ?? 0) + 1})`
+				: 'waiting to try';
+		case 'dispatched':
+			return 'being worked on';
+		case 'resolved':
+			if (e.resolution?.startsWith('proven')) {
+				return 'improved — verified';
+			}
+			if (e.resolution?.startsWith('inconclusive')) {
+				return 'tried — no measurable difference';
+			}
+			return 'finished';
+		case 'exhausted': {
+			const tries = (e.retry_count ?? 0) + 1;
+			return `tried ${tries === 2 ? 'twice' : `${tries} time(s)`}, no verified win — parked`;
+		}
+		case 'evicted':
+			return 'outranked by higher-predicted work — evicted';
+		case 'expired':
+			return 'no longer in the evidence — expired';
+	}
+}
 
 /**
  * The board as a human-readable block plus machine JSON lines — what the MCP
  * `opportunities` action returns so harness agents walk the same board the
- * sweeps consume.
+ * sweeps consume. Statuses read as plain language; the machine block keeps
+ * the raw contract fields unchanged.
  */
 export function renderOpportunityBoard(entries: OpportunityEntry[]): string {
 	if (entries.length === 0) {
@@ -557,24 +889,44 @@ export function renderOpportunityBoard(entries: OpportunityEntry[]): string {
 		(a, b) =>
 			STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.predicted_ms - a.predicted_ms,
 	);
-	const counts = { posted: 0, dispatched: 0, resolved: 0, expired: 0 };
+	const counts: Record<OpportunityStatus, number> = {
+		posted: 0,
+		dispatched: 0,
+		resolved: 0,
+		exhausted: 0,
+		evicted: 0,
+		expired: 0,
+	};
 	for (const e of entries) {
 		counts[e.status] += 1;
 	}
 	const lines = ordered.map(
 		(e) =>
-			`- [${e.status}] ${e.name} at ${e.file}:${e.line} — ${e.kind}, ` +
+			`- [${plainStatus(e)}] ${e.name} at ${e.file}:${e.line} — ${e.kind}, ` +
 			`~${Math.round(e.predicted_ms)}ms predicted: ${e.evidence}` +
 			(e.resolution ? ` → ${e.resolution}` : '') +
+			(e.note ? ` (${e.note})` : '') +
 			` (id ${e.id}, source ${e.source})`,
 	);
+	// Exhausted entries are LOUD: they represent evidence the loop tried and
+	// could not convert — silence here would bury exactly the failures a human
+	// should look at.
+	const exhaustedWarning =
+		counts.exhausted > 0
+			? `\nATTENTION: ${counts.exhausted} opportunity(ies) exhausted their retry budget ` +
+				'and are parked — they will NOT be retried automatically. Investigate them ' +
+				'manually or dispatch with a materially different approach.\n'
+			: '';
 	return (
-		`Opportunity board: ${counts.posted} open, ${counts.dispatched} dispatched, ` +
-		`${counts.resolved} resolved, ${counts.expired} expired.\n` +
+		`Opportunity board: ${counts.posted} waiting to try, ${counts.dispatched} being ` +
+		`worked on, ${counts.resolved} resolved, ${counts.exhausted} parked (retry budget ` +
+		`spent), ${counts.evicted} evicted (outranked), ${counts.expired} expired.\n` +
+		exhaustedWarning +
 		`${lines.join('\n')}\n\n` +
-		'Only [posted] entries are dispatchable; dispatched/resolved entries re-open ' +
-		'only after expiry (absent from fresh evidence for ' +
-		`${EXPIRY_MISSING_SESSIONS}+ capture sessions). ` +
+		'Only "waiting to try" entries are dispatchable; entries being worked on or ' +
+		'already resolved re-open only after expiry (absent from fresh evidence for ' +
+		`${EXPIRY_MISSING_SESSIONS}+ capture sessions), and parked/evicted entries never ` +
+		're-dispatch automatically. ' +
 		'Use action="run_sweep" sweep="hotspots" or sweep="cache_candidates" to dispatch.\n\n' +
 		'Machine JSON (one entry per line):\n' +
 		ordered.map((e) => JSON.stringify(e)).join('\n')
