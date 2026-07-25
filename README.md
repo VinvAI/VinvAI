@@ -72,7 +72,7 @@ The claim isn't a model ranking — blind, the commodity model scored zero. The 
 **And the loop keeps finding real ones.** On the same pristine template, the optimization loop later surfaced — and statistically proved — a fix nobody planted: the app's default database pool (SQLAlchemy's 5+10) makes requests **queue for connection checkouts** under concurrent load, so a 7-row indexed lookup measured 22× the typical symbol's cost. Pool sized to the worker concurrency: sustained-load median **75.6ms → 41.2ms — 45.4% faster, 95% CI [36.3%, 45.8%]** — responses byte-identical. The same engine auto-reverted two earlier attempts whose measurement windows couldn't certify the win; the accept only landed when the evidence did.
 
 <div align="center">
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof.gif" alt="Vinv optimization loop on the FastAPI template: detects connection-pool starvation from real traces, dispatches the pool-sizing fix, proves 45.4% median improvement with a paired-bootstrap 95% CI, and records the episode with its reverted attempts in Findings" width="720">
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/vinv-pool-optimization-proof.gif" alt="Vinv optimization loop on the FastAPI template: detects connection-pool starvation from real traces, dispatches the pool-sizing fix, proves 45.4% median improvement with a paired-bootstrap 95% CI, and records the episode with its reverted attempts in Findings" width="720">
 </div>
 
 ## If any of these is your open tab
