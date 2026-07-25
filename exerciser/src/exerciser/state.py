@@ -136,6 +136,9 @@ def attempt_teardown(
         candidates = list(row.get("response_values") or [])[:_MAX_DELETE_TRIES]
         if not candidates:
             continue
+        # Attempt accounting: every teardown pass over this row is one attempt;
+        # the outcome status is stamped after the tries below.
+        row["teardown_attempts"] = int(row.get("teardown_attempts") or 0) + 1
         done = False
         for tgt in targets:
             if done or len(tgt["prefix"]) >= len(segs) + 1:
@@ -162,7 +165,53 @@ def attempt_teardown(
                     break
             if done:
                 break
+        row["teardown_status"] = (
+            "cleaned" if row.get("cleaned")
+            else ("failed-again" if row["teardown_attempts"] > 1 else "failed")
+        )
     return cleaned
+
+
+def reattempt_teardown(
+    repo: Path,
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    probe_fn: Callable[..., Any],
+    *,
+    auth_headers: list[dict[str, str]] | None = None,
+    auth_headers_fn: Callable[[], list[dict[str, str]]] | None = None,
+) -> dict[str, int]:
+    """Run-start unwind of PRIOR runs' uncleaned planted values.
+
+    Loaded from the ledger, retried through the same ``attempt_teardown``
+    mechanism with the CURRENT credentials, and rewritten in place — so
+    pollution stops accumulating instead of compounding run over run. Rows get
+    ``teardown_status`` cleaned / failed-again and a monotone
+    ``teardown_attempts`` count. ``auth_headers_fn`` is called lazily (it may
+    replay login chains, which costs probes) and only when stale rows exist.
+    Best-effort throughout: a failure here never blocks the run.
+    """
+    rows = store.read_jsonl(ledger_path(repo))
+    stale = [r for r in rows
+             if not r.get("cleaned") and (r.get("response_values"))]
+    if not stale:
+        return {"reattempted": 0, "cleaned": 0}
+    headers = list(auth_headers or [])
+    if not headers and auth_headers_fn is not None:
+        try:
+            headers = list(auth_headers_fn() or [])
+        except Exception:
+            headers = []
+    cleaned = attempt_teardown(
+        stale, endpoints, base_url, probe_fn,
+        auth_headers=headers, exercise_id="vinv-reteardown",
+    )
+    # A run-start retry is by definition a re-attempt of a prior run's failure.
+    for r in stale:
+        if not r.get("cleaned"):
+            r["teardown_status"] = "failed-again"
+    store.write_jsonl(ledger_path(repo), rows)
+    return {"reattempted": len(stale), "cleaned": cleaned}
 
 
 def append_ledger(repo: Path, rows: list[dict[str, Any]]) -> None:

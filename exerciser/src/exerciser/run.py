@@ -24,6 +24,7 @@ from typing import Any, Callable
 from . import state, store
 from .bandit import STRATEGIES, EndpointBandit, bandit_summary, seed_from_prior
 from .baseline import apply_baselines, status_class
+from .compaction import compact_artifacts
 from .coverage import endpoint_coverage
 from .execute import ProbeResult, execute_probe
 from .issues import cluster_failures, issues_document
@@ -122,6 +123,11 @@ def run_exercise(
         return {"status": "error", "error": "no plan.json — run `exerciser plan` first"}
     endpoints = plan["endpoints"]
 
+    # Generation compaction of the unbounded logs (results, state ledger,
+    # optimize/regress attempt streams) BEFORE this run appends to them.
+    # Idempotent; leaves a loud one-line compaction_summary.txt artifact.
+    compaction = compact_artifacts(repo, plan, logger=log)
+
     # Warm-start each endpoint's posterior from the previous run's bandit.json,
     # DECAYED toward the uniform prior — learned strategy preferences persist
     # across runs but expire geometrically, so a stale lesson (learned against
@@ -151,6 +157,21 @@ def run_exercise(
     # necessary live: a reset Postgres with no seeded superuser degraded a
     # 23/23 run to 5/23 with zero signal about why.
     canary = _environment_canary(endpoints, base_url, exercise_id, probe_fn, log)
+
+    # Re-attempt teardown of PRIOR runs' uncleaned planted values before this
+    # run plants new ones — pollution must not accumulate. Credentials are
+    # earned lazily (regress's fresh setup-chain capture) and only when stale
+    # ledger rows actually exist.
+    def _early_auth_headers() -> list[dict[str, str]]:
+        from .regress import _fresh_auth_headers  # lazy: avoids an import cycle
+        return _fresh_auth_headers(repo, base_url, probe_fn)
+
+    reattempt = state.reattempt_teardown(
+        repo, endpoints, base_url, probe_fn, auth_headers_fn=_early_auth_headers,
+    )
+    if reattempt["reattempted"]:
+        log.info("state ledger: re-attempted teardown of %d stale row(s), cleaned %d",
+                 reattempt["reattempted"], reattempt["cleaned"])
 
     executions: list[dict[str, Any]] = []
     spent = 0
@@ -300,6 +321,9 @@ def run_exercise(
         "repo": str(repo),
         "base_url": base_url,
         "environment_canary": canary,
+        "compaction": compaction["line"],
+        "state_reattempted": reattempt["reattempted"],
+        "state_recleaned": reattempt["cleaned"],
         "rounds_run": round_no,
         "probes_spent": spent,
         "budget": budget,
