@@ -396,8 +396,24 @@ export function postOpportunities(
 	// EVICTION: bound the live 'posted' surface relative to the evidence feed.
 	const posted = [...board.entries.values()].filter((e) => e.status === 'posted');
 	if (posted.length > LIVE_POSTED_CAP) {
+		// Rank each entry WITHIN its own unit (ms vs bytes) before evicting: a
+		// memory opportunity's predicted_ms holds bytes, so a raw compare would
+		// evict every latency opportunity and keep the byte counts. Evict the
+		// least-important within each unit first (highest within-unit rank).
+		const unitOfKind = (kind: string): 'ms' | 'bytes' =>
+			kind === 'alloc-churn' || kind === 'mem-leak' ? 'bytes' : 'ms';
+		const byUnit = new Map<string, OpportunityEntry[]>();
+		for (const e of posted) {
+			const u = unitOfKind(e.kind);
+			(byUnit.get(u) ?? byUnit.set(u, []).get(u)!).push(e);
+		}
+		const rankWithinUnit = new Map<OpportunityEntry, number>();
+		for (const arr of byUnit.values()) {
+			arr.sort((a, b) => b.predicted_ms - a.predicted_ms);
+			arr.forEach((e, i) => rankWithinUnit.set(e, i));
+		}
 		const overflow = posted
-			.sort((a, b) => a.predicted_ms - b.predicted_ms)
+			.sort((a, b) => (rankWithinUnit.get(b) ?? 0) - (rankWithinUnit.get(a) ?? 0))
 			.slice(0, posted.length - LIVE_POSTED_CAP);
 		for (const victim of overflow) {
 			const evicted = transition(board, victim, {
@@ -926,10 +942,24 @@ export function renderOpportunityBoard(entries: OpportunityEntry[]): string {
 	for (const e of entries) {
 		counts[e.status] += 1;
 	}
+	const fmtMag = (kind: string, n: number): string => {
+		// Memory kinds carry BYTES in predicted_ms; render them as bytes.
+		if (kind === 'alloc-churn' || kind === 'mem-leak') {
+			const b = Math.abs(n);
+			if (b >= 1 << 20) {
+				return `${(b / (1 << 20)).toFixed(1)}MB`;
+			}
+			if (b >= 1 << 10) {
+				return `${(b / (1 << 10)).toFixed(1)}KB`;
+			}
+			return `${Math.round(b)}B`;
+		}
+		return `${Math.round(n)}ms`;
+	};
 	const lines = ordered.map(
 		(e) =>
 			`- [${plainStatus(e)}] ${e.name} at ${e.file}:${e.line} — ${e.kind}, ` +
-			`~${Math.round(e.predicted_ms)}ms predicted: ${e.evidence}` +
+			`~${fmtMag(e.kind, e.predicted_ms)} predicted: ${e.evidence}` +
 			(e.resolution ? ` → ${e.resolution}` : '') +
 			(e.note ? ` (${e.note})` : '') +
 			` (id ${e.id}, source ${e.source})`,

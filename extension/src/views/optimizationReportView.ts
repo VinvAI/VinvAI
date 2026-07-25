@@ -264,7 +264,12 @@ function getReportHtml(): string {
 		window.addEventListener('error', (e) => vscode.postMessage({ type: 'webviewError', message: String(e.message || 'unknown') }));
 		const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 		const ms = (n) => Math.round(n) + 'ms';
-		const KIND = { 'cache': 'cache', 'fanout': 'fan-out', 'per-call': 'per-call', 'n-plus-1': 'N+1', 'serial-async': 'async' };
+		const fmtBytes = (b) => { b = Math.abs(b); if (b >= 1048576) return (b / 1048576).toFixed(1) + 'MB'; if (b >= 1024) return (b / 1024).toFixed(1) + 'KB'; return Math.round(b) + 'B'; };
+		// Unit-aware magnitude: a memory candidate's numbers are BYTES, not ms.
+		const amt = (unit, n) => unit === 'bytes' ? fmtBytes(n) : ms(n);
+		const DIM_LABEL = { 'latency': 'Latency', 'parallelism': 'Parallelization', 'memory': 'Memory' };
+		const DIM_ORDER = ['latency', 'parallelism', 'memory'];
+		const KIND = { 'cache': 'cache', 'fanout': 'fan-out', 'per-call': 'per-call', 'n-plus-1': 'N+1', 'serial-async': 'async', 'alloc-churn': 'alloc', 'mem-leak': 'leak', 'gc-pressure': 'gc', 'wait': 'wait' };
 		// Plain-language description behind each waste-kind tag, so the label
 		// reads cold without knowing the analyzer's vocabulary.
 		const KIND_TIP = {
@@ -273,9 +278,15 @@ function getReportHtml(): string {
 			'per-call': 'Each individual call is slow in its own body — the cost is in this function, not in what it calls.',
 			'n-plus-1': 'The same lookup repeats once per item in a list instead of once for the whole list.',
 			'serial-async': 'Independent waits run one after another when they could overlap.',
+			'wait': 'The call spends time waiting on something that is not I/O — a queue or a lock.',
+			'gc-pressure': 'This function allocates enough that garbage-collection pauses show up in its requests.',
+			'alloc-churn': 'This function allocates a large share of the run\\'s memory — pooling or reuse would cut the churn.',
+			'mem-leak': 'Memory this function holds keeps growing run over run — it is not being freed.',
 		};
-		// Direction of a measured delta (after − before): negative = faster.
-		const dir = (delta) => delta == null ? '' : (delta < 0 ? ' faster' : (delta > 0 ? ' slower' : ''));
+		// Direction of a measured delta (after − before), unit-aware.
+		const dir = (delta, unit) => delta == null ? '' : (unit === 'bytes'
+			? (delta < 0 ? ' less' : (delta > 0 ? ' more' : ''))
+			: (delta < 0 ? ' faster' : (delta > 0 ? ' slower' : '')));
 		// Micro-glossary: every statistical term on a card carries a plain-language
 		// tooltip (mirrors the existing inconclusive sentence's honesty).
 		const GLOSS = {
@@ -298,13 +309,13 @@ function getReportHtml(): string {
 			const open = cands.filter((c) => c.status === 'candidate');
 			const proven = cands.filter((c) => c.status === 'proven');
 			const working = cands.filter((c) => c.status === 'dispatched');
-			const recoverable = open.reduce((s, c) => s + c.predicted_ms, 0);
-			const saved = proven.reduce((s, c) => s + Math.abs((c.outcome || {}).delta_ms || 0), 0);
+			const recTime = open.filter((c) => (c.unit || 'ms') === 'ms').reduce((s, c) => s + c.predicted_ms, 0);
+			const recMem = open.filter((c) => c.unit === 'bytes').reduce((s, c) => s + c.predicted_ms, 0);
 			const t = [
 				{ k: 'Open opportunities', v: open.length, hot: open.length > 0 },
-				{ k: 'Recoverable (predicted)', v: '~' + ms(recoverable) },
+				{ k: 'Recoverable time', v: recTime > 0 ? '~' + ms(recTime) : '—' },
+				{ k: 'Recoverable memory', v: recMem > 0 ? '~' + fmtBytes(recMem) : '—' },
 				{ k: 'In progress', v: working.length },
-				{ k: 'Proven saved', v: ms(saved), good: saved > 0 },
 			];
 			document.getElementById('tiles').innerHTML = t.map((x) =>
 				'<div class="tile' + (x.hot ? ' hot' : '') + (x.good ? ' good' : '') + '"><div class="k">' + x.k + '</div><div class="v">' + x.v + '</div></div>').join('');
@@ -313,9 +324,9 @@ function getReportHtml(): string {
 		function axis(c, scale) {
 			const o = c.outcome || {};
 			const predW = Math.max(1, (c.predicted_ms / scale) * 100);
-			let html = '<div class="axis"><div class="lab"><span>' + gloss('predicted ~' + ms(c.predicted_ms), 'predicted') + '</span>';
+			let html = '<div class="axis"><div class="lab"><span>' + gloss('predicted ~' + amt(c.unit, c.predicted_ms), 'predicted') + '</span>';
 			const measured = o.delta_ms != null ? Math.abs(o.delta_ms) : null;
-			if (measured != null) { html += '<span>measured ' + ms(measured) + dir(o.delta_ms) + '</span>'; }
+			if (measured != null) { html += '<span>measured ' + amt(c.unit, measured) + dir(o.delta_ms, c.unit) + '</span>'; }
 			html += '</div>';
 			html += '<div class="bar"><span class="predicted" style="width:' + predW + '%"></span></div>';
 			if (measured != null) {
@@ -341,20 +352,21 @@ function getReportHtml(): string {
 				? ' The change was reverted to the pre-episode snapshot.'
 				: (o.reverted === false ? ' The change was kept.' : '');
 			const noAutoRevert = ' No automatic revert ran — this verdict came from the capture watcher (session timings, no managed episode), so the change is still in your working tree; review it and revert it yourself if unwanted.';
+			const betterWord = c.unit === 'bytes' ? 'lighter' : 'faster';
 			if (c.status === 'proven') {
-				return '<div class="verdict proven"><b>Proven ' + ms(Math.abs(o.delta_ms || 0)) + ' faster</b> — predicted ~' + ms(o.predicted_ms || 0) +
-					(o.ci ? '.' : ', measured beyond the ±' + ms(o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + '.') + ' Behavior unchanged.' + ciNote + kept + '</div>';
+				return '<div class="verdict proven"><b>Proven ' + amt(c.unit, Math.abs(o.delta_ms || 0)) + ' ' + betterWord + '</b> — predicted ~' + amt(c.unit, o.predicted_ms || 0) +
+					(o.ci ? '.' : ', measured beyond the ±' + amt(c.unit, o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + '.') + ' Behavior unchanged.' + ciNote + kept + '</div>';
 			}
 			if (c.status === 'regressed') {
 				const broke = o.behavior_ok === false;
-				return '<div class="verdict regressed"><b>' + (broke ? 'Regressed — behavior changed' : 'Regressed ' + ms(Math.abs(o.delta_ms || 0)) + dir(o.delta_ms)) + '</b> — ' +
-					(broke ? 'the after-run no longer answered identically.' : (o.ci ? 'the after-run was significantly slower.' : 'the after-run was slower beyond the ' + gloss('noise band', 'noise') + '.')) +
+				return '<div class="verdict regressed"><b>' + (broke ? 'Regressed — behavior changed' : 'Regressed ' + amt(c.unit, Math.abs(o.delta_ms || 0)) + dir(o.delta_ms, c.unit)) + '</b> — ' +
+					(broke ? 'the after-run no longer answered identically.' : (o.ci ? 'the after-run was significantly worse.' : 'the after-run was worse beyond the ' + gloss('noise band', 'noise') + '.')) +
 					ciNote + (kept || noAutoRevert) + '</div>';
 			}
 			if (c.status === 'inconclusive') {
 				return '<div class="verdict"><b>Inconclusive</b> — ' +
-					(o.ci ? 'no significant speedup (the ' + gloss('95% CI', 'ci') + ' includes zero or the effect is below 10%), so no honest claim can be made.'
-						: 'the change landed inside the ±' + ms(o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + ', so no honest speedup can be claimed.') +
+					(o.ci ? 'no significant win (the ' + gloss('95% CI', 'ci') + ' includes zero or the effect is below 10%), so no honest claim can be made.'
+						: 'the change landed inside the ±' + amt(c.unit, o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + ', so no honest win can be claimed.') +
 					ciNote + (kept || noAutoRevert) + '</div>';
 			}
 			return '';
@@ -366,9 +378,9 @@ function getReportHtml(): string {
 			h += '<div class="rhd"><span class="nm">' + esc(c.name) + '</span>' +
 				'<span class="tag ' + esc(c.waste_kind) + '"' + (KIND_TIP[c.waste_kind] ? ' title="' + KIND_TIP[c.waste_kind] + '"' : '') + '>' + (KIND[c.waste_kind] || esc(c.waste_kind)) + '</span>' +
 				ceilingTag(c) +
-				'<span class="loc">' + esc(c.file) + ':' + c.line + ' · ' + ms(c.total_ms) + ' across ' + c.calls + ' call(s)' + (c.self_ms != null ? ' · ' + gloss(ms(c.self_ms) + ' self', 'self') : '') + '</span>' +
-				'<span class="pred" title="' + GLOSS.predicted + '">~' + ms(c.predicted_ms) +
-				(typeof c.predicted_ms_effective === 'number' && isFinite(c.predicted_ms_effective) ? ' <small>≈' + ms(c.predicted_ms_effective) + ' whole-flow</small>' : '') +
+				'<span class="loc">' + esc(c.file) + ':' + c.line + ' · ' + amt(c.unit, c.total_ms) + ' across ' + c.calls + ' call(s)' + (c.self_ms != null ? ' · ' + gloss(ms(c.self_ms) + ' self', 'self') : '') + '</span>' +
+				'<span class="pred" title="' + GLOSS.predicted + '">~' + amt(c.unit, c.predicted_ms) +
+				(typeof c.predicted_ms_effective === 'number' && isFinite(c.predicted_ms_effective) && (c.unit || 'ms') === 'ms' ? ' <small>≈' + ms(c.predicted_ms_effective) + ' whole-flow</small>' : '') +
 				'</span></div>';
 			h += '<div class="why">' + esc(c.reason) + '</div>';
 			h += axis(c, scale);
@@ -393,9 +405,16 @@ function getReportHtml(): string {
 				content.innerHTML = '<div class="empty">No optimizable hotspots yet. Run a service under Vinv and exercise it — traced symbols with removable overhead (duplicate work, loops, slow calls) appear here, ranked by the time a fix would recover, each with a one-click optimize that is verified by re-tracing.</div>';
 				return;
 			}
-			const scale = Math.max(1, ...cands.map((c) => Math.max(c.predicted_ms, Math.abs((c.outcome || {}).delta_ms || 0))));
-			let html = '<h2>Opportunities (' + cands.length + ')</h2>';
-			for (const c of cands) { html += card(c, scale); }
+			// Group by dimension: ms and bytes are not comparable, so each dimension
+			// gets its own section and its own bar scale.
+			let html = '';
+			for (const dim of DIM_ORDER) {
+				const group = cands.filter((c) => (c.dimension || 'latency') === dim);
+				if (!group.length) { continue; }
+				const scale = Math.max(1, ...group.map((c) => Math.max(c.predicted_ms, Math.abs((c.outcome || {}).delta_ms || 0))));
+				html += '<h2>' + DIM_LABEL[dim] + ' (' + group.length + ')</h2>';
+				for (const c of group) { html += card(c, scale); }
+			}
 			html += '<div class="hint">Machine-readable copy: .vinv/reports/optimization.json (this tab\\'s backing file).</div>';
 			content.innerHTML = html;
 			content.querySelectorAll('button[data-opt]').forEach((b) =>

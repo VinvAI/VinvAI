@@ -31,6 +31,7 @@ import {
 } from '../graph/indexGraph';
 import {
 	collectCacheCandidates,
+	collectMemoryTrends,
 	collectRequestSpans,
 	collectSymbolTimings,
 	type SymbolSessionTiming,
@@ -99,12 +100,23 @@ function priority(c: OptimizationCandidate): number {
 	}
 }
 
+/** Dimension display order — keeps ms and bytes candidates from interleaving. */
+const DIMENSION_RANK: Record<string, number> = { latency: 0, parallelism: 1, memory: 2 };
+
 function sortCandidates(list: OptimizationCandidate[]): OptimizationCandidate[] {
 	return [...list].sort((a, b) => {
 		const pa = priority(a);
 		const pb = priority(b);
 		if (pa !== pb) {
 			return pa - pb;
+		}
+		// Partition by dimension BEFORE comparing magnitudes: predicted_ms holds
+		// bytes for a memory candidate, so a raw compare would let any memory row
+		// (large byte counts) outrank every latency row. Group first, rank within.
+		const da = DIMENSION_RANK[a.dimension ?? 'latency'] ?? 0;
+		const db = DIMENSION_RANK[b.dimension ?? 'latency'] ?? 0;
+		if (da !== db) {
+			return da - db;
 		}
 		if (pa === 1) {
 			return b.predicted_ms - a.predicted_ms;
@@ -369,7 +381,18 @@ export class OptimizationSource implements vscode.Disposable {
 		// Ranking-time calibration: predicted_ms deflated by the learned
 		// per-waste-kind outcome ratio when the artifact exists (default 1).
 		const calibration = loadOptimizationCalibration(root);
-		return computeOptimizationCandidates({ nodes, edges, timings, cacheByRow, spans, calibration });
+		// Memory dimension: cross-session leak suspects (bytes). alloc-churn is
+		// derived inside the analyzer from timings' alloc_bytes.
+		const memoryLeaks = collectMemoryTrends(root, nodes);
+		return computeOptimizationCandidates({
+			nodes,
+			edges,
+			timings,
+			cacheByRow,
+			spans,
+			calibration,
+			memoryLeaks,
+		});
 	}
 
 	/**

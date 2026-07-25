@@ -34,10 +34,15 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
-import type { CacheCandidate, SymbolSessionTiming, TraceSpan } from './runtimeAnalysis';
+import type {
+	CacheCandidate,
+	MemoryLeakSuspect,
+	SymbolSessionTiming,
+	TraceSpan,
+} from './runtimeAnalysis';
 import { removeExpiredOptimizationEvidence } from './optimizationEvidence';
 
-/** Which evidence signal drove a candidate's predicted recoverable time. */
+/** Which evidence signal drove a candidate's predicted recoverable amount. */
 export type WasteKind =
 	| 'cache'
 	| 'fanout'
@@ -50,7 +55,41 @@ export type WasteKind =
 	| 'wait'
 	// GC pressure: the session's gc_pause total is an outlier against the
 	// trace's own symbol-cost distribution, attributed to top allocators (§20).
-	| 'gc-pressure';
+	| 'gc-pressure'
+	// ---- memory dimension (measured in BYTES, not ms) ----
+	// alloc-churn: a symbol allocates a large share of traced bytes per call —
+	// a pooling/reuse target, visible in a single run (unlike gc-pressure this
+	// does NOT require a GC pause to have fired). Recoverable = allocated bytes.
+	| 'alloc-churn'
+	// mem-leak: net bytes retained EVERY run with a positive Theil–Sen trend
+	// (collectMemoryTrends). Recoverable = retained bytes; proven by a re-run
+	// showing the retention flattened.
+	| 'mem-leak';
+
+/**
+ * Optimization is not only latency. Each candidate belongs to a DIMENSION with
+ * its own unit and its own proof metric, so the panel ranks WITHIN a dimension
+ * (ms and bytes are not comparable magnitudes) and the verdict engine measures
+ * the right quantity (response latency for time, allocated/retained bytes for
+ * memory) through the same paired-bootstrap statistics.
+ */
+export type OptDimension = 'latency' | 'parallelism' | 'memory';
+
+/** The dimension a waste signal belongs to. */
+export function dimensionOf(kind: WasteKind): OptDimension {
+	if (kind === 'serial-async') {
+		return 'parallelism';
+	}
+	if (kind === 'alloc-churn' || kind === 'mem-leak') {
+		return 'memory';
+	}
+	return 'latency';
+}
+
+/** The metric unit a dimension is measured in. */
+export function unitOf(dim: OptDimension): 'ms' | 'bytes' {
+	return dim === 'memory' ? 'bytes' : 'ms';
+}
 
 /** Lifecycle of one optimization opportunity through the proof loop. */
 export type OptimizationStatus =
@@ -106,7 +145,14 @@ export interface OptimizationCandidate {
 	name: string;
 	file: string;
 	line: number;
-	/** newest-session wall time — the ceiling on what optimizing can recover. */
+	/** which optimization dimension this belongs to (absent ⇒ 'latency'). */
+	dimension?: OptDimension;
+	/** the unit total_ms/predicted_ms are expressed in (absent ⇒ 'ms'). For a
+	 * memory candidate these fields hold BYTES — read `unit` for the truth. */
+	unit?: 'ms' | 'bytes';
+	/** newest-session cost in `unit` — the ceiling on what optimizing can recover.
+	 * Named `_ms` for back-compat with the ms-only history; for a bytes candidate
+	 * it holds bytes. */
 	total_ms: number;
 	/** newest-session completed calls. */
 	calls: number;
@@ -246,6 +292,109 @@ interface ComputeInputs {
 	 * calibration artifact (loadOptimizationCalibration). Absent kind → 1.
 	 */
 	calibration?: Record<string, number>;
+	/** memory-leak suspects (collectMemoryTrends) — the memory dimension's
+	 * cross-session retention signal. Optional. */
+	memoryLeaks?: MemoryLeakSuspect[];
+}
+
+/** Human byte sizes for candidate reasons. */
+function fmtBytes(bytes: number): string {
+	const b = Math.abs(bytes);
+	if (b >= 1 << 20) {
+		return `${(b / (1 << 20)).toFixed(1)}MB`;
+	}
+	if (b >= 1 << 10) {
+		return `${(b / (1 << 10)).toFixed(1)}KB`;
+	}
+	return `${Math.round(b)}B`;
+}
+
+/**
+ * The memory-dimension candidates, ranked in BYTES (a separate Pareto from the
+ * ms candidates — magnitudes are not comparable). Two signals:
+ *  - alloc-churn: newest-session allocated bytes (SymbolSessionTiming.alloc_bytes),
+ *    Pareto head. Recoverable is HALF the allocated volume (pooling/reuse rarely
+ *    removes all of it) — conservative, and it never claims a leak's certainty.
+ *  - mem-leak: retained bytes with a positive cross-session trend
+ *    (collectMemoryTrends) — retention IS recoverable by fixing the leak, so the
+ *    full retained figure is the estimate. Leaks outrank churn on the same row.
+ */
+function memoryCandidates(
+	nodes: GraphNode[],
+	timings: Map<number, SymbolSessionTiming[]>,
+	leaks: MemoryLeakSuspect[],
+	coverage: number,
+	cap: number,
+): OptimizationCandidate[] {
+	const raw: OptimizationCandidate[] = [];
+	const leakRows = new Set<number>();
+	for (const s of leaks) {
+		const n = nodes[s.row];
+		if (!n || s.total_retained_bytes <= 0) {
+			continue;
+		}
+		leakRows.add(s.row);
+		raw.push({
+			row: s.row,
+			name: n.name,
+			file: n.file,
+			line: n.start_line,
+			dimension: 'memory',
+			unit: 'bytes',
+			total_ms: s.total_retained_bytes,
+			calls: s.sessions,
+			waste_prior: 1,
+			predicted_ms: s.total_retained_bytes,
+			waste_kind: 'mem-leak',
+			reason: `retains ~${fmtBytes(s.total_retained_bytes)} across ${s.sessions} runs (growing ~${fmtBytes(
+				s.slope_bytes_per_session,
+			)}/run) — a leak; free what it holds`,
+			status: 'candidate',
+		});
+	}
+	for (const [row, sess] of timings) {
+		if (leakRows.has(row)) {
+			continue; // a leak on this row already ranks it (and outranks churn)
+		}
+		const l = sess.length > 0 ? sess[sess.length - 1] : undefined;
+		const alloc = l ? Math.max(0, l.alloc_bytes ?? 0) : 0;
+		const n = nodes[row];
+		if (!n || alloc <= 0) {
+			continue;
+		}
+		raw.push({
+			row,
+			name: n.name,
+			file: n.file,
+			line: n.start_line,
+			dimension: 'memory',
+			unit: 'bytes',
+			total_ms: alloc,
+			calls: l?.calls ?? 0,
+			waste_prior: 0.5,
+			predicted_ms: alloc * 0.5,
+			waste_kind: 'alloc-churn',
+			reason: `allocates ~${fmtBytes(alloc)} across ${l?.calls ?? 0} call(s) (${fmtBytes(
+				alloc / Math.max(1, l?.calls ?? 1),
+			)}/call) — reduce with pooling/reuse or a lighter structure`,
+			status: 'candidate',
+		});
+	}
+	if (raw.length === 0) {
+		return [];
+	}
+	const total = raw.reduce((sum, c) => sum + c.predicted_ms, 0);
+	raw.sort((a, b) => b.predicted_ms - a.predicted_ms);
+	const out: OptimizationCandidate[] = [];
+	let covered = 0;
+	for (const c of raw) {
+		if (out.length >= cap || (total > 0 && covered / total >= coverage)) {
+			break;
+		}
+		covered += c.predicted_ms;
+		out.push(c);
+	}
+	return out;
 }
 
 /** Last dotted segment of a component qualname, for readable reasons. */
@@ -646,11 +795,14 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 		// predict more than the symbol currently spends, which the after-run can
 		// never confirm (predicted 2623ms of a 417ms symbol, seen live).
 		bestMs = Math.min(bestMs, l.total_ms);
+		const dim = dimensionOf(bestKind);
 		raw.push({
 			row,
 			name: node.name,
 			file: node.file,
 			line: node.start_line,
+			dimension: dim,
+			unit: unitOf(dim),
 			total_ms: l.total_ms,
 			calls: l.calls,
 			waste_prior: Math.min(1, bestMs / l.total_ms),
@@ -674,9 +826,19 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 			c.predicted_ms * (typeof ratio === 'number' && Number.isFinite(ratio) && ratio > 0 ? ratio : 1);
 	}
 	const effective = (c: OptimizationCandidate): number => c.predicted_ms_effective ?? c.predicted_ms;
+	// The memory dimension is ranked SEPARATELY (bytes, not ms) — computed here so
+	// it survives even when there are NO latency candidates (a heavy allocator
+	// that is cheap per call has no ms signal but is still a memory target).
+	const memory = memoryCandidates(
+		inputs.nodes,
+		inputs.timings,
+		inputs.memoryLeaks ?? [],
+		coverage,
+		Math.min(cap, 6),
+	);
 	const total = raw.reduce((s, c) => s + effective(c), 0);
 	if (total <= 0) {
-		return [];
+		return memory;
 	}
 	// End-to-end Amdahl ceiling per candidate (see the field doc): share of the
 	// trace's total predicted time, discounted by the waste prior. The
@@ -696,7 +858,10 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 		covered += effective(c);
 		out.push(c);
 	}
-	return out;
+	// Memory candidates (computed above, ranked in bytes) are appended after the
+	// ms Pareto — they never entered the clamp/calibration/Amdahl loops, which
+	// are all time concepts.
+	return [...out, ...memory];
 }
 
 // ---- outcome calibration artifact (read side) -------------------------------
