@@ -4,6 +4,69 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.12] — 2026-07-26
+
+### ✨ Added
+
+- **Trace-diff verdict — proof from the run, not a promise.** Optimization
+  fixes are now judged by re-tracing the flow and comparing the before/after
+  traces directly: the verdict measures the actual recovered time on the failed
+  flow, from the trace itself, and feeds it into the dispatch fallback so a
+  "predicted" saving only becomes "proven" once the run shows it.
+- **Memory as a first-class dimension.** Vinv now detects and surfaces memory
+  waste in bytes alongside latency — leak suspects across sessions
+  (**Analyze Memory Trends**) and duplicate-recomputation cache opportunities
+  (**Analyze Cache Opportunities**), each with a per-kind fix playbook shipped
+  to your agent.
+- **More latency detectors.** GC pauses are now attributed as a latency source,
+  and new "unexplained wait" and "throughput ceiling" waste kinds are detected
+  and dispatched.
+- **Opportunity board.** A single detection path with cross-restart dispatch
+  dedup and a full lifecycle — eviction, hang retrial, and exhaustion — plus
+  outcome events, attempt lineage, doom-loop memory, and calibrated ranking that
+  trains the bandit from real optimization verdicts.
+
+### 🔧 Changed
+
+- **Auto-Pilot budgets are configurable, and running out asks instead of
+  quitting.** When the episode budget is exhausted, Vinv now pauses and asks how
+  to proceed rather than silently stopping.
+- **Honest tracing overhead.** Tracelens self-calibrates its observer effect,
+  keeps enrichment out of the timed window, records `blocked_ms`, and ships a
+  latency-honest standard preset — so measured times reflect your code, not the
+  tracer.
+- **Trace-primary coverage.** Coverage now joins on the trace first and survives
+  legacy rows and display-form handler names; live report mirrors and
+  history-derived probe deadlines make verdicts steadier.
+
+### 🐛 Fixed
+
+- **Optimize verdicts are clamped to reality.** Every waste signal's prediction
+  is capped to the newest session's measured ceiling, the request span forest is
+  rebuilt structurally rather than by line order, and the cache detector gained a
+  None-return gate, observed-dependence check, and a structural security guard.
+- **Redundant "Measure now" button removed** from the Optimize panel — measuring
+  is part of the verdict flow.
+- **Flaky device-tune test stabilized.** The embedder auto-tune test compared
+  real wall-clock throughput with too small a margin and failed intermittently on
+  CI's Apple-Silicon runners; the margin is now wide enough to be
+  jitter-proof.
+
+## [0.0.11] — 2026-07-25
+
+### ✨ Added
+
+- **Optimize panel — recoverable time, predicted → proven.** A new custom editor
+  over `optimization.json` shows where time is recoverable across your traced
+  flows and walks each hotspot through the predicted→proven loop: dispatch a fix
+  to your coding agent, re-measure, and confirm the saving.
+
+### 🔧 Changed
+
+- **Marketplace listing corrected.** The README now states the real split (four
+  bugs, one optimization), drops dead badges while restoring the download count,
+  and points at Open VSX.
+
 ## [0.0.10] — 2026-07-25
 
 ### 🔧 Changed
