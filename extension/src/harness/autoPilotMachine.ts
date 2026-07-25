@@ -409,3 +409,15 @@ export function summarize(services: ServiceState[]): PilotSummary {
 		gaveUp: services.filter((s) => s.phase === 'gave-up'),
 	};
 }
+
+
+/**
+ * Clears a service's spent attempt counters so a topped-up budget actually
+ * buys more work. Raising the ceiling alone is not enough: the per-signature
+ * and total episode counts are already at the old limit, so the very next
+ * failure would give up again and re-ask. Called when the user grants more
+ * effort from the exhaustion prompt.
+ */
+export function grantMoreBudget(svc: ServiceState): ServiceState {
+	return { ...svc, setupAttempts: 0, fixEpisodes: {}, phase: svc.phase === 'gave-up' ? 'needs-setup' : svc.phase };
+}

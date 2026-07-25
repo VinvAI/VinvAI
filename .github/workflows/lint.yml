@@ -1,0 +1,72 @@
+name: lint
+
+# PR gate: lint only the files a change actually touches. The existing tree has
+# pre-existing ruff/eslint debt, so full-tree linting would fail on unrelated
+# legacy code — diff-scoped linting holds *new* code to the standard without
+# blocking on that debt. Tests live in test.yml; this workflow is lint only.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changed:
+    name: lint changed files (ruff + eslint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changed files
+        id: diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # Fall back to the previous commit if the base is missing (first push,
+          # force-push, new branch reported as all-zero SHA).
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "Comparing $base..HEAD"
+          git diff --name-only --diff-filter=ACMR "$base" HEAD > all_changed.txt || true
+          grep -E '\.py$'                      all_changed.txt > py_changed.txt || true
+          grep -E '^extension/src/.*\.(ts|tsx)$' all_changed.txt > ts_changed.txt || true
+          echo "py_count=$(wc -l < py_changed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "ts_count=$(wc -l < ts_changed.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "--- changed Python ---"; cat py_changed.txt || true
+          echo "--- changed TypeScript ---"; cat ts_changed.txt || true
+
+      - name: Set up uv
+        if: steps.diff.outputs.py_count != '0'
+        uses: astral-sh/setup-uv@v5
+
+      - name: Ruff lint + format check (changed Python)
+        if: steps.diff.outputs.py_count != '0'
+        run: |
+          uv sync
+          # ruff auto-discovers each engine's own [tool.ruff] config per file.
+          xargs -a py_changed.txt uv run ruff check
+          xargs -a py_changed.txt uv run ruff format --check
+
+      - name: Set up Node
+        if: steps.diff.outputs.ts_count != '0'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: ESLint (changed TypeScript)
+        if: steps.diff.outputs.ts_count != '0'
+        run: |
+          npm ci --prefix extension
+          # eslint config lives in extension/; pass paths relative to it.
+          sed 's#^extension/##' ts_changed.txt > ts_rel.txt
+          (cd extension && xargs -a ../ts_rel.txt npx eslint)

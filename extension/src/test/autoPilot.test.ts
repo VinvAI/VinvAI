@@ -9,6 +9,7 @@ import * as assert from 'assert';
 import {
 	applySetupOutcome,
 	decideOnFailure,
+	grantMoreBudget,
 	DEFAULT_BUDGETS,
 	failureSignature,
 	initialServiceState,
@@ -244,5 +245,40 @@ suite('autoPilotMachine: terminal transitions and summary', () => {
 
 		assert.deepStrictEqual(planNextAction(true, [state]), { kind: 'done' });
 		assert.strictEqual(summarize([state]).green.length, 1);
+	});
+});
+
+suite('Auto-Pilot budgets: configurable and toppable-up', () => {
+	test('a top-up clears spent counters so the raised ceiling actually buys work', () => {
+		// The bug this guards: raising the budget alone leaves setupAttempts and
+		// fixEpisodes at the old limit, so the next failure gives up again and
+		// re-asks the user immediately — an infinite prompt loop.
+		const exhausted: ServiceState = {
+			name: 'api',
+			phase: 'gave-up',
+			setupAttempts: 3,
+			fixEpisodes: { 'setup:boom': 2 },
+		};
+		const granted = grantMoreBudget(exhausted);
+		assert.strictEqual(granted.setupAttempts, 0);
+		assert.deepStrictEqual(granted.fixEpisodes, {});
+		assert.strictEqual(granted.phase, 'needs-setup', 'a gave-up service is retryable again');
+
+		// With counters cleared and a raised ceiling, the next failure retries
+		// instead of giving up.
+		const raised = { setupAttempts: 4, fixEpisodesPerSignature: 5, totalFixEpisodes: 9 };
+		const { decision } = decideOnFailure(granted, 'setup', 'setup:boom', raised);
+		assert.notStrictEqual(decision.next, 'give-up');
+	});
+
+	test('a top-up does not resurrect a service the user chose to stop', () => {
+		const running: ServiceState = {
+			name: 'api',
+			phase: 'needs-start',
+			setupAttempts: 1,
+			fixEpisodes: {},
+		};
+		// Phase is only rewritten for gave-up; anything else is left alone.
+		assert.strictEqual(grantMoreBudget(running).phase, 'needs-start');
 	});
 });

@@ -6,6 +6,8 @@ import { SessionsProvider } from './views/sessionsView';
 import { ServicesProvider } from './views/servicesView';
 import { FlowStateSource } from './views/flowStateSource';
 import { FlowViewProvider, FLOW_VIEW_ID } from './views/flowPanel';
+import { OptimizationSource } from './views/optimizationSource';
+import { registerOptimizationNudge } from './views/optimizationPanel';
 import { maybeAutoDiscover } from './index/discovery';
 import { startAutoReindex } from './index/autoReindex';
 import { initServiceRunner } from './bringup/serviceRunner';
@@ -14,6 +16,7 @@ import { CallTreeEditorProvider } from './identification/callTreeView';
 import { GraphExplorerEditorProvider } from './views/graphExplorer';
 import { JourneyEditorProvider } from './views/journeyView';
 import { FindingsEditorProvider } from './views/findingsView';
+import { OptimizationReportEditorProvider } from './views/optimizationReportView';
 import { registerAutoTriggers } from './harness/autoTrigger';
 import { registerAutoPilotAutoStart } from './harness/autoPilot';
 import { initStatusBar } from './views/statusBar';
@@ -73,7 +76,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		void vscode.window
 			.showInformationMessage(
-				'🎉 Vinv is now free & open source. Everything runs on your machine: no account, no API keys, no telemetry. Your agent says it’s done — Vinv says prove it.',
+				'🎉 Vinv is now free & open source. Everything runs on your machine: no account, no API keys, no telemetry. Your agent stops guessing: it gets the real run, joined to your code.',
 				'⭐ Star on GitHub',
 				'Get Started',
 			)
@@ -126,6 +129,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 	registerFlowIssueWarnings(context, flowSource);
 
+	// The Optimization analyzer — a background pass that ranks traced symbols by
+	// RECOVERABLE time (total_ms × waste_prior) and owns the predicted→proven
+	// loop: a click sends one symbol to the harness; the after-run measures the
+	// delta against this trace's own noise band. It has NO sidebar surface — the
+	// ranked evidence opens as a full-page tab (the Optimize button on the Flow
+	// rail / the "Open Optimize Panel" command), and its mirror is
+	// .vinv/reports/optimization.json (agent-legible over MCP). The nudge is the
+	// only ambient trace: a one-time pointer to the report when work appears.
+	const optimizationSource = new OptimizationSource();
+	context.subscriptions.push(optimizationSource);
+	registerOptimizationNudge(context, optimizationSource);
+
 	// Status-bar indicator + management quick pick for services the user runs via
 	// the ▶ flow (the multi-service analogue of the debug toolbar).
 	initServiceRunner(context);
@@ -140,6 +155,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		GraphExplorerEditorProvider.register(context),
 		JourneyEditorProvider.register(context),
 		FindingsEditorProvider.register(context),
+		OptimizationReportEditorProvider.register(context),
 	);
 
 	registerCommands(context, sessionsProvider, servicesProvider);

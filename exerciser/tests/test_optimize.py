@@ -36,15 +36,39 @@ def test_noisy_no_effect_ci_includes_zero():
     assert cmp.ci_low <= 0.0 <= cmp.ci_high
 
 
-def test_detect_opportunities_from_profile():
-    profile = {"endpoints": [
-        {"api_id": "A", "method": "GET", "path": "/slow",
-         "latency": {"p95_ms": 500.0}, "coverage": {"handler_observed": True}},
-        {"api_id": "B", "method": "GET", "path": "/fast",
-         "latency": {"p95_ms": 10.0}, "coverage": {"handler_observed": True}},
-    ]}
-    ops = detect_opportunities(profile, p95_outlier_ms=200.0)
+def _ep(api_id: str, p95: float, observed: bool = True) -> dict:
+    return {"api_id": api_id, "method": "GET", "path": f"/{api_id.lower()}",
+            "latency": {"p95_ms": p95}, "coverage": {"handler_observed": observed}}
+
+
+def test_detect_opportunities_relative_outlier():
+    # Leave-one-out: 500ms vs the other endpoint's 10ms is an outlier even
+    # with only two endpoints (the outlier cannot drag the median toward itself).
+    profile = {"endpoints": [_ep("A", 500.0), _ep("B", 10.0)]}
+    ops = detect_opportunities(profile)
     assert len(ops) == 1 and ops[0].endpoint_id == "A"
+    assert "median P95" in ops[0].detail
+
+
+def test_detect_opportunities_local_fast_service():
+    # The absolute-200ms bug: on a local service where everything is single-digit
+    # ms, a 60ms endpoint IS the opportunity — the old floor returned [] forever.
+    profile = {"endpoints": [_ep("A", 5.0), _ep("B", 4.0), _ep("C", 60.0), _ep("D", 6.0)]}
+    ops = detect_opportunities(profile)
+    assert [o.endpoint_id for o in ops] == ["C"]
+
+
+def test_detect_opportunities_uniformly_slow_service_has_none():
+    # A uniformly slow service has a baseline, not an outlier — nothing to
+    # single out even though every endpoint exceeds the old 200ms threshold.
+    profile = {"endpoints": [_ep("A", 300.0), _ep("B", 320.0), _ep("C", 340.0)]}
+    assert detect_opportunities(profile) == []
+
+
+def test_detect_opportunities_needs_observed_handler_and_peers():
+    # Unobserved handlers never contribute; a lone endpoint has no distribution.
+    profile = {"endpoints": [_ep("A", 500.0), _ep("B", 10.0, observed=False)]}
+    assert detect_opportunities(profile) == []
 
 
 def test_accept_when_improved_and_suite_passes():

@@ -1,8 +1,8 @@
 {
 	"name": "VinvAI",
 	"displayName": "VinvAI",
-	"description": "Runtime ground truth for your coding agent. AI writes the code — Vinv watches it run, joins every call to source, and serves that evidence over MCP.",
-	"version": "0.0.8",
+	"description": "Context beats model size. Vinv traces a real run, joins every call to your code, exercises every endpoint, and grades fixes against tests the agent never sees. Runtime context bandits for coding agents.",
+	"version": "0.0.11",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
@@ -19,17 +19,37 @@
 		"vscode": "^1.75.0"
 	},
 	"categories": [
+		"AI",
+		"Testing",
 		"Debuggers",
 		"Other"
 	],
 	"keywords": [
-		"vinv",
-		"observability",
-		"apm",
-		"tracing",
+		"ai coding agent",
+		"doom loop",
+		"agent stuck in loop",
+		"says done but fails",
+		"debugging",
+		"code verification",
+		"mcp",
+		"claude code",
+		"cursor",
+		"copilot",
+		"agent verification",
+		"vibe coding",
+		"api testing",
+		"runtime tracing",
+		"code graph",
 		"flamegraph",
-		"debug",
-		"trace"
+		"python",
+		"fastapi",
+		"windsurf",
+		"codex",
+		"agent testing",
+		"pytest",
+		"test generation",
+		"ai code review",
+		"tracing"
 	],
 	"activationEvents": [
 		"onStartupFinished"
@@ -99,6 +119,16 @@
 				"selector": [
 					{
 						"filenamePattern": "**/.vinv/reports/findings.json"
+					}
+				],
+				"priority": "default"
+			},
+			{
+				"viewType": "vinv.optimizationReport",
+				"displayName": "Vinv Optimize",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/optimization.json"
 					}
 				],
 				"priority": "default"
@@ -368,6 +398,24 @@
 				"icon": "$(dashboard)"
 			},
 			{
+				"command": "vinv-vs.optimizeHotspot",
+				"title": "Optimize This Hotspot (Predicted → Proven)",
+				"category": "Vinv",
+				"icon": "$(rocket)"
+			},
+			{
+				"command": "vinv-vs.openOptimization",
+				"title": "Open Optimize Panel (Recoverable Time)",
+				"category": "Vinv",
+				"icon": "$(rocket)"
+			},
+			{
+				"command": "vinv-vs.measureOptimization",
+				"title": "Measure Optimization (Re-trace the Flow)",
+				"category": "Vinv",
+				"icon": "$(pulse)"
+			},
+			{
 				"command": "vinv-vs.showTrajectory",
 				"title": "Show Trajectory (Episodes, Rewards, Goals)",
 				"category": "Vinv",
@@ -423,6 +471,12 @@
 			}
 		],
 		"menus": {
+			"commandPalette": [
+				{
+					"command": "vinv-vs.optimizeHotspot",
+					"when": "false"
+				}
+			],
 			"view/title": [
 				{
 					"command": "vinv-vs.stopDiscovery",
@@ -436,6 +490,11 @@
 				},
 				{
 					"command": "vinv-vs.openGraphExplorer",
+					"when": "view == vinv.flow",
+					"group": "navigation@1"
+				},
+				{
+					"command": "vinv-vs.openOptimization",
 					"when": "view == vinv.flow",
 					"group": "navigation@1"
 				},

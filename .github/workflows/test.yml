@@ -1,0 +1,79 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-engines:
+    name: python engines (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Sync workspace
+        run: uv sync
+      - name: Run engine test suites
+        run: |
+          for pkg in contracts core tracelens identification handbook bringup goal embedder; do
+            if [ -d "$pkg/tests" ] || ls "$pkg"/src/**/test_*.py >/dev/null 2>&1; then
+              echo "::group::$pkg"
+              (cd "$pkg" && uv run pytest -q)
+              echo "::endgroup::"
+            fi
+          done
+
+  rust-index:
+    name: rust index (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: index
+      - name: Test
+        run: cargo test --manifest-path index/Cargo.toml
+
+  extension:
+    name: extension (typecheck + bundle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        run: npm ci --prefix extension
+      - name: Typecheck
+        run: npm run check --prefix extension
+      - name: Bundle
+        run: npm run bundle --prefix extension
+
+  e2e:
+    name: planted-bug golden e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: index
+      - name: Sync workspace
+        run: uv sync
+      - name: Run e2e
+        run: uv run python tests/e2e/planted_bug_golden/run.py

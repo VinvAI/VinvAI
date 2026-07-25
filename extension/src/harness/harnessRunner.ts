@@ -866,6 +866,12 @@ export function dispatchAgentPrompt(
 		PATH: [path.dirname(exe), ...wellKnownBinDirs(), process.env.PATH ?? '']
 			.filter(Boolean)
 			.join(path.delimiter),
+		// Python children (pytest, uvicorn, the exerciser) block-buffer stdout
+		// when piped, which starves the silence watchdog for minutes at a time
+		// on long batches — the run LOOKS hung while working. Root-caused live:
+		// a 17-cluster verification produced zero output for 120s and was
+		// killed as hung. Unbuffered children keep the cadence signal honest.
+		PYTHONUNBUFFERED: '1',
 	};
 	return new Promise<string | null>((resolve) => {
 		let settled = false;
@@ -1035,6 +1041,12 @@ export async function runHarnessPrompt(
 		PATH: [path.dirname(exe), ...wellKnownBinDirs(), process.env.PATH ?? '']
 			.filter(Boolean)
 			.join(path.delimiter),
+		// Python children (pytest, uvicorn, the exerciser) block-buffer stdout
+		// when piped, which starves the silence watchdog for minutes at a time
+		// on long batches — the run LOOKS hung while working. Root-caused live:
+		// a 17-cluster verification produced zero output for 120s and was
+		// killed as hung. Unbuffered children keep the cadence signal honest.
+		PYTHONUNBUFFERED: '1',
 	};
 	running = true;
 	return new Promise<HarnessRunResult>((resolve) => {
@@ -1161,10 +1173,21 @@ export async function runHarnessPrompt(
 				return;
 			}
 			const silence = Date.now() - lastOutputMs;
-			const adaptive = Math.min(
+			// Before the FIRST byte of output there is no cadence to adapt to
+			// (maxGap is still 0, so the adaptive threshold collapses to the
+			// floor) — but startup is exactly when long legitimate silences
+			// happen: CLI auth, model spin-up, tool discovery. Give the first
+			// output a distinct, longer grace instead of judging it by a
+			// cadence that does not exist yet. Root-caused live: "largest
+			// prior gap was 0s" killing a working 17-cluster verification at
+			// the 120s floor.
+			const startupGraceMs = Math.min(
 				silenceCeilingMs,
-				Math.max(silenceFloorMs, maxGapMs * 6),
+				(Number.parseFloat(process.env.VINV_HARNESS_STARTUP_GRACE_S ?? '300') || 300) * 1000,
 			);
+			const adaptive = maxGapMs === 0
+				? startupGraceMs
+				: Math.min(silenceCeilingMs, Math.max(silenceFloorMs, maxGapMs * 6));
 			if (silence >= adaptive) {
 				options?.onUpdate?.(
 					`⚠ harness watchdog: no output for ${Math.round(silence / 1000)}s — treating the run as hung`,
@@ -1354,6 +1377,7 @@ async function runHarnessTask(
 		PATH: [exe ? path.dirname(exe) : '', ...wellKnownBinDirs(), process.env.PATH ?? '']
 			.filter(Boolean)
 			.join(path.delimiter),
+		PYTHONUNBUFFERED: '1',
 	};
 
 	running = true;
