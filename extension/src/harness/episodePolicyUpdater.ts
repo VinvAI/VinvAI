@@ -32,6 +32,7 @@
  *   schema — no epoch/action.top_k).
  */
 import * as fs from 'fs';
+import * as path from 'path';
 import {
 	appendEpisodeEvent,
 	armLevels,
@@ -116,6 +117,11 @@ export function readCompletedEpisodes(
 	// re-labeled verified=false with objective=true — a reproducible failing
 	// test is objective evidence about the arm, unlike a bare thumbs-down.
 	const retracted = new Set<string>();
+	// Measured optimization verdicts (appended by the exercise/optimize bridge,
+	// possibly long after episode_end): per episode, per optimized row, the
+	// LATEST verdict wins — a retry's verdict supersedes its predecessor for
+	// the same row, exactly like the newest-status-wins rule everywhere else.
+	const optVerdicts = new Map<string, Map<number, string>>();
 	for (const line of content.split('\n')) {
 		if (!line.trim()) {
 			continue;
@@ -167,8 +173,43 @@ export function readCompletedEpisodes(
 			}
 		} else if (event.type === 'reconciliation' && event.retracted === true) {
 			retracted.add(id);
+		} else if (event.type === 'optimization_outcome' && typeof event.verdict === 'string') {
+			const row = typeof event.row === 'number' ? event.row : -1;
+			const rows = optVerdicts.get(id) ?? new Map<number, string>();
+			rows.set(row, event.verdict);
+			optVerdicts.set(id, rows);
 		}
 	}
+	// Optimization episodes (kind 'general') end without an oracle verdict —
+	// objective:false — because the measured verdict resolves asynchronously.
+	// When it does, the bridge's optimization_outcome IS the objective oracle,
+	// so the episode is re-labeled here: 'proven' → objective SUCCESS for the
+	// episode's arm, 'regressed'/'reverted-behavior' → objective FAILURE,
+	// 'inconclusive' → excluded (no re-label; the episode stays non-objective
+	// and never trains the bandit). Across multiple optimized rows a failure
+	// dominates (shipping one regression outweighs proving another row), while
+	// within a row the latest verdict wins (retries supersede).
+	for (const [id, rows] of optVerdicts) {
+		const episode = byId.get(id);
+		if (!episode) {
+			continue;
+		}
+		const verdicts = [...rows.values()];
+		const failed = verdicts.some((v) => v === 'regressed' || v === 'reverted-behavior');
+		const proven = verdicts.some((v) => v === 'proven');
+		if (!failed && !proven) {
+			continue; // only inconclusive verdicts — not evidence either way
+		}
+		episode.verified = !failed;
+		episode.objective = true;
+		// Binary outcome reward, matching the posterior's Bernoulli model: the
+		// measured verdict arrives without the episode's attempt budget, so no
+		// attempt discount applies; a regression is a definitive loss (−1, the
+		// same label a retraction earns), not a neutral non-verify.
+		episode.reward = failed ? -1 : 1;
+	}
+	// Retractions apply LAST: a human counterexample that reproduced outranks
+	// every automated verdict, including a measured optimization 'proven'.
 	for (const id of retracted) {
 		const episode = byId.get(id);
 		if (episode) {
@@ -275,6 +316,66 @@ export function shapleyAttribution(
 	return result;
 }
 
+/**
+ * COMA-style COUNTERFACTUAL credit assignment per composition feature
+ * (Foerster et al., "Counterfactual Multi-Agent Policy Gradients", AAAI 2018 —
+ * adapted from actor-critic to this Beta-Bernoulli feature-subset bandit).
+ *
+ * COMA scores agent i by an advantage against a counterfactual baseline that
+ * marginalizes ONLY agent i's action, holding the others fixed:
+ *   A_i(s, u) = Q(s, u) − Σ_{u'_i} π(u'_i|s) Q(s, (u^{-i}, u'_i)).
+ * Here the "agents" are the composition features and an arm A ⊆ F is the joint
+ * action (the subset of features at their rich level). Each feature is binary,
+ * so the counterfactual baseline for feature i at arm A ∋ i is simply the
+ * posterior mean of the IDENTICAL arm with i toggled off:
+ *
+ *   advantage_i = Σ_{A ∋ i} w_A · (μ(A) − μ(A \ {i})),
+ *   w_A ∝ n(A) + n(A \ {i})            (combined evidence of the pair),
+ *
+ * with μ(·) the Beta-posterior mean and n(·) the arm's OBSERVED objective
+ * episode count. Pairs where n(A) + n(A\{i}) = 0 carry no evidence about i's
+ * effect (both means are pure prior, their difference is exactly 0 by
+ * construction) and are skipped so they cannot dilute the weights. Unlike
+ * Shapley-over-means — which weights every coalition by combinatorics alone
+ * and lets never-pulled arms' prior means vote — this weights each toggled
+ * pair by how much evidence actually backs it.
+ *
+ * The result is shrunk toward 0 by the total paired evidence,
+ *   shrunk_i = raw_i · N_i / (N_i + n0),  N_i = Σ non-skipped (n(A)+n(A\{i})),
+ * with n0 the policy's shrinkage pseudo-count — a feature attested by two
+ * episodes claims proportionally less credit than one attested by fifty.
+ * Returns all-zero when no pair has evidence.
+ */
+export function counterfactualAttribution(
+	posteriors: ArmPosterior[],
+	counts: number[],
+	n0: number,
+): Record<EpisodeFeature, number> {
+	const result = {} as Record<EpisodeFeature, number>;
+	for (const feature of EPISODE_FEATURES) {
+		let weighted = 0; // Σ w_A · (μ(A) − μ(A\{i})), w_A unnormalized
+		let totalPaired = 0; // N_i = Σ (n(A) + n(A\{i})) over non-skipped pairs
+		for (let a = 0; a < posteriors.length; a++) {
+			const levels = armLevels(a);
+			if (levels[feature] !== 1) {
+				continue; // only arms CONTAINING i are scored against A\{i}
+			}
+			const counterfactual = { ...levels };
+			counterfactual[feature] = 0;
+			const base = levelsToIndex(counterfactual);
+			const pairN = counts[a] + counts[base];
+			if (pairN <= 0) {
+				continue; // empty-evidence pair: prior-vs-prior, no information
+			}
+			weighted += pairN * (posteriorMean(posteriors[a]) - posteriorMean(posteriors[base]));
+			totalPaired += pairN;
+		}
+		result[feature] =
+			totalPaired > 0 ? (weighted / totalPaired) * (totalPaired / (totalPaired + n0)) : 0;
+	}
+	return result;
+}
+
 /** Quantile of a sorted-or-not numeric sample (nearest-rank). */
 export function nearestRankQuantile(sample: number[], q: number): number {
 	if (sample.length === 0) {
@@ -309,8 +410,10 @@ export function computeUpdatedPolicy(
 		alpha: current.ts_prior_alpha,
 		beta: current.ts_prior_beta,
 	}));
+	const armCounts = new Array<number>(armCount).fill(0);
 	for (const e of objective) {
 		if (e.armIndex >= 0 && e.armIndex < armCount) {
+			armCounts[e.armIndex] += 1;
 			if (e.verified) {
 				posteriors[e.armIndex].alpha += 1;
 			} else {
@@ -320,10 +423,11 @@ export function computeUpdatedPolicy(
 	}
 	next.arm_posteriors = posteriors;
 
-	// Greedy arm + Shapley attribution over posterior MEANS (the learned
-	// verified-fix rate per arm). Exact over the 2^|F| grid.
+	// Greedy arm + COMA counterfactual attribution (evidence-weighted toggled
+	// pairs over the posterior means; see counterfactualAttribution). Same
+	// Record<feature, number> report shape the Shapley attribution produced.
 	const means = posteriors.map(posteriorMean);
-	next.attribution = shapleyAttribution(means);
+	next.attribution = counterfactualAttribution(posteriors, armCounts, current.shrinkage_n0);
 	let best = 0;
 	for (let a = 1; a < armCount; a++) {
 		if (means[a] > means[best]) {
@@ -348,11 +452,152 @@ export function computeUpdatedPolicy(
 	return next;
 }
 
+// ---- optimization calibration (predicted vs measured speedups) -------------
+
+/** One resolved-or-not optimization verdict read back from the ledger. */
+export interface OptimizationOutcome {
+	episodeId: string;
+	row: number;
+	wasteKind: string;
+	predictedMs: number;
+	deltaMs: number;
+	verdict: string;
+	attempt: number;
+}
+
+/**
+ * Reads every optimization_outcome event from the episode ledger (the same
+ * event log episode_start/episode_end live in — appended by the
+ * exercise/optimize verdict bridge when a measured verdict resolves).
+ */
+export function readOptimizationOutcomes(
+	ledgerPath: string = episodeLedgerPath(),
+): OptimizationOutcome[] {
+	let content: string;
+	try {
+		content = fs.readFileSync(ledgerPath, 'utf8');
+	} catch {
+		return [];
+	}
+	const out: OptimizationOutcome[] = [];
+	for (const line of content.split('\n')) {
+		if (!line.trim()) {
+			continue;
+		}
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			continue; // torn tail line — skipped, never fatal
+		}
+		if (
+			event.type === 'optimization_outcome' &&
+			typeof event.episode_id === 'string' &&
+			typeof event.waste_kind === 'string' &&
+			typeof event.verdict === 'string' &&
+			typeof event.predicted_ms === 'number' &&
+			typeof event.delta_ms === 'number'
+		) {
+			out.push({
+				episodeId: event.episode_id,
+				row: typeof event.row === 'number' ? event.row : -1,
+				wasteKind: event.waste_kind,
+				predictedMs: event.predicted_ms,
+				deltaMs: event.delta_ms,
+				verdict: event.verdict,
+				attempt: typeof event.attempt === 'number' ? event.attempt : 1,
+			});
+		}
+	}
+	return out;
+}
+
+/** Per-waste-kind calibration of predicted vs measured optimization impact. */
+export interface OptimizationCalibration {
+	updated_at: string;
+	by_waste_kind: Record<string, { n: number; mean_ratio: number; shrunk_ratio: number }>;
+}
+
+/**
+ * Prior strength of the calibration shrinkage — the contract-fixed pseudo-count
+ * (C2: n0 = 3) pulling a sparse kind's ratio toward the global mean. A kind
+ * with 1 sample sits near the global mean; one with many sits near its own.
+ */
+export const CALIBRATION_PRIOR_N0 = 3;
+
+/**
+ * Turns measured verdicts into the per-kind calibration table: for each
+ * RESOLVED outcome ('proven'/'regressed' — the two verdicts with a clean
+ * measured delta; 'inconclusive' has no measurement and 'reverted-behavior'
+ * measured a behavior break, not a speedup), ratio = |measured delta_ms| /
+ * predicted_ms. Per kind the mean ratio is shrunk toward the GLOBAL mean with
+ * prior strength n0 (empirical-Bayes partial pooling):
+ *   shrunk = (n·mean_kind + n0·mean_global) / (n + n0).
+ * Outcomes with a non-positive prediction are skipped (no defined ratio).
+ * Returns null when no resolved outcome exists — the artifact is only ever
+ * written from evidence, never as an empty husk.
+ */
+export function computeOptimizationCalibration(
+	outcomes: OptimizationOutcome[],
+	n0: number = CALIBRATION_PRIOR_N0,
+): OptimizationCalibration | null {
+	const resolved = outcomes.filter(
+		(o) =>
+			(o.verdict === 'proven' || o.verdict === 'regressed') &&
+			Number.isFinite(o.deltaMs) &&
+			Number.isFinite(o.predictedMs) &&
+			o.predictedMs > 0,
+	);
+	if (resolved.length === 0) {
+		return null;
+	}
+	const ratios = resolved.map((o) => Math.abs(o.deltaMs) / o.predictedMs);
+	const globalMean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+	const byKind = new Map<string, number[]>();
+	for (let i = 0; i < resolved.length; i++) {
+		const list = byKind.get(resolved[i].wasteKind) ?? [];
+		list.push(ratios[i]);
+		byKind.set(resolved[i].wasteKind, list);
+	}
+	const table: OptimizationCalibration['by_waste_kind'] = {};
+	for (const [kind, rs] of byKind) {
+		const n = rs.length;
+		const mean = rs.reduce((a, b) => a + b, 0) / n;
+		table[kind] = {
+			n,
+			mean_ratio: mean,
+			shrunk_ratio: (n * mean + n0 * globalMean) / (n + n0),
+		};
+	}
+	return { updated_at: new Date().toISOString(), by_waste_kind: table };
+}
+
+/** The calibration artifact's workspace path (.vinv/reports/optimization_calibration.json). */
+export function calibrationFilePath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, '.vinv', 'reports', 'optimization_calibration.json');
+}
+
+/** Atomically persists the calibration artifact. */
+export function writeOptimizationCalibration(
+	workspaceRoot: string,
+	calibration: OptimizationCalibration,
+): void {
+	const target = calibrationFilePath(workspaceRoot);
+	fs.mkdirSync(path.dirname(target), { recursive: true });
+	const tmp = `${target}.tmp-${process.pid}`;
+	fs.writeFileSync(tmp, `${JSON.stringify(calibration, null, '\t')}\n`);
+	fs.renameSync(tmp, target);
+}
+
 /**
  * Reads the ledger, recomputes the policy, persists it, and logs the update.
  * Called after every episode_end; cheap (the ledger is line-scanned once).
+ * When `workspaceRoot` is given, the optimization calibration artifact is
+ * refreshed from the same ledger scan's verdicts (predicted-vs-measured
+ * ratios per waste kind) — the policy update is the ONE place ledger evidence
+ * becomes derived state, so the calibration rides the same trigger.
  */
-export function maybeUpdateEpisodePolicy(): EpisodePolicy {
+export function maybeUpdateEpisodePolicy(workspaceRoot?: string): EpisodePolicy {
 	const current = loadEpisodePolicy();
 	const episodes = readCompletedEpisodes(episodeLedgerPath(), current.arm_levels);
 	const next = computeUpdatedPolicy(current, episodes);
@@ -365,5 +610,11 @@ export function maybeUpdateEpisodePolicy(): EpisodePolicy {
 		attempt_budget: next.attempt_budget,
 		attribution: next.attribution ?? null,
 	});
+	if (workspaceRoot) {
+		const calibration = computeOptimizationCalibration(readOptimizationOutcomes());
+		if (calibration) {
+			writeOptimizationCalibration(workspaceRoot, calibration);
+		}
+	}
 	return next;
 }
