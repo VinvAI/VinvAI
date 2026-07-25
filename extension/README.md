@@ -131,6 +131,10 @@ Register them in your agent tools with **Register Vinv MCP in Agent Tools**.
 
 ---
 
+### 🎚 Effort budget — you decide how hard it tries
+
+Auto-Pilot works inside a budget: attempts per service setup, fix episodes per distinct failure, and a total cap that catches errors whose signature shifts every attempt. All three are fields in **Configure**. When a run spends them, Vinv asks whether to grant more — answer once and the new level is saved for later runs, and the run continues from where it stopped rather than starting over.
+
 ### 🛫 Auto-Pilot — set up, run, and fix everything
 
 Once the engines are installed and an agent is picked, **Auto-Pilot** takes over: it scans the project (code map, handbook, service inventory), sets up each service (your agent finds the real start command, Vinv verifies it), runs everything with tracing on, and fixes what breaks — sending failures to your agent with the evidence attached and re-checking each fix by running it. The **Flow panel** pulses on whatever step it's working; when something needs you, a single **Next step** card says what and why.
