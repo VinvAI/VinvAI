@@ -19,11 +19,22 @@
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
-**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) (VS Code · Cursor · Windsurf · VSCodium) · [**vinv.ai/#install**](https://vinv.ai/#install)
-
-<sub>Or build the engines from source (~4 min: compiles the Rust index and fetches a one-time ~500 MB local embedding model). First trace about a minute after that.</sub>
+**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**one-click, pick your editor**](https://vinv.ai/#install)
 
 </div>
+
+Or straight from your editor's CLI — GitHub can't render `vscode:` deep links, so here are the commands:
+
+| Editor | Command |
+|---|---|
+| VS Code | `code --install-extension VinvAI.VinvAI` |
+| Cursor | `cursor --install-extension VinvAI.VinvAI` |
+| Windsurf | `windsurf --install-extension VinvAI.VinvAI` |
+| VSCodium | `codium --install-extension VinvAI.VinvAI` |
+| Trae | `trae --install-extension VinvAI.VinvAI` |
+| VS Code Insiders | `code-insiders --install-extension VinvAI.VinvAI` |
+
+<sub>First run builds the engines (~4 min: compiles the Rust index, fetches a one-time ~500 MB local embedding model). Needs [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs). First trace about a minute after that.</sub>
 
 ```bash
 git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
