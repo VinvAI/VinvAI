@@ -11,7 +11,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { indexStoreDir, type GraphEdge } from '../graph/indexGraph';
 import {
+	DEFAULT_BOARD_MAX_RETRIES,
 	EXPIRY_MISSING_SESSIONS,
+	LIVE_POSTED_CAP,
+	boardMaxRetries,
 	loadOpportunityBoard,
 	markOpportunitiesDispatched,
 	opportunityBoardPath,
@@ -157,6 +160,182 @@ suite('opportunity board (lifecycle)', () => {
 		result = reconcileOpportunityBoard(root, [], null, 'session-6');
 		assert.strictEqual(result.expired, 0);
 		assert.strictEqual(loadOpportunityBoard(root)[0].misses ?? 0, 0);
+	});
+
+	test('eviction bounds the live posted surface at the analyzer-derived cap, lowest predicted first', () => {
+		const overflow = 3;
+		const inputs = Array.from({ length: LIVE_POSTED_CAP + overflow }, (_, i) =>
+			input({
+				name: `sym${i}`,
+				// Ascending predicted time: sym0..sym2 are the weakest predictions.
+				predicted_ms: i + 1,
+				evidence: `waste observed in sym${i}`,
+			}),
+		);
+		postOpportunities(root, inputs);
+		const board = loadOpportunityBoard(root);
+		const posted = board.filter((e) => e.status === 'posted');
+		const evicted = board.filter((e) => e.status === 'evicted');
+		assert.strictEqual(posted.length, LIVE_POSTED_CAP, 'live posted surface is bounded');
+		assert.strictEqual(evicted.length, overflow);
+		assert.deepStrictEqual(
+			evicted.map((e) => e.name).sort(),
+			['sym0', 'sym1', 'sym2'],
+			'the lowest-predicted entries are evicted first',
+		);
+		assert.ok(evicted.every((e) => e.note?.includes('outranked')), 'plain-language note');
+
+		// Evicted is terminal AND distinct from expired: re-posting the same
+		// signature does not silently re-open it (no churn back onto the board).
+		const again = [...postOpportunities(root, [inputs[0]]).values()][0];
+		assert.strictEqual(again.status, 'evicted');
+		assert.strictEqual(
+			loadOpportunityBoard(root).filter((e) => e.status === 'posted').length,
+			LIVE_POSTED_CAP,
+		);
+	});
+
+	test('hang detection: a quiet dispatch re-opens with retry_count, then exhausts at the budget', () => {
+		assert.strictEqual(boardMaxRetries(root), DEFAULT_BOARD_MAX_RETRIES, 'policy default');
+		const entry = [...postOpportunities(root, [input()]).values()][0];
+		markOpportunitiesDispatched(root, [entry.id]);
+
+		// Synthetic ledger: NO events at all — the episode never wrote a line.
+		// freshIds is null (evidence unknown) on purpose: hang detection counts
+		// capture sessions via the ledger, not the analyzer's evidence.
+		reconcileOpportunityBoard(root, [], null, 'h1');
+		reconcileOpportunityBoard(root, [], null, 'h1');
+		assert.strictEqual(loadOpportunityBoard(root)[0].misses, 1, 'one session counts once');
+		reconcileOpportunityBoard(root, [], null, 'h2');
+		const third = reconcileOpportunityBoard(root, [], null, 'h3');
+		assert.strictEqual(third.reopened, 1, 'the hung dispatch re-opened');
+		let current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'posted');
+		assert.strictEqual(current.retry_count, 1);
+		assert.ok(current.note?.includes('went quiet'), `plain-language note: ${current.note}`);
+
+		// Retry: dispatch again, go quiet again — the shared budget (default 2
+		// attempts) is now spent, so the entry parks loudly as 'exhausted'.
+		markOpportunitiesDispatched(root, [entry.id]);
+		reconcileOpportunityBoard(root, [], null, 'h4');
+		reconcileOpportunityBoard(root, [], null, 'h5');
+		const sixth = reconcileOpportunityBoard(root, [], null, 'h6');
+		assert.strictEqual(sixth.exhausted, 1);
+		current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'exhausted');
+		assert.ok(current.note?.includes('tried twice'), current.note);
+
+		// Exhausted never silently re-dispatches: re-posting holds the id.
+		const held = [...postOpportunities(root, [input()]).values()][0];
+		assert.strictEqual(held.status, 'exhausted');
+	});
+
+	test('ledger activity after the dispatch blocks hang counting', () => {
+		const entry = [...postOpportunities(root, [input()]).values()][0];
+		markOpportunitiesDispatched(root, [entry.id]);
+		const alive = [{ type: 'episode_end', ts: new Date(Date.now() + 5000).toISOString() }];
+		for (let s = 0; s < EXPIRY_MISSING_SESSIONS + 1; s += 1) {
+			reconcileOpportunityBoard(root, alive, null, `alive-${s}`);
+		}
+		const current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'dispatched', 'the episode is alive — not hung');
+		assert.strictEqual(current.misses ?? 0, 0);
+	});
+
+	test('board.max_retries from policy.json overrides the attempt budget', () => {
+		const policyFile = path.join(root, '.vinv', 'exercise', 'policy.json');
+		fs.mkdirSync(path.dirname(policyFile), { recursive: true });
+		fs.writeFileSync(policyFile, JSON.stringify({ 'board.max_retries': 1 }));
+		assert.strictEqual(boardMaxRetries(root), 1);
+		const entry = [...postOpportunities(root, [input()]).values()][0];
+		markOpportunitiesDispatched(root, [entry.id]);
+		for (let s = 0; s < EXPIRY_MISSING_SESSIONS; s += 1) {
+			reconcileOpportunityBoard(root, [], null, `p${s}`);
+		}
+		// Budget of 1 total attempt: the first hang exhausts, no retry at all.
+		assert.strictEqual(loadOpportunityBoard(root)[0].status, 'exhausted');
+	});
+
+	test('a regressed verdict re-opens ONCE automatically, then exhausts', () => {
+		const entry = [...postOpportunities(root, [input()]).values()][0];
+		markOpportunitiesDispatched(root, [entry.id]);
+		const now = Math.floor(Date.now() / 1000);
+		const first = reconcileOpportunityBoard(
+			root,
+			[{ type: 'optimization_outcome', at: now + 5, episode_id: 'e1', row: 3, waste_kind: 'cache', predicted_ms: 90, delta_ms: 40, verdict: 'regressed', attempt: 1 }],
+			null,
+			'',
+		);
+		assert.strictEqual(first.resolved, 0, 'a regression is not a settled resolution');
+		assert.strictEqual(first.reopened, 1);
+		let current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'posted', 'automatic re-open for a second attempt');
+		assert.strictEqual(current.retry_count, 1);
+		assert.ok(current.resolution?.startsWith('regressed'), 'the verdict is carried');
+
+		// The second attempt's failure (this time the behavior-revert flavor)
+		// spends the shared budget: terminal 'exhausted', loud in the render.
+		markOpportunitiesDispatched(root, [entry.id]);
+		const second = reconcileOpportunityBoard(
+			root,
+			[{ type: 'optimization_outcome', at: now + 20, episode_id: 'e2', row: 3, waste_kind: 'cache', predicted_ms: 90, delta_ms: 12, verdict: 'reverted-behavior', attempt: 1 }],
+			null,
+			'',
+		);
+		assert.strictEqual(second.exhausted, 1);
+		current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'exhausted');
+		assert.ok(current.resolution?.startsWith('reverted-behavior'));
+		const text = renderOpportunityBoard([current]);
+		assert.ok(text.includes('tried twice, no verified win — parked'), text.split('\n')[0]);
+		assert.ok(text.includes('ATTENTION'), 'exhausted entries are loud in the render');
+	});
+
+	test('a proven verdict still resolves normally and holds the id', () => {
+		const entry = [...postOpportunities(root, [input()]).values()][0];
+		markOpportunitiesDispatched(root, [entry.id]);
+		const now = Math.floor(Date.now() / 1000);
+		const result = reconcileOpportunityBoard(
+			root,
+			[{ type: 'optimization_outcome', at: now + 5, episode_id: 'e1', row: 3, waste_kind: 'cache', predicted_ms: 90, delta_ms: -70, verdict: 'proven', attempt: 1 }],
+			null,
+			'',
+		);
+		assert.strictEqual(result.resolved, 1);
+		assert.strictEqual(result.reopened, 0);
+		const current = loadOpportunityBoard(root)[0];
+		assert.strictEqual(current.status, 'resolved');
+		assert.ok(renderOpportunityBoard([current]).includes('improved — verified'));
+	});
+
+	test('compaction drops terminal entries once they are N fresh sessions old', () => {
+		const doomed = [...postOpportunities(root, [input()]).values()][0];
+		const keeper = [
+			...postOpportunities(root, [
+				input({ name: 'keeper', row: 4, evidence: 'waste observed in keeper' }),
+			]).values(),
+		][0];
+		const present = new Set([keeper.id]);
+		// Expire the doomed entry (absent while the keeper stays sighted)…
+		for (let s = 0; s < EXPIRY_MISSING_SESSIONS; s += 1) {
+			reconcileOpportunityBoard(root, [], present, `t${s}`);
+		}
+		assert.strictEqual(
+			loadOpportunityBoard(root).find((e) => e.id === doomed.id)?.status,
+			'expired',
+		);
+		// …then age it EXPIRY_MISSING_SESSIONS further fresh sessions: compaction
+		// now drops the terminal entry entirely — bounded memory, session-relative.
+		for (let s = 0; s < EXPIRY_MISSING_SESSIONS; s += 1) {
+			reconcileOpportunityBoard(root, [], present, `age${s}`);
+		}
+		const board = loadOpportunityBoard(root);
+		assert.strictEqual(board.find((e) => e.id === doomed.id), undefined, 'terminal entry dropped');
+		assert.strictEqual(board.find((e) => e.id === keeper.id)?.status, 'posted');
+		// The board forgot the id — a still-present signal may post fresh again.
+		const reborn = [...postOpportunities(root, [input()]).values()][0];
+		assert.strictEqual(reborn.status, 'posted');
+		assert.strictEqual(reborn.retry_count ?? 0, 0);
 	});
 
 	test('compaction bounds the append log relative to its live population', () => {
@@ -355,17 +534,27 @@ suite('opportunity board (sweeps route through the analyzer)', () => {
 		}
 	});
 
-	test('renderOpportunityBoard: human lines plus machine JSON', () => {
+	test('renderOpportunityBoard: plain-language human lines, raw machine JSON', () => {
 		assert.ok(renderOpportunityBoard([]).includes('empty'));
 		prepareOptimizationSweep(root, 'hotspots', []);
+		markOpportunitiesDispatched(root, [
+			loadOpportunityBoard(root).find((e) => e.name === 'serialize')!.id,
+		]);
 		const text = renderOpportunityBoard(loadOpportunityBoard(root));
-		assert.ok(text.includes('[posted]'));
+		// Human lines carry the plain-language status, never the raw enum.
+		assert.ok(text.includes('[waiting to try]'), text.split('\n')[0]);
+		assert.ok(text.includes('[being worked on]'));
+		assert.ok(!text.includes('[posted]') && !text.includes('[dispatched]'));
 		assert.ok(text.includes('serialize'));
+		// The machine block keeps the raw contract fields unchanged.
 		const jsonLines = text.split('Machine JSON (one entry per line):\n')[1];
 		assert.ok(jsonLines, 'machine block present');
+		const statuses = new Set<string>();
 		for (const line of jsonLines.split('\n').filter((l) => l.trim())) {
 			const parsed = JSON.parse(line) as { id?: string; status?: string };
 			assert.ok(parsed.id && parsed.status, 'each machine line is a full entry');
+			statuses.add(parsed.status!);
 		}
+		assert.ok(statuses.has('posted') && statuses.has('dispatched'), 'raw enum in JSON');
 	});
 });

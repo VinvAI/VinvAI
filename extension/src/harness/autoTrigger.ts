@@ -604,7 +604,10 @@ export function prepareOptimizationSweep(
 		const status = statusOf.get(id);
 		if (status === 'posted' || status === undefined) {
 			dispatchable.push({ candidate, id });
-		} else if (status === 'dispatched' || status === 'resolved') {
+		} else {
+			// dispatched/resolved are held until expiry; evicted was outranked and
+			// exhausted spent its retry budget — neither ever re-dispatches
+			// silently, so all non-posted statuses count as held.
 			held += 1;
 		}
 	}
@@ -760,7 +763,9 @@ export function prepareRowOptimization(
 				source: 'panel',
 			};
 	const entry = [...postOpportunities(workspaceRoot, [input]).values()][0];
-	if (entry.status === 'dispatched' || entry.status === 'resolved') {
+	if (entry.status !== 'posted') {
+		// dispatched/resolved held until expiry; evicted/exhausted are terminal
+		// and never re-dispatch silently — a panel click is not a side-channel.
 		return { plan: null, candidateCount: 1, heldCount: 1 };
 	}
 	const guardBlock = guardReason ? guardText([node.name], guardReason) : '';
@@ -892,9 +897,9 @@ function noPlanMessage(prep: OptimizationPrep, sweep: 'hotspots' | 'cache_candid
 	if (prep.heldCount > 0) {
 		return (
 			`Vinv: All ${prep.heldCount} current ${sweep === 'cache_candidates' ? 'cache ' : ''}` +
-			'opportunity(ies) are already dispatched or resolved on the opportunity board — ' +
-			'nothing re-dispatches until an entry expires. Inspect the board with ' +
-			'vinv_session action="opportunities".'
+			'opportunity(ies) are held on the opportunity board (being worked on, already ' +
+			'resolved, or parked after their retry budget) — nothing re-dispatches ' +
+			'automatically. Inspect the board with vinv_session action="opportunities".'
 		);
 	}
 	return sweep === 'cache_candidates'
