@@ -387,8 +387,7 @@ function getReportHtml(): string {
 			h += verdict(c);
 			h += '<div class="acts">';
 			if (c.status === 'dispatched') {
-				h += '<button class="go" data-measure="1">Measure now</button>';
-				h += '<span class="working-note">Sent to the agent. When it has finished, click <b>Measure now</b> to re-trace the same flow — the measured before/after then appears here.</span>';
+				h += '<span class="working-note">Sent to the agent — the verdict engine replays the frozen request set and reports the measured before/after here when the episode finishes.</span>';
 			} else {
 				h += '<button class="go" data-opt="' + c.row + '">' + (c.status === 'candidate' ? 'Optimize' : 'Optimize again') + '</button>';
 			}
@@ -421,8 +420,6 @@ function getReportHtml(): string {
 				b.addEventListener('click', () => vscode.postMessage({ type: 'optimize', row: Number(b.getAttribute('data-opt')) })));
 			content.querySelectorAll('button[data-file]').forEach((b) =>
 				b.addEventListener('click', () => vscode.postMessage({ type: 'openSource', file: b.getAttribute('data-file'), line: Number(b.getAttribute('data-line')) })));
-			content.querySelectorAll('button[data-measure]').forEach((b) =>
-				b.addEventListener('click', () => vscode.postMessage({ type: 'measure' })));
 		}
 
 		window.addEventListener('message', (event) => {
