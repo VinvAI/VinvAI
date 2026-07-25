@@ -474,6 +474,11 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 		if (bestMs <= 0) {
 			continue; // hot but no removable overhead we can point at — skip
 		}
+		// The ceiling is the symbol's NEWEST-session cost: signals derived from
+		// cross-session aggregates (self-time spans, cache groups) can otherwise
+		// predict more than the symbol currently spends, which the after-run can
+		// never confirm (predicted 2623ms of a 417ms symbol, seen live).
+		bestMs = Math.min(bestMs, l.total_ms);
 		raw.push({
 			row,
 			name: node.name,
