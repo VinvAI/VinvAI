@@ -214,10 +214,11 @@ suite('COMA counterfactual credit assignment (episodePolicyUpdater)', () => {
 		// include_runtime: pairs (2,0),(3,1), pairN=8, Δ=−1/6 each → raw −1/6,
 		// shrunk = −(1/6)·16/18 = −4/27.
 		assert.ok(Math.abs(phi.include_runtime - -4 / 27) < 1e-12, `include_runtime ${phi.include_runtime}`);
-		// snippet_chars: every pair (4,0),(5,1),(6,2),(7,3) keeps the observed
-		// half's evidence (pairN=4 each — NOT skipped): Δ = 0, −1/3, +1/6, −1/6
-		// → raw = −1/12, shrunk = −(1/12)·16/18 = −2/27.
-		assert.ok(Math.abs(phi.snippet_chars - -2 / 27) < 1e-12, `snippet_chars ${phi.snippet_chars}`);
+		// snippet_chars: every pair (4,0),(5,1),(6,2),(7,3) has an UNPULLED
+		// snippet-rich side — comparing an observed mean against the untouched
+		// prior would credit distance-from-0.5, not the feature, so half-empty
+		// pairs are skipped entirely: raw = 0, shrunk = 0.
+		assert.ok(Math.abs(phi.snippet_chars - 0) < 1e-12, `snippet_chars ${phi.snippet_chars}`);
 	});
 
 	test('no evidence at all → all-zero advantages (never NaN)', () => {

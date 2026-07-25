@@ -789,7 +789,8 @@ class SharedScratchpad:
         grace — we own them).  Files belonging to OTHER runs/processes sharing
         ``VINV_ENGINE_SHARED_DIR`` are never touched here: a concurrent run's
         live offloads must survive our clear.  Stale foreign files are instead
-        collected by the run-start ``gc_offloads`` hooks (bringup/handbook),
+        reclaimable via ``offload_registry.gc_offloads``/``compact_registry`` (no
+        automatic run-start hook exists yet — collection is a manual/tooling step),
         which honor the grace window.  Non-fatal: a GC failure must never
         break a clear.
         """

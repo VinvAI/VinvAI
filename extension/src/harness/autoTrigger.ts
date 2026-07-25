@@ -859,6 +859,7 @@ async function offerPreparedOptimization(
 	workspaceRoot: string,
 	plan: OptimizationPlan,
 	hooks?: DispatchHooks,
+	episodeId?: string,
 ): Promise<boolean> {
 	// The retry seed (persisted attempt history + this episode's learning) is
 	// OFFLOADED, not inlined: it rides the task's optimization block into
@@ -878,7 +879,7 @@ async function offerPreparedOptimization(
 		priorLearning: task.optimization ? undefined : hooks?.priorLearning,
 		onAccept: async () => {
 			try {
-				markOpportunitiesDispatched(workspaceRoot, plan.boardIds);
+				markOpportunitiesDispatched(workspaceRoot, plan.boardIds, episodeId);
 			} catch {
 				// The board is bookkeeping; a failed write must not lose the episode.
 			}
@@ -983,10 +984,11 @@ export async function runVerifiedHotspotEpisode(
 		void vscode.window.showInformationMessage(noPlanMessage(prep, 'hotspots'));
 		return;
 	}
+	const deps = buildWorkspaceDeps(workspaceRoot, { row });
 	const result = await runVerifiedOptimization(
 		{ label: plan.label, opportunity: plan.opportunity },
-		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks),
-		buildWorkspaceDeps(workspaceRoot, { row }),
+		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks, deps.episodeId),
+		deps,
 	);
 	announceVerdict(result, plan.label);
 }
@@ -1007,10 +1009,11 @@ export async function runVerifiedCacheSweep(
 		void vscode.window.showInformationMessage(noPlanMessage(prep, 'cache_candidates'));
 		return;
 	}
+	const deps = buildWorkspaceDeps(workspaceRoot, {});
 	const result = await runVerifiedOptimization(
 		{ label: plan.label, opportunity: plan.opportunity },
-		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks),
-		buildWorkspaceDeps(workspaceRoot, {}),
+		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks, deps.episodeId),
+		deps,
 	);
 	announceVerdict(result, plan.label);
 }

@@ -61,6 +61,7 @@ import {
 } from './optimizationAnalysis';
 import { appendEpisodeEvent, type EpisodeEvent } from './episodeTelemetry';
 import { readEpisodeEvents } from './trajectoryReport';
+import { maybeUpdateEpisodePolicy } from './episodePolicyUpdater';
 
 /**
  * The policy updater joins optimization_outcome events to episodes by the
@@ -72,18 +73,13 @@ import { readEpisodeEvents } from './trajectoryReport';
  */
 function ledgerEpisodeIdSince(sinceUnix: number, fallback: string): string {
 	try {
-		const events = readEpisodeEvents() as Array<{
-			type?: string;
-			episode_id?: string;
-			at?: number;
-		}>;
+		const events = readEpisodeEvents();
 		for (let i = events.length - 1; i >= 0; i -= 1) {
-			const e = events[i];
-			if (
-				e.type === 'episode_end' &&
-				typeof e.episode_id === 'string' &&
-				(e.at ?? 0) >= sinceUnix
-			) {
+			const e = events[i] as { type?: string; episode_id?: string; at?: number; ts?: string };
+			// episode_end lines carry ts (ISO), not at — parse whichever exists.
+			const when =
+				typeof e.at === 'number' ? e.at : e.ts ? Math.floor(Date.parse(e.ts) / 1000) : 0;
+			if (e.type === 'episode_end' && typeof e.episode_id === 'string' && when >= sinceUnix) {
 				return e.episode_id;
 			}
 		}
@@ -498,6 +494,9 @@ export interface OptimizeEngineDeps {
 		files_changed: string[];
 	}) => void;
 	notify: (message: string) => void;
+	/** The verdict engine's own episode id (opt-*) — board dispatch records it
+	 * so hang detection can scope ledger activity to THIS episode. */
+	episodeId?: string;
 	/**
 	 * Fallback hand-off: called when the engine dispatched WITHOUT a measurable
 	 * frozen set, so the session-timing watcher must own the row again — the
@@ -830,6 +829,7 @@ export function buildWorkspaceDeps(
 	const startedAtUnix = Math.floor(Date.now() / 1000);
 	let frozenTarget: FrozenProbeTarget | null = null;
 	return {
+		episodeId,
 		freezeProbes: async () => {
 			frozenTarget = freezeReadyProbeSpecs(workspaceRoot);
 			if (!frozenTarget || frozenTarget.specs.length === 0) {
@@ -875,7 +875,21 @@ export function buildWorkspaceDeps(
 			// Learned MDE: at least the measured noise floor, never below a 3%
 			// practical floor nor above 25% (a floor that high means the probe set
 			// is too noisy to verify anything — flag via the policy value itself).
-			const learned = Math.min(0.25, Math.max(0.03, noiseFloorRel ?? 0.03));
+			// No fresh noise floor (too few samples) → fall back to the value a
+			// previous measured run persisted, so the learned prior is READ back,
+			// not merely written.
+			let persisted: number | undefined;
+			try {
+				const prev = JSON.parse(
+					fs.readFileSync(path.join(workspaceRoot, '.vinv', 'exercise', 'policy.json'), 'utf8'),
+				) as Record<string, unknown>;
+				if (typeof prev['optimize.min_effect'] === 'number') {
+					persisted = prev['optimize.min_effect'] as number;
+				}
+			} catch {
+				persisted = undefined;
+			}
+			const learned = Math.min(0.25, Math.max(0.03, noiseFloorRel ?? persisted ?? 0.03));
 			try {
 				const file = path.join(workspaceRoot, '.vinv', 'exercise', 'policy.json');
 				fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -916,6 +930,8 @@ export function buildWorkspaceDeps(
 					// episode this dispatch ran. The bridge's own id is the fallback
 					// when no loop episode completed (headless/test dispatches).
 					episode_id: ledgerEpisodeIdSince(startedAtUnix, episodeId),
+					// The bridge's own id, for board hang-detection scoping.
+					bridge_episode_id: episodeId,
 					row: target.row ?? -1,
 					waste_kind: candidate?.waste_kind ?? resolution.opportunity_kind,
 					predicted_ms: candidate?.outcome?.predicted_ms ?? 0,
@@ -925,6 +941,14 @@ export function buildWorkspaceDeps(
 				} as unknown as EpisodeEvent);
 			} catch {
 				// The verdict already resolved; a failed ledger append must not mask it.
+			}
+			// A resolved verdict is fresh objective evidence — update the learned
+			// policy (posteriors + calibration artifact) now rather than waiting
+			// for the next episode_end-driven update.
+			try {
+				void maybeUpdateEpisodePolicy(workspaceRoot);
+			} catch {
+				// Policy refresh is best-effort; the verdict itself already landed.
 			}
 		},
 		changedFiles: async () => {

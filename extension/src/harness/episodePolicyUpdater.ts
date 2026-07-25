@@ -333,7 +333,7 @@ export function shapleyAttribution(
  *   w_A ∝ n(A) + n(A \ {i})            (combined evidence of the pair),
  *
  * with μ(·) the Beta-posterior mean and n(·) the arm's OBSERVED objective
- * episode count. Pairs where n(A) + n(A\{i}) = 0 carry no evidence about i's
+ * episode count. Pairs where EITHER side is unpulled carry no counterfactual evidence about i's
  * effect (both means are pure prior, their difference is exactly 0 by
  * construction) and are skipped so they cannot dilute the weights. Unlike
  * Shapley-over-means — which weights every coalition by combinatorics alone
@@ -364,8 +364,13 @@ export function counterfactualAttribution(
 			counterfactual[feature] = 0;
 			const base = levelsToIndex(counterfactual);
 			const pairN = counts[a] + counts[base];
-			if (pairN <= 0) {
-				continue; // empty-evidence pair: prior-vs-prior, no information
+			// A pair carries counterfactual information only when BOTH sides were
+			// actually pulled: comparing an observed mean against the untouched
+			// Beta(1,1) prior (0.5) credits distance-from-prior, not the feature —
+			// under Thompson concentration that half-empty case is the common one,
+			// and it silently dominated sparse features' attribution.
+			if (counts[a] <= 0 || counts[base] <= 0) {
+				continue;
 			}
 			weighted += pairN * (posteriorMean(posteriors[a]) - posteriorMean(posteriors[base]));
 			totalPaired += pairN;

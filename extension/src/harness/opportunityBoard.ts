@@ -133,6 +133,9 @@ export interface OpportunityEntry {
 	/** Unix seconds of the newest dispatch — stable while hang bookkeeping
 	 * advances updated_at, so outcome/activity postdating stays correct. */
 	dispatched_at?: number;
+	/** The verdict engine's episode id recorded at dispatch — hang detection
+	 * counts only THIS episode's ledger activity, not the whole workspace's. */
+	episode_id?: string;
 	/** Plain-language lifecycle note (why re-opened, why parked, why evicted). */
 	note?: string;
 }
@@ -436,7 +439,11 @@ function transition(
  * anchor — updated_at keeps moving as bookkeeping advances) and resets the
  * sighting counter so hang detection starts fresh for this attempt.
  */
-export function markOpportunitiesDispatched(workspaceRoot: string, ids: string[]): void {
+export function markOpportunitiesDispatched(
+	workspaceRoot: string,
+	ids: string[],
+	episodeId?: string,
+): void {
 	const board = readBoardFile(workspaceRoot);
 	const changed: OpportunityEntry[] = [];
 	const now = Math.floor(Date.now() / 1000);
@@ -444,7 +451,12 @@ export function markOpportunitiesDispatched(workspaceRoot: string, ids: string[]
 		const entry = board.entries.get(id);
 		if (entry && entry.status === 'posted') {
 			changed.push(
-				transition(board, entry, { status: 'dispatched', dispatched_at: now, misses: 0 }),
+				transition(board, entry, {
+					status: 'dispatched',
+					dispatched_at: now,
+					misses: 0,
+					...(episodeId ? { episode_id: episodeId } : {}),
+				}),
 			);
 		}
 	}
@@ -483,10 +495,24 @@ function eventUnixTime(ev: LedgerEvent): number | undefined {
  * same-second clocks). A timestamp-less line counts as activity: an unknown
  * clock must never convict a dispatch of hanging.
  */
-function ledgerActiveSince(events: ReadonlyArray<LedgerEvent>, since: number): boolean {
+function ledgerActiveSince(
+	events: ReadonlyArray<LedgerEvent>,
+	since: number,
+	episodeId?: string,
+): boolean {
 	return events.some((ev) => {
 		if (ev.type !== 'episode_end' && ev.type !== 'optimization_outcome') {
 			return false;
+		}
+		// When the dispatch recorded its episode id, only THAT episode's events
+		// count — otherwise any concurrent episode in the workspace resets the
+		// hang counter forever and a genuinely dead dispatch never re-opens.
+		if (episodeId) {
+			const eid = typeof ev.episode_id === 'string' ? ev.episode_id : undefined;
+			const bid = typeof ev.bridge_episode_id === 'string' ? ev.bridge_episode_id : undefined;
+			if (eid !== episodeId && bid !== episodeId) {
+				return false;
+			}
 		}
 		const at = eventUnixTime(ev);
 		return at === undefined || at + 1 >= since;
@@ -630,7 +656,7 @@ export function reconcileOpportunityBoard(
 				if (entry.last_session === sessionKey) {
 					continue; // this session's quiet was already counted
 				}
-				if (ledgerActiveSince(events, entry.dispatched_at ?? entry.updated_at)) {
+				if (ledgerActiveSince(events, entry.dispatched_at ?? entry.updated_at, entry.episode_id)) {
 					if ((entry.misses ?? 0) > 0) {
 						changed.push(transition(board, entry, { misses: 0, last_session: sessionKey }));
 					}

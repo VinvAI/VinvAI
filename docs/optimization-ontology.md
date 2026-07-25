@@ -88,7 +88,7 @@ paired-bootstrap 95% CI on per-probe medians that must exclude zero and clear
 the minimum effect. Attempts form a lineage: behavior breaks revert to origin
 immediately; behavior-preserving no-gain steps stay applied; an unaccepted
 lineage reverts to origin. Every finished episode appends to
-`.vinv/exercise/optimize.jsonl` (both writers, identical shape). *Readers:*
+`.vinv/exercise/optimize.jsonl` (one production writer (the extension verdict engine); the exerciser module is the doctrine reference, exercised by its tests, writing the identical shape). *Readers:*
 the Findings view, the machine summary, this walk. Append-only, no expiry —
 it is the permanent verdict history.
 
