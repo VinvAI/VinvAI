@@ -261,6 +261,8 @@ interface ExitEvent {
 	args_hash?: string;
 	/** BLAKE2b of the return value, on exit events. */
 	result_hash?: string;
+	/** Shape of the return value, on exit events ('NoneType' for None). */
+	result_schema?: string;
 	/** Request-tree fields (present on every raw-capture event). */
 	request_id?: string;
 	thread_id?: number | string;
@@ -363,8 +365,11 @@ export function collectMemoryTrends(
  * nondeterministic, so "optimizing" them (caching credentials, cutting rounds)
  * weakens security rather than saving waste.
  */
+// NOTE: hashlib is deliberately absent — it is overwhelmingly used for
+// CONTENT hashing (checksums, cache keys, ids), and including it guarded half
+// of real codebases. Password hashing in practice arrives via the dedicated
+// libraries below.
 const SECURITY_IMPORT_ROOTS = new Set([
-	'hashlib',
 	'hmac',
 	'secrets',
 	'bcrypt',
@@ -434,29 +439,29 @@ export function securityGuardReasons(
 			reasons.set(f, `imports ${hits.join(', ')} — crypto/credential code is intentionally slow`);
 		}
 	}
-	// Propagate through intra-repo imports to a fixpoint (bounded by file count).
-	for (let pass = 0; pass < files.size; pass += 1) {
-		let changed = false;
-		for (const [f, mods] of importsOf) {
-			if (reasons.has(f)) {
-				continue;
-			}
-			for (const m of mods) {
-				for (const g of reasons.keys()) {
-					const d = dotted(g);
-					if (d === m || d.endsWith(`.${m}`) || m.endsWith(`.${d}`)) {
-						reasons.set(f, `imports ${m}, which is security-sensitive (${reasons.get(g)})`);
-						changed = true;
-						break;
-					}
-				}
-				if (reasons.has(f)) {
+	// Propagate ONE hop through intra-repo imports: a file importing a
+	// DIRECTLY-guarded module (crud.py importing core.security) inherits the
+	// guard, but the chain stops there — a fixpoint walk guarded half of a real
+	// codebase via shared plumbing modules, which silently suppresses honest
+	// candidates. One hop plus the functional-dependence gate is the balance.
+	const direct = new Map(reasons);
+	for (const [f, mods] of importsOf) {
+		if (reasons.has(f)) {
+			continue;
+		}
+		for (const m of mods) {
+			let found: string | undefined;
+			for (const g of direct.keys()) {
+				const d = dotted(g);
+				if (d === m || d.endsWith(`.${m}`) || m.endsWith(`.${d}`)) {
+					found = `imports ${m}, which is security-sensitive (${direct.get(g)})`;
 					break;
 				}
 			}
-		}
-		if (!changed) {
-			break;
+			if (found) {
+				reasons.set(f, found);
+				break;
+			}
 		}
 	}
 	const out = new Map<number, string>();
@@ -481,9 +486,12 @@ export function securityGuardReasons(
  *     one type hash identically, so 62 distinct requests can masquerade as one
  *     repeated input) and salted/impure functions whose output varies.
  *   • Security guard — symbols in files importing crypto/credential modules
- *     (directly or transitively) are never offered as cache candidates:
- *     their cost is intentional (bcrypt), and caching credentials is a
- *     vulnerability, not an optimization.
+ *     (directly or one intra-repo hop away) are never offered as cache
+ *     candidates: their cost is intentional (bcrypt), and caching credentials
+ *     is a vulnerability, not an optimization.
+ *   • None-return gate — a duplicated call whose every observed return is None
+ *     contributes nothing reclaimable: the work's real output is a side effect
+ *     the tracer didn't see, and there is no value a cache could serve.
  * reclaimable_ms is measured per duplicated argument group (its observed time
  * minus one representative call) and capped at the NEWEST session's total for
  * the symbol — you cannot reclaim more than the symbol currently costs.
@@ -501,6 +509,10 @@ export function collectCacheCandidates(
 		ms: number;
 		results: Set<string>;
 		unknownResult: boolean;
+		/** Every observed return was None — the work's real output is a side
+		 * effect the tracer didn't record (the embedder's do_POST writes to a
+		 * socket and returns None), so there is no value to memoize. */
+		noneOnly: boolean;
 	}
 	interface Acc {
 		calls: number;
@@ -551,6 +563,7 @@ export function collectCacheCandidates(
 						ms: 0,
 						results: new Set<string>(),
 						unknownResult: false,
+						noneOnly: true,
 					};
 					g.count += 1;
 					g.ms += ms;
@@ -558,6 +571,9 @@ export function collectCacheCandidates(
 						g.results.add(ev.result_hash);
 					} else {
 						g.unknownResult = true;
+					}
+					if (ev.result_schema !== 'NoneType') {
+						g.noneOnly = false;
 					}
 					acc.args.set(ah, g);
 				}
@@ -589,6 +605,10 @@ export function collectCacheCandidates(
 			if (g.unknownResult || g.results.size !== 1) {
 				functional = false;
 				break;
+			}
+			// A None-returning group has no value to reuse: its work is effects.
+			if (g.noneOnly) {
+				continue;
 			}
 			dup += g.count - 1;
 			dupMs += (g.ms * (g.count - 1)) / g.count;

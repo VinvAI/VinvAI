@@ -42,6 +42,7 @@ import {
 	collectCacheCandidates,
 	collectMemoryTrends,
 	collectRuntimeErrorClusters,
+	securityGuardReasons,
 	selectHotspots,
 	type ErrorCluster,
 	type Hotspot,
@@ -580,6 +581,7 @@ export async function offerEpisodeForHotspot(
 	let node: { name: string; file: string; start_line: number } | undefined;
 	let totalMs = 0;
 	let calls = 0;
+	let guardReason: string | undefined;
 	try {
 		const nodes = loadNodes(indexStoreDir(workspaceRoot));
 		const overlay = loadRuntimeOverlay(workspaceRoot, nodes);
@@ -587,6 +589,7 @@ export async function offerEpisodeForHotspot(
 		const rt = overlay[row];
 		totalMs = rt?.total_ms ?? 0;
 		calls = rt?.calls ?? 0;
+		guardReason = securityGuardReasons(workspaceRoot, nodes).get(row);
 	} catch {
 		return false;
 	}
@@ -594,6 +597,16 @@ export async function offerEpisodeForHotspot(
 		// Row is not resolvable against the current store — do the safe thing.
 		return offerEpisodeForHotspots(context, workspaceRoot, hooks);
 	}
+	// A security-sensitive hotspot is still a real hotspot (bcrypt DOMINATES an
+	// auth-heavy trace) — but its cost may be deliberate, so the constraint
+	// rides the prompt: the agent must not weaken what makes it slow.
+	const guardBlock = guardReason
+		? `\n\nSECURITY CONSTRAINT: \`${node.name}\` is security-sensitive (${guardReason}). ` +
+			'Its cost may be DELIBERATE — password hashing and crypto are slow by design. ' +
+			'Do not cache credentials or their results, reduce hash rounds/iterations, or ' +
+			'weaken any security parameter. If the time is intentional crypto cost, say so ' +
+			'and stop instead of optimizing.'
+		: '';
 	const task: EpisodeTask = {
 		kind: 'general',
 		trigger: 'smoke-errors',
@@ -605,11 +618,15 @@ export async function offerEpisodeForHotspot(
 			'\n\nDecide whether the win is a better algorithm, caching, batching, or ' +
 			'making the work async/parallel — and change only what the evidence ' +
 			'supports. Do not alter behavior. Re-run the same flow afterwards so a ' +
-			'fresh trace can show the time dropped.',
+			'fresh trace can show the time dropped.' +
+			guardBlock,
 		seedRows: [row],
 		successCriteria: [
 			`\`${node.name}\` spends measurably less total time on the same exercised flow`,
 			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
+			...(guardReason
+				? ['No security behavior weakened: hashing/crypto parameters and credential checks are untouched']
+				: []),
 		],
 	};
 	return offerOrDispatch(

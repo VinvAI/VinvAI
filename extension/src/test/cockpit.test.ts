@@ -2146,6 +2146,24 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 		}
 	});
 
+	test('a duplicated call that always returns None has nothing to memoize', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-none-'));
+		try {
+			// The embedder's do_POST shape: constant args hash, constant result
+			// hash — but the "result" is None every time; the real output is a
+			// socket write the tracer never saw. No value to cache.
+			const lines: string[] = [];
+			for (let i = 0; i < 3; i++) {
+				lines.push(enter('src.mod0.fn0', 'aaaa'));
+				lines.push(exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'noneh', result_schema: 'NoneType' }));
+			}
+			writeTrace(ws, 's0', lines, Math.floor(Date.now() / 1000));
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
 	test('security guard: crypto-importing files are excluded, directly and transitively', () => {
 		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-guard-'));
 		try {
