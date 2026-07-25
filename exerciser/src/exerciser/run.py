@@ -138,6 +138,10 @@ def run_exercise(
     bandits: dict[str, EndpointBandit] = {}
     grouped_by_ep: dict[str, dict[str, list[Candidate]]] = {}
     covered_ids_by_ep: dict[str, set[str]] = {}
+    # Handler symbol per endpoint, for the trace-primary handler_observed join.
+    handler_by_id: dict[str, str | None] = {
+        e["api_id"]: e.get("handler") for e in endpoints
+    }
     for ep in endpoints:
         api_id = ep["api_id"]
         grouped = _candidates_for_endpoint(ep)
@@ -217,6 +221,7 @@ def run_exercise(
         for api_id in list(active_ids):
             cov = coverage_fn(
                 repo, api_id, service=service, store_dir=store_dir, logger=log,
+                handler=handler_by_id.get(api_id),
             )
             new_ids = set(cov.get("covered_ids", set())) - covered_ids_by_ep[api_id]
             covered_ids_by_ep[api_id] |= set(cov.get("covered_ids", set()))
@@ -283,7 +288,8 @@ def run_exercise(
     # Coverage snapshot for the summary.
     coverage_rows = []
     for api_id in grouped_by_ep:
-        cov = coverage_fn(repo, api_id, service=service, store_dir=store_dir, logger=log)
+        cov = coverage_fn(repo, api_id, service=service, store_dir=store_dir, logger=log,
+                          handler=handler_by_id.get(api_id))
         coverage_rows.append({
             "api_id": api_id,
             "covered": cov.get("covered", 0),

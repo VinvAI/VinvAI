@@ -8,6 +8,7 @@ import { FlowStateSource } from './views/flowStateSource';
 import { FlowViewProvider, FLOW_VIEW_ID } from './views/flowPanel';
 import { OptimizationSource } from './views/optimizationSource';
 import { registerOptimizationNudge } from './views/optimizationPanel';
+import { ReportMirrorSource } from './views/reportMirrorSource';
 import { maybeAutoDiscover } from './index/discovery';
 import { startAutoReindex } from './index/autoReindex';
 import { initServiceRunner } from './bringup/serviceRunner';
@@ -140,6 +141,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	const optimizationSource = new OptimizationSource();
 	context.subscriptions.push(optimizationSource);
 	registerOptimizationNudge(context, optimizationSource);
+
+	// The agent-facing report mirrors (findings.json / journey.json) are kept
+	// current in the background — before this source they were produced only
+	// inside the webview lifecycle, so they went stale until a human opened a
+	// tab. Debounced over .vinv artifacts, change-gated, atomic.
+	context.subscriptions.push(new ReportMirrorSource());
 
 	// Status-bar indicator + management quick pick for services the user runs via
 	// the ▶ flow (the multi-service analogue of the debug toolbar).

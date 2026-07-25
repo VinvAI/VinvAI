@@ -131,7 +131,11 @@ function wireJourney(workspaceRoot: string, webview: vscode.Webview): vscode.Dis
 		}
 		void webview.postMessage({ type: 'journey', journey });
 		try {
-			fs.writeFileSync(backing, JSON.stringify(journey, null, 2), 'utf8');
+			// Same serialization + atomic write as ReportMirrorSource, so the two
+			// writers of this file produce identical bytes and never tear it.
+			const tmp = `${backing}.tmp-${process.pid}`;
+			fs.writeFileSync(tmp, `${JSON.stringify(journey, null, 2)}\n`, 'utf8');
+			fs.renameSync(tmp, backing);
 		} catch {
 			// referenceable snapshot lags; the view itself is current
 		}
@@ -305,14 +309,14 @@ function getHtml(): string {
 		document.getElementById('title').textContent = 'Journey';
 		document.getElementById('meta').textContent = 'START TO END · EVERYTHING VINV VERIFIED';
 		document.getElementById('stats').innerHTML =
-			'<span class="cov">Endpoints <span class="bar"><span style="width:' +
+			'<span class="cov" title="Endpoints where at least one test request actually ran code">Endpoints <span class="bar"><span style="width:' +
 			(j.coverage.endpointsTotal ? Math.round(100 * j.coverage.endpointsCovered / j.coverage.endpointsTotal) : 0) +
 			'%"></span></span> ' + j.coverage.endpointsCovered + '/' + j.coverage.endpointsTotal + '</span>' +
-			'<span class="cov">Symbols <span class="bar"><span style="width:' +
+			'<span class="cov" title="Functions the endpoints can reach that a captured request actually executed">Functions <span class="bar"><span style="width:' +
 			(j.coverage.symbolsTotal ? Math.round(100 * j.coverage.symbolsCovered / j.coverage.symbolsTotal) : 0) +
 			'%"></span></span> ' + j.coverage.symbolsCovered + '/' + j.coverage.symbolsTotal + '</span>' +
-			'<span class="stat">Scenarios <b>' + j.scenarios.completed + '/' + j.scenarios.run + '</b></span>' +
-			'<span class="stat">State cleaned <b>' + j.statePollution.cleaned + '/' + j.statePollution.created + '</b></span>';
+			'<span class="stat" title="Recorded multi-step flows (sign up → log in → create → delete) replayed end to end; completed means every step answered as recorded">Scenarios <b>' + j.scenarios.completed + '/' + j.scenarios.run + '</b></span>' +
+			'<span class="stat" title="Records the test runs created in your service, and how many were deleted again afterwards">Test data cleaned up <b>' + j.statePollution.cleaned + '/' + j.statePollution.created + '</b></span>';
 		let html = '<h2>Services</h2>';
 		html += j.services.length === 0 ? '<div class="empty">No services discovered yet.</div>' : '';
 		for (const s of j.services) {
@@ -328,7 +332,7 @@ function getHtml(): string {
 			html += '<h2>Expired scenarios</h2>';
 			for (const s of j.scenarios.expired) html += '<div class="svc error">' + esc(s.name) + ' — ' + esc(s.reason) + '</div>';
 		}
-		html += '<h2>Walk</h2><div class="empty">Use Next / → to step through every endpoint: call tree, flamegraph, and the exact inputs and outputs exercised.</div>';
+		html += '<h2>Walk</h2><div class="empty">Use Next / → to step through every endpoint: its call tree, where the time went, and the exact inputs and outputs exercised.</div>';
 		document.getElementById('content').innerHTML = html;
 	}
 
@@ -391,22 +395,22 @@ function getHtml(): string {
 	function renderStep(s) {
 		document.getElementById('title').textContent = s.method + ' ' + s.path;
 		document.getElementById('meta').textContent =
-			(s.handler ? s.handler.toUpperCase() + '() · ' : '') + s.apiId;
+			s.handler ? 'served by ' + s.handler + '()' : 'every request, input, and result for this endpoint';
 		const pct = s.coverage.total ? Math.round(100 * s.coverage.covered / s.coverage.total) : 0;
 		document.getElementById('stats').innerHTML =
-			'<span class="cov">Coverage <span class="bar"><span style="width:' + pct + '%"></span></span> ' +
+			'<span class="cov" title="Functions this endpoint can reach that a captured request actually executed">Coverage <span class="bar"><span style="width:' + pct + '%"></span></span> ' +
 			s.coverage.covered + '/' + s.coverage.total + '</span>' +
-			'<span class="stat">p50 <b>' + s.p50Ms + 'ms</b></span>' +
-			'<span class="stat">p95 <b>' + s.p95Ms + 'ms</b></span>' +
-			'<span class="stat" title="Observed = the endpoint&#39;s handler function actually ran in the trace. Not observed = every request so far was rejected before reaching it (auth, validation) — it still needs a valid input">Handler ' + (s.handlerObserved ? '<b>observed</b>' : 'not observed') + '</span>' +
-			'<span class="stat">Invariants <b>' + s.invariants + '</b></span>';
+			'<span class="stat" title="Typical response time — half of the checked requests were faster than this">p50 <b>' + s.p50Ms + 'ms</b></span>' +
+			'<span class="stat" title="The slow tail — 19 of 20 requests were faster than this">p95 <b>' + s.p95Ms + 'ms</b></span>' +
+			'<span class="stat" title="Reached = the function that serves this endpoint actually ran during a captured request. Not reached = every request so far was turned away first (login, validation) — it still needs a valid input">Code ' + (s.handlerObserved ? '<b>reached</b>' : 'not reached yet') + '</span>' +
+			'<span class="stat" title="Rules of behavior that held on every healthy response — an id that only ever grows, a field that is never empty. Checked again on every later run">Behavior rules <b>' + s.invariants + '</b></span>';
 
 		let html = '<h2>Call tree</h2>';
 		if (s.tree) html += '<ul class="tree">' + nodeHtml(s.tree) + '</ul>';
 		else html += '<div class="empty' + (s.treeError ? ' error' : '') + '">' +
 			esc(s.treeError || 'No call-tree snapshot yet — open this endpoint\\'s call tree once to generate it.') + '</div>';
 
-		html += '<h2>Flamegraph</h2>';
+		html += '<h2>Where the time went</h2>';
 		html += s.tree ? '<div id="flame">' + flameHtml(s.tree) + '</div>'
 			: '<div class="empty">Needs a call-tree snapshot.</div>';
 
@@ -434,7 +438,7 @@ function getHtml(): string {
 			'<div><label>Expected status</label><input id="in-expect" value="2xx"></div>' +
 			'<div style="align-self:end"><button type="submit">Add input</button></div>' +
 			'</form>' +
-			'<div class="empty">Saved into this endpoint\\'s semantic plan — the next <b>exerciser run</b> executes it (with auth setup if the endpoint\\'s scenario provides it) and it becomes a permanent regression case.</div>';
+			'<div class="empty">Saved with this endpoint\\'s planned inputs — the next <b>exerciser run</b> executes it (logging in first if this endpoint\\'s recorded flow needs it) and it becomes a permanent regression check.</div>';
 
 		document.getElementById('content').innerHTML = html;
 

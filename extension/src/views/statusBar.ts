@@ -28,6 +28,8 @@ import {
 import { collectRuntimeErrorClusters } from '../harness/runtimeAnalysis';
 import { runningServiceNames } from '../bringup/serviceRunner';
 import { isEpisodeRunning } from '../harness/episodeLoop';
+import { actionableOpportunityCount, timeSaverLine } from './optimizationPanel';
+import { optimizeReportOpenedThisSession } from './optimizationReportView';
 
 const REFRESH_MS = 15_000;
 
@@ -123,20 +125,32 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 		const running = runningServiceNames();
 		const failing = currentFailingCount(root);
 		let text = `$(circuit-board) Vinv e${epoch}`;
-		tooltip.appendMarkdown(`**Vinv** — index epoch ${epoch}\n\n`);
+		tooltip.appendMarkdown(
+			`**Vinv** — code map version ${epoch} (updates every time the code is re-indexed)\n\n`,
+		);
 		if (running.length > 0) {
 			text += ` · ${running.length}▶`;
 			tooltip.appendMarkdown(`Running services: ${running.join(', ')}\n\n`);
 		}
 		if (isEpisodeRunning()) {
-			text += ' · episode';
-			tooltip.appendMarkdown('A harness episode is in flight.\n\n');
+			text += ' · agent working';
+			tooltip.appendMarkdown('An agent is working on a fix right now.\n\n');
 		}
 		if (failing > 0) {
 			text += ` · ${failing}✗`;
 			tooltip.appendMarkdown(
-				`**${failing} symbol(s) failing** in the latest captured run — ` +
+				`**${failing} function${failing === 1 ? '' : 's'} failing** in the latest captured run — ` +
 					'the graph shows exactly where.\n\n',
+			);
+		}
+		// The quiet time-saver line: only while the board holds actionable
+		// opportunities AND the Optimize report has not been opened this session.
+		// Passive by design — it sits in the bar/tooltip, it never pops anything.
+		const savers = optimizeReportOpenedThisSession() ? 0 : actionableOpportunityCount(root);
+		if (savers > 0) {
+			text += ` · ${savers}⚡`;
+			tooltip.appendMarkdown(
+				`**${timeSaverLine(savers)}** — [Open Optimize](command:vinv-vs.openOptimization)\n\n`,
 			);
 		}
 		// Error background only when runtime evidence says something is broken;

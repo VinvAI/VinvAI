@@ -71,6 +71,13 @@ export interface ProbeSpec {
 	source: 'trace' | 'authored';
 	/** Why authoring is needed (evidence handed to the authoring agent). */
 	authoringReason?: string;
+	/**
+	 * Per-probe HTTP deadline, derived from the endpoint's OWN persisted latency
+	 * history at synthesis/freeze time (see probeTimeoutMs). Absent on specs
+	 * probed before any history exists — httpProbe then falls back to the
+	 * no-history policy prior.
+	 */
+	timeoutMs?: number;
 }
 
 /** The persisted probe file for one service. */
@@ -299,10 +306,100 @@ function argExamplesFromCorpus(
 
 // ---- probe execution --------------------------------------------------------
 
-/** Per-probe HTTP deadline in ms (VINV_PROBE_TIMEOUT_S, default 10s). */
-function probeTimeoutMs(): number {
+/**
+ * Timeout policy priors — multipliers over the endpoint's OWN latency history,
+ * never absolute deadlines. p99 × TAIL says "this endpoint has been given 20×
+ * its own observed tail and still hasn't answered — that is a hang, not a slow
+ * response"; the floor keeps the deadline at least a couple of slowest-ever
+ * responses even when the p99 sits far below the max.
+ */
+const TIMEOUT_TAIL_MULTIPLIER = 20;
+const TIMEOUT_FLOOR_MULTIPLIER = 2;
+/** No history yet: the pre-existing flat prior (10s) until evidence arrives. */
+const NO_HISTORY_TIMEOUT_MS = 10_000;
+
+/**
+ * Per-probe HTTP deadline in ms, derived from the endpoint's own persisted
+ * latency history: max(p99 × 20, slowest-observed × 2). The VINV_PROBE_TIMEOUT_S
+ * env override always wins; with no history the flat 10s prior applies.
+ * Exported for the unit test.
+ */
+export function probeTimeoutMs(latencyHistoryMs: ReadonlyArray<number> = []): number {
 	const raw = Number.parseFloat(process.env.VINV_PROBE_TIMEOUT_S ?? '');
-	return (Number.isFinite(raw) && raw > 0 ? raw : 10) * 1000;
+	if (Number.isFinite(raw) && raw > 0) {
+		return raw * 1000;
+	}
+	const samples = latencyHistoryMs.filter((v) => Number.isFinite(v) && v > 0);
+	if (samples.length === 0) {
+		return NO_HISTORY_TIMEOUT_MS;
+	}
+	const ordered = [...samples].sort((a, b) => a - b);
+	const p99 = ordered[Math.min(ordered.length - 1, Math.floor(0.99 * ordered.length))];
+	const slowest = ordered[ordered.length - 1];
+	return Math.ceil(
+		Math.max(p99 * TIMEOUT_TAIL_MULTIPLIER, slowest * TIMEOUT_FLOOR_MULTIPLIER),
+	);
+}
+
+/**
+ * The endpoint's persisted latency samples, joined from the two records that
+ * survive restarts: the exerciser's results.jsonl (rows matching this probe's
+ * "METHOD path") and the service's probe file lastRun (same probe id). Missing
+ * or unreadable artifacts contribute nothing — the timeout then rests on the
+ * no-history prior.
+ */
+export function persistedLatencyHistory(
+	workspaceRoot: string,
+	service: string,
+	spec: Pick<ProbeSpec, 'id' | 'method' | 'path'>,
+): number[] {
+	const out: number[] = [];
+	try {
+		const raw = fs.readFileSync(
+			path.join(workspaceRoot, '.vinv', 'exercise', 'results.jsonl'),
+			'utf8',
+		);
+		for (const line of raw.split('\n')) {
+			if (!line.trim()) {
+				continue;
+			}
+			let row: { method?: string; path?: string; latency_ms?: number };
+			try {
+				row = JSON.parse(line) as typeof row;
+			} catch {
+				continue; // torn line — skip
+			}
+			if (
+				row.method === spec.method &&
+				row.path === spec.path &&
+				typeof row.latency_ms === 'number'
+			) {
+				out.push(row.latency_ms);
+			}
+		}
+	} catch {
+		// No exerciser results yet.
+	}
+	const persisted = readProbeFile(workspaceRoot, service);
+	for (const outcome of persisted?.lastRun?.probes ?? []) {
+		if (outcome.id === spec.id && typeof outcome.latencyMs === 'number') {
+			out.push(outcome.latencyMs);
+		}
+	}
+	return out;
+}
+
+/** Stamps every ready spec's deadline from its own persisted history. */
+function stampProbeTimeouts(
+	workspaceRoot: string,
+	service: string,
+	specs: ProbeSpec[],
+): void {
+	for (const spec of specs) {
+		if (spec.status === 'ready') {
+			spec.timeoutMs = probeTimeoutMs(persistedLatencyHistory(workspaceRoot, service, spec));
+		}
+	}
 }
 
 /** Response-body capture cap for shape hashing — structure, not a transcript. */
@@ -322,6 +419,9 @@ export function httpProbe(
 }> {
 	return new Promise((resolve) => {
 		const started = Date.now();
+		// Stamped from the endpoint's own latency history at synthesis/freeze
+		// time; a spec that predates any history falls back to the flat prior.
+		const deadlineMs = spec.timeoutMs ?? probeTimeoutMs();
 		let settled = false;
 		let body = '';
 		let contentType: string | undefined;
@@ -342,7 +442,7 @@ export function httpProbe(
 				port,
 				method: spec.method,
 				path: spec.path,
-				timeout: probeTimeoutMs(),
+				timeout: deadlineMs,
 				headers: spec.body
 					? {
 							'content-type': spec.contentType ?? 'application/json',
@@ -366,7 +466,7 @@ export function httpProbe(
 		);
 		req.on('timeout', () => {
 			req.destroy();
-			settle(null, `no response within ${Math.round(probeTimeoutMs() / 1000)}s`);
+			settle(null, `no response within ${(deadlineMs / 1000).toFixed(1)}s`);
 		});
 		req.on('error', (e) => settle(null, e.message));
 		if (spec.body) {
@@ -490,6 +590,8 @@ export function freezeReadyProbeSpecs(workspaceRoot: string): FrozenProbeTarget 
 		}
 	}
 	const ready = specs.filter((s) => s.status === 'ready');
+	// Freeze includes each probe's deadline, so before/after replays share it.
+	stampProbeTimeouts(workspaceRoot, target.service, ready);
 	return ready.length > 0 ? { service: target.service, port: target.port, specs: ready } : null;
 }
 
@@ -738,6 +840,9 @@ async function probePassOnce(
 	}
 
 	specs = await authorMissingProbes(context, workspaceRoot, specs);
+	// Every probe's deadline comes from its endpoint's own latency history
+	// (p99×k with a history floor) — never one flat number for all endpoints.
+	stampProbeTimeouts(workspaceRoot, target.service, specs);
 
 	const outcomes: ProbeOutcome[] = [];
 	const observations: ObservedResponse[] = [];

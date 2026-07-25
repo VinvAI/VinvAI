@@ -222,15 +222,21 @@ function getHtml(): string {
 	function tiles(f) {
 		const h = f.headline;
 		const t = [
-			{ k: 'Endpoint coverage', v: h.endpointsCovered + '<small>/' + h.endpointsTotal + '</small>' },
-			{ k: 'Symbol coverage', v: h.symbolsCovered + '<small>/' + h.symbolsTotal + '</small>' },
-			{ k: 'Issues found', v: h.issuesFound, hot: h.issuesFound > 0 },
-			{ k: 'Optimizations accepted', v: h.episodesAccepted + '<small>/' + (h.episodesAccepted + h.episodesReverted) + ' episodes</small>' },
-			{ k: 'Regression cases', v: h.regressCases + '<small> · ' + h.regressRealDiffs + ' real diffs</small>', hot: h.regressRealDiffs > 0 },
-			{ k: 'State unwound', v: h.stateCleaned + '<small>/' + h.stateCreated + ' created</small>' },
+			{ k: 'Endpoints covered', v: h.endpointsCovered + '<small>/' + h.endpointsTotal + '</small>',
+				tip: 'Endpoints where at least one test request actually ran code' },
+			{ k: 'Functions covered', v: h.symbolsCovered + '<small>/' + h.symbolsTotal + '</small>',
+				tip: 'Functions the endpoints can reach that a captured request actually executed' },
+			{ k: 'Issues found', v: h.issuesFound, hot: h.issuesFound > 0,
+				tip: 'Distinct failures observed in live runs, grouped by root cause' },
+			{ k: 'Optimizations accepted', v: h.episodesAccepted + '<small>/' + (h.episodesAccepted + h.episodesReverted) + ' attempts</small>',
+				tip: 'Speedups that measured faster with behavior unchanged; the rest were rolled back' },
+			{ k: 'Regression checks', v: h.regressCases + '<small> · ' + h.regressRealDiffs + ' real changes</small>', hot: h.regressRealDiffs > 0,
+				tip: 'Recorded request/response pairs replayed against the current code; a real change means the same request now answers differently' },
+			{ k: 'Test data cleaned up', v: h.stateCleaned + '<small>/' + h.stateCreated + ' created</small>',
+				tip: 'Records the test runs created in your service, and how many were deleted again afterwards' },
 		];
 		document.getElementById('tiles').innerHTML = t.map((x) =>
-			'<div class="tile' + (x.hot ? ' hot' : '') + '"><div class="k">' + x.k + '</div><div class="v">' + x.v + '</div></div>').join('');
+			'<div class="tile' + (x.hot ? ' hot' : '') + '"' + (x.tip ? ' title="' + x.tip + '"' : '') + '><div class="k">' + x.k + '</div><div class="v">' + x.v + '</div></div>').join('');
 	}
 
 	function ciBar(a) {
@@ -259,11 +265,11 @@ function getHtml(): string {
 		let html = '';
 
 		html += '<h2>Issue clusters (' + f.issues.length + ')</h2>';
-		html += f.issues.length === 0 ? '<div class="empty">No behavioral failures clustered.</div>' : '';
+		html += f.issues.length === 0 ? '<div class="empty">No failures found in anything that was exercised.</div>' : '';
 		for (const i of f.issues) {
 			html += '<div class="epi"><div class="head"><span class="badge revert">' + esc(i.kind) + '</span>' +
 				'<span class="label">' + esc(i.title) + '</span></div>' +
-				'<div class="files">signature ' + esc(i.signature) + '</div></div>';
+				'<div class="files" title="A stable id for this failure — the same root cause keeps this fingerprint across runs, so fixes and re-checks line up">fingerprint ' + esc(i.signature) + '</div></div>';
 		}
 
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';
@@ -290,7 +296,7 @@ function getHtml(): string {
 		}
 
 		if (f.opportunities.length) {
-			html += '<h2>Detected opportunities awaiting episodes (' + f.opportunities.length + ')</h2>';
+			html += '<h2>Detected time-savers not yet attempted (' + f.opportunities.length + ')</h2>';
 			for (const o of f.opportunities) {
 				html += '<div class="epi"><div class="head"><span class="badge">' + esc(o.kind) + '</span>' +
 					'<span class="label">' + esc(o.endpoint) + '</span></div>' +
@@ -304,10 +310,10 @@ function getHtml(): string {
 			html += '<div class="empty">No regress runs recorded yet.</div>';
 		} else {
 			html += '<div class="epi"><div class="head">' +
-				'<span class="badge">' + r.cases + ' cases</span>' +
-				'<span class="badge' + (r.behavior ? ' revert' : '') + '">behavior ' + r.behavior + '</span>' +
-				'<span class="badge' + (r.contract ? ' revert' : '') + '">contract ' + r.contract + '</span>' +
-				'<span class="badge' + (r.perf ? ' revert' : '') + '">perf ' + r.perf + '</span>' +
+				'<span class="badge" title="Recorded request/response pairs replayed against the current code">' + r.cases + ' cases</span>' +
+				'<span class="badge' + (r.behavior ? ' revert' : '') + '" title="The same request now returns a different answer">behavior ' + r.behavior + '</span>' +
+				'<span class="badge' + (r.contract ? ' revert' : '') + '" title="The response&#39;s shape changed — fields appeared, vanished, or changed type">contract ' + r.contract + '</span>' +
+				'<span class="badge' + (r.perf ? ' revert' : '') + '" title="The same request got clearly slower than it used to be">perf ' + r.perf + '</span>' +
 				'<span class="badge env" title="Differences caused by data the test engine itself planted in earlier runs (its own residue) — the world changed, not your code">environment ' + r.environment + '</span>' +
 				(r.authSkipped ? '<span class="badge">auth skipped ' + r.authSkipped + '</span>' : '') + '</div>';
 			for (const d of r.diffs) {
@@ -316,7 +322,7 @@ function getHtml(): string {
 			}
 			if (f.regress.history.length > 1) {
 				const hmax = Math.max(1, ...f.regress.history.map((x) => x.behavior + x.contract + x.perf + x.environment));
-				html += '<div class="att"><span class="ap hint">real-diff history (newest right; grey = environment drift)</span><span class="spark">' +
+				html += '<div class="att"><span class="ap hint">real-change history (newest right; grey = environment drift)</span><span class="spark">' +
 					f.regress.history.map((x) => {
 						const real = x.behavior + x.contract + x.perf;
 						const env = x.environment;
@@ -329,24 +335,29 @@ function getHtml(): string {
 
 		html += '<h2>Latency profile per endpoint</h2>';
 		const maxP95 = Math.max(1, ...f.endpoints.map((e) => e.p95Ms));
-		html += '<table><tr><th>Endpoint</th><th>Coverage</th><th>p50</th><th>p95</th><th style="width:30%">p95 bar</th><th>Statuses</th></tr>';
+		html += '<table><tr><th>Endpoint</th>' +
+			'<th title="Functions this endpoint can reach that a captured request actually executed (ran / reachable)">Coverage</th>' +
+			'<th title="Typical response time — half of the checked requests were faster than this">p50</th>' +
+			'<th title="The slow tail — 19 of 20 requests were faster than this">p95</th>' +
+			'<th style="width:30%" title="The slow tail, drawn relative to the slowest endpoint">p95 bar</th>' +
+			'<th title="How many requests got each HTTP status">Statuses</th></tr>';
 		for (const e of f.endpoints) {
 			const hot = e.p95Ms >= 200;
-			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge" title="No request has reached this endpoint&#39;s handler function yet — usually it needs auth or a valid multi-step setup">handler unseen</span>') + '</td>' +
+			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge" title="No request has reached the function that serves this endpoint yet — usually it needs a login or a valid multi-step setup first">not reached</span>') + '</td>' +
 				'<td>' + esc(e.coverage) + '</td><td>' + e.p50Ms + 'ms</td><td' + (hot ? ' class="badge revert"' : '') + '>' + e.p95Ms + 'ms</td>' +
 				'<td><span class="bar' + (hot ? ' hot' : '') + '"><span style="width:' + Math.max(1, (e.p95Ms / maxP95) * 100) + '%"></span></span></td>' +
 				'<td>' + esc(Object.entries(e.statuses).map(([k, v]) => k + '×' + v).join(' ')) + '</td></tr>';
 		}
 		html += '</table>';
 
-		html += '<h2>State ledger (' + f.state.cleaned + '/' + f.state.created + ' unwound)</h2>';
+		html += '<h2>Data the tests created (' + f.state.cleaned + '/' + f.state.created + ' cleaned up)</h2>';
 		if (f.state.rows.length === 0) {
-			html += '<div class="empty">Nothing planted — or nothing recorded yet.</div>';
+			html += '<div class="empty">The test runs created nothing in your service — or nothing has been recorded yet.</div>';
 		} else {
 			html += '<table><tr><th>Created via</th><th>Status</th></tr>';
 			for (const row of f.state.rows) {
 				html += '<tr><td>' + esc(row.endpoint) + '</td><td>' +
-					(row.cleaned ? 'cleaned via ' + esc(row.via ?? '') : '<span class="badge env">uncleaned</span>') + '</td></tr>';
+					(row.cleaned ? 'cleaned up via ' + esc(row.via ?? '') : '<span class="badge env" title="This record is still in your service — the engine could not delete it and will retry before the next run">still there</span>') + '</td></tr>';
 			}
 			html += '</table>';
 		}
@@ -354,7 +365,7 @@ function getHtml(): string {
 		if (f.scenarios.expired && f.scenarios.expired.length) {
 			html += '<h2>Expired scenarios</h2>';
 			for (const s of f.scenarios.expired) {
-				html += '<div class="epi"><div class="head"><span class="badge revert">expired</span>' +
+				html += '<div class="epi"><div class="head"><span class="badge revert" title="This recorded multi-step flow no longer matches the service (a login changed, data was reset) — it will be re-written before the next run">expired</span>' +
 					'<span class="label">' + esc(s.name) + '</span></div><div class="why">' + esc(s.reason) + '</div></div>';
 			}
 		}

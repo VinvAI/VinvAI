@@ -94,7 +94,10 @@ def _endpoint_profile(
 
     latencies = [float(ex["latency_ms"]) for ex in ep_execs if ex.get("latency_ms") is not None]
 
-    cov = endpoint_coverage(repo, api_id, service=service, store_dir=store_dir, logger=logger)
+    cov = endpoint_coverage(
+        repo, api_id, service=service, store_dir=store_dir,
+        handler=handler, logger=logger,
+    )
 
     # Invariants over the SUCCESSFUL responses.
     obs: list[Observation] = []
