@@ -26,6 +26,18 @@ import type { OptimizationCandidate } from '../harness/optimizationAnalysis';
 
 export const OPTIMIZATION_REPORT_VIEW_TYPE = 'vinv.optimizationReport';
 
+/**
+ * Whether the Optimize report has been on screen at any point this session
+ * (opened via command/rail button, or restored with the window). The ambient
+ * surfaces (status bar line, once-per-session nudge) only speak while this is
+ * false — a user who has already seen the report needs no pointer to it.
+ */
+let openedThisSession = false;
+
+export function optimizeReportOpenedThisSession(): boolean {
+	return openedThisSession;
+}
+
 /** Messages the report webview sends back to the extension. */
 export interface OptimizationReportOutbound {
 	type: 'optimize' | 'openSource' | 'measure';
@@ -92,6 +104,8 @@ export class OptimizationReportEditorProvider implements vscode.CustomReadonlyEd
 	}
 
 	resolveCustomEditor(document: vscode.CustomDocument, webviewPanel: vscode.WebviewPanel): void {
+		// Every path to the report lands here (command, rail button, restored tab).
+		openedThisSession = true;
 		// .vinv/reports/optimization.json → workspace root is two dirs up.
 		const workspaceRoot = path.resolve(path.dirname(document.uri.fsPath), '..', '..');
 		const wiring = wireReport(workspaceRoot, document.uri.fsPath, webviewPanel.webview);
@@ -251,6 +265,15 @@ function getReportHtml(): string {
 		const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 		const ms = (n) => Math.round(n) + 'ms';
 		const KIND = { 'cache': 'cache', 'fanout': 'fan-out', 'per-call': 'per-call', 'n-plus-1': 'N+1', 'serial-async': 'async' };
+		// Plain-language description behind each waste-kind tag, so the label
+		// reads cold without knowing the analyzer's vocabulary.
+		const KIND_TIP = {
+			'cache': 'The same work runs again and again with the same inputs — remembering the first result and reusing it would skip the repeats.',
+			'fanout': 'One call sets off many downstream calls; trimming or batching them recovers the time.',
+			'per-call': 'Each individual call is slow in its own body — the cost is in this function, not in what it calls.',
+			'n-plus-1': 'The same lookup repeats once per item in a list instead of once for the whole list.',
+			'serial-async': 'Independent waits run one after another when they could overlap.',
+		};
 		// Direction of a measured delta (after − before): negative = faster.
 		const dir = (delta) => delta == null ? '' : (delta < 0 ? ' faster' : (delta > 0 ? ' slower' : ''));
 		// Micro-glossary: every statistical term on a card carries a plain-language
@@ -341,7 +364,7 @@ function getReportHtml(): string {
 			const cls = c.status === 'dispatched' ? 'working' : (c.status === 'proven' ? 'proven' : (c.status === 'regressed' ? 'regressed' : ''));
 			let h = '<div class="row ' + cls + '">';
 			h += '<div class="rhd"><span class="nm">' + esc(c.name) + '</span>' +
-				'<span class="tag ' + esc(c.waste_kind) + '">' + (KIND[c.waste_kind] || esc(c.waste_kind)) + '</span>' +
+				'<span class="tag ' + esc(c.waste_kind) + '"' + (KIND_TIP[c.waste_kind] ? ' title="' + KIND_TIP[c.waste_kind] + '"' : '') + '>' + (KIND[c.waste_kind] || esc(c.waste_kind)) + '</span>' +
 				ceilingTag(c) +
 				'<span class="loc">' + esc(c.file) + ':' + c.line + ' · ' + ms(c.total_ms) + ' across ' + c.calls + ' call(s)' + (c.self_ms != null ? ' · ' + gloss(ms(c.self_ms) + ' self', 'self') : '') + '</span>' +
 				'<span class="pred" title="' + GLOSS.predicted + '">~' + ms(c.predicted_ms) +

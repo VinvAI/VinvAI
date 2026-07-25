@@ -142,6 +142,18 @@ suite('journey view: arrow keys vs the add-input form', () => {
 		winListeners.keydown({ key: 'ArrowLeft', target: null });
 		assert.strictEqual(els.pos.textContent, '1 / 2', 'moved back');
 	});
+
+	test('step copy reads cold: no raw internal ids, statuses as plain words', () => {
+		const { els, winListeners } = loaded();
+		winListeners.keydown({ key: 'ArrowRight', target: { tagName: 'BODY' } });
+		assert.strictEqual(els.meta.textContent, 'served by h()', 'meta names the function, not the api_id');
+		assert.ok(!els.meta.textContent.includes('GET_x'), 'internal id kept out of the header');
+		const stats = els.stats.innerHTML;
+		assert.ok(stats.includes('not reached yet'), 'handler status is a plain phrase');
+		assert.ok(stats.includes('Behavior rules'), 'invariants renamed to plain words');
+		assert.ok(stats.includes('title="Typical response time'), 'p50 carries a plain tooltip');
+		assert.ok(stats.includes('title="The slow tail'), 'p95 carries a plain tooltip');
+	});
 });
 
 suite('optimization report: verdict copy, direction, glossary, optional fields', () => {
@@ -309,5 +321,30 @@ suite('findings view: episode attempts render legibly', () => {
 		assert.ok(html.includes('No optimization episodes recorded yet'));
 		assert.ok(html.includes('optimize.jsonl'), 'points at the artifact that feeds the section');
 		assert.ok(html.includes('Optimize panel'), 'mentions the in-editor dispatch path too');
+	});
+
+	test('endpoint table and state section read cold: plain badges + stat tooltips', () => {
+		const html = rendered({
+			...findings,
+			endpoints: [
+				{ endpoint: 'GET /api/v1/items/', p50Ms: 12, p95Ms: 288, coverage: '0/4', handlerObserved: false, statuses: { '401': 3 } },
+			],
+			state: {
+				created: 2,
+				cleaned: 1,
+				uncleaned: 1,
+				rows: [
+					{ endpoint: 'POST /items', cleaned: true, via: 'DELETE /items/{id}' },
+					{ endpoint: 'POST /users', cleaned: false, via: null },
+				],
+			},
+		});
+		assert.ok(html.includes('>not reached</span>'), 'unreached endpoint labeled in plain words');
+		assert.ok(!html.includes('handler unseen'), 'the jargon badge is gone');
+		assert.ok(html.includes('title="Typical response time'), 'p50 column tooltip');
+		assert.ok(html.includes('title="The slow tail'), 'p95 column tooltip');
+		assert.ok(html.includes('Data the tests created'), 'ledger section title is plain');
+		assert.ok(html.includes('>still there</span>'), 'uncleaned row is a sentence a non-expert reads');
+		assert.ok(html.includes('fingerprint') || findings.issues.length === 0, 'issue id labeled fingerprint');
 	});
 });
