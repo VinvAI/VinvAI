@@ -107,9 +107,9 @@ Vinv ties **every runtime trace to the exact code segment that produced it** and
 - **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game.
 - **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
-## We ran it on a repo you know
+## The same run, in detail
 
-Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-template**](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all-local on an M-series MacBook:
+Everything above came from one all-local pass on that template, on an M-series MacBook:
 
 - **Indexed 855 symbols across 151 files with 516 call edges in 27.6s** — cold, from clone.
 - **Semantic search: 5/6 natural questions hit the right symbol in the top 5, p50 64ms:**
@@ -152,7 +152,7 @@ Traffic only shows you the code paths users happen to hit. The behavior exercise
 | Symbols covered | — | 18 → **37 / 44** |
 | Regression cases banked | 0 | **125** (replayable forever) |
 
-The **authenticated sweep** (every endpoint replayed under credentials the login scenario captured, with freshly created resource IDs fed to the by-id endpoints) surfaced **four real bugs in a 35k★ template** that anonymous traffic can never reach:
+The **authenticated sweep** (every endpoint replayed under credentials the login scenario captured, with freshly created resource IDs fed to the by-id endpoints) surfaced **four real bugs** that anonymous traffic can never reach:
 
 1. `GET /api/v1/users/` → **HTTP 500** — an invalid email stored by an unvalidated private endpoint poisons response serialization
 2. `POST /api/v1/private/users/` → **IntegrityError escapes as a 500** — `email: str` instead of `EmailStr`, no duplicate guard
