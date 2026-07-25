@@ -1,7 +1,7 @@
 {
 	"name": "VinvAI",
 	"displayName": "VinvAI",
-	"description": "Runtime ground truth for your coding agent. AI writes the code — Vinv watches it run, joins every call to source, and serves that evidence over MCP.",
+	"description": "Runtime context bandits for coding agents. Vinv builds the context, runs the harness and produces the evidence, so commodity models out-fix frontier ones. Stops the AI doom loop and verifies every fix.",
 	"version": "0.0.9",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
@@ -26,6 +26,11 @@
 	],
 	"keywords": [
 		"ai coding agent",
+		"doom loop",
+		"agent stuck in loop",
+		"says done but fails",
+		"debugging",
+		"code verification",
 		"mcp",
 		"claude code",
 		"cursor",

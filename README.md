@@ -1,16 +1,16 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.svg">
-  <img src="https://images.vinv.ai/vinv-banner-dark.svg" alt="Vinv — give your coding agent runtime context. Your agent says it's done. Vinv says prove it." width="720">
+  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-light.png">
+  <img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-dark.png" alt="Vinv — runtime context bandits for coding agents. Commodity models out-fix frontier ones." width="880">
 </picture>
 
 <br><br>
 
-**Vinv watches your code actually run and hands that evidence to your coding agent — then independently checks the agent's "done".**
+**Vinv is the reinforcement loop around your coding agent. It builds the context, runs the harness, and produces the evidence** — a real run traced to the exact line that served each request, every endpoint exercised, and acceptance tests written before the fix that the agent never sees.
 
-<sub><b>Your agent says it's done. Vinv says prove it.</b></sub>
+<sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
 
 <br><br>
 
@@ -39,7 +39,37 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 
 ## 😤 The problem
 
-You've lived the search query *"claude code says done but tests fail"*: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start. It has never watched your code run, so it argues from static text and vibes. Vinv is the vibe coding safety net — it records a real run, ties every request to the exact line that served it, and refuses to accept "done" without proof.
+82% of developers use AI coding tools weekly. Only 33% trust their accuracy ([Stack Overflow 2025](https://survey.stackoverflow.co/2025/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
+
+Or it enters the **doom loop** — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
+
+Both failures have one root cause: **the agent has never watched your code run.** It argues from static text.
+
+## 📈 Case study: commodity models out-fix frontier ones
+
+Five real bugs from [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★). Same bugs, same prompts, Vinv grading every run:
+
+| Setup | Bugs fixed |
+|---|---|
+| **Cheap commodity model + Vinv context** | **5** |
+| Frontier model, working blind | 1 |
+| Cheap commodity model, working blind | 0 |
+
+The claim isn't a model ranking — blind, the commodity model scored zero. The claim is that **a model holding the failing frame, the caller chain, and the real argument values beats a stronger model guessing from static code.** The evidence is what moved, not the weights.
+
+**Why the pass rate means something:** Vinv grades, and it doesn't take the agent's word. Acceptance tests are written before the fix and the agent never sees them. Any change that alters observable output is reverted automatically, even when it's faster: the behavior replay has to come back byte-identical, and the paired-bootstrap 95% CI on a speedup has to exclude zero.
+
+**Vinv found those bugs itself.** One run took the template from 0 of 23 endpoints executed to 23 of 23, and symbol coverage from 18 to 37 of 44. All four sit behind auth, which is why ordinary traffic never reached them:
+
+- `GET /api/v1/users/` returns 500 — an invalid email stored by an unvalidated private endpoint poisons response serialization
+- `POST /api/v1/private/users/` leaks an `IntegrityError` as a 500 — the field is typed `str` instead of `EmailStr`, with no duplicate guard
+- `POST /api/v1/utils/test-email/` crashes on an `assert` instead of degrading when email isn't configured
+- `POST /api/v1/password-recovery-html-content/{email}` kills the connection on an unsanitized header
+
+<div align="center">
+<img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="820">
+<br><sub>One endpoint, fully exercised: call tree with live runtime, latency flamegraph, and every input Vinv drove with the output it got back.</sub>
+</div>
 
 ## 🔍 You searched for this
 
@@ -63,10 +93,10 @@ Give your coding agent runtime context — ten capabilities, one loop:
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
 - **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
-- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
+- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
 - **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
-- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
+- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
 > **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).
 
@@ -134,7 +164,7 @@ The **authenticated sweep** (every endpoint replayed under credentials the login
 The harness then **fixed all four**, and the regression suite now distinguishes *your code regressed* from *the test engine's own leftover data changed the world* (the state ledger) — so a re-run doesn't cry wolf. Phantom perf regressions are gone too: a latency diff must survive a median of 5 replays before it's reported.
 
 <div align="center">
-<img src="https://images.vinv.ai/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="720">
+<img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="720">
 <br><sub>The Journey overview after the run: every service, coverage bars, and the four real bugs — walk them one by one with Next.</sub>
 </div>
 
