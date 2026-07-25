@@ -37,10 +37,42 @@ from typing import Any
 
 from . import store
 
-# Minimum practical relative improvement for an optimization to count (10%).
+# Minimum practical relative improvement for an optimization to count.
+# Documented default: 0.10 (10%) — overridable via the learned policy file
+# (``.vinv/exercise/policy.json``, key ``optimize.min_effect``).
 DEFAULT_MIN_EFFECT = 0.10
+# An endpoint P95 is an outlier when it exceeds this factor times the TRACE
+# MEDIAN P95 (relative-to-trace, never an absolute ms threshold). Documented
+# default: 3.0 — overridable via policy key ``optimize.outlier_factor``.
+DEFAULT_OUTLIER_FACTOR = 3.0
 # Bootstrap resamples for the CI.
 _BOOTSTRAP_N = 2000
+
+
+# ---- learned policy overrides ------------------------------------------------
+
+def policy_path(repo: Path) -> Path:
+    return store.exercise_dir(repo) / "policy.json"
+
+
+def policy_value(repo: Path | str | None, key: str, default: float) -> float:
+    """One learned-policy scalar from ``.vinv/exercise/policy.json``.
+
+    The file is a flat map of dotted keys to numbers, e.g.
+    ``{"optimize.outlier_factor": 2.5, "optimize.min_effect": 0.05}`` — written
+    by the extension's policy updater as it learns from resolved episode
+    outcomes; absent file/key falls back to the documented default. Malformed
+    values fall back too (a broken policy must not break detection).
+    """
+    if repo is None:
+        return default
+    doc = store.read_json(policy_path(Path(repo)))
+    if not isinstance(doc, dict):
+        return default
+    try:
+        return float(doc[key])
+    except (KeyError, TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -69,7 +101,8 @@ def paired_bootstrap_improvement(
     before: list[float],
     after: list[float],
     *,
-    min_effect: float = DEFAULT_MIN_EFFECT,
+    min_effect: float | None = None,
+    repo: Path | str | None = None,
     seed: int = 1729,
     resamples: int = _BOOTSTRAP_N,
 ) -> MetricComparison:
@@ -80,7 +113,13 @@ def paired_bootstrap_improvement(
     relative improvement of medians ``(median(before) - median(after)) /
     median(before)``. ``improved`` is True only when the point estimate meets the
     minimum practical effect AND the 95% CI lower bound is > 0 (CI excludes zero).
+
+    ``min_effect`` unstated resolves through the learned policy
+    (``optimize.min_effect``) with ``DEFAULT_MIN_EFFECT`` as the documented
+    fallback; pass ``repo`` so the policy file can be found.
     """
+    if min_effect is None:
+        min_effect = policy_value(repo, "optimize.min_effect", DEFAULT_MIN_EFFECT)
     n = min(len(before), len(after))
     if n == 0:
         return MetricComparison(0.0, 0.0, 0.0, 0.0, 0.0, False)
@@ -129,25 +168,49 @@ class Opportunity:
 def detect_opportunities(
     profile: dict[str, Any],
     *,
-    p95_outlier_ms: float = 200.0,
+    outlier_factor: float | None = None,
+    repo: Path | str | None = None,
 ) -> list[Opportunity]:
     """Detect optimization opportunities from a behavioral profile.
 
-    A P95 latency above ``p95_outlier_ms`` on a healthy endpoint is an
-    opportunity to speed up; the detection reuses the profile the exerciser
-    already produces (the extension's existing hotspot/cache sweeps cover the
-    symbol-level angle — this is the endpoint-level companion).
+    RELATIVE-TO-TRACE: an endpoint is an outlier when its P95 is at least
+    ``outlier_factor`` times the median P95 across this profile's endpoints —
+    no absolute ms threshold, so a uniformly slow (or uniformly fast) service
+    yields no false seeds. ``outlier_factor`` unstated resolves through the
+    learned policy (``optimize.outlier_factor``, documented default
+    ``DEFAULT_OUTLIER_FACTOR`` = 3.0); the profile's own ``repo`` field locates
+    the policy file, so the existing ``build_profile`` call needs no plumbing.
+    The extension's existing hotspot/cache sweeps cover the symbol-level angle
+    — this is the endpoint-level companion.
     """
+    if repo is None:
+        repo = profile.get("repo")
+    if outlier_factor is None:
+        outlier_factor = policy_value(
+            repo, "optimize.outlier_factor", DEFAULT_OUTLIER_FACTOR,
+        )
+    endpoints = profile.get("endpoints", [])
+    p95s = [float(ep.get("latency", {}).get("p95_ms") or 0.0) for ep in endpoints]
+    positives = [p for p in p95s if p > 0]
+    if len(positives) < 2:
+        return []  # "relative to the trace" needs a trace beyond the endpoint itself
     out: list[Opportunity] = []
-    for ep in profile.get("endpoints", []):
-        p95 = ep.get("latency", {}).get("p95_ms", 0.0)
+    for ep, p95 in zip(endpoints, p95s):
         cov = ep.get("coverage", {})
-        if p95 >= p95_outlier_ms and cov.get("handler_observed"):
+        if not (p95 > 0 and cov.get("handler_observed")):
+            continue
+        # Leave-one-out median: the endpoint is compared against the REST of
+        # the trace, so one dominant outlier cannot hide inside its own median.
+        others = list(positives)
+        others.remove(p95)
+        reference = statistics.median(others)
+        if reference > 0 and p95 >= reference * outlier_factor:
             out.append(Opportunity(
                 kind="latency-p95",
                 endpoint_id=ep["api_id"],
                 endpoint=f"{ep['method']} {ep['path']}",
-                detail=f"P95 latency {p95}ms exceeds the {p95_outlier_ms}ms outlier threshold",
+                detail=(f"P95 latency {p95}ms is >= {outlier_factor}x the "
+                        f"rest-of-trace median P95 ({reference}ms)"),
                 metric="p95_ms",
                 value=p95,
             ))
