@@ -10,6 +10,8 @@ import {
 	setAutoEpisodesEnabled,
 	isAutoPilotEnabled,
 	setAutoPilotEnabled,
+	getAutoPilotBudgets,
+	setAutoPilotBudgets,
 	isAcceptanceTestsEnabled,
 	setAcceptanceTestsEnabled,
 	isMcpEnabled,
@@ -35,6 +37,7 @@ interface InboundMessage {
 		| 'toggleMcp'
 		| 'toggleAutoDiscover'
 		| 'toggleAutoPilot'
+		| 'setBudgets'
 		| 'toggleAutoEpisodes'
 		| 'toggleAcceptanceTests'
 		| 'checkHarnesses'
@@ -42,6 +45,10 @@ interface InboundMessage {
 		| 'installEngines';
 	enabled?: boolean;
 	harnessId?: string;
+	/** Budget fields — arrive as strings from number inputs, clamped on save. */
+	setupAttempts?: number | string;
+	fixEpisodesPerSignature?: number | string;
+	totalFixEpisodes?: number | string;
 }
 
 export function openConfigureForm(context: vscode.ExtensionContext): void {
@@ -73,6 +80,7 @@ export function openConfigureForm(context: vscode.ExtensionContext): void {
 		mcp,
 		isAutoDiscoverEnabled(),
 		isAutoPilotEnabled(),
+		getAutoPilotBudgets(),
 		isAutoEpisodesEnabled(),
 		isAcceptanceTestsEnabled(),
 		panel.webview.cspSource,
@@ -160,6 +168,17 @@ export function openConfigureForm(context: vscode.ExtensionContext): void {
 					return;
 				}
 
+				case 'setBudgets': {
+					setAutoPilotBudgets({
+						setupAttempts: Number(message.setupAttempts),
+						fixEpisodesPerSignature: Number(message.fixEpisodesPerSignature),
+						totalFixEpisodes: Number(message.totalFixEpisodes),
+					});
+					// Echo the stored values so the form shows what was actually
+					// kept after clamping, not what was typed.
+					void panel.webview.postMessage({ type: 'budgets', ...getAutoPilotBudgets() });
+					return;
+				}
 				case 'toggleAutoEpisodes': {
 					await setAutoEpisodesEnabled(!!message.enabled);
 					void panel.webview.postMessage({ type: 'autoEpisodes', enabled: !!message.enabled });
@@ -215,7 +234,8 @@ function esc(s: string): string {
 		.replace(/"/g, '&quot;');
 }
 
-function getFormHtml(
+/** Exported for the standalone render harness (visual verification). */
+export function getFormHtml(
 	selectedHarness: string,
 	harnesses: Array<{
 		id: string;
@@ -227,6 +247,7 @@ function getFormHtml(
 	mcp: { supported: boolean; enabled: boolean; clients: string[] },
 	autoDiscover: boolean,
 	autoPilot: boolean,
+	budgets: { setupAttempts: number; fixEpisodesPerSignature: number; totalFixEpisodes: number },
 	autoEpisodes: boolean,
 	acceptanceTests: boolean,
 	cspSource: string,
@@ -315,6 +336,22 @@ function getFormHtml(
 		.eg { color: var(--muted); }
 		.status { font-size: 11px; margin: 12px 0 0; min-height: 16px; color: var(--muted); }
 		.status.err { color: var(--accent); }
+		.budget-head { font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); margin: 18px 0 6px; }
+		.budget-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 10px 0 6px; }
+		.budget-field { display: flex; flex-direction: column; gap: 4px; }
+		.budget-field span { font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+		.budget-field small { font-size: 9.5px; color: var(--muted-2); }
+		.budget-field input {
+			background: var(--bg-2); color: var(--ink); font-family: inherit; font-size: 15px;
+			border: 1px solid var(--line-strong); border-radius: 0; padding: 7px 9px; width: 100%;
+			box-sizing: border-box; -moz-appearance: textfield;
+		}
+		.budget-field input:focus { outline: none; border-color: var(--accent-fg); }
+		.budget-saved {
+			font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase;
+			color: var(--accent-fg); opacity: 0; transition: opacity 0.2s;
+		}
+		.budget-saved.on { opacity: 1; }
 		.toggle { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; font-size: 10.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
 		.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 		.track {
@@ -391,6 +428,27 @@ function getFormHtml(
 					<span class="track"></span>
 					<span id="pilot-label">${autoPilot ? 'Auto-Pilot on (drives to green after discovery)' : 'Auto-Pilot off (manual per-service setup)'}</span>
 				</label>
+
+				<h4 class="budget-head">Effort budget</h4>
+				<p class="sub">How hard an unattended run tries before handing the service back to you. When a budget runs out, Vinv asks whether to grant more rather than quietly giving up — and the answer is saved here.</p>
+				<div class="budget-grid">
+					<label class="budget-field">
+						<span>Setup attempts</span>
+						<input type="number" id="b-setup" min="1" max="20" value="${budgets.setupAttempts}" />
+						<small>per service</small>
+					</label>
+					<label class="budget-field">
+						<span>Fixes per failure</span>
+						<input type="number" id="b-sig" min="1" max="20" value="${budgets.fixEpisodesPerSignature}" />
+						<small>same error signature</small>
+					</label>
+					<label class="budget-field">
+						<span>Total fixes</span>
+						<input type="number" id="b-total" min="1" max="50" value="${budgets.totalFixEpisodes}" />
+						<small>per service, all errors</small>
+					</label>
+				</div>
+				<div class="budget-saved" id="budget-saved">saved</div>
 
 				<h3>Fix episodes</h3>
 				<p class="sub">When a traced service fails, Vinv composes a context pack and dispatches it to your coding harness automatically. Turn this off to approve each dispatch first.</p>
@@ -541,6 +599,27 @@ function getFormHtml(
 		if (autoToggle) { autoToggle.addEventListener('change', () => vscode.postMessage({ type: 'toggleAutoDiscover', enabled: autoToggle.checked })); }
 		const pilotToggle = $('pilot-toggle'); const pilotLabel = $('pilot-label');
 		if (pilotToggle) { pilotToggle.addEventListener('change', () => vscode.postMessage({ type: 'toggleAutoPilot', enabled: pilotToggle.checked })); }
+		// Budgets: save on change and on blur, debounced so holding the spinner
+		// does not fire a write per tick. The host echoes the stored (clamped)
+		// values back, so the field always shows what was actually kept.
+		const bSetup = document.getElementById('b-setup');
+		const bSig = document.getElementById('b-sig');
+		const bTotal = document.getElementById('b-total');
+		let budgetTimer;
+		const saveBudgets = () => {
+			clearTimeout(budgetTimer);
+			budgetTimer = setTimeout(() => vscode.postMessage({
+				type: 'setBudgets',
+				setupAttempts: bSetup ? bSetup.value : undefined,
+				fixEpisodesPerSignature: bSig ? bSig.value : undefined,
+				totalFixEpisodes: bTotal ? bTotal.value : undefined,
+			}), 400);
+		};
+		[bSetup, bSig, bTotal].forEach((el) => {
+			if (!el) { return; }
+			el.addEventListener('change', saveBudgets);
+			el.addEventListener('blur', saveBudgets);
+		});
 		const episodesToggle = $('episodes-toggle'); const episodesLabel = $('episodes-label');
 		if (episodesToggle) { episodesToggle.addEventListener('change', () => vscode.postMessage({ type: 'toggleAutoEpisodes', enabled: episodesToggle.checked })); }
 		const acceptanceToggle = $('acceptance-toggle'); const acceptanceLabel = $('acceptance-label');
@@ -564,6 +643,13 @@ function getFormHtml(
 			} else if (msg.type === 'autoPilot') {
 				if (pilotToggle) { pilotToggle.checked = msg.enabled; }
 				if (pilotLabel) { pilotLabel.textContent = msg.enabled ? 'Auto-Pilot on (drives to green after discovery)' : 'Auto-Pilot off (manual per-service setup)'; }
+			} else if (msg.type === 'budgets') {
+				const set = (id, v) => { const el = document.getElementById(id); if (el) { el.value = String(v); } };
+				set('b-setup', msg.setupAttempts);
+				set('b-sig', msg.fixEpisodesPerSignature);
+				set('b-total', msg.totalFixEpisodes);
+				const flag = document.getElementById('budget-saved');
+				if (flag) { flag.classList.add('on'); setTimeout(() => flag.classList.remove('on'), 1200); }
 			} else if (msg.type === 'autoEpisodes') {
 				if (episodesToggle) { episodesToggle.checked = msg.enabled; }
 				if (episodesLabel) { episodesLabel.textContent = msg.enabled ? 'Auto-dispatch on (fixes start on failure)' : 'Auto-dispatch off (asks before each fix)'; }

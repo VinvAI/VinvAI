@@ -108,6 +108,60 @@ export function isAutoPilotEnabled(): boolean {
 	return readVinvConfig().autoPilot ?? true;
 }
 
+/**
+ * Auto-Pilot's effort budgets, merged over the engine defaults. These bound how
+ * hard an unattended run tries before handing the problem back: retries per
+ * service setup, fix episodes per distinct failure signature, and an absolute
+ * per-service cap that catches failures whose signature shifts every attempt.
+ */
+export function getAutoPilotBudgets(): {
+	setupAttempts: number;
+	fixEpisodesPerSignature: number;
+	totalFixEpisodes: number;
+} {
+	const saved = readVinvConfig().autoPilotBudgets ?? {};
+	const clamp = (v: unknown, fallback: number): number =>
+		typeof v === 'number' && Number.isFinite(v) && v >= 1 ? Math.floor(v) : fallback;
+	return {
+		setupAttempts: clamp(saved.setupAttempts, 3),
+		fixEpisodesPerSignature: clamp(saved.fixEpisodesPerSignature, 2),
+		totalFixEpisodes: clamp(saved.totalFixEpisodes, 6),
+	};
+}
+
+/** Persists explicit budget values from the Configure form (clamped on read). */
+export function setAutoPilotBudgets(budgets: {
+	setupAttempts: number;
+	fixEpisodesPerSignature: number;
+	totalFixEpisodes: number;
+}): void {
+	const safe = (v: number, lo: number, hi: number, fallback: number): number =>
+		Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.floor(v))) : fallback;
+	updateVinvConfig({
+		autoPilotBudgets: {
+			setupAttempts: safe(budgets.setupAttempts, 1, 20, 3),
+			fixEpisodesPerSignature: safe(budgets.fixEpisodesPerSignature, 1, 20, 2),
+			totalFixEpisodes: safe(budgets.totalFixEpisodes, 1, 50, 6),
+		},
+	});
+}
+
+/**
+ * Raises the budgets by `extra` episodes (and one more setup attempt), persisting
+ * the new level. Called when the user tops up an exhausted run, so the choice
+ * carries into later runs instead of prompting for the same service every time.
+ */
+export function extendAutoPilotBudgets(extra: number): void {
+	const cur = getAutoPilotBudgets();
+	updateVinvConfig({
+		autoPilotBudgets: {
+			setupAttempts: cur.setupAttempts + 1,
+			fixEpisodesPerSignature: cur.fixEpisodesPerSignature + extra,
+			totalFixEpisodes: cur.totalFixEpisodes + extra,
+		},
+	});
+}
+
 /** Persists the Auto-Pilot toggle. */
 export async function setAutoPilotEnabled(enabled: boolean): Promise<void> {
 	updateVinvConfig({ autoPilot: enabled });

@@ -96,6 +96,14 @@ export interface VinvConfig {
 	acceptanceTests?: boolean;
 	/** QnA escalation channel: 'off' (default) | 'shadow' (log actions) | 'on' (execute). */
 	qnaEscalation?: string;
+	/** Auto-Pilot effort budgets. Absent keys fall back to DEFAULT_BUDGETS.
+	 * Raised in place when the user tops up an exhausted run, so the next run
+	 * starts from the level they chose rather than asking again. */
+	autoPilotBudgets?: {
+		setupAttempts?: number;
+		fixEpisodesPerSignature?: number;
+		totalFixEpisodes?: number;
+	};
 }
 
 export function readVinvConfig(): VinvConfig {
