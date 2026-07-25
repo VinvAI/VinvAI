@@ -25,8 +25,13 @@
  *      after-run is bound to the episode, never to "any newer capture session".
  *   5. Verdict = paired-bootstrap CI on the per-probe median latencies AND the
  *      behavioral oracle (byte/shape-identical responses on the frozen set).
- *   6. accept → keep; anything else → revertToSnapshot ACTUALLY runs, and a
- *      bounded retry re-dispatches with the learning threaded into the pack.
+ *   6. accept → keep. Attempts form a bounded LINEAGE: a behavior break
+ *      reverts to ORIGIN at once; a behavior-preserving step without a proven
+ *      speedup stays applied (the next attempt builds on it, judged endpoint
+ *      vs the original baseline); a lineage that ends without acceptance
+ *      reverts to ORIGIN — revertToSnapshot ACTUALLY runs — and every retry
+ *      re-dispatches with the learning (plus the persisted attempt history in
+ *      optimize_attempts.jsonl) threaded into the pack.
  *
  * The maths (paired bootstrap, decision) is a faithful TypeScript port of
  * `exerciser/src/exerciser/optimize.py` — same statistic, same thresholds,
@@ -46,7 +51,15 @@ import {
 	type ProbeMeasurement,
 } from './probeRunner';
 import { optimizationSourceInstance } from '../views/optimizationSource';
-import type { OptimizationStatus } from './optimizationAnalysis';
+import {
+	appendOptimizeAttempt,
+	composePriorAttemptSeed,
+	loadPriorOptimizeAttempts,
+	opportunitySignature,
+	type OptimizationStatus,
+	type PersistedOptimizeAttempt,
+} from './optimizationAnalysis';
+import { appendEpisodeEvent, type EpisodeEvent } from './episodeTelemetry';
 
 // ---- the maths: paired bootstrap CI (port of optimize.py) -------------------
 
@@ -415,13 +428,32 @@ export interface OptimizeEngineDeps {
 	revert: () => Promise<void>;
 	/** Mark the panel row dispatched (no-op for sweeps). */
 	markDispatched: () => void;
-	/** Resolve the panel row from the engine verdict (no-op for sweeps). */
+	/**
+	 * Resolve the panel row from the engine verdict. The production deps also
+	 * emit the contract `optimization_outcome` event to the episode ledger here
+	 * — this is THE point where a verdict resolves.
+	 */
 	resolve: (resolution: {
 		status: OptimizationStatus;
 		comparison: MetricComparison | null;
 		behaviorOk: boolean;
 		reverted: boolean;
+		/** attempts consumed when the verdict resolved. */
+		attempt: number;
+		/** the dispatched opportunity's kind (waste_kind fallback for sweeps). */
+		opportunity_kind: string;
 	}) => void;
+	/**
+	 * Prior persisted attempts for this opportunity signature (doom-loop
+	 * guard) — read from .vinv/exercise/optimize_attempts.jsonl in production.
+	 */
+	loadPriorAttempts: (signature: string) => PersistedOptimizeAttempt[];
+	/** Durably record one attempt for this opportunity signature. */
+	persistAttempt: (
+		signature: string,
+		attempt: OptimizeAttempt,
+		verdict: PersistedOptimizeAttempt['verdict'],
+	) => void;
 	/** Workspace files changed since the snapshot. */
 	changedFiles: () => Promise<string[]>;
 	/** Append the finished episode to optimize.jsonl. */
@@ -472,12 +504,37 @@ function statusFrom(
 	return comparison.ci_high < 0 ? 'regressed' : 'inconclusive';
 }
 
+/** The KEPT-step learning note for a behavior-preserving, timing-unproven attempt. */
+function keptLearning(attemptNo: number, approach: string, c: MetricComparison): string {
+	return (
+		`attempt ${attemptNo} '${approach}' KEPT as an intermediate lineage step: no significant ` +
+		`speedup vs the ORIGINAL baseline yet (rel improvement ${pct(c.rel_improvement)}, 95% CI ` +
+		`[${pct(c.ci_low)}, ${pct(c.ci_high)}]), but behavior is intact so the change remains ` +
+		'applied. Build on it or take a materially different route — the timing verdict is always ' +
+		'judged against the original pre-episode baseline, and everything reverts to origin if the ' +
+		'lineage ends without a proven win.'
+	);
+}
+
 /**
  * The one verdict engine. Freezes the probe set, measures before, dispatches,
  * measures after AS PART OF the same episode, applies the paired-bootstrap +
- * behavioral-oracle verdict, reverts on anything but accept, retries with the
- * learning while budget remains, resolves the panel row, and records the whole
+ * behavioral-oracle verdict, resolves the panel row, and records the whole
  * episode to optimize.jsonl.
+ *
+ * Attempts form a LINEAGE (the escape from the one-step revert trap): every
+ * attempt must pass the BEHAVIOR gate (byte/shape-identical replay of the
+ * frozen set) to stay alive, but the TIMING verdict is always the lineage
+ * endpoint vs the ORIGINAL frozen baseline. A step that preserves behavior
+ * without a proven speedup stays applied and the next attempt builds on it
+ * (budget permitting); a behavior break reverts to ORIGIN immediately; and
+ * when the lineage ends without acceptance the workspace reverts to ORIGIN —
+ * never to an intermediate step. `maxAttempts` remains the whole budget.
+ *
+ * The doom-loop guard: prior attempts persisted under this opportunity's
+ * signature (optimize_attempts.jsonl) seed the FIRST dispatch's prompt, so
+ * "try a materially different approach" survives restarts; and every attempt
+ * of this episode is persisted back as it happens.
  *
  * When the frozen set is empty or too small to judge (service down, no probes
  * yet), it still dispatches ONE episode — the phantom-dispatch fix and the
@@ -491,6 +548,7 @@ export async function runVerifiedOptimization(
 ): Promise<OptimizeRunResult> {
 	const minPaired = opts.minPairedProbes ?? 3;
 	const maxAttempts = opts.maxAttempts ?? 3;
+	const signature = opportunitySignature(opts.opportunity);
 
 	const frozen = await deps.freezeProbes();
 	const before = frozen ? await deps.measure(frozen) : null;
@@ -502,28 +560,63 @@ export async function runVerifiedOptimization(
 
 	await deps.snapshot();
 
+	// Doom-loop guard: what earlier episodes (possibly before a restart)
+	// already tried on this exact opportunity, threaded into every dispatch.
+	let persistedSeed: string | undefined;
+	try {
+		persistedSeed = composePriorAttemptSeed(deps.loadPriorAttempts(signature));
+	} catch {
+		persistedSeed = undefined; // an unreadable store must not block dispatch
+	}
+
 	let attempts: OptimizeAttempt[] = [];
 	let decision: OptimizeDecision | null = null;
 	let lastComparison: MetricComparison | null = null;
 	let lastBehaviorOk = true;
 	let files: string[] = [];
 	const budget = measurable ? maxAttempts : 1;
+	// Behavior-preserving intermediate changes currently applied on top of the
+	// origin snapshot (the live lineage).
+	let liveLineageSteps = 0;
+
+	const persist = (attempt: OptimizeAttempt, verdict: PersistedOptimizeAttempt['verdict']): void => {
+		try {
+			deps.persistAttempt(signature, attempt, verdict);
+		} catch {
+			// The attempt already happened; a failed history write must not mask it.
+		}
+	};
+	const markAllReverted = (list: OptimizeAttempt[]): void => {
+		for (const a of list) {
+			a.reverted = true;
+		}
+	};
+	const seed = (): string | undefined => {
+		const parts = [persistedSeed, decision?.learning].filter(
+			(p): p is string => Boolean(p),
+		);
+		return parts.length > 0 ? parts.join('\n\n') : undefined;
+	};
 
 	for (let attempt = 1; attempt <= budget; attempt += 1) {
 		const dispatched = await dispatch({
 			onAccept: () => deps.markDispatched(),
-			priorLearning: decision?.learning || undefined,
+			priorLearning: seed(),
 		});
 		if (!dispatched) {
 			if (attempts.length === 0) {
 				// Declined outright: nothing ran, nothing was marked — no phantom.
 				return { mode: 'declined' };
 			}
-			// A retry was declined after real (reverted) attempts: close the
-			// episode honestly with what happened.
+			// A retry was declined after real attempts: the lineage ends without
+			// acceptance, so any live intermediate steps go back to ORIGIN.
+			if (liveLineageSteps > 0) {
+				await deps.revert();
+				markAllReverted(attempts);
+			}
 			decision = {
 				action: 'revert-and-stop',
-				reason: `retry declined after ${attempts.length} reverted attempt(s)`,
+				reason: `retry declined after ${attempts.length} unaccepted attempt(s)`,
 				learning: decision?.learning ?? '',
 				attempts,
 			};
@@ -535,6 +628,7 @@ export async function runVerifiedOptimization(
 			// lands. No CI, no auto-revert — we never judge on evidence we lack.
 			return { mode: 'fallback' };
 		}
+		// Lineage endpoint vs the ORIGINAL frozen baseline — `before` never moves.
 		const after = await deps.measure(frozen as FrozenProbeSet);
 		const paired = pairProbeSamples(before as Map<string, ProbeMeasurement>, after);
 		lastComparison = pairedBootstrapImprovement(paired.before, paired.after);
@@ -546,23 +640,51 @@ export async function runVerifiedOptimization(
 			paired.behaviorOk,
 			{ priorAttempts: attempts, maxAttempts: budget },
 		);
+		const newest = decision.attempts[decision.attempts.length - 1];
 		if (!paired.behaviorOk && paired.behaviorDetail) {
-			decision.attempts[decision.attempts.length - 1].learning += ` (${paired.behaviorDetail})`;
+			newest.learning += ` (${paired.behaviorDetail})`;
 		}
 		attempts = decision.attempts;
+
 		if (decision.action === 'accept') {
+			persist(newest, 'accepted');
 			break;
 		}
-		// Regressed or no-gain: the revert is REAL, not a UI claim.
-		await deps.revert();
-		deps.notify(
-			`Vinv: optimization attempt ${attempt} reverted — ${
-				paired.behaviorOk ? 'no verified speedup' : 'behavior changed'
-			}.`,
-		);
+		if (!paired.behaviorOk) {
+			// A behavior break never stays alive: the WHOLE lineage returns to
+			// origin (earlier kept steps included), and (budget permitting) the
+			// next attempt starts fresh.
+			await deps.revert();
+			liveLineageSteps = 0;
+			markAllReverted(attempts);
+			persist(newest, 'reverted-behavior');
+			deps.notify(`Vinv: optimization attempt ${attempt} reverted — behavior changed.`);
+			if (decision.action === 'revert-and-stop') {
+				break;
+			}
+			continue;
+		}
 		if (decision.action === 'revert-and-stop') {
+			// Budget exhausted without acceptance: the lineage ends → ORIGIN (one
+			// real revert of everything, never a partial rollback to a step).
+			await deps.revert();
+			markAllReverted(attempts);
+			persist(newest, 'reverted-no-gain');
+			deps.notify(
+				`Vinv: optimization lineage reverted to origin after ${attempt} attempt(s) — no verified speedup.`,
+			);
 			break;
 		}
+		// No proven speedup but behavior intact: the step stays ALIVE as an
+		// intermediate lineage change instead of reverting immediately.
+		liveLineageSteps += 1;
+		newest.reverted = false;
+		newest.learning = keptLearning(attempt, `${opts.label} — attempt ${attempt}`, lastComparison);
+		decision.learning = newest.learning;
+		persist(newest, 'kept-no-gain');
+		deps.notify(
+			`Vinv: optimization attempt ${attempt} kept (behavior intact, no verified speedup yet) — the lineage continues.`,
+		);
 	}
 
 	if (!decision || !lastComparison) {
@@ -573,6 +695,8 @@ export async function runVerifiedOptimization(
 		comparison: lastComparison,
 		behaviorOk: lastBehaviorOk,
 		reverted: decision.action !== 'accept',
+		attempt: attempts.length,
+		opportunity_kind: opts.opportunity.kind,
 	});
 	deps.recordEpisode({
 		label: opts.label,
@@ -648,12 +772,34 @@ export function buildWorkspaceDeps(
 			}
 		},
 		resolve: (resolution) => {
+			let candidate;
 			if (target.row !== undefined) {
-				optimizationSourceInstance()?.resolveRowFromVerdict(
+				candidate = optimizationSourceInstance()?.resolveRowFromVerdict(
 					workspaceRoot,
 					target.row,
 					resolution,
 				);
+			}
+			// Contract: one optimization_outcome event per resolved verdict, into
+			// the SAME episode ledger episodeTelemetry/trajectoryReport read. The
+			// calibration updater joins delta_ms against the RAW predicted_ms that
+			// was frozen at dispatch.
+			const ci = resolution.comparison;
+			try {
+				appendEpisodeEvent({
+					type: 'optimization_outcome',
+					ts: new Date().toISOString(),
+					at: Math.floor(Date.now() / 1000),
+					episode_id: episodeId,
+					row: target.row ?? -1,
+					waste_kind: candidate?.waste_kind ?? resolution.opportunity_kind,
+					predicted_ms: candidate?.outcome?.predicted_ms ?? 0,
+					delta_ms: ci ? ci.after_median - ci.before_median : 0,
+					verdict: resolution.behaviorOk ? resolution.status : 'reverted-behavior',
+					attempt: resolution.attempt,
+				} as unknown as EpisodeEvent);
+			} catch {
+				// The verdict already resolved; a failed ledger append must not mask it.
 			}
 		},
 		changedFiles: async () => {
@@ -672,6 +818,18 @@ export function buildWorkspaceDeps(
 			} catch {
 				return [];
 			}
+		},
+		loadPriorAttempts: (signature) =>
+			loadPriorOptimizeAttempts(workspaceRoot, target.row, signature),
+		persistAttempt: (signature, attempt, verdict) => {
+			appendOptimizeAttempt(workspaceRoot, {
+				row: target.row,
+				signature,
+				approach: attempt.approach,
+				comparison: attempt.comparison ? comparisonToJson(attempt.comparison) : null,
+				verdict,
+				learning: attempt.learning,
+			});
 		},
 		recordEpisode: (record) => {
 			try {
