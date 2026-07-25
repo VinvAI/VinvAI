@@ -1,9 +1,9 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-light.png">
-  <img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/vinv-banner-dark.png" alt="Vinv — runtime context bandits for coding agents. Commodity models out-fix frontier ones." width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
+  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — runtime context bandits for coding agents. Commodity models out-fix frontier ones." width="880">
 </picture>
 
 <br><br>
@@ -15,12 +15,14 @@
 <br><br>
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-D71921?style=flat-square)](LICENSE)
-[![Open VSX Version](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI)
-[![Open VSX Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI)
-[![Open VSX Rating](https://img.shields.io/open-vsx/rating/VinvAI/VinvAI?style=flat-square&color=D71921)](https://open-vsx.org/extension/VinvAI/VinvAI/reviews)
-[![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#-privacy)
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/VinvAI.VinvAI?style=flat-square&color=D71921&label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI)
+[![Open VSX](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921&label=Open%20VSX)](https://open-vsx.org/extension/VinvAI/VinvAI)
+[![Found 4 real bugs](https://img.shields.io/badge/found-4%20real%20bugs%20in%20a%2035k%E2%98%85%20repo-D71921?style=flat-square)](#case-study-commodity-models-out-fix-frontier-ones)
+[![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
-**Install:** [**Open VSX** (Cursor · VS Code · Windsurf)](https://open-vsx.org/extension/VinvAI/VinvAI) · [**vinv.ai/#install**](https://vinv.ai/#install) — or build everything from source:
+**Install:** [**VS Code Marketplace**](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI) · [**Open VSX** (Cursor · Windsurf · VSCodium)](https://open-vsx.org/extension/VinvAI/VinvAI) · [**vinv.ai/#install**](https://vinv.ai/#install)
+
+<sub>Or build the engines from source (~4 min: compiles the Rust index and fetches a one-time ~500 MB local embedding model). First trace about a minute after that.</sub>
 
 </div>
 
@@ -29,25 +31,21 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 ```
 
 <div align="center">
-<sub>⭐ <b>Star the repo if your agent has ever said "done" and lied</b> — stars are how other vibe coders find the safety net.</sub>
-</div>
-
-<div align="center">
 <img src="https://images.vinv.ai/vinv-journey.gif" alt="Runtime tracing for AI coding agents: Vinv installs, discovers and runs every service under tracing, catches a real bug, dispatches the fix, and verifies it — on its own repo" width="720">
 <br><sub>The whole loop on Vinv's own repo: install → discover → trace → catch a real bug → dispatch → verified fix, zero clicks.</sub>
 </div>
 
-## 😤 The problem
+## The problem
 
-82% of developers use AI coding tools weekly. Only 33% trust their accuracy ([Stack Overflow 2025](https://survey.stackoverflow.co/2025/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
+84% of developers now use or plan to use AI coding tools. More of them **actively distrust** the output (46%) than trust it (33%) — and distrust nearly doubled in a year ([Stack Overflow 2025, 49k developers](https://survey.stackoverflow.co/2025/ai/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
 
 Or it enters the **doom loop** — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
 
 Both failures have one root cause: **the agent has never watched your code run.** It argues from static text.
 
-## 📈 Case study: commodity models out-fix frontier ones
+## Case study: commodity models out-fix frontier ones
 
-Five real bugs from [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★). Same bugs, same prompts, Vinv grading every run:
+Five real bugs in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★) — four of them Vinv found itself. Same bugs, same prompts, one trial per condition, Vinv grading every run:
 
 | Setup | Bugs fixed |
 |---|---|
@@ -55,34 +53,24 @@ Five real bugs from [fastapi/full-stack-fastapi-template](https://github.com/fas
 | Frontier model, working blind | 1 |
 | Cheap commodity model, working blind | 0 |
 
+**This is a demonstration, not a benchmark** — five bugs, one repo, one trial per condition. We're publishing it because it's checkable, not because n=5 settles anything.
+
 The claim isn't a model ranking — blind, the commodity model scored zero. The claim is that **a model holding the failing frame, the caller chain, and the real argument values beats a stronger model guessing from static code.** The evidence is what moved, not the weights.
 
 **Why the pass rate means something:** Vinv grades, and it doesn't take the agent's word. Acceptance tests are written before the fix and the agent never sees them. Any change that alters observable output is reverted automatically, even when it's faster: the behavior replay has to come back byte-identical, and the paired-bootstrap 95% CI on a speedup has to exclude zero.
 
-**Vinv found those bugs itself.** One run took the template from 0 of 23 endpoints executed to 23 of 23, and symbol coverage from 18 to 37 of 44. All four sit behind auth, which is why ordinary traffic never reached them:
+## If any of these is your open tab
 
-- `GET /api/v1/users/` returns 500 — an invalid email stored by an unvalidated private endpoint poisons response serialization
-- `POST /api/v1/private/users/` leaks an `IntegrityError` as a 500 — the field is typed `str` instead of `EmailStr`, with no duplicate guard
-- `POST /api/v1/utils/test-email/` crashes on an `assert` instead of degrading when email isn't configured
-- `POST /api/v1/password-recovery-html-content/{email}` kills the connection on an unsanitized header
-
-<div align="center">
-<img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="820">
-<br><sub>One endpoint, fully exercised: call tree with live runtime, latency flamegraph, and every input Vinv drove with the output it got back.</sub>
-</div>
-
-## 🔍 You searched for this
-
-| The 2 a.m. search | What Vinv does about it |
+| Symptom | What Vinv does about it |
 |---|---|
 | *"claude code says done but tests fail"* | independent verification: replayed start, live port, acceptance tests the agent never sees |
-| *"cursor agent stuck in a loop"* | doom-loop guard + adaptive watchdog + Nash stall judge — mutate the approach or escalate to you, never spin |
+| *"cursor agent stuck in a loop"* | Vinv notices the agent repeating itself, forces a different approach, and hands you a verdict instead of burning tokens |
 | *"how to test fastapi endpoints automatically"* | the behavior exerciser drives every endpoint with schema/boundary/negative/auth inputs, banks every response as a regression case |
 | *"AI broke code that was working"* | byte-identical behavior replay gates every change; one-click revert of everything an episode touched |
-| *"find memory leak python without profiler"* | Theil–Sen retention trends across sessions name leak suspects from real runs |
+| *"find memory leak python without profiler"* | names the functions holding memory that never got released, from real runs — no profiler, no instrumentation |
 | *"why is my api slow"* | per-call flamegraphs from live traffic + Pareto hotspots + CI-gated optimization episodes |
 
-## 👁 What Vinv does
+## What Vinv does
 
 Give your coding agent runtime context — ten capabilities, one loop:
 
@@ -93,14 +81,14 @@ Give your coding agent runtime context — ten capabilities, one loop:
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
 - **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
-- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
+- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
 - **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
-- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
+- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
 > **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).
 
-## 🛡 Why agents don't reward-hack under Vinv
+## Why agents don't reward-hack under Vinv
 
 Vinv ties **every runtime trace to the exact code segment that produced it** and hands your agent a context graph built from that join — so the agent argues from evidence, not vibes. And when the agent claims victory, Vinv doesn't take its word:
 
@@ -109,7 +97,7 @@ Vinv ties **every runtime trace to the exact code segment that produced it** and
 - **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game.
 - **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
-## 🧪 We ran it on a repo you know
+## We ran it on a repo you know
 
 Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-template**](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all-local on an M-series MacBook:
 
@@ -125,7 +113,7 @@ Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-templat
 - The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
 
 <div align="center">
-<img src="https://images.vinv.ai/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
+<img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
 </div>
 
 *The actual run, captured frame by frame: install → 855-symbol graph → search hits → trace hotspots → the failing frame named → verified.*
@@ -164,11 +152,11 @@ The **authenticated sweep** (every endpoint replayed under credentials the login
 The harness then **fixed all four**, and the regression suite now distinguishes *your code regressed* from *the test engine's own leftover data changed the world* (the state ledger) — so a re-run doesn't cry wolf. Phantom perf regressions are gone too: a latency diff must survive a median of 5 replays before it's reported.
 
 <div align="center">
-<img src="https://github.com/VinvAI/VinvAI/raw/main/.github/assets/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="720">
-<br><sub>The Journey overview after the run: every service, coverage bars, and the four real bugs — walk them one by one with Next.</sub>
+<img src="https://images.vinv.ai/journey-endpoint.png" alt="Vinv Journey deep-dive on POST /users/signup: call tree with runtime counts and errors, latency flamegraph, and all 15 exercised inputs with their outputs" width="720">
+<br><sub>One endpoint after the run: call tree with live runtime, latency flamegraph, and every input Vinv drove with the output it got back.</sub>
 </div>
 
-## 🔌 Works with your agent
+## Works with your agent
 
 Vinv is an MCP server for Claude Code and Cursor — and every other MCP client you already use. One command (**Register Vinv MCP in Agent Tools**) writes both servers into every agent it detects:
 
@@ -195,7 +183,7 @@ Registration is idempotent and never commits secrets. Both servers (`vinv-index`
 **Your agent is also Vinv's only LLM** — every analysis step routes through the coding-agent CLI you already pay for. No provider keys, no model picker.
 </details>
 
-## ⚖️ Agent without Vinv vs with Vinv
+## Agent without Vinv vs with Vinv
 
 | | Agent alone | Agent + Vinv |
 |---|---|---|
@@ -210,7 +198,7 @@ Registration is idempotent and never commits secrets. Both servers (`vinv-index`
 | Test data | pollutes your dev DB and forgets | state ledger: created resources tracked, torn down via your own API, drift labeled |
 | Cost | burns tokens re-exploring | evidence pack composed once, locally |
 
-## 📊 Proven on itself
+## Proven on itself
 
 Vinv's release gate is Vinv — these numbers come from running the loop on this repository:
 
@@ -220,10 +208,10 @@ Vinv's release gate is Vinv — these numbers come from running the loop on this
 | Search | file hit@10 **0.90** · symbol MRR 0.51 · p50 81ms |
 | Crash recovery | indexer, embedder, and traced service all kill-tested mid-run |
 | Self-found waste | 83% duplicate compute found → now cached |
-| Config promotion | OPE-gated: **+0.173** CI [0.081, 0.317] |
+| Retrieval tuning | new configs ship only when they beat the old one on replayed past queries — last promotion **+17% retrieval reward**, 95% CI [+8%, +32%] |
 | Test suite | 941 tests green |
 
-## ⚙️ How it works
+## How it works
 
 ```mermaid
 flowchart LR
@@ -260,7 +248,7 @@ The whole test ontology — what exists, where it lives on disk, and the walk or
 Vinv indexes **the code** and generates — from your own run — **the traces**, **the logs**, and **the metrics**, then ties all four to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → probe → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
 </details>
 
-## 🚀 Using the new views (60 seconds)
+## After install: the five things to try
 
 1. **Exercise your API** — `exerciser plan <repo> && exerciser run <repo> --base-url http://127.0.0.1:PORT` (or let Auto-Pilot's `exercise` phase do it). An **environment canary** first dry-runs your login chains and tells you *loudly* if the database was reset or credentials unseeded — no more silently-401 runs.
 2. **Walk everything** — Command Palette → **"Vinv: Open Journey"**. Overview first (services, coverage, open issues), then `Next`/`→` through every endpoint: call tree with live runtime, flamegraph, and the exact inputs → outputs driven. Hover anything cryptic — every marker explains itself in plain language.
@@ -269,7 +257,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 5. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
 6. **Hunt waste on demand** — **"Vinv: Optimize Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** (recomputed-work finder) each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
 
-## 🛠 MCP tools reference
+## MCP tools reference
 
 <details><summary><b>10 tools, 19 capabilities — few names on purpose (agents pick better from short menus; the session tool multiplexes)</b></summary>
 
@@ -292,14 +280,14 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 | `callers_of` / `blast_radius` / `why_did_this_run` | Observed callers · transitive impact · entry-point paths |
 </details>
 
-## 🔒 Privacy
+## Privacy
 
 - **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
 - The only download is the embedding model (Hugging Face, once, ~500 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.
 - The only LLM Vinv talks to is the coding-agent CLI **you** configured, through its own auth.
 
-## 🤝 Contributing & license
+## Contributing & license
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. [Apache License 2.0](LICENSE) © 2026 VinvAI.
 

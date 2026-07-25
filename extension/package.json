@@ -1,7 +1,7 @@
 {
 	"name": "VinvAI",
-	"displayName": "VinvAI",
-	"description": "Runtime context bandits for coding agents. Vinv builds the context, runs the harness and produces the evidence, so commodity models out-fix frontier ones. Stops the AI doom loop and verifies every fix.",
+	"displayName": "Vinv — Runtime Context for AI Coding Agents",
+	"description": "Your agent says done — Vinv runs the code and checks. Traces a real run, exercises every endpoint, grades fixes against tests the agent never sees. Runtime context bandits: commodity models out-fix frontier ones.",
 	"version": "0.0.9",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
@@ -41,10 +41,15 @@
 		"runtime tracing",
 		"code graph",
 		"flamegraph",
-		"observability",
-		"llm",
 		"python",
-		"fastapi"
+		"fastapi",
+		"windsurf",
+		"codex",
+		"agent testing",
+		"pytest",
+		"test generation",
+		"ai code review",
+		"tracing"
 	],
 	"activationEvents": [
 		"onStartupFinished"
