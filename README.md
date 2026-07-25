@@ -15,9 +15,8 @@
 <br><br>
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-D71921?style=flat-square)](LICENSE)
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/VinvAI.VinvAI?style=flat-square&color=D71921&label=VS%20Code)](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI)
-[![Open VSX](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921&label=Open%20VSX)](https://open-vsx.org/extension/VinvAI/VinvAI)
-[![Found 4 real bugs](https://img.shields.io/badge/found-4%20real%20bugs%20in%20a%2035k%E2%98%85%20repo-D71921?style=flat-square)](#case-study-commodity-models-out-fix-frontier-ones)
+[![Version](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921&label=version)](https://open-vsx.org/extension/VinvAI/VinvAI)
+[![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
 **Install:** [**VS Code Marketplace**](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI) · [**Open VSX** (Cursor · Windsurf · VSCodium)](https://open-vsx.org/extension/VinvAI/VinvAI) · [**vinv.ai/#install**](https://vinv.ai/#install)
