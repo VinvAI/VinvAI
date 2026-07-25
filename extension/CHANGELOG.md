@@ -4,6 +4,20 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.10] — 2026-07-25
+
+### 🔧 Changed
+
+- **Marketplace listing refreshed.** New description and keywords around the
+  runtime-context / "context bandits" / doom-loop framing for discoverability.
+  Extension behavior is unchanged.
+
+### 🐛 Fixed
+
+- **The "Vinv is now open source" notice shows again on fresh installs.** Its
+  one-time marker had been committed to the repo, which suppressed the notice
+  for every new checkout; the marker is now written only at runtime, as intended.
+
 ## [0.0.9] — 2026-07-25
 
 ### ✨ Added
