@@ -2,7 +2,7 @@
 
 <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv wordmark and tagline" width="700" />
 
-### Your coding agent says it's done. Vinv runs the code and checks.
+### Vinv runs your code and hands your agent what actually happened.
 
 **Zero-edit Python tracing · Code Graph · Behavior exerciser · Answers with citations · Fix &amp; verify loop · Two MCP servers · Auto-Pilot · Entirely local**
 
@@ -259,7 +259,7 @@ Apache License 2.0 — see [LICENSE](./LICENSE). © 2026 VinvAI.
 
 Built by **[VinvAI](https://vinv.ai)** · [LinkedIn](https://www.linkedin.com/company/vinvai/) · [GitHub](https://github.com/VinvAI/VinvAI)
 
-Your agent says it's done. Vinv says prove it.
+Context beats model size.
 
 <br/>
 

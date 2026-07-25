@@ -1,7 +1,7 @@
 {
 	"name": "VinvAI",
 	"displayName": "VinvAI",
-	"description": "Your agent says done — Vinv runs the code and checks. Traces a real run, exercises every endpoint, grades fixes against tests the agent never sees. Runtime context bandits: commodity models out-fix frontier ones.",
+	"description": "Context beats model size. Vinv traces a real run, joins every call to your code, exercises every endpoint, and grades fixes against tests the agent never sees. Runtime context bandits for coding agents.",
 	"version": "0.0.10",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
