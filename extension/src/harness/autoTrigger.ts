@@ -39,7 +39,6 @@ import {
 } from './exerciseOptimize';
 import { readAndClearRequests, restoreEpisodeRequests } from './requestQueue';
 import {
-	collectCacheCandidates,
 	collectMemoryTrends,
 	collectRuntimeErrorClusters,
 	securityGuardReasons,
@@ -47,9 +46,23 @@ import {
 	type ErrorCluster,
 	type Hotspot,
 } from './runtimeAnalysis';
+import {
+	candidateSignature,
+	candidateToOpportunity,
+	markOpportunitiesDispatched,
+	postOpportunities,
+	syncOpportunityBoard,
+	type LedgerEvent,
+	type OpportunityInput,
+} from './opportunityBoard';
+import { readEpisodeEvents } from './trajectoryReport';
+import type { OptimizationCandidate } from './optimizationAnalysis';
 
 // The pure analyses live in runtimeAnalysis.ts (vscode-free, shared with the
 // MCP server); re-exported here so existing imports and tests keep working.
+// NOTE: selectHotspots is a DISPLAY ranking only (QnA answers, the MCP
+// `hotspots` read action) — dispatch derives exclusively from
+// computeOptimizationCandidates through the opportunity board below.
 export { collectRuntimeErrorClusters, selectHotspots, type ErrorCluster, type Hotspot };
 
 function serviceFixTask(event: ServiceExitEvent): EpisodeTask {
@@ -458,6 +471,16 @@ export function registerRuntimeErrorTrigger(context: vscode.ExtensionContext): v
 	);
 	let timer: ReturnType<typeof scheduleTimer> | undefined;
 	const evaluate = async (): Promise<void> => {
+		// Fresh trace data is ALSO what advances the opportunity board: resolve
+		// dispatched entries against episode outcomes (contract: the
+		// optimization_outcome ledger events), advance expiry against the new
+		// session, and post whatever the ranker newly supports. Best-effort —
+		// board bookkeeping must never block the error trigger.
+		try {
+			syncOpportunityBoard(root, 'capture-watch', readEpisodeEvents());
+		} catch {
+			// No index yet, or an unwritable board — the next capture retries.
+		}
 		let clusters: ErrorCluster[] = [];
 		let signature = '';
 		try {
@@ -507,77 +530,202 @@ export function registerRuntimeErrorTrigger(context: vscode.ExtensionContext): v
 	});
 }
 
-/**
- * Self-driven performance sweep: reads the runtime overlay, extracts the
- * Pareto head of traced time, and dispatches (or offers) an optimization
- * episode. The pack carries the evidence — per-symbol time, call counts,
- * share — and asks the agent to decide per hotspot whether the win is a
- * better algorithm, caching, or making the call async/parallel; the replay
- * gate plus a fresh trace verify the app still works and got faster.
- */
-export async function offerEpisodeForHotspots(
-	context: vscode.ExtensionContext,
-	workspaceRoot: string,
-	hooks?: DispatchHooks,
-): Promise<boolean> {
-	let hotspots: Hotspot[] = [];
-	try {
-		const nodes = loadNodes(indexStoreDir(workspaceRoot));
-		hotspots = selectHotspots(nodes, loadRuntimeOverlay(workspaceRoot, nodes));
-	} catch {
-		return false;
-	}
-	if (hotspots.length === 0) {
-		void vscode.window.showInformationMessage(
-			'Vinv: No latency hotspots — capture a trace first (run a service and exercise it).',
-		);
-		return false;
-	}
-	const lines = hotspots.map(
-		(h) =>
-			`- ${h.name} at ${h.file}:${h.line} — ${Math.round(h.total_ms)}ms total across ` +
-			`${h.calls} call(s) (${(h.share * 100).toFixed(1)}% of all traced time)`,
-	);
-	const task: EpisodeTask = {
-		kind: 'general',
-		trigger: 'smoke-errors',
-		title: `Optimize ${hotspots.length} latency hotspot(s)`,
-		issue:
-			'The captured runtime trace concentrates its time in these symbols ' +
-			'(Pareto head of traced time):\n\n' +
-			lines.join('\n') +
-			'\n\nFor each: decide whether the win is a better algorithm, caching, ' +
-			'batching, or making the work async/parallel — and only change what the ' +
-			'evidence supports. Re-run the same flow afterwards to show the time dropped.',
-		seedRows: hotspots.map((h) => h.row),
-		successCriteria: [
-			'The listed symbols spend measurably less total time on the same exercised flow',
-			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
-		],
-	};
-	return offerOrDispatch(
-		context,
-		workspaceRoot,
-		task,
-		`the trace concentrates ${(hotspots.reduce((s, h) => s + h.share, 0) * 100).toFixed(0)}% of runtime in ${hotspots.length} symbol(s)`,
-		hooks,
+/** A fully-prepared optimization dispatch: the task, its board claim, labels. */
+export interface OptimizationPlan {
+	task: EpisodeTask;
+	/** Board ids the accepted dispatch marks 'dispatched' (the consume step). */
+	boardIds: string[];
+	summary: string;
+	label: string;
+	opportunity: OptimizeOpportunity;
+}
+
+/** What preparing a sweep found — a plan, or the reason there is none. */
+export interface OptimizationPrep {
+	plan: OptimizationPlan | null;
+	/** Candidates the evidence currently supports for this sweep's kind. */
+	candidateCount: number;
+	/** Candidates held on the board (dispatched/resolved — not re-dispatchable). */
+	heldCount: number;
+}
+
+const NO_PLAN: OptimizationPrep = { plan: null, candidateCount: 0, heldCount: 0 };
+
+/** The security constraint appended when a plan touches guarded symbols. */
+function guardText(guardedNames: string[], reason: string): string {
+	return (
+		`\n\nSECURITY CONSTRAINT: ${guardedNames.map((n) => `\`${n}\``).join(', ')} ` +
+		`${guardedNames.length === 1 ? 'is' : 'are'} security-sensitive (${reason}). ` +
+		'The cost may be DELIBERATE — password hashing and crypto are slow by design. ' +
+		'Do not cache credentials or their results, reduce hash rounds/iterations, or ' +
+		'weaken any security parameter. If the time is intentional crypto cost, say so ' +
+		'and stop instead of optimizing.'
 	);
 }
 
+const GUARD_CRITERION =
+	'No security behavior weakened: hashing/crypto parameters and credential checks are untouched';
+
 /**
- * Scoped sibling of offerEpisodeForHotspots: dispatches an optimization episode
- * for ONE symbol (the row the user clicked in the Optimization panel). A
- * single-symbol pack is smaller, faster, and — the point of the predicted→proven
- * loop — cleanly attributable: the after-run's measured delta belongs to this
- * one change, not a batch. Falls back to the whole-Pareto sweep when the row
- * carries no runtime evidence (nothing to scope to).
+ * Prepares one optimization sweep — the ONE detection path every dispatch
+ * surface rides:
+ *
+ *   computeOptimizationCandidates (waste-prior ranker)
+ *     → post to the opportunity board (content-signature dedup)
+ *     → dispatch only entries in status 'posted'
+ *
+ * An id already 'dispatched' or 'resolved' on the board is HELD: it never
+ * re-dispatches — across restarts, editors, and processes — until it expires
+ * (absent from fresh evidence for 3+ capture sessions). The 'cache_candidates'
+ * sweep takes the candidates whose dominant waste signal is cache; 'hotspots'
+ * takes the rest — each symbol is claimed by the signal that predicts the
+ * largest recoverable time, so the two sweeps never fight over a row.
+ *
+ * Exported (with an injectable event list) so tests drive it against a disk
+ * fixture without a vscode workspace.
  */
-export async function offerEpisodeForHotspot(
-	context: vscode.ExtensionContext,
+export function prepareOptimizationSweep(
+	workspaceRoot: string,
+	sweep: 'hotspots' | 'cache_candidates',
+	events: ReadonlyArray<LedgerEvent> = readEpisodeEvents(),
+): OptimizationPrep {
+	const source = sweep === 'cache_candidates' ? 'cache-sweep' : 'hotspot-sweep';
+	const sync = syncOpportunityBoard(workspaceRoot, source, events);
+	if (!sync.evidenceKnown) {
+		return NO_PLAN; // no index store — unknown evidence is not "no candidates"
+	}
+	const wantCache = sweep === 'cache_candidates';
+	const subset = sync.candidates.filter((c) => (c.waste_kind === 'cache') === wantCache);
+	const statusOf = new Map(sync.entries.map((e) => [e.id, e.status]));
+	const dispatchable: { candidate: OptimizationCandidate; id: string }[] = [];
+	let held = 0;
+	for (const candidate of subset) {
+		const id = candidateSignature(candidate);
+		const status = statusOf.get(id);
+		if (status === 'posted' || status === undefined) {
+			dispatchable.push({ candidate, id });
+		} else if (status === 'dispatched' || status === 'resolved') {
+			held += 1;
+		}
+	}
+	if (dispatchable.length === 0) {
+		return { plan: null, candidateCount: subset.length, heldCount: held };
+	}
+	const lines = dispatchable.map(
+		({ candidate: c }) =>
+			`- ${c.name} at ${c.file}:${c.line} — ~${Math.round(c.predicted_ms)}ms recoverable ` +
+			`of ${Math.round(c.total_ms)}ms (${c.waste_kind}): ${c.reason}`,
+	);
+	// Security-sensitive symbols stay real candidates (bcrypt DOMINATES an
+	// auth-heavy trace) but the constraint rides the prompt: the agent must not
+	// weaken what makes them slow.
+	let guardBlock = '';
+	let guarded = false;
+	try {
+		const reasons = securityGuardReasons(workspaceRoot, loadNodes(indexStoreDir(workspaceRoot)));
+		const hit = dispatchable.filter(({ candidate }) => reasons.has(candidate.row));
+		if (hit.length > 0) {
+			guarded = true;
+			guardBlock = guardText(
+				hit.map(({ candidate }) => candidate.name),
+				reasons.get(hit[0].candidate.row) as string,
+			);
+		}
+	} catch {
+		// Guard scan is best-effort; the candidates stand on their own.
+	}
+	const totalPredicted = Math.round(
+		dispatchable.reduce((s, d) => s + d.candidate.predicted_ms, 0),
+	);
+	const task: EpisodeTask = wantCache
+		? {
+				kind: 'general',
+				trigger: 'smoke-errors',
+				title: `Cache ${dispatchable.length} recomputation site(s)`,
+				issue:
+					'The optimization analyzer found these symbols recomputing identical ' +
+					'inputs (same args_hash AND the same observed result — functional ' +
+					'dependence, no recorded nondeterminism):\n\n' +
+					lines.join('\n') +
+					'\n\nDecide per symbol whether memoization is safe (watch invalidation ' +
+					'and unbounded growth — prefer bounded/keyed caches) and implement only ' +
+					'where the evidence supports it.' +
+					guardBlock,
+				seedRows: dispatchable.map((d) => d.candidate.row),
+				successCriteria: [
+					'A fresh trace of the same flow shows fewer duplicate-argument recomputations or lower total time in the listed symbols',
+					'Behavior is unchanged: same results, no new errors, memory stays bounded',
+					...(guarded ? [GUARD_CRITERION] : []),
+				],
+			}
+		: {
+				kind: 'general',
+				trigger: 'smoke-errors',
+				title: `Optimize ${dispatchable.length} recoverable-time candidate(s)`,
+				issue:
+					'The optimization analyzer ranked these symbols by predicted RECOVERABLE ' +
+					'time (measured cost × waste prior, relative to this trace — hot but ' +
+					'already-optimal symbols are excluded):\n\n' +
+					lines.join('\n') +
+					'\n\nFor each: the waste kind names the likely fix (fanout/n-plus-1 → ' +
+					'batch or hoist at the caller; per-call → a better algorithm; ' +
+					'serial-async → await the independent I/O concurrently). Change only ' +
+					'what the evidence supports. Re-run the same flow afterwards to show ' +
+					'the time dropped.' +
+					guardBlock,
+				seedRows: dispatchable.map((d) => d.candidate.row),
+				successCriteria: [
+					'The listed symbols spend measurably less total time on the same exercised flow',
+					'Behavior is unchanged: the service still starts, serves, and raises no new errors',
+					...(guarded ? [GUARD_CRITERION] : []),
+				],
+			};
+	return {
+		plan: {
+			task,
+			boardIds: dispatchable.map((d) => d.id),
+			summary: wantCache
+				? `~${totalPredicted}ms of traced time is duplicate recomputation in ${dispatchable.length} symbol(s)`
+				: `~${totalPredicted}ms of traced time is predicted recoverable in ${dispatchable.length} symbol(s)`,
+			label: wantCache ? 'Cache recomputation sites' : 'Optimize recoverable-time candidates',
+			opportunity: wantCache
+				? {
+						kind: 'cache-sweep',
+						endpoint_id: 'cache-candidates',
+						endpoint: 'duplicate-recomputation sites',
+						detail:
+							'board-deduped head of reclaimable duplicated work dispatched as a memoization episode',
+						metric: 'probe_latency_ms',
+						value: totalPredicted,
+					}
+				: {
+						kind: 'hotspot-sweep',
+						endpoint_id: 'hotspots',
+						endpoint: 'ranked optimization candidates',
+						detail:
+							'board-deduped head of predicted recoverable time dispatched as one optimization episode',
+						metric: 'probe_latency_ms',
+						value: totalPredicted,
+					},
+		},
+		candidateCount: subset.length,
+		heldCount: held,
+	};
+}
+
+/**
+ * Prepares the single-row (panel click) dispatch. The row's candidate is
+ * posted to the board like any sweep candidate — a panel click is not a
+ * side-channel around the dedup: if the board already holds the id as
+ * dispatched/resolved, the plan is null and nothing re-dispatches until
+ * expiry. Falls back to the whole sweep when the row cannot be resolved
+ * against the store.
+ */
+export function prepareRowOptimization(
 	workspaceRoot: string,
 	row: number,
-	hooks?: DispatchHooks,
-): Promise<boolean> {
+	events: ReadonlyArray<LedgerEvent> = readEpisodeEvents(),
+): OptimizationPrep {
 	let node: { name: string; file: string; start_line: number } | undefined;
 	let totalMs = 0;
 	let calls = 0;
@@ -591,22 +739,31 @@ export async function offerEpisodeForHotspot(
 		calls = rt?.calls ?? 0;
 		guardReason = securityGuardReasons(workspaceRoot, nodes).get(row);
 	} catch {
-		return false;
+		return NO_PLAN;
 	}
 	if (!node) {
 		// Row is not resolvable against the current store — do the safe thing.
-		return offerEpisodeForHotspots(context, workspaceRoot, hooks);
+		return prepareOptimizationSweep(workspaceRoot, 'hotspots', events);
 	}
-	// A security-sensitive hotspot is still a real hotspot (bcrypt DOMINATES an
-	// auth-heavy trace) — but its cost may be deliberate, so the constraint
-	// rides the prompt: the agent must not weaken what makes it slow.
-	const guardBlock = guardReason
-		? `\n\nSECURITY CONSTRAINT: \`${node.name}\` is security-sensitive (${guardReason}). ` +
-			'Its cost may be DELIBERATE — password hashing and crypto are slow by design. ' +
-			'Do not cache credentials or their results, reduce hash rounds/iterations, or ' +
-			'weaken any security parameter. If the time is intentional crypto cost, say so ' +
-			'and stop instead of optimizing.'
-		: '';
+	const sync = syncOpportunityBoard(workspaceRoot, 'panel', events);
+	const candidate = sync.candidates.find((c) => c.row === row);
+	const input: OpportunityInput = candidate
+		? candidateToOpportunity(candidate, 'panel')
+		: {
+				kind: 'latency-symbol',
+				row,
+				name: node.name,
+				file: node.file,
+				line: node.start_line,
+				predicted_ms: 0,
+				evidence: `panel dispatch of ${node.name}`,
+				source: 'panel',
+			};
+	const entry = [...postOpportunities(workspaceRoot, [input]).values()][0];
+	if (entry.status === 'dispatched' || entry.status === 'resolved') {
+		return { plan: null, candidateCount: 1, heldCount: 1 };
+	}
+	const guardBlock = guardReason ? guardText([node.name], guardReason) : '';
 	const task: EpisodeTask = {
 		kind: 'general',
 		trigger: 'smoke-errors',
@@ -615,6 +772,10 @@ export async function offerEpisodeForHotspot(
 			`The captured runtime trace spends significant time in \`${node.name}\` ` +
 			`at ${node.file}:${node.start_line}` +
 			(totalMs > 0 ? ` — ${Math.round(totalMs)}ms across ${calls} call(s).` : '.') +
+			(candidate
+				? `\n\nThe optimization analyzer predicts ~${Math.round(candidate.predicted_ms)}ms ` +
+					`recoverable (${candidate.waste_kind}): ${candidate.reason}`
+				: '') +
 			'\n\nDecide whether the win is a better algorithm, caching, batching, or ' +
 			'making the work async/parallel — and change only what the evidence ' +
 			'supports. Do not alter behavior. Re-run the same flow afterwards so a ' +
@@ -624,18 +785,53 @@ export async function offerEpisodeForHotspot(
 		successCriteria: [
 			`\`${node.name}\` spends measurably less total time on the same exercised flow`,
 			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
-			...(guardReason
-				? ['No security behavior weakened: hashing/crypto parameters and credential checks are untouched']
-				: []),
+			...(guardReason ? [GUARD_CRITERION] : []),
 		],
 	};
-	return offerOrDispatch(
-		context,
-		workspaceRoot,
-		task,
-		`optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`,
-		hooks,
-	);
+	return {
+		plan: {
+			task,
+			boardIds: [entry.id],
+			summary: `optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`,
+			label: `Optimize ${node.name}`,
+			opportunity: {
+				kind: candidate ? candidate.waste_kind : 'latency-symbol',
+				endpoint_id: node.name,
+				endpoint: `${node.name} (${node.file}:${node.start_line})`,
+				detail: 'panel dispatch of a ranked optimization candidate',
+				metric: 'probe_latency_ms',
+				value: candidate ? Math.round(candidate.predicted_ms) : 0,
+			},
+		},
+		candidateCount: 1,
+		heldCount: 0,
+	};
+}
+
+/**
+ * Offers/dispatches a prepared plan. The board claim happens in onAccept —
+ * the only moment a dispatch is real — so a declined offer leaves every entry
+ * 'posted' and eligible. Marking is idempotent, which is what lets the
+ * verdict engine's revert-learn-retry loop re-offer the SAME plan without the
+ * board blocking its own episode's retries.
+ */
+async function offerPreparedOptimization(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	plan: OptimizationPlan,
+	hooks?: DispatchHooks,
+): Promise<boolean> {
+	return offerOrDispatch(context, workspaceRoot, plan.task, plan.summary, {
+		priorLearning: hooks?.priorLearning,
+		onAccept: async () => {
+			try {
+				markOpportunitiesDispatched(workspaceRoot, plan.boardIds);
+			} catch {
+				// The board is bookkeeping; a failed write must not lose the episode.
+			}
+			await hooks?.onAccept?.();
+		},
+	});
 }
 
 /**
@@ -691,108 +887,55 @@ export async function offerEpisodeForMemoryTrends(
 	);
 }
 
-/**
- * Cache sweep: symbols repeatedly called with identical argument hashes
- * (and no recorded nondeterminism) waste recomputable time — the Pareto head
- * of reclaimable time is dispatched as a memoization episode.
- */
-export async function offerEpisodeForCacheCandidates(
-	context: vscode.ExtensionContext,
-	workspaceRoot: string,
-	hooks?: DispatchHooks,
-): Promise<boolean> {
-	let candidates: ReturnType<typeof collectCacheCandidates> = [];
-	try {
-		candidates = collectCacheCandidates(workspaceRoot, loadNodes(indexStoreDir(workspaceRoot)));
-	} catch {
-		return false;
-	}
-	if (candidates.length === 0) {
-		void vscode.window.showInformationMessage(
-			'Vinv: No cache opportunities — no deterministic symbol was re-called with identical arguments in the captured traces.',
+/** The user-facing "nothing to dispatch" message for a plan-less prep. */
+function noPlanMessage(prep: OptimizationPrep, sweep: 'hotspots' | 'cache_candidates'): string {
+	if (prep.heldCount > 0) {
+		return (
+			`Vinv: All ${prep.heldCount} current ${sweep === 'cache_candidates' ? 'cache ' : ''}` +
+			'opportunity(ies) are already dispatched or resolved on the opportunity board — ' +
+			'nothing re-dispatches until an entry expires. Inspect the board with ' +
+			'vinv_session action="opportunities".'
 		);
-		return false;
 	}
-	const lines = candidates.map(
-		(c) =>
-			`- ${c.name} at ${c.file}:${c.line} — ${c.calls} calls but only ${c.distinct_args} ` +
-			`distinct argument hash(es); ~${Math.round(c.reclaimable_ms)}ms reclaimable ` +
-			`(${(c.share * 100).toFixed(1)}% of all duplicated work)`,
-	);
-	const task: EpisodeTask = {
-		kind: 'general',
-		trigger: 'smoke-errors',
-		title: `Cache ${candidates.length} recomputation site(s)`,
-		issue:
-			'The captured traces show these symbols recomputing identical inputs ' +
-			'(same args_hash, no recorded nondeterminism):\n\n' +
-			lines.join('\n') +
-			'\n\nDecide per symbol whether memoization is safe (watch invalidation and ' +
-			'unbounded growth — prefer bounded/keyed caches) and implement only where ' +
-			'the evidence supports it.',
-		seedRows: candidates.map((c) => c.row),
-		successCriteria: [
-			'A fresh trace of the same flow shows fewer duplicate-argument recomputations or lower total time in the listed symbols',
-			'Behavior is unchanged: same results, no new errors, memory stays bounded',
-		],
-	};
-	return offerOrDispatch(
-		context,
-		workspaceRoot,
-		task,
-		`~${Math.round(candidates.reduce((s, c) => s + c.reclaimable_ms, 0))}ms of traced time is duplicate recomputation in ${candidates.length} symbol(s)`,
-		hooks,
-	);
+	return sweep === 'cache_candidates'
+		? 'Vinv: No cache opportunities — no deterministic symbol was observed recomputing identical inputs in the captured traces.'
+		: 'Vinv: No optimization opportunities — the analyzer found no recoverable time. Capture a trace first (run a service and exercise it).';
 }
 
 /**
  * The verified sweeps and the panel dispatch — every optimization episode
  * flows through the exerciseOptimize verdict engine (paired-bootstrap CI on
  * the frozen probe set, episode-bound after-run, real revert, optimize.jsonl).
- * These wrappers compose the existing offer/dispatch flows with the engine;
- * they are what the commands and the chat-request sweeps invoke.
+ * The plan is prepared ONCE (board consulted, candidates frozen) and the
+ * engine's retry loop re-offers that same plan; the board is claimed on the
+ * first accepted dispatch. These wrappers are what the commands and the
+ * chat-request sweeps invoke.
  */
 export async function runVerifiedHotspotEpisode(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	row?: number,
 ): Promise<void> {
-	let label = 'Optimize latency hotspots';
-	let opportunity: OptimizeOpportunity = {
-		kind: 'hotspot-sweep',
-		endpoint_id: 'hotspots',
-		endpoint: 'traced latency hotspots',
-		detail: 'Pareto head of traced time dispatched as one optimization episode',
-		metric: 'probe_latency_ms',
-		value: 0,
-	};
-	if (row !== undefined) {
-		try {
-			const n = loadNodes(indexStoreDir(workspaceRoot))[row];
-			if (n) {
-				label = `Optimize ${n.name}`;
-				opportunity = {
-					kind: 'latency-symbol',
-					endpoint_id: n.name,
-					endpoint: `${n.name} (${n.file}:${n.start_line})`,
-					detail: 'panel dispatch of a ranked optimization candidate',
-					metric: 'probe_latency_ms',
-					value: 0,
-				};
-			}
-		} catch {
-			// Store unreadable — keep the generic labels; the offer flow re-checks.
-		}
+	let prep: OptimizationPrep;
+	try {
+		prep =
+			row !== undefined
+				? prepareRowOptimization(workspaceRoot, row)
+				: prepareOptimizationSweep(workspaceRoot, 'hotspots');
+	} catch {
+		prep = NO_PLAN;
+	}
+	const plan = prep.plan;
+	if (!plan) {
+		void vscode.window.showInformationMessage(noPlanMessage(prep, 'hotspots'));
+		return;
 	}
 	const result = await runVerifiedOptimization(
-		{ label, opportunity },
-		(hooks) =>
-			row !== undefined
-				? offerEpisodeForHotspot(context, workspaceRoot, row, hooks)
-				: offerEpisodeForHotspots(context, workspaceRoot, hooks),
+		{ label: plan.label, opportunity: plan.opportunity },
+		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks),
 		buildWorkspaceDeps(workspaceRoot, { row }),
 	);
-	announceVerdict(result, label);
+	announceVerdict(result, plan.label);
 }
 
 /** Cache sweep through the same verdict engine (see runVerifiedHotspotEpisode). */
@@ -800,23 +943,23 @@ export async function runVerifiedCacheSweep(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 ): Promise<void> {
-	const label = 'Cache recomputation sites';
+	let prep: OptimizationPrep;
+	try {
+		prep = prepareOptimizationSweep(workspaceRoot, 'cache_candidates');
+	} catch {
+		prep = NO_PLAN;
+	}
+	const plan = prep.plan;
+	if (!plan) {
+		void vscode.window.showInformationMessage(noPlanMessage(prep, 'cache_candidates'));
+		return;
+	}
 	const result = await runVerifiedOptimization(
-		{
-			label,
-			opportunity: {
-				kind: 'cache-sweep',
-				endpoint_id: 'cache-candidates',
-				endpoint: 'duplicate-recomputation sites',
-				detail: 'Pareto head of reclaimable duplicated work dispatched as a memoization episode',
-				metric: 'probe_latency_ms',
-				value: 0,
-			},
-		},
-		(hooks) => offerEpisodeForCacheCandidates(context, workspaceRoot, hooks),
+		{ label: plan.label, opportunity: plan.opportunity },
+		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks),
 		buildWorkspaceDeps(workspaceRoot, {}),
 	);
-	announceVerdict(result, label);
+	announceVerdict(result, plan.label);
 }
 
 /** One closing notification per engine-judged episode. */

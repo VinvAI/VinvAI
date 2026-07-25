@@ -44,6 +44,11 @@ import {
 	selectHotspots,
 } from '../harness/runtimeAnalysis';
 import {
+	loadOpportunityBoard,
+	renderOpportunityBoard,
+	syncOpportunityBoard,
+} from '../harness/opportunityBoard';
+import {
 	loadNodes,
 	loadRuntimeOverlay,
 	indexStoreDir,
@@ -154,7 +159,10 @@ const INSTRUCTIONS =
 	'action="issues" lists functions observed raising errors in live traces; ' +
 	'action="hotspots" lists where traced runtime concentrates; ' +
 	'action="memory_trends" lists cross-session leak suspects; ' +
-	'action="cache_candidates" lists duplicate-recomputation sites. ' +
+	'action="cache_candidates" lists duplicate-recomputation sites; ' +
+	'action="opportunities" shows the live optimization opportunity board — the ' +
+	'shared ledger every sweep posts to and dispatch consumes (posted entries ' +
+	'are dispatchable; dispatched/resolved never re-dispatch until they expire). ' +
 	'To ACT: action="fix" with an issue description (and optional service) ' +
 	'queues a closed-loop fix episode that the Vinv extension dispatches to the ' +
 	'coding harness; action="run_sweep" with sweep one of ' +
@@ -209,7 +217,10 @@ const SESSION_TOOL = {
 		'action="status" (short summary), action="issues" (functions raising ' +
 		'errors in live traces), action="hotspots" (Pareto head of traced time), ' +
 		'action="memory_trends" (cross-session leak suspects), ' +
-		'action="cache_candidates" (duplicate-recomputation sites). ACT: ' +
+		'action="cache_candidates" (duplicate-recomputation sites), ' +
+		'action="opportunities" (the live optimization opportunity board with ' +
+		'per-entry status: posted entries are dispatchable, dispatched/resolved ' +
+		'never re-dispatch until expiry). ACT: ' +
 		'action="fix" with issue (and optional service) queues a closed-loop fix ' +
 		'episode; action="run_sweep" with sweep queues an evidence-seeded ' +
 		'episode; action="set_goal"/"set_budget" steer future episodes. ' +
@@ -226,6 +237,7 @@ const SESSION_TOOL = {
 					'hotspots',
 					'memory_trends',
 					'cache_candidates',
+					'opportunities',
 					'fix',
 					'run_sweep',
 					'set_goal',
@@ -403,6 +415,20 @@ function sessionReadAction(action: string): string | null {
 					);
 				},
 			);
+		}
+		case 'opportunities': {
+			// The board lives at the launch root — the same file the editor's
+			// sweeps and the capture watcher maintain. Syncing here (reconcile
+			// outcomes, advance expiry, post fresh candidates) keeps the board
+			// live even when no sweep has run recently; when there is no index
+			// store the sync degrades to reading whatever the board already holds.
+			try {
+				return renderOpportunityBoard(
+					syncOpportunityBoard(workspaceRoot, 'mcp', readEpisodeEvents()).entries,
+				);
+			} catch {
+				return renderOpportunityBoard(loadOpportunityBoard(workspaceRoot));
+			}
 		}
 		case 'cache_candidates': {
 			return federatedReadAction(
@@ -705,7 +731,7 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 					req.id,
 					-32602,
 					'Invalid vinv_session arguments. Read actions (trajectory, status, issues, ' +
-						'hotspots, memory_trends, cache_candidates) take no value; fix needs issue ' +
+						'hotspots, memory_trends, cache_candidates, opportunities) take no value; fix needs issue ' +
 						'(service optional); run_sweep needs sweep in ' +
 						'runtime_errors|hotspots|memory_trends|cache_candidates; set_goal needs ' +
 						'goal; set_budget needs an integer budget from 1 to 20.',
