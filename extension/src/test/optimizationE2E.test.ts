@@ -36,6 +36,7 @@ import {
 } from '../harness/optimizationAnalysis';
 import {
 	appendOptimizeEpisode,
+	buildWorkspaceDeps,
 	pairProbeSamples,
 	runVerifiedOptimization,
 	type FrozenProbeSet,
@@ -44,6 +45,12 @@ import {
 	type OptimizeDispatchHooks,
 	type OptimizeEngineDeps,
 } from '../harness/exerciseOptimize';
+import {
+	appendOptimizeAttempt,
+	loadPriorOptimizeAttempts,
+	opportunitySignature,
+	type PersistedOptimizeAttempt,
+} from '../harness/optimizationAnalysis';
 import type { ProbeMeasurement } from '../harness/probeRunner';
 import { buildFindings } from '../views/findingsModel';
 
@@ -484,31 +491,63 @@ suite('optimization end-to-end (verdict engine bridge)', () => {
 	interface Calls {
 		markDispatched: number;
 		revert: number;
+		/** interleaved event order — proves WHEN the revert ran, not just that it did. */
+		sequence: string[];
 		measure: FrozenProbeSet[];
-		resolutions: Array<{ status: OptimizationStatus; comparison: MetricComparison | null; reverted: boolean }>;
+		resolutions: Array<{
+			status: OptimizationStatus;
+			comparison: MetricComparison | null;
+			reverted: boolean;
+			attempt: number;
+		}>;
 		records: Array<{ action: string; attempts: OptimizeAttempt[] }>;
 		dispatchHooks: OptimizeDispatchHooks[];
+		/** persisted attempt history (the doom-loop guard's write side). */
+		persisted: Array<{ signature: string; approach: string; verdict: string }>;
+		/** what loadPriorAttempts serves (the read side). */
+		prior: PersistedOptimizeAttempt[];
 	}
 
 	/** Deps whose measure() replays a scripted sequence (before, after1, after2…). */
 	function fakeDeps(measurements: Array<Map<string, ProbeMeasurement>>): { deps: OptimizeEngineDeps; calls: Calls } {
-		const calls: Calls = { markDispatched: 0, revert: 0, measure: [], resolutions: [], records: [], dispatchHooks: [] };
+		const calls: Calls = {
+			markDispatched: 0,
+			revert: 0,
+			sequence: [],
+			measure: [],
+			resolutions: [],
+			records: [],
+			dispatchHooks: [],
+			persisted: [],
+			prior: [],
+		};
 		let next = 0;
 		const deps: OptimizeEngineDeps = {
 			freezeProbes: async () => ({ ids: ['p1', 'p2', 'p3', 'p4'] }),
 			measure: async (set) => {
 				calls.measure.push(set);
+				calls.sequence.push('measure');
 				return measurements[Math.min(next++, measurements.length - 1)];
 			},
 			snapshot: async () => 'sha',
 			revert: async () => {
 				calls.revert += 1;
+				calls.sequence.push('revert');
 			},
 			markDispatched: () => {
 				calls.markDispatched += 1;
 			},
 			resolve: (r) => {
-				calls.resolutions.push({ status: r.status, comparison: r.comparison, reverted: r.reverted });
+				calls.resolutions.push({
+					status: r.status,
+					comparison: r.comparison,
+					reverted: r.reverted,
+					attempt: r.attempt,
+				});
+			},
+			loadPriorAttempts: () => calls.prior,
+			persistAttempt: (signature, attempt, verdict) => {
+				calls.persisted.push({ signature, approach: attempt.approach, verdict });
 			},
 			changedFiles: async () => ['src/app/svc.py'],
 			recordEpisode: (r) => {
@@ -597,8 +636,10 @@ suite('optimization end-to-end (verdict engine bridge)', () => {
 		assert.strictEqual(calls.records[0].attempts[0].behavior_suite_passed, false);
 	});
 
-	test('no-gain reverts and threads the learning into the retry pack', async () => {
-		// Attempt 1: no change (100 → 100). Attempt 2: the retry is declined.
+	test('no-gain keeps the step alive, threads the learning, and a declined retry reverts to ORIGIN', async () => {
+		// Attempt 1: no change (100 → 100) but behavior intact → the step stays
+		// applied as a lineage intermediate. Attempt 2: the retry is declined →
+		// the lineage ends without acceptance → origin revert.
 		const { deps, calls } = fakeDeps([samples(100), samples(100)]);
 		let dispatches = 0;
 		const result = await runVerifiedOptimization(
@@ -614,15 +655,255 @@ suite('optimization end-to-end (verdict engine bridge)', () => {
 			},
 			deps,
 		);
-		assert.strictEqual(calls.revert, 1, 'no-gain → reverted before the retry');
+		assert.strictEqual(calls.revert, 1, 'the lineage ended unaccepted → one origin revert');
+		assert.deepStrictEqual(
+			calls.sequence,
+			['measure', 'measure', 'revert'],
+			'the kept step was NOT reverted before the retry — only when the lineage closed',
+		);
 		assert.strictEqual(calls.dispatchHooks[0].priorLearning, undefined, 'first attempt has no prior');
 		assert.ok(
-			calls.dispatchHooks[1].priorLearning?.includes('REVERTED'),
-			'the retry pack opens with what was tried and why it failed',
+			calls.dispatchHooks[1].priorLearning?.includes('KEPT'),
+			'the retry pack opens with what was tried and that it is still applied',
 		);
 		assert.strictEqual(result.action, 'revert-and-stop');
 		assert.strictEqual(calls.resolutions[0].status, 'inconclusive', 'no honest claim either way');
 		assert.strictEqual(calls.resolutions[0].reverted, true);
+		assert.ok(
+			calls.records[0].attempts.every((a) => a.reverted),
+			'once the lineage reverts to origin every attempt reads as reverted',
+		);
+		assert.deepStrictEqual(
+			calls.persisted.map((p) => p.verdict),
+			['kept-no-gain'],
+			'the attempt history landed in the doom-loop store',
+		);
+	});
+
+	test('LINEAGE: a timing-neutral step1 plus a step2 that clears the CI is ACCEPTED (no revert)', async () => {
+		// step1: 100 → 100 (behavior intact, kept). step2 builds on step1 and the
+		// endpoint measures 10ms vs the ORIGINAL 100ms baseline → accept.
+		const { deps, calls } = fakeDeps([samples(100), samples(100), samples(10)]);
+		const result = await runVerifiedOptimization(
+			{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 3 },
+			accepting(calls),
+			deps,
+		);
+		assert.strictEqual(result.mode, 'verdict');
+		assert.strictEqual(result.action, 'accept');
+		assert.strictEqual(calls.revert, 0, 'nothing was ever reverted — step1 stayed alive');
+		assert.strictEqual(calls.measure.length, 3, 'before + one endpoint measure per step');
+		const res = calls.resolutions[0];
+		assert.strictEqual(res.status, 'proven');
+		assert.strictEqual(res.attempt, 2, 'the verdict resolved on the second lineage step');
+		assert.strictEqual(Math.round(res.comparison!.before_median), 100, 'judged vs the ORIGINAL baseline');
+		assert.strictEqual(Math.round(res.comparison!.after_median), 10);
+		assert.strictEqual(calls.records[0].attempts.length, 2);
+		assert.strictEqual(calls.records[0].attempts[0].reverted, false, 'the kept step was never rolled back');
+		assert.deepStrictEqual(
+			calls.persisted.map((p) => p.verdict),
+			['kept-no-gain', 'accepted'],
+		);
+	});
+
+	test('LINEAGE: a lineage ending worse reverts to ORIGIN once, not to step1', async () => {
+		// step1: 100 → 120 (worse, behavior intact → kept). step2: 150 (worse
+		// still). Budget exhausted → ONE revert, straight to the origin snapshot.
+		const { deps, calls } = fakeDeps([samples(100), samples(120), samples(150)]);
+		const result = await runVerifiedOptimization(
+			{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 2 },
+			accepting(calls),
+			deps,
+		);
+		assert.strictEqual(result.action, 'revert-and-stop');
+		assert.strictEqual(calls.revert, 1, 'exactly one revert — origin, never a partial step rollback');
+		assert.deepStrictEqual(
+			calls.sequence,
+			['measure', 'measure', 'measure', 'revert'],
+			'the single revert happened only after the lineage ended',
+		);
+		const res = calls.resolutions[0];
+		assert.strictEqual(res.status, 'regressed', 'the whole CI below zero is a regression');
+		assert.strictEqual(res.reverted, true);
+		assert.ok(
+			calls.records[0].attempts.every((a) => a.reverted),
+			'both lineage steps read as reverted after the origin revert',
+		);
+		assert.deepStrictEqual(
+			calls.persisted.map((p) => p.verdict),
+			['kept-no-gain', 'reverted-no-gain'],
+		);
+	});
+
+	test('LINEAGE: a behavior break reverts to origin immediately and the next attempt starts fresh', async () => {
+		// step1 answers a different shape → dead on the spot (origin revert);
+		// step2 starts from origin, measures 10ms clean → accept.
+		const { deps, calls } = fakeDeps([samples(100), samples(10, { shape: 'shapeB' }), samples(10)]);
+		const result = await runVerifiedOptimization(
+			{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 2 },
+			accepting(calls),
+			deps,
+		);
+		assert.strictEqual(result.action, 'accept');
+		assert.deepStrictEqual(
+			calls.sequence,
+			['measure', 'measure', 'revert', 'measure'],
+			'the behavior break was reverted BEFORE the retry dispatched',
+		);
+		assert.deepStrictEqual(
+			calls.persisted.map((p) => p.verdict),
+			['reverted-behavior', 'accepted'],
+		);
+	});
+
+	test('DOOM-LOOP GUARD: persisted attempts seed the FIRST dispatch of a new episode (restart survives)', async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-e2e-attempts-'));
+		try {
+			const signature = opportunitySignature(OPP);
+			// Episode 1 (pre-"restart"): one kept-no-gain attempt, retry declined —
+			// wired to the REAL store.
+			const first = fakeDeps([samples(100), samples(100)]);
+			first.deps.loadPriorAttempts = (sig) => loadPriorOptimizeAttempts(root, 7, sig);
+			first.deps.persistAttempt = (sig, attempt, verdict) =>
+				appendOptimizeAttempt(root, {
+					row: 7,
+					signature: sig,
+					approach: attempt.approach,
+					comparison: null,
+					verdict,
+					learning: attempt.learning,
+				});
+			let dispatches = 0;
+			await runVerifiedOptimization(
+				{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 2 },
+				async (hooks) => {
+					first.calls.dispatchHooks.push(hooks);
+					dispatches += 1;
+					if (dispatches === 1) {
+						await hooks.onAccept();
+						return true;
+					}
+					return false;
+				},
+				first.deps,
+			);
+			const stored = loadPriorOptimizeAttempts(root, 7, signature);
+			assert.strictEqual(stored.length, 1, 'the attempt record persisted to optimize_attempts.jsonl');
+			assert.strictEqual(stored[0].verdict, 'kept-no-gain');
+
+			// Episode 2 — a brand-new engine run (fresh deps = restarted process).
+			const second = fakeDeps([samples(100), samples(10)]);
+			second.deps.loadPriorAttempts = (sig) => loadPriorOptimizeAttempts(root, 7, sig);
+			await runVerifiedOptimization(
+				{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 2 },
+				accepting(second.calls),
+				second.deps,
+			);
+			const seeded = second.calls.dispatchHooks[0].priorLearning;
+			assert.ok(
+				seeded?.includes('Prior optimization attempts'),
+				'the FIRST dispatch of the new episode opens with the persisted history',
+			);
+			assert.ok(
+				seeded?.includes('materially different'),
+				'the seed carries the do-not-repeat instruction across the restart',
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('CONTRACT C1: a resolved verdict appends an optimization_outcome event to the episode ledger', async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-e2e-outcome-root-'));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-e2e-outcome-home-'));
+		const previousHome = process.env.VINV_HOME;
+		try {
+			process.env.VINV_HOME = home;
+			// Production deps (the REAL resolve → ledger append), with the probe /
+			// snapshot machinery faked out so no service or git repo is needed.
+			const { deps: fake, calls } = fakeDeps([samples(100), samples(10)]);
+			const deps: OptimizeEngineDeps = {
+				...buildWorkspaceDeps(root, { row: 424242 }),
+				freezeProbes: fake.freezeProbes,
+				measure: fake.measure,
+				snapshot: fake.snapshot,
+				revert: fake.revert,
+				changedFiles: fake.changedFiles,
+				recordEpisode: fake.recordEpisode,
+				notify: fake.notify,
+			};
+			const result = await runVerifiedOptimization(
+				{ label: 'Optimize get_docs', opportunity: OPP },
+				accepting(calls),
+				deps,
+			);
+			assert.strictEqual(result.mode, 'verdict');
+			const ledger = fs.readFileSync(path.join(home, 'telemetry', 'episodes.jsonl'), 'utf8');
+			const events = ledger
+				.split('\n')
+				.filter(Boolean)
+				.map((l) => JSON.parse(l) as Record<string, unknown>)
+				.filter((e) => e.type === 'optimization_outcome');
+			assert.strictEqual(events.length, 1, 'exactly one outcome event per resolved verdict');
+			const e = events[0];
+			assert.ok(String(e.episode_id).startsWith('opt-'), 'carries the dispatched episode id');
+			assert.strictEqual(e.row, 424242);
+			assert.strictEqual(e.verdict, 'proven');
+			assert.strictEqual(e.attempt, 1);
+			assert.strictEqual(typeof e.at, 'number');
+			assert.strictEqual(typeof e.waste_kind, 'string');
+			assert.strictEqual(typeof e.predicted_ms, 'number');
+			assert.strictEqual(Math.round(e.delta_ms as number), -90, 'delta = after − before medians');
+		} finally {
+			if (previousHome === undefined) {
+				delete process.env.VINV_HOME;
+			} else {
+				process.env.VINV_HOME = previousHome;
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	test('CONTRACT C1: a behavior break resolves as reverted-behavior', async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-e2e-outcome2-root-'));
+		const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-e2e-outcome2-home-'));
+		const previousHome = process.env.VINV_HOME;
+		try {
+			process.env.VINV_HOME = home;
+			const { deps: fake, calls } = fakeDeps([samples(100), samples(10, { shape: 'shapeB' })]);
+			const deps: OptimizeEngineDeps = {
+				...buildWorkspaceDeps(root, { row: 424242 }),
+				freezeProbes: fake.freezeProbes,
+				measure: fake.measure,
+				snapshot: fake.snapshot,
+				revert: fake.revert,
+				changedFiles: fake.changedFiles,
+				recordEpisode: fake.recordEpisode,
+				notify: fake.notify,
+			};
+			await runVerifiedOptimization(
+				{ label: 'Optimize get_docs', opportunity: OPP, maxAttempts: 1 },
+				accepting(calls),
+				deps,
+			);
+			const ledger = fs.readFileSync(path.join(home, 'telemetry', 'episodes.jsonl'), 'utf8');
+			const e = ledger
+				.split('\n')
+				.filter(Boolean)
+				.map((l) => JSON.parse(l) as Record<string, unknown>)
+				.find((x) => x.type === 'optimization_outcome');
+			assert.ok(e, 'the outcome event landed');
+			assert.strictEqual(e!.verdict, 'reverted-behavior');
+		} finally {
+			if (previousHome === undefined) {
+				delete process.env.VINV_HOME;
+			} else {
+				process.env.VINV_HOME = previousHome;
+			}
+			fs.rmSync(root, { recursive: true, force: true });
+			fs.rmSync(home, { recursive: true, force: true });
+		}
 	});
 
 	test('the finished episode lands in optimize.jsonl where the findings model reads it', async () => {

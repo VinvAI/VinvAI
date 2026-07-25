@@ -30,6 +30,9 @@
  * would make the proof step look like a miss. The measured delta from the
  * after-run is the truth; predicted_ms only sets the expectation and the rank.
  */
+import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import type { CacheCandidate, SymbolSessionTiming, TraceSpan } from './runtimeAnalysis';
 
@@ -109,6 +112,25 @@ export interface OptimizationCandidate {
 	 * optimization target. Undefined when no span data was available.
 	 */
 	self_ms?: number;
+	/**
+	 * predicted_ms deflated by the outcome-calibration artifact
+	 * (.vinv/reports/optimization_calibration.json): predicted × the learned
+	 * shrunk |measured|/predicted ratio for this waste_kind. Equals predicted_ms
+	 * when no calibration exists (ratio defaults to 1). RANKING (sort, Pareto
+	 * coverage, Amdahl share) uses this value; `predicted_ms` stays the raw
+	 * signal estimate so the calibration never feeds back into itself.
+	 */
+	predicted_ms_effective?: number;
+	/**
+	 * End-to-end Amdahl ceiling: the whole-trace speedup factor if this
+	 * candidate's waste were fully removed — 1/(1 − share·waste_prior), where
+	 * share = this candidate's (calibrated) predicted_ms over the trace's total
+	 * predicted time. share already prices the symbol's weight in the trace and
+	 * waste_prior discounts it again by how much of that weight is removable,
+	 * so the ceiling is deliberately conservative: a candidate can look huge in
+	 * isolation (predicted_ms) yet move the end-to-end clock barely at all.
+	 */
+	amdahl_ceiling?: number;
 	status: OptimizationStatus;
 	outcome?: OptimizationOutcome;
 }
@@ -124,20 +146,66 @@ function median(values: number[]): number {
 }
 
 /**
+ * The typical relative session-to-session variation of THIS trace: for every
+ * symbol observed in ≥2 capture sessions, compute (scaled MAD ÷ median) of its
+ * per-session totals, then take the median across symbols. This is the
+ * derivation behind noiseBand's smallest-detectable floor — the factor is
+ * observed from the trace itself, never a constant: a workspace whose re-runs
+ * genuinely repeat to the millisecond yields ~0 (tight bands are then honest),
+ * while a jittery one yields a large factor (borderline wins stay
+ * inconclusive). Undefined when no symbol has two sessions yet — there is no
+ * observed spread to derive from.
+ */
+export function traceRelativeSpread(
+	timings: Map<number, SymbolSessionTiming[]>,
+): number | undefined {
+	const spreads: number[] = [];
+	for (const sessions of timings.values()) {
+		const totals = sessions.map((s) => s.total_ms).filter((v) => v > 0);
+		if (totals.length < 2) {
+			continue;
+		}
+		const med = median(totals);
+		if (med <= 0) {
+			continue;
+		}
+		const mad = median(totals.map((v) => Math.abs(v - med)));
+		spreads.push((mad * 1.4826) / med);
+	}
+	return spreads.length > 0 ? median(spreads) : undefined;
+}
+
+/**
  * Robust spread of a symbol's baseline per-session cost: the median absolute
  * deviation scaled to a standard-deviation equivalent (×1.4826). This is the
  * band a measured drop must clear to be called "proven" rather than trace
- * noise. With a single baseline sample there is no spread to estimate, so we
- * fall back to a 10% tolerance of that sample — honest and deliberately
+ * noise.
+ *
+ * `relativeSpread` (from traceRelativeSpread) supplies a smallest-detectable
+ * FLOOR: max(MAD band, median per-session total × relativeSpread). A symbol's
+ * own MAD can be degenerate — three sessions that happen to repeat exactly
+ * give a zero band, which would let a 1ms wiggle claim "proven" — but no
+ * measured delta smaller than (this symbol's typical cost × the trace's
+ * typical relative jitter) is distinguishable from re-run noise. The floor is
+ * relative to the trace by construction; when the caller has no derived
+ * spread (undefined), the MAD band stands alone, and a single baseline sample
+ * falls back to a 10% tolerance of that sample — honest and deliberately
  * conservative (borderline wins report inconclusive, never a false proof).
  */
-export function noiseBand(baseline: number[]): number {
-	if (baseline.length <= 1) {
-		return baseline.length === 1 ? Math.abs(baseline[0]) * 0.1 : 0;
+export function noiseBand(baseline: number[], relativeSpread?: number): number {
+	if (baseline.length === 0) {
+		return 0;
+	}
+	if (baseline.length === 1) {
+		return Math.abs(baseline[0]) * (relativeSpread ?? 0.1);
 	}
 	const med = median(baseline);
 	const mad = median(baseline.map((v) => Math.abs(v - med)));
-	return mad * 1.4826;
+	const band = mad * 1.4826;
+	if (relativeSpread === undefined) {
+		return band;
+	}
+	return Math.max(band, Math.abs(med) * relativeSpread);
 }
 
 /** The newest session's timing for a row (undefined when never observed). */
@@ -160,6 +228,11 @@ interface ComputeInputs {
 	coverage?: number;
 	/** hard cap on the list length (packs and panels are budgeted). */
 	cap?: number;
+	/**
+	 * waste_kind → learned shrunk |measured|/predicted ratio from the outcome
+	 * calibration artifact (loadOptimizationCalibration). Absent kind → 1.
+	 */
+	calibration?: Record<string, number>;
 }
 
 /** Last dotted segment of a component qualname, for readable reasons. */
@@ -417,21 +490,78 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 		});
 	}
 
-	const total = raw.reduce((s, c) => s + c.predicted_ms, 0);
+	// Calibration deflation at RANKING time: the learned |measured|/predicted
+	// ratio per waste_kind (contract with the calibration artifact) scales the
+	// raw estimate into the expectation history supports. Raw stays on the
+	// candidate — the C1 outcome events report against raw so the calibration
+	// never compounds on its own output.
+	const calibration = inputs.calibration ?? {};
+	for (const c of raw) {
+		const ratio = calibration[c.waste_kind];
+		c.predicted_ms_effective =
+			c.predicted_ms * (typeof ratio === 'number' && Number.isFinite(ratio) && ratio > 0 ? ratio : 1);
+	}
+	const effective = (c: OptimizationCandidate): number => c.predicted_ms_effective ?? c.predicted_ms;
+	const total = raw.reduce((s, c) => s + effective(c), 0);
 	if (total <= 0) {
 		return [];
 	}
-	raw.sort((a, b) => b.predicted_ms - a.predicted_ms);
+	// End-to-end Amdahl ceiling per candidate (see the field doc): share of the
+	// trace's total predicted time, discounted by the waste prior. The
+	// denominator cannot hit zero unless one candidate IS the whole trace at
+	// waste_prior 1; the epsilon floor keeps the ceiling finite even then.
+	for (const c of raw) {
+		const share = effective(c) / total;
+		c.amdahl_ceiling = 1 / Math.max(1e-6, 1 - share * c.waste_prior);
+	}
+	raw.sort((a, b) => effective(b) - effective(a));
 	const out: OptimizationCandidate[] = [];
 	let covered = 0;
 	for (const c of raw) {
 		if (out.length >= cap || covered / total >= coverage) {
 			break;
 		}
-		covered += c.predicted_ms;
+		covered += effective(c);
 		out.push(c);
 	}
 	return out;
+}
+
+// ---- outcome calibration artifact (read side) -------------------------------
+
+/** Where the policy updater's outcome-calibration artifact lives. */
+export function optimizationCalibrationPath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, '.vinv', 'reports', 'optimization_calibration.json');
+}
+
+/**
+ * Loads the calibration artifact written by the episode policy updater —
+ * {"updated_at":iso,"by_waste_kind":{kind:{"n","mean_ratio","shrunk_ratio"}}} —
+ * as a waste_kind → shrunk_ratio map for computeOptimizationCandidates.
+ * Returns undefined (ratio 1 everywhere) when the file is absent or malformed:
+ * an unreadable calibration must never zero out the ranking.
+ */
+export function loadOptimizationCalibration(
+	workspaceRoot: string,
+): Record<string, number> | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(optimizationCalibrationPath(workspaceRoot), 'utf8'));
+	} catch {
+		return undefined;
+	}
+	const by = (parsed as { by_waste_kind?: unknown })?.by_waste_kind;
+	if (typeof by !== 'object' || by === null) {
+		return undefined;
+	}
+	const out: Record<string, number> = {};
+	for (const [kind, entry] of Object.entries(by as Record<string, unknown>)) {
+		const ratio = (entry as { shrunk_ratio?: unknown })?.shrunk_ratio;
+		if (typeof ratio === 'number' && Number.isFinite(ratio) && ratio > 0) {
+			out[kind] = ratio;
+		}
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -443,6 +573,7 @@ export function markDispatched(
 	candidate: OptimizationCandidate,
 	timings: SymbolSessionTiming[] | undefined,
 	episodeTitle: string,
+	relativeSpread?: number,
 ): OptimizationCandidate {
 	const l = latest(timings);
 	const before = l?.total_ms ?? candidate.total_ms;
@@ -453,7 +584,7 @@ export function markDispatched(
 		outcome: {
 			predicted_ms: candidate.predicted_ms,
 			measured_before: before,
-			noise_band_ms: noiseBand(baseline),
+			noise_band_ms: noiseBand(baseline, relativeSpread),
 			baseline_sessions: baseline.length,
 			before_session: l?.session ?? '',
 			episode_title: episodeTitle,
@@ -515,4 +646,299 @@ export function reconcileOutcome(
 			behavior_ok: behaviorOk,
 		},
 	};
+}
+
+// ---- attempt-history store (doom-loop guard) --------------------------------
+//
+// Every optimization attempt's record is persisted to
+// .vinv/exercise/optimize_attempts.jsonl keyed by (row, opportunity
+// signature), so "try a materially different approach" survives extension
+// restarts: a NEW dispatch for the same key seeds the episode prompt with what
+// was already tried and why it failed. The file is append-only with EXPLICIT
+// expiry: a key whose underlying candidate signature has not been sighted in
+// ATTEMPT_EXPIRY_SESSIONS fresh capture sessions (a session count relative to
+// the trace stream, never a wall-clock age) is dropped — the code it described
+// evidently changed or the waste disappeared, so its learnings are stale.
+//
+// Line shapes (one JSON object per line, torn tails skipped):
+//   {"type":"attempt","key","row","signature","at","approach","comparison",
+//    "verdict","learning"}
+//   {"type":"session","session","at","keys":[...]}   ← sighting: which stored
+//     keys were still present among the ranked candidates when this fresh
+//     capture session was analyzed.
+
+/** Fresh capture sessions a key may go unsighted before its attempts expire. */
+export const ATTEMPT_EXPIRY_SESSIONS = 3;
+
+/** Attempt learnings threaded into a new dispatch's prompt seed. */
+const ATTEMPT_SEED_MAX = 3;
+
+export function optimizeAttemptsPath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, '.vinv', 'exercise', 'optimize_attempts.jsonl');
+}
+
+/** Content signature of an optimization opportunity (kind + endpoint id). */
+export function opportunitySignature(opp: { kind: string; endpoint_id: string }): string {
+	return crypto
+		.createHash('sha1')
+		.update(`${opp.kind}|${opp.endpoint_id}`)
+		.digest('hex')
+		.slice(0, 16);
+}
+
+/** The store key: row (−1 for row-less sweeps) + opportunity signature. */
+export function attemptKey(row: number | undefined, signature: string): string {
+	return `${row ?? -1}:${signature}`;
+}
+
+/**
+ * The sighting keys a freshly ranked candidate list "proves alive": one per
+ * candidate row plus the sweep keys. Kinds and endpoint ids mirror how the
+ * dispatch layer (autoTrigger) constructs OptimizeOpportunity for a panel row
+ * ('latency-symbol'/name), the hotspot sweep ('hotspot-sweep'/'hotspots'),
+ * and the cache sweep ('cache-sweep'/'cache-candidates') — the signature must
+ * hash identically on the write (dispatch) and sighting (recompute) sides.
+ */
+export function candidateAttemptKeys(candidates: OptimizationCandidate[]): string[] {
+	const keys = candidates.map((c) =>
+		attemptKey(c.row, opportunitySignature({ kind: 'latency-symbol', endpoint_id: c.name })),
+	);
+	if (candidates.length > 0) {
+		keys.push(attemptKey(undefined, opportunitySignature({ kind: 'hotspot-sweep', endpoint_id: 'hotspots' })));
+	}
+	if (candidates.some((c) => c.waste_kind === 'cache')) {
+		keys.push(
+			attemptKey(undefined, opportunitySignature({ kind: 'cache-sweep', endpoint_id: 'cache-candidates' })),
+		);
+	}
+	return keys;
+}
+
+/** One persisted attempt record (the doom-loop guard's unit of memory). */
+export interface PersistedOptimizeAttempt {
+	key: string;
+	row: number;
+	signature: string;
+	/** unix seconds — ordering only, never used as a wall-clock expiry. */
+	at: number;
+	approach: string;
+	comparison: Record<string, number | boolean> | null;
+	verdict: 'accepted' | 'kept-no-gain' | 'reverted-no-gain' | 'reverted-behavior';
+	learning: string;
+}
+
+interface SessionSighting {
+	session: string;
+	at: number;
+	keys: Set<string>;
+}
+
+interface AttemptStore {
+	attempts: PersistedOptimizeAttempt[];
+	/** Deduped by session id (keys unioned), in first-appearance order. */
+	sessions: SessionSighting[];
+}
+
+function parseAttemptStore(workspaceRoot: string): AttemptStore {
+	const store: AttemptStore = { attempts: [], sessions: [] };
+	let raw: string;
+	try {
+		raw = fs.readFileSync(optimizeAttemptsPath(workspaceRoot), 'utf8');
+	} catch {
+		return store;
+	}
+	const bySession = new Map<string, SessionSighting>();
+	for (const line of raw.split('\n')) {
+		if (!line.trim()) {
+			continue;
+		}
+		let obj: Record<string, unknown>;
+		try {
+			obj = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			continue; // torn tail (crash mid-append) — never fatal
+		}
+		if (obj.type === 'attempt' && typeof obj.key === 'string') {
+			store.attempts.push(obj as unknown as PersistedOptimizeAttempt);
+		} else if (obj.type === 'session' && typeof obj.session === 'string') {
+			const keys = Array.isArray(obj.keys)
+				? obj.keys.filter((k): k is string => typeof k === 'string')
+				: [];
+			const existing = bySession.get(obj.session);
+			if (existing) {
+				for (const k of keys) {
+					existing.keys.add(k);
+				}
+				existing.at = Math.max(existing.at, Number(obj.at) || 0);
+			} else {
+				const s: SessionSighting = {
+					session: obj.session,
+					at: Number(obj.at) || 0,
+					keys: new Set(keys),
+				};
+				bySession.set(obj.session, s);
+				store.sessions.push(s);
+			}
+		}
+	}
+	return store;
+}
+
+/**
+ * Keys whose candidate signature disappeared for ATTEMPT_EXPIRY_SESSIONS or
+ * more fresh capture sessions: count the sighted sessions recorded AFTER the
+ * key's last activity (its newest attempt or newest sighting) that do NOT
+ * include it. Session COUNT, not elapsed time — a workspace idle for a month
+ * expires nothing.
+ */
+function expiredAttemptKeys(store: AttemptStore): Set<string> {
+	const lastActivity = new Map<string, number>();
+	for (const a of store.attempts) {
+		lastActivity.set(a.key, Math.max(lastActivity.get(a.key) ?? 0, a.at || 0));
+	}
+	for (const s of store.sessions) {
+		for (const k of s.keys) {
+			if (lastActivity.has(k)) {
+				lastActivity.set(k, Math.max(lastActivity.get(k) ?? 0, s.at));
+			}
+		}
+	}
+	const expired = new Set<string>();
+	for (const [key, activityAt] of lastActivity) {
+		const missed = store.sessions.filter((s) => s.at > activityAt && !s.keys.has(key)).length;
+		if (missed >= ATTEMPT_EXPIRY_SESSIONS) {
+			expired.add(key);
+		}
+	}
+	return expired;
+}
+
+/** Appends one attempt record for (row, signature). */
+export function appendOptimizeAttempt(
+	workspaceRoot: string,
+	record: {
+		row?: number;
+		signature: string;
+		approach: string;
+		comparison: Record<string, number | boolean> | null;
+		verdict: PersistedOptimizeAttempt['verdict'];
+		learning: string;
+		at?: number;
+	},
+): void {
+	const file = optimizeAttemptsPath(workspaceRoot);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	const line: PersistedOptimizeAttempt & { type: 'attempt' } = {
+		type: 'attempt',
+		key: attemptKey(record.row, record.signature),
+		row: record.row ?? -1,
+		signature: record.signature,
+		at: record.at ?? Math.floor(Date.now() / 1000),
+		approach: record.approach,
+		comparison: record.comparison,
+		verdict: record.verdict,
+		learning: record.learning,
+	};
+	fs.appendFileSync(file, `${JSON.stringify(line)}\n`, 'utf8');
+}
+
+/**
+ * Records which stored keys the current candidate ranking still contains, for
+ * one capture session — the expiry clock. Also the compaction point: once a
+ * key has expired, its lines are rewritten away here (append-only evidence
+ * with explicit expiry, not an ever-growing file). No-ops when the store has
+ * no attempts, and appends at most one line per (session, key-set) so a
+ * session whose trace merely grows does not spam sightings.
+ */
+export function recordCandidateSightings(
+	workspaceRoot: string,
+	session: string,
+	presentKeys: string[],
+	at?: number,
+): void {
+	const store = parseAttemptStore(workspaceRoot);
+	if (store.attempts.length === 0) {
+		return;
+	}
+	const storedKeys = new Set(store.attempts.map((a) => a.key));
+	const present = [...new Set(presentKeys)].filter((k) => storedKeys.has(k));
+	const existing = store.sessions.find((s) => s.session === session);
+	const file = optimizeAttemptsPath(workspaceRoot);
+	if (!existing || present.some((k) => !existing.keys.has(k))) {
+		const line = {
+			type: 'session',
+			session,
+			at: at ?? Math.floor(Date.now() / 1000),
+			keys: present,
+		};
+		fs.appendFileSync(file, `${JSON.stringify(line)}\n`, 'utf8');
+		// Fold the new sighting into the in-memory store for the expiry pass.
+		if (existing) {
+			for (const k of present) {
+				existing.keys.add(k);
+			}
+			existing.at = Math.max(existing.at, line.at);
+		} else {
+			store.sessions.push({ session, at: line.at, keys: new Set(present) });
+		}
+	}
+	const expired = expiredAttemptKeys(store);
+	if (expired.size === 0) {
+		return;
+	}
+	// Compaction: drop the expired keys' attempts; keep a bounded tail of
+	// session lines (older ones can no longer change any surviving key's count).
+	const survivors = store.attempts.filter((a) => !expired.has(a.key));
+	const lines: string[] = survivors.map((a) => JSON.stringify({ type: 'attempt', ...a }));
+	for (const s of store.sessions.slice(-20)) {
+		lines.push(
+			JSON.stringify({
+				type: 'session',
+				session: s.session,
+				at: s.at,
+				keys: [...s.keys].filter((k) => !expired.has(k)),
+			}),
+		);
+	}
+	const tmp = `${file}.tmp-${process.pid}`;
+	fs.writeFileSync(tmp, lines.length > 0 ? `${lines.join('\n')}\n` : '', 'utf8');
+	fs.renameSync(tmp, file);
+}
+
+/**
+ * Prior attempts for (row, signature), oldest → newest, excluding expired
+ * keys. This is what a NEW dispatch threads into its prompt seed.
+ */
+export function loadPriorOptimizeAttempts(
+	workspaceRoot: string,
+	row: number | undefined,
+	signature: string,
+): PersistedOptimizeAttempt[] {
+	const store = parseAttemptStore(workspaceRoot);
+	const key = attemptKey(row, signature);
+	if (expiredAttemptKeys(store).has(key)) {
+		return [];
+	}
+	return store.attempts.filter((a) => a.key === key);
+}
+
+/**
+ * The prompt-seed text composed from persisted prior attempts (newest last,
+ * capped) — what makes "try a materially different approach" survive a
+ * restart. Undefined when there is no history to seed.
+ */
+export function composePriorAttemptSeed(
+	attempts: PersistedOptimizeAttempt[],
+): string | undefined {
+	if (attempts.length === 0) {
+		return undefined;
+	}
+	const shown = attempts.slice(-ATTEMPT_SEED_MAX);
+	const omitted = attempts.length - shown.length;
+	return (
+		'Prior optimization attempts on this exact target (persisted across sessions):\n' +
+		(omitted > 0 ? `(${omitted} earlier attempt(s) omitted)\n` : '') +
+		shown.map((a) => `- [${a.verdict}] ${a.learning}`).join('\n') +
+		'\nDo not repeat these approaches — try a materially different one.'
+	);
 }

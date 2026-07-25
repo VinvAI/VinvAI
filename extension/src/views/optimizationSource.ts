@@ -36,9 +36,13 @@ import {
 	type SymbolSessionTiming,
 } from '../harness/runtimeAnalysis';
 import {
+	candidateAttemptKeys,
 	computeOptimizationCandidates,
+	loadOptimizationCalibration,
 	markDispatched,
+	recordCandidateSightings,
 	reconcileOutcome,
+	traceRelativeSpread,
 	type OptimizationCandidate,
 	type OptimizationStatus,
 } from '../harness/optimizationAnalysis';
@@ -197,10 +201,15 @@ export class OptimizationSource implements vscode.Disposable {
 		opts: { engine?: 'bridge' | 'watch' } = {},
 	): OptimizationCandidate | undefined {
 		let timings: SymbolSessionTiming[] | undefined;
+		let relSpread: number | undefined;
 		let existing = this.tracked.get(row) ?? this.model.candidates.find((c) => c.row === row);
 		try {
 			const nodes = loadNodes(indexStoreDir(root));
-			timings = collectSymbolTimings(root, nodes).get(row);
+			const allTimings = collectSymbolTimings(root, nodes);
+			timings = allTimings.get(row);
+			// The trace-derived relative jitter gives the frozen noise band its
+			// smallest-detectable floor (see noiseBand's derivation note).
+			relSpread = traceRelativeSpread(allTimings);
 			if (!existing) {
 				existing = this.computeCandidates(root).find((c) => c.row === row);
 			}
@@ -229,7 +238,7 @@ export class OptimizationSource implements vscode.Disposable {
 		if (!existing) {
 			return undefined; // row unresolvable against the store — nothing to track
 		}
-		const frozen = markDispatched(existing, timings, `Optimize ${existing.name}`);
+		const frozen = markDispatched(existing, timings, `Optimize ${existing.name}`, relSpread);
 		if (frozen.outcome) {
 			// 'bridge' rows are judged by the exerciseOptimize verdict engine
 			// (paired-bootstrap CI bound to the episode); the capture watcher must
@@ -245,7 +254,9 @@ export class OptimizationSource implements vscode.Disposable {
 	 * Resolves a bridge-dispatched row from the verdict engine's episode-bound
 	 * measurement — the ONE authority for rows it dispatched. The CI evidence
 	 * and the fact of the revert land on the outcome so the report renders the
-	 * honest story ("reverted" is a real rollback, not copy).
+	 * honest story ("reverted" is a real rollback, not copy). Returns the
+	 * resolved candidate so the bridge can enrich its outcome event with the
+	 * frozen prediction (waste_kind, predicted_ms).
 	 */
 	resolveRowFromVerdict(
 		root: string,
@@ -263,13 +274,13 @@ export class OptimizationSource implements vscode.Disposable {
 			behaviorOk: boolean;
 			reverted: boolean;
 		},
-	): void {
+	): OptimizationCandidate | undefined {
 		const tracked = this.tracked.get(row);
 		if (!tracked || tracked.status !== 'dispatched' || !tracked.outcome) {
-			return;
+			return undefined;
 		}
 		const ci = resolution.comparison ?? undefined;
-		this.tracked.set(row, {
+		const resolved: OptimizationCandidate = {
 			...tracked,
 			status: resolution.status,
 			outcome: {
@@ -283,8 +294,10 @@ export class OptimizationSource implements vscode.Disposable {
 				measured_before: ci ? ci.before_median : tracked.outcome.measured_before,
 				delta_ms: ci ? ci.after_median - ci.before_median : tracked.outcome.delta_ms,
 			},
-		});
+		};
+		this.tracked.set(row, resolved);
 		this.rebuildModelFrom(this.memoCandidates, root);
+		return resolved;
 	}
 
 	private seedTrackedFromDisk(): void {
@@ -329,6 +342,9 @@ export class OptimizationSource implements vscode.Disposable {
 			if (sig !== this.memoSig) {
 				this.memoCandidates = this.computeCandidates(root);
 				this.memoSig = sig;
+				// Fresh evidence: record which persisted attempt keys are still
+				// alive in this capture session (the doom-loop store's expiry clock).
+				this.recordAttemptSightings(root, this.memoCandidates);
 			}
 			this.rebuildModelFrom(this.memoCandidates, root);
 		} catch {
@@ -350,7 +366,39 @@ export class OptimizationSource implements vscode.Disposable {
 		const timings = collectSymbolTimings(root, nodes);
 		const cacheByRow = new Map(collectCacheCandidates(root, nodes).map((c) => [c.row, c]));
 		const spans = collectRequestSpans(root, nodes);
-		return computeOptimizationCandidates({ nodes, edges, timings, cacheByRow, spans });
+		// Ranking-time calibration: predicted_ms deflated by the learned
+		// per-waste-kind outcome ratio when the artifact exists (default 1).
+		const calibration = loadOptimizationCalibration(root);
+		return computeOptimizationCandidates({ nodes, edges, timings, cacheByRow, spans, calibration });
+	}
+
+	/**
+	 * The doom-loop store's expiry clock: mark which persisted attempt keys the
+	 * fresh ranking still contains, attributed to the NEWEST capture session
+	 * (the same directory-keyed session identity every cross-session analysis
+	 * uses). Best-effort — the model publish must never fail on it.
+	 */
+	private recordAttemptSightings(root: string, candidates: OptimizationCandidate[]): void {
+		try {
+			let session: string | undefined;
+			let newest = -1;
+			for (const f of findTraceFiles(path.join(root, '.vinv', 'captures'))) {
+				try {
+					const m = fs.statSync(f).mtimeMs;
+					if (m > newest) {
+						newest = m;
+						session = path.dirname(f);
+					}
+				} catch {
+					// Trace vanished mid-scan — skip it.
+				}
+			}
+			if (session) {
+				recordCandidateSightings(root, session, candidateAttemptKeys(candidates));
+			}
+		} catch {
+			// The sighting is bookkeeping for expiry; never take the view down.
+		}
 	}
 
 	/**

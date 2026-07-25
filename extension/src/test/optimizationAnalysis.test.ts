@@ -4,13 +4,27 @@
  * freeze / reconcile with an honest noise band.
  */
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import type { CacheCandidate, SymbolSessionTiming } from '../harness/runtimeAnalysis';
 import {
+	appendOptimizeAttempt,
+	attemptKey,
+	candidateAttemptKeys,
+	composePriorAttemptSeed,
 	computeOptimizationCandidates,
+	loadOptimizationCalibration,
+	loadPriorOptimizeAttempts,
 	markDispatched,
 	noiseBand,
+	opportunitySignature,
+	optimizationCalibrationPath,
+	optimizeAttemptsPath,
 	reconcileOutcome,
+	recordCandidateSightings,
+	traceRelativeSpread,
 	type OptimizationCandidate,
 } from '../harness/optimizationAnalysis';
 
@@ -122,6 +136,269 @@ suite('optimizationAnalysis: noise band', () => {
 	test('a flat baseline has a zero band; a spread one scales the MAD', () => {
 		assert.strictEqual(noiseBand([100, 100, 100]), 0);
 		assert.ok(Math.abs(noiseBand([90, 100, 110]) - 14.826) < 0.001);
+	});
+
+	test('the trace-derived floor lifts a degenerate MAD band to the smallest detectable delta', () => {
+		// Three sessions that happen to repeat exactly give MAD 0 — but the trace
+		// as a whole jitters 10%, so no delta under median×0.1 is distinguishable.
+		assert.strictEqual(noiseBand([100, 100, 100], 0.1), 10);
+		// A healthy MAD above the floor stands unchanged.
+		assert.ok(Math.abs(noiseBand([90, 100, 110], 0.001) - 14.826) < 0.001);
+		// A single sample uses the derived factor instead of the 10% prior.
+		assert.strictEqual(noiseBand([200], 0.05), 10);
+		// A genuinely repeatable trace (derived factor 0) keeps the honest zero.
+		assert.strictEqual(noiseBand([100, 100, 100], 0), 0);
+	});
+
+	test('traceRelativeSpread derives the factor from ALL symbols with ≥2 sessions', () => {
+		const timings = new Map<number, SymbolSessionTiming[]>([
+			// med 100, MAD 10 → scaled 14.826 → relative 0.14826
+			[0, [timing('s1', 90, 1), timing('s2', 100, 1), timing('s3', 110, 1)]],
+			// perfectly flat → relative 0
+			[1, [timing('s1', 200, 1), timing('s2', 200, 1)]],
+			// single session → no spread to observe, excluded
+			[2, [timing('s1', 50, 1)]],
+		]);
+		const f = traceRelativeSpread(timings)!;
+		// median of [0.14826, 0] on two entries = midpoint
+		assert.ok(Math.abs(f - 0.07413) < 0.0005);
+		// No symbol with two sessions → nothing to derive from.
+		assert.strictEqual(
+			traceRelativeSpread(new Map([[2, [timing('s1', 50, 1)]]])),
+			undefined,
+		);
+	});
+
+	test('markDispatched freezes the floored band', () => {
+		const c: OptimizationCandidate = {
+			row: 1,
+			name: 'get_docs',
+			file: 'pkg/mod1.py',
+			line: 2,
+			total_ms: 100,
+			calls: 10,
+			waste_prior: 0.5,
+			predicted_ms: 50,
+			waste_kind: 'cache',
+			reason: '',
+			status: 'candidate',
+		};
+		const sessions = [timing('s1', 100, 10), timing('s2', 100, 10), timing('s3', 100, 10)];
+		const d = markDispatched(c, sessions, 't', 0.1);
+		assert.strictEqual(d.outcome!.noise_band_ms, 10, 'flat baseline floored at median × derived spread');
+	});
+});
+
+suite('optimizationAnalysis: Amdahl ceiling', () => {
+	test('a single candidate owning the whole trace gets 1/(1 − waste_prior)', () => {
+		const nodes = [node(0, 'handler'), node(1, 'get_docs')];
+		const timings = new Map<number, SymbolSessionTiming[]>([[1, [timing('s1', 100, 10)]]]);
+		const cache: CacheCandidate = {
+			row: 1,
+			name: 'get_docs',
+			file: 'pkg/mod1.py',
+			line: 2,
+			calls: 10,
+			distinct_args: 5,
+			reclaimable_ms: 50,
+			share: 1,
+		};
+		const [c] = computeOptimizationCandidates({
+			nodes,
+			edges: [],
+			timings,
+			cacheByRow: new Map([[1, cache]]),
+		});
+		// share = 1, waste_prior = 0.5 → ceiling = 1/(1 − 0.5) = 2×.
+		assert.ok(Math.abs(c.amdahl_ceiling! - 2) < 1e-9);
+	});
+
+	test('share is relative to the trace: every candidate carries a finite ceiling ≥ 1', () => {
+		const list = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cacheByRow: cacheFor(),
+		});
+		assert.ok(list.length >= 2);
+		const total = list.reduce((s, c) => s + c.predicted_ms_effective!, 0);
+		for (const c of list) {
+			const share = c.predicted_ms_effective! / total;
+			// The candidates here span the whole predicted total, so share is exact.
+			assert.ok(
+				Math.abs(c.amdahl_ceiling! - 1 / (1 - share * c.waste_prior)) < 1e-6,
+				'ceiling = 1/(1 − share·waste_prior)',
+			);
+			assert.ok(c.amdahl_ceiling! >= 1 && Number.isFinite(c.amdahl_ceiling!));
+		}
+	});
+});
+
+suite('optimizationAnalysis: calibration deflation at ranking time', () => {
+	test('shrunk_ratio deflates predicted_ms for ranking while the raw value stays exposed', () => {
+		// Uncalibrated: the 150ms cache win outranks the ~120ms fan-out. Full
+		// coverage so the deflated candidate stays inspectable below the Pareto cut.
+		const plain = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cacheByRow: cacheFor(),
+			coverage: 1,
+		});
+		assert.strictEqual(plain[0].row, 1);
+		assert.strictEqual(plain[0].predicted_ms_effective, plain[0].predicted_ms, 'no calibration → effective = raw');
+		// History says cache predictions land at 10% of the claim → the fan-out
+		// takes the top slot; raw and effective are BOTH on the candidate.
+		const calibrated = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cacheByRow: cacheFor(),
+			coverage: 1,
+			calibration: { cache: 0.1 },
+		});
+		assert.strictEqual(calibrated[0].row, 2, 'the deflated cache claim no longer outranks the fan-out');
+		const cache = calibrated.find((c) => c.row === 1)!;
+		assert.strictEqual(Math.round(cache.predicted_ms), 150, 'raw survives for the proof loop');
+		assert.strictEqual(Math.round(cache.predicted_ms_effective!), 15, 'ranking used the calibrated value');
+	});
+
+	test('loadOptimizationCalibration reads the artifact and rejects junk', () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-calib-'));
+		try {
+			assert.strictEqual(loadOptimizationCalibration(root), undefined, 'absent file → undefined (ratio 1)');
+			const file = optimizationCalibrationPath(root);
+			fs.mkdirSync(path.dirname(file), { recursive: true });
+			fs.writeFileSync(
+				file,
+				JSON.stringify({
+					updated_at: '2026-07-25T00:00:00Z',
+					by_waste_kind: {
+						cache: { n: 4, mean_ratio: 0.6, shrunk_ratio: 0.5 },
+						fanout: { n: 1, mean_ratio: -3, shrunk_ratio: -3 }, // invalid → dropped
+						'per-call': { n: 2, mean_ratio: 1.2, shrunk_ratio: 'NaN' }, // invalid → dropped
+					},
+				}),
+			);
+			assert.deepStrictEqual(loadOptimizationCalibration(root), { cache: 0.5 });
+			fs.writeFileSync(file, 'not json');
+			assert.strictEqual(loadOptimizationCalibration(root), undefined, 'malformed → undefined, never a crash');
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+suite('optimizationAnalysis: attempt-history store (doom-loop guard)', () => {
+	const SIG = opportunitySignature({ kind: 'latency-symbol', endpoint_id: 'get_docs' });
+
+	function tempRoot(): string {
+		return fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-attempts-'));
+	}
+
+	function append(root: string, at: number, learning: string): void {
+		appendOptimizeAttempt(root, {
+			row: 5,
+			signature: SIG,
+			approach: `Optimize get_docs — attempt ${at}`,
+			comparison: { rel_improvement: 0, improved: false },
+			verdict: 'reverted-no-gain',
+			learning,
+			at,
+		});
+	}
+
+	test('attempts persist and reload keyed by (row, signature)', () => {
+		const root = tempRoot();
+		try {
+			append(root, 1000, 'tried memoization — CI included zero');
+			append(root, 1001, 'tried batching — CI included zero');
+			// Same signature, DIFFERENT row → a different key entirely.
+			appendOptimizeAttempt(root, {
+				row: 9,
+				signature: SIG,
+				approach: 'other row',
+				comparison: null,
+				verdict: 'accepted',
+				learning: 'other row won',
+				at: 1002,
+			});
+			const loaded = loadPriorOptimizeAttempts(root, 5, SIG);
+			assert.strictEqual(loaded.length, 2, 'reload sees exactly this key');
+			assert.strictEqual(loaded[0].learning, 'tried memoization — CI included zero');
+			assert.strictEqual(loaded[1].learning, 'tried batching — CI included zero');
+			const seed = composePriorAttemptSeed(loaded)!;
+			assert.ok(seed.includes('tried memoization') && seed.includes('tried batching'));
+			assert.ok(seed.includes('materially different'), 'the seed carries the instruction');
+			assert.strictEqual(composePriorAttemptSeed([]), undefined, 'no history → no seed');
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('a key unsighted for 3 fresh capture sessions expires (and is compacted away)', () => {
+		const root = tempRoot();
+		try {
+			append(root, 1000, 'stale learning');
+			const key = attemptKey(5, SIG);
+			// Two fresh sessions without the candidate: still alive.
+			recordCandidateSightings(root, '/caps/s1/svc', [], 1001);
+			recordCandidateSightings(root, '/caps/s2/svc', [], 1002);
+			assert.strictEqual(loadPriorOptimizeAttempts(root, 5, SIG).length, 1, 'missed 2 sessions → alive');
+			// The third absent session crosses the relative-expiry threshold.
+			recordCandidateSightings(root, '/caps/s3/svc', [], 1003);
+			assert.strictEqual(loadPriorOptimizeAttempts(root, 5, SIG).length, 0, 'missed 3 sessions → expired');
+			const rawFile = fs.readFileSync(optimizeAttemptsPath(root), 'utf8');
+			assert.ok(!rawFile.includes(key), 'compaction rewrote the expired lines away');
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('a sighting resets the expiry clock; re-sighted keys never expire', () => {
+		const root = tempRoot();
+		try {
+			append(root, 1000, 'still-relevant learning');
+			const key = attemptKey(5, SIG);
+			recordCandidateSightings(root, '/caps/s1/svc', [], 1001); // absent
+			recordCandidateSightings(root, '/caps/s2/svc', [key], 1002); // SIGHTED — clock resets
+			recordCandidateSightings(root, '/caps/s3/svc', [], 1003); // absent
+			recordCandidateSightings(root, '/caps/s4/svc', [], 1004); // absent (2 since sighting)
+			assert.strictEqual(loadPriorOptimizeAttempts(root, 5, SIG).length, 1, 'only 2 misses since the last sighting');
+			// A session whose trace merely grows must not double-count.
+			recordCandidateSightings(root, '/caps/s4/svc', [], 1005);
+			assert.strictEqual(loadPriorOptimizeAttempts(root, 5, SIG).length, 1, 'the same session never counts twice');
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('candidateAttemptKeys mirrors the dispatch-side opportunity identities', () => {
+		const list = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cacheByRow: cacheFor(),
+		});
+		const keys = candidateAttemptKeys(list);
+		const cacheRow = list.find((c) => c.waste_kind === 'cache')!;
+		assert.ok(
+			keys.includes(
+				attemptKey(cacheRow.row, opportunitySignature({ kind: 'latency-symbol', endpoint_id: cacheRow.name })),
+			),
+			'panel-row dispatch key present',
+		);
+		assert.ok(
+			keys.includes(attemptKey(undefined, opportunitySignature({ kind: 'hotspot-sweep', endpoint_id: 'hotspots' }))),
+			'hotspot-sweep key present while any candidate exists',
+		);
+		assert.ok(
+			keys.includes(
+				attemptKey(undefined, opportunitySignature({ kind: 'cache-sweep', endpoint_id: 'cache-candidates' })),
+			),
+			'cache-sweep key present while a cache candidate exists',
+		);
+		assert.deepStrictEqual(candidateAttemptKeys([]), [], 'no candidates → nothing sighted');
 	});
 });
 
