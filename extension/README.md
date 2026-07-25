@@ -257,10 +257,12 @@ Apache License 2.0 — see [LICENSE](./LICENSE). © 2026 VinvAI.
 
 <div align="center">
 
-Built by **[VinvAI](https://vinv.ai)**. Your agent says it's done. Vinv says prove it.
+Built by **[VinvAI](https://vinv.ai)** · [LinkedIn](https://www.linkedin.com/company/vinvai/) · [GitHub](https://github.com/VinvAI/VinvAI)
+
+Your agent says it's done. Vinv says prove it.
 
 <br/>
 
-[🌐 vinv.ai](https://vinv.ai) &nbsp;·&nbsp; [GitHub](https://github.com/VinvAI/VinvAI) &nbsp;·&nbsp; [Report a Bug](https://github.com/VinvAI/VinvAI/issues)
+[🌐 vinv.ai](https://vinv.ai) &nbsp;·&nbsp; [GitHub](https://github.com/VinvAI/VinvAI) &nbsp;·&nbsp; [LinkedIn](https://www.linkedin.com/company/vinvai/) &nbsp;·&nbsp; [Report a Bug](https://github.com/VinvAI/VinvAI/issues)
 
 </div>

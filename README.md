@@ -23,7 +23,7 @@
 
 </div>
 
-Or straight from your editor's CLI — GitHub can't render `vscode:` deep links, so here are the commands:
+Or straight from your editor's CLI:
 
 | Editor | Command |
 |---|---|
@@ -302,5 +302,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. [Apache License 2.0](LICENSE) © 2026 VinvAI.
 
 <div align="center">
-<sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo. Python first, TS & Go next · <b>Your agent says it's done. Vinv says prove it.</b></sub>
+<sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo.</sub>
+
+<sub><a href="https://vinv.ai">vinv.ai</a> · <a href="https://www.linkedin.com/company/vinvai/">LinkedIn</a> · Python first, TS &amp; Go next · <b>Your agent says it's done. Vinv says prove it.</b></sub>
 </div>
