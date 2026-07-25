@@ -135,7 +135,7 @@ def test_minimal_capture_survives_broken_otel_contrib(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     assert out.is_file(), "trace file was never created (root-cause regression)"
     events = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    components = {e["component"] for e in events}
+    components = {e["component"] for e in events if "component" in e}
     assert "demopkg.main.App.handle" in components
     assert "demopkg.main.App.transform" in components
 
@@ -169,7 +169,7 @@ def test_autoinst_with_broken_contrib_warns_but_still_captures(tmp_path: Path) -
     assert r.returncode == 0, r.stderr
     assert out.is_file()
     events = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    assert any(e["component"].startswith("demopkg.") for e in events)
+    assert any(e.get("component", "").startswith("demopkg.") for e in events)
     assert "auto-instrumentation unavailable" in r.stderr
 
 

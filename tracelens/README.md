@@ -28,8 +28,8 @@ Useful switches:
 
 | Flag / env | Effect |
 | --- | --- |
-| `--minimal` / `--standard` / `--full` | How much to record. `--standard` (default) captures calls, memory and determinism sources; `--minimal` is bare calls only. |
-| `--memory` / `--no-memory` | Per-call memory on or off. |
+| `--minimal` / `--standard` / `--full` | How much to record. `--standard` (default) is latency-honest: calls with cpu/blocked timing, tracemalloc off; `--full` adds memory and determinism capture; `--minimal` is bare calls only. `TRACELENS_PRESET=memory` selects the memory-focused preset (full tracemalloc, no determinism). |
+| `--memory` / `--no-memory` | Per-call memory on or off (tracemalloc; distorts user-code latency — every run's `tracer_calibration` header records the active axes). |
 | `--capture-determinism` / `--no-capture-determinism` | Record time/random reads alongside the trace. |
 | `--instrument-third-party` | Also record installed libraries, not just your packages. |
 | `TRACELENS_DISABLED=1` | Turns tracing into a no-op without changing your command. |

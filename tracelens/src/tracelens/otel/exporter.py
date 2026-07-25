@@ -27,6 +27,15 @@ _log = logging.getLogger("tracelens.diag")
 # the summary's capture_health block.
 _exported_count = 0
 
+# Spans emitted by the launcher's startup overhead self-calibration
+# (``tracelens.launcher.calibration``). They flow through the REAL span pipeline
+# — that is the point: the measured overhead includes the processor bookkeeping
+# and batch queueing a production call pays — but they are synthetic no-ops, so
+# the exporter drops them here rather than polluting the trace. The single
+# artifact of calibration is the ``tracer_calibration`` header line the launcher
+# writes itself.
+CALIBRATION_SPAN_PREFIX = "tracelens.calibration."
+
 
 def exported_span_count() -> int:
     return _exported_count
@@ -182,6 +191,8 @@ class JSONLFileSpanExporter(SpanExporter):
         global _exported_count
         for span in spans:
             try:
+                if span.name.startswith(CALIBRATION_SPAN_PREFIX):
+                    continue  # synthetic calibration no-ops — never trace rows
                 self._export_one(span)
                 _exported_count += 1
             except BaseException as exc:
@@ -208,7 +219,28 @@ class JSONLFileSpanExporter(SpanExporter):
         attrs = span.attributes or {}
         st = span.start_time or 0
         et = span.end_time or st
-        duration_ms = max(0.0, (et - st) / 1_000_000.0)
+        # duration_ms: prefer the raw perf-counter window ``wrap_call`` records
+        # around ONLY the user function (``tracelens.duration_ns``) — it excludes
+        # the tracer's own enrichment work. Spans without it (OTel contrib
+        # instrumenters, plain SDK spans) keep the span wall-clock, as before.
+        dur_ns_raw = _attr(attrs, "tracelens.duration_ns")
+        if isinstance(dur_ns_raw, int) and not isinstance(dur_ns_raw, bool) and dur_ns_raw >= 0:
+            duration_ms = dur_ns_raw / 1_000_000.0
+        else:
+            dur_ns_raw = None
+            duration_ms = max(0.0, (et - st) / 1_000_000.0)
+        # blocked_ms = wall − cpu over the same window: ground-truth "was this
+        # call waiting (I/O, locks, sleep) rather than computing". Additive and
+        # nullable — spans without both clock attributes export null, so
+        # downstream consumers can distinguish "no signal" from "not blocked".
+        cpu_ns_raw = _attr(attrs, "tracelens.cpu_ns")
+        blocked_ms: float | None = None
+        if (
+            dur_ns_raw is not None
+            and isinstance(cpu_ns_raw, int)
+            and not isinstance(cpu_ns_raw, bool)
+        ):
+            blocked_ms = round(max(0.0, (dur_ns_raw - cpu_ns_raw) / 1_000_000.0), 4)
         trace_id = span.context.trace_id
         request_id = _attr_str(attrs, "tracelens.request_id") or f"ot-{trace_id:032x}"
         component = span.name
@@ -307,6 +339,9 @@ class JSONLFileSpanExporter(SpanExporter):
             "parent_component": parent_component,
             "thread_id": thread_id,
             "duration_ms": round(duration_ms, 4),
+            # wall − cpu across the user-function window; null when the span
+            # carries no clock attributes (contrib spans, pre-upgrade traces).
+            "blocked_ms": blocked_ms,
             # None when memory attribution is OFF (the span carries no
             # attribute) — a bare 0 here would be indistinguishable from a real
             # zero-delta call, and downstream consumers (e.g. the extension's

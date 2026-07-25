@@ -90,7 +90,8 @@ def _components(trace_path: Path) -> set[str]:
         for line in trace_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    return {e["component"] for e in events}
+    # Non-span header lines (tracer_calibration) carry no component.
+    return {e["component"] for e in events if "component" in e}
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +318,7 @@ def test_fork_child_spans_go_to_sidecar_not_parent_file(tmp_path: Path) -> None:
     # parent's spans present.
     lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
     events = [json.loads(ln) for ln in lines]  # raises if any line was torn
-    assert any(e["component"] == "demopkg.main.work" for e in events)
+    assert any(e.get("component") == "demopkg.main.work" for e in events)
 
     # Child spans landed in a pid-suffixed sidecar, itself valid JSONL.
     sidecars = sorted(out.parent.glob(out.name + ".fork-*"))
@@ -327,7 +328,7 @@ def test_fork_child_spans_go_to_sidecar_not_parent_file(tmp_path: Path) -> None:
         for ln in sc.read_text(encoding="utf-8").splitlines():
             if ln.strip():
                 side_events.append(json.loads(ln))
-    assert any(e["component"] == "demopkg.main.work" for e in side_events)
+    assert any(e.get("component") == "demopkg.main.work" for e in side_events)
 
     # The summary accounts for the sidecars.
     summary = json.loads(out.with_name(out.name + ".summary.json").read_text(encoding="utf-8"))

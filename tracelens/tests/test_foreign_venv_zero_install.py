@@ -176,6 +176,8 @@ def test_clean_target_with_injected_roots_captures_nonempty_trace(tmp_path: Path
         if not line.strip():
             continue
         event = json.loads(line)  # parseable JSONL or this raises
+        if "component" not in event:
+            continue  # non-span header lines (tracer_calibration)
         components.add(event["component"])
         n += 1
     assert n > 0

@@ -35,6 +35,7 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
     parent_null = 0
     oracle_violations_nonempty = 0
     invalid_json = 0
+    tracer_calibration: dict[str, Any] | None = None
     if not log_path.is_file():
         return {"error": f"log not found: {log_path}"}
     with log_path.open(encoding="utf-8") as fh:
@@ -49,6 +50,12 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
                 invalid_json += 1
                 continue
             ev = obj.get("event")
+            if ev == "tracer_calibration":
+                # Startup overhead header (launcher/calibration.py) — surfaced
+                # verbatim so summary.json is overhead-self-describing; it is
+                # not a span row and must not pollute component/request stats.
+                tracer_calibration = obj
+                continue
             comp = obj.get("component", "?")
             components[comp] += 1
             request_ids.add(str(obj.get("request_id", "")))
@@ -96,6 +103,9 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
         ),
         "top_components": [{"component": c, "count": n} for c, n in components.most_common(20)],
         "unique_components": len(components),
+        # Per-call tracer overhead measured at startup (median/MAD ns + active
+        # axes); None for traces captured without a calibration header.
+        "tracer_calibration": tracer_calibration,
     }
 
 
