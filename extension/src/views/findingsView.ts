@@ -183,6 +183,7 @@ function getHtml(): string {
 		.att .ap { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
 		.att .suite { flex: none; font-size: 10px; }
 		.att .suite.fail { color: var(--accent-fg); }
+		.att .cin { flex: none; font-size: 10px; color: var(--muted); white-space: nowrap; }
 		/* CI bar: signed axis, zero tick in the middle-ish; interval drawn as a
 		   filled band, point estimate as a notch. Improvement = toward +. */
 		.ci { flex: none; position: relative; width: 180px; height: 14px;
@@ -245,6 +246,14 @@ function getHtml(): string {
 			'</span>';
 	}
 
+	// The interval spelled out next to its bar, so the evidence is legible
+	// without hovering (positive = faster).
+	function ciText(a) {
+		if (a.ciLow == null || a.ciHigh == null) return '';
+		return '<span class="cin" title="Paired-bootstrap 95% confidence interval of the relative speedup over the frozen probe set; the claim only counts when the whole interval is above zero">' +
+			pct(a.rel ?? 0) + ' [' + pct(a.ciLow) + ', ' + pct(a.ciHigh) + ']</span>';
+	}
+
 	function render(f) {
 		tiles(f);
 		let html = '';
@@ -259,7 +268,7 @@ function getHtml(): string {
 
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';
 		if (f.episodes.length === 0) {
-			html += '<div class="empty">No optimization episodes recorded yet — episodes land here with their paired-bootstrap evidence once the harness runs one against a detected opportunity.</div>';
+			html += '<div class="empty">No optimization episodes recorded yet. An episode is appended to .vinv/exercise/optimize.jsonl each time a verified optimization runs to a verdict — dispatched from the Optimize panel or report, or by the exerciser — and lands here with each attempt&#39;s paired-bootstrap CI, behavior-suite result, and whether the change was kept or reverted.</div>';
 		}
 		for (const e of f.episodes) {
 			const cls = e.action === 'accept' ? 'accept' : 'revert';
@@ -268,11 +277,14 @@ function getHtml(): string {
 				'<span class="label">' + esc(e.label) + '</span>' +
 				'<span class="badge">' + esc(e.opportunity.kind) + '</span></div>' +
 				'<div class="why">' + esc(e.reason) + '</div>';
-			for (const a of e.attempts) {
-				html += '<div class="att"><span class="ap">' + esc(a.approach) + '</span>' +
+			e.attempts.forEach((a, i) => {
+				html += '<div class="att">' +
+					'<span class="badge' + (a.reverted ? ' revert' : ' accept') + '" title="' + (a.reverted ? 'This attempt&#39;s change was rolled back to the pre-episode snapshot' : 'This attempt&#39;s change stayed in the codebase') + '">' +
+					(a.reverted ? 'reverted' : 'kept') + '</span>' +
+					'<span class="ap">' + (e.attempts.length > 1 ? (i + 1) + '. ' : '') + esc(a.approach) + '</span>' +
 					'<span class="suite' + (a.behaviorSuitePassed ? '' : ' fail') + '" title="' + (a.behaviorSuitePassed ? 'Every recorded behavior still byte/shape-identical after this change' : 'This change altered observable outputs — a faster-but-wrong result, so it was reverted no matter how big the speedup') + '">' +
-					(a.behaviorSuitePassed ? 'suite ✓' : 'suite ✗') + '</span>' + ciBar(a) + '</div>';
-			}
+					(a.behaviorSuitePassed ? 'suite ✓' : 'suite ✗') + '</span>' + ciBar(a) + ciText(a) + '</div>';
+			});
 			if (e.filesChanged.length) html += '<div class="files">changed: ' + e.filesChanged.map(esc).join(', ') + '</div>';
 			html += '</div>';
 		}

@@ -465,7 +465,15 @@ function getHtml(): string {
 
 	document.getElementById('prev').addEventListener('click', () => { if (step > 0) { step--; render(); } });
 	document.getElementById('next').addEventListener('click', () => { if (step < total() - 1) { step++; render(); } });
+	// True when the key event originated in a form field (the add-input JSON
+	// textareas etc). Arrow keys there are cursor movement — navigating and
+	// re-rendering would destroy what the user is typing.
+	function isTypingTarget(t) {
+		const tag = t && t.tagName ? String(t.tagName).toUpperCase() : '';
+		return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(t && t.isContentEditable);
+	}
 	window.addEventListener('keydown', (e) => {
+		if (isTypingTarget(e.target)) return;
 		if (e.key === 'ArrowLeft' && step > 0) { step--; render(); }
 		if (e.key === 'ArrowRight' && step < total() - 1) { step++; render(); }
 	});

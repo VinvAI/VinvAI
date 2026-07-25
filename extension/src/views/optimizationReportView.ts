@@ -210,6 +210,7 @@ function getReportHtml(): string {
 		.rhd .nm { font-weight: 600; font-size: 14px; }
 		.rhd .loc { color: var(--muted-2); font-size: 10.5px; }
 		.rhd .pred { margin-left: auto; color: var(--accent-fg); font-weight: 600; }
+		.rhd .pred small { font-weight: 400; font-size: 10px; color: var(--muted); }
 		.tag { font-size: 8.5px; letter-spacing: 0.16em; text-transform: uppercase; padding: 2px 6px; border: 1px solid var(--line-strong); color: var(--muted); }
 		.tag.cache { color: var(--ink); border-color: var(--ink); }
 		.why { color: var(--muted); font-size: 11.5px; margin: 8px 0 10px; line-height: 1.55; }
@@ -250,6 +251,25 @@ function getReportHtml(): string {
 		const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 		const ms = (n) => Math.round(n) + 'ms';
 		const KIND = { 'cache': 'cache', 'fanout': 'fan-out', 'per-call': 'per-call', 'n-plus-1': 'N+1', 'serial-async': 'async' };
+		// Direction of a measured delta (after − before): negative = faster.
+		const dir = (delta) => delta == null ? '' : (delta < 0 ? ' faster' : (delta > 0 ? ' slower' : ''));
+		// Micro-glossary: every statistical term on a card carries a plain-language
+		// tooltip (mirrors the existing inconclusive sentence's honesty).
+		const GLOSS = {
+			noise: 'Noise band: how much this timing naturally wobbles between identical runs of the same code. A change inside the band cannot be told apart from noise, so no claim is made either way.',
+			ci: '95% confidence interval from a paired bootstrap: the same frozen request set is replayed before and after the change, and the interval is the range of plausible true speedups given trace noise. A speedup only counts when the whole interval is on the faster side of zero.',
+			self: 'Self time: milliseconds spent in this function&#39;s own body, not in the functions it calls. A symbol with a big total but near-zero self time is a delegator — its cost lives in its callees.',
+			predicted: 'Predicted recoverable time: an estimate of how much of this symbol&#39;s measured cost a fix could remove. It sets the expectation and the ranking; the measured after-run is the truth.',
+		};
+		const gloss = (txt, key) => '<span title="' + GLOSS[key] + '">' + txt + '</span>';
+		// Amdahl ceiling badge — rendered only when the analyzer supplied the
+		// optional amdahl_ceiling field (feature-detected, never required).
+		function ceilingTag(c) {
+			const raw = c.amdahl_ceiling;
+			if (typeof raw !== 'number' || !isFinite(raw) || raw < 0) { return ''; }
+			const p = raw > 1 ? raw : raw * 100;
+			return '<span class="tag" title="Amdahl ceiling: this symbol is only one part of the whole flow, so even a perfect fix cannot speed the end-to-end flow up by more than this share.">whole-flow ceiling ≤' + (p < 10 ? p.toFixed(1) : String(Math.round(p))) + '%</span>';
+		}
 
 		function tiles(cands) {
 			const open = cands.filter((c) => c.status === 'candidate');
@@ -270,9 +290,9 @@ function getReportHtml(): string {
 		function axis(c, scale) {
 			const o = c.outcome || {};
 			const predW = Math.max(1, (c.predicted_ms / scale) * 100);
-			let html = '<div class="axis"><div class="lab"><span>predicted ~' + ms(c.predicted_ms) + '</span>';
+			let html = '<div class="axis"><div class="lab"><span>' + gloss('predicted ~' + ms(c.predicted_ms), 'predicted') + '</span>';
 			const measured = o.delta_ms != null ? Math.abs(o.delta_ms) : null;
-			if (measured != null) { html += '<span>measured ' + ms(measured) + (c.status === 'proven' ? ' faster' : '') + '</span>'; }
+			if (measured != null) { html += '<span>measured ' + ms(measured) + dir(o.delta_ms) + '</span>'; }
 			html += '</div>';
 			html += '<div class="bar"><span class="predicted" style="width:' + predW + '%"></span></div>';
 			if (measured != null) {
@@ -287,26 +307,32 @@ function getReportHtml(): string {
 			const o = c.outcome || {};
 			const pc = (v) => (v * 100).toFixed(1) + '%';
 			const ciNote = o.ci
-				? ' Paired-bootstrap: ' + pc(o.ci.rel_improvement) + ' (95% CI [' + pc(o.ci.ci_low) + ', ' + pc(o.ci.ci_high) + ']) over the frozen probe set.'
+				? ' ' + gloss('Paired-bootstrap: ' + pc(o.ci.rel_improvement) + ' (95% CI [' + pc(o.ci.ci_low) + ', ' + pc(o.ci.ci_high) + ']) over the frozen probe set.', 'ci')
 				: '';
+			// What ACTUALLY happened to the change. reverted true/false is the
+			// verdict engine reporting a real rollback / a real keep; undefined
+			// means the watcher-only fallback judged from session timings — that
+			// path never touches the working tree, so we must say so instead of
+			// claiming a revert that never ran.
 			const kept = o.reverted === true
 				? ' The change was reverted to the pre-episode snapshot.'
 				: (o.reverted === false ? ' The change was kept.' : '');
+			const noAutoRevert = ' No automatic revert ran — this verdict came from the capture watcher (session timings, no managed episode), so the change is still in your working tree; review it and revert it yourself if unwanted.';
 			if (c.status === 'proven') {
 				return '<div class="verdict proven"><b>Proven ' + ms(Math.abs(o.delta_ms || 0)) + ' faster</b> — predicted ~' + ms(o.predicted_ms || 0) +
-					(o.ci ? '.' : ', measured beyond the ±' + ms(o.noise_band_ms || 0) + ' noise band.') + ' Behavior unchanged.' + ciNote + '</div>';
+					(o.ci ? '.' : ', measured beyond the ±' + ms(o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + '.') + ' Behavior unchanged.' + ciNote + kept + '</div>';
 			}
 			if (c.status === 'regressed') {
 				const broke = o.behavior_ok === false;
-				return '<div class="verdict regressed"><b>' + (broke ? 'Regressed — behavior changed' : 'Regressed ' + ms(o.delta_ms || 0)) + '</b> — ' +
-					(broke ? 'the after-run no longer answered identically.' : (o.ci ? 'the after-run was significantly slower.' : 'the after-run was slower beyond the noise band.')) +
-					ciNote + (kept || ' The change was not kept.') + '</div>';
+				return '<div class="verdict regressed"><b>' + (broke ? 'Regressed — behavior changed' : 'Regressed ' + ms(Math.abs(o.delta_ms || 0)) + dir(o.delta_ms)) + '</b> — ' +
+					(broke ? 'the after-run no longer answered identically.' : (o.ci ? 'the after-run was significantly slower.' : 'the after-run was slower beyond the ' + gloss('noise band', 'noise') + '.')) +
+					ciNote + (kept || noAutoRevert) + '</div>';
 			}
 			if (c.status === 'inconclusive') {
 				return '<div class="verdict"><b>Inconclusive</b> — ' +
-					(o.ci ? 'no significant speedup (the CI includes zero or the effect is below 10%), so no honest claim can be made.'
-						: 'the change landed inside the ±' + ms(o.noise_band_ms || 0) + ' noise band, so no honest speedup can be claimed.') +
-					ciNote + kept + '</div>';
+					(o.ci ? 'no significant speedup (the ' + gloss('95% CI', 'ci') + ' includes zero or the effect is below 10%), so no honest claim can be made.'
+						: 'the change landed inside the ±' + ms(o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + ', so no honest speedup can be claimed.') +
+					ciNote + (kept || noAutoRevert) + '</div>';
 			}
 			return '';
 		}
@@ -316,8 +342,11 @@ function getReportHtml(): string {
 			let h = '<div class="row ' + cls + '">';
 			h += '<div class="rhd"><span class="nm">' + esc(c.name) + '</span>' +
 				'<span class="tag ' + esc(c.waste_kind) + '">' + (KIND[c.waste_kind] || esc(c.waste_kind)) + '</span>' +
-				'<span class="loc">' + esc(c.file) + ':' + c.line + ' · ' + ms(c.total_ms) + ' across ' + c.calls + ' call(s)' + (c.self_ms != null ? ' · ' + ms(c.self_ms) + ' self' : '') + '</span>' +
-				'<span class="pred">~' + ms(c.predicted_ms) + '</span></div>';
+				ceilingTag(c) +
+				'<span class="loc">' + esc(c.file) + ':' + c.line + ' · ' + ms(c.total_ms) + ' across ' + c.calls + ' call(s)' + (c.self_ms != null ? ' · ' + gloss(ms(c.self_ms) + ' self', 'self') : '') + '</span>' +
+				'<span class="pred" title="' + GLOSS.predicted + '">~' + ms(c.predicted_ms) +
+				(typeof c.predicted_ms_effective === 'number' && isFinite(c.predicted_ms_effective) ? ' <small>≈' + ms(c.predicted_ms_effective) + ' whole-flow</small>' : '') +
+				'</span></div>';
 			h += '<div class="why">' + esc(c.reason) + '</div>';
 			h += axis(c, scale);
 			h += verdict(c);
