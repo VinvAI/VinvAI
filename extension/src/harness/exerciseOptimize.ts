@@ -101,6 +101,9 @@ import {
 	seededRng,
 	type MetricComparison,
 } from './optimizeStats';
+import { collectCallSamples, errorSignature, traceDiffVerdict } from './traceDiff';
+import { runDriverUnderTracing, tracedConfig } from './tracedRun';
+import { indexStoreDir, loadNodes } from '../graph/indexGraph';
 
 export {
 	comparisonToJson,
@@ -407,6 +410,18 @@ export interface OptimizeEngineDeps {
 	 */
 	releaseToWatcher?: () => void;
 	/**
+	 * Trace-diff measurement: run a DRIVER under tracing and return the target
+	 * row's per-call samples plus the flow's error signature. Called 'before'
+	 * (original code) and 'after' (post-dispatch). This is what lets the engine
+	 * judge a flow the probe path CANNOT measure — one that raises, has no ready
+	 * probes, or is judged on bytes — by comparing the two traces. Optional:
+	 * returns null when no driver exercises the target (→ watcher fallback,
+	 * exactly today's behavior, so this never regresses the probe path).
+	 */
+	measureTraceDiff?: (
+		phase: 'before' | 'after',
+	) => Promise<{ samples: number[]; errorSig: string } | null>;
+	/**
 	 * Learned minimum-detectable-effect: receives the null-split noise floor
 	 * measured from the BEFORE samples (half-width of the CI of a no-change
 	 * comparison; null when too few samples), persists it as the repo's learned
@@ -529,6 +544,16 @@ export async function runVerifiedOptimization(
 		: 0;
 	const measurable = Boolean(frozen && before && beforePairs >= minPaired);
 
+	// Trace-diff before-capture: when the probe path is NOT measurable (a flow
+	// that raises, no ready probes, or a memory candidate), capture the target's
+	// per-call samples from a traced driver run on the ORIGINAL code, so the
+	// fallback branch can judge from the before/after traces instead of orphaning
+	// the row to the watcher. Best-effort — a null keeps today's behavior exactly.
+	const tdBefore =
+		!measurable && deps.measureTraceDiff
+			? await deps.measureTraceDiff('before').catch(() => null)
+			: null;
+
 	await deps.snapshot();
 
 	// Doom-loop guard: what earlier episodes (possibly before a restart)
@@ -594,11 +619,56 @@ export async function runVerifiedOptimization(
 			break;
 		}
 		if (!measurable) {
-			// Dispatched without a measurable frozen set: the session-timing
-			// reconcile (noise-band screen) picks the row up when a fresh capture
-			// lands. No CI, no auto-revert — we never judge on evidence we lack.
-			// Release the row back to the watcher so it is not orphaned under the
-			// bridge tag with a verdict that will never come.
+			// Trace-diff verdict: the probe path could not measure, but if we
+			// captured before-samples we can re-run the driver on the FIXED code and
+			// compare the two traces per call — a real verdict on a flow the probe
+			// path can't touch. Guarded: any gap (no dep, no driver, too few
+			// samples) falls through to the watcher, exactly today's behavior.
+			if (tdBefore && deps.measureTraceDiff) {
+				const tdAfter = await deps.measureTraceDiff('after').catch(() => null);
+				if (tdAfter && tdBefore.samples.length > 0 && tdAfter.samples.length > 0) {
+					const behaviorOk = tdBefore.errorSig === tdAfter.errorSig;
+					const v = traceDiffVerdict(tdBefore.samples, tdAfter.samples, behaviorOk);
+					if (v.status === 'regressed') {
+						await deps.revert();
+					}
+					const action: OptimizeAction = v.status === 'regressed' ? 'revert-and-stop' : 'accept';
+					const attempt: OptimizeAttempt = {
+						approach: `${opts.label} — trace-diff (${tdBefore.samples.length}→${tdAfter.samples.length} per-call samples)`,
+						comparison: v.comparison,
+						behavior_suite_passed: behaviorOk,
+						reverted: v.status === 'regressed',
+						learning:
+							v.status === 'proven'
+								? ''
+								: v.status === 'regressed'
+									? behaviorOk
+										? 'the after-run was worse beyond the CI'
+										: 'the after-run failed the flow differently (behavior change)'
+									: 'no significant change measured (CI includes zero or below the 10% floor)',
+					};
+					deps.resolve({
+						status: v.status,
+						comparison: v.comparison,
+						behaviorOk,
+						reverted: v.status === 'regressed',
+						attempt: 1,
+						opportunity_kind: opts.opportunity.kind,
+					});
+					deps.recordEpisode({
+						label: opts.label,
+						opportunity: opts.opportunity,
+						action,
+						reason: `trace-diff verdict: ${v.status}`,
+						attempts: [attempt],
+						files_changed: v.status === 'proven' ? await deps.changedFiles() : [],
+					});
+					return { mode: 'verdict', action, comparison: v.comparison, behaviorOk, attempts: [attempt] };
+				}
+			}
+			// No trace-diff evidence: the session-timing reconnect (noise-band
+			// screen) picks the row up when a fresh capture lands. Release the row
+			// back to the watcher so it is not orphaned under the bridge tag.
 			deps.releaseToWatcher?.();
 			return { mode: 'fallback' };
 		}
@@ -725,7 +795,7 @@ function probePasses(): number {
  */
 export function buildWorkspaceDeps(
 	workspaceRoot: string,
-	target: { row?: number },
+	target: { row?: number; metric?: 'duration' | 'bytes' },
 ): OptimizeEngineDeps {
 	const episodeId = `opt-${crypto.randomUUID()}`;
 	const startedAtUnix = Math.floor(Date.now() / 1000);
@@ -807,6 +877,44 @@ export function buildWorkspaceDeps(
 				// The learned value still applies to THIS verdict even unpersisted.
 			}
 			return learned;
+		},
+		measureTraceDiff: async (phase) => {
+			if (target.row === undefined) {
+				return null;
+			}
+			const cfg = tracedConfig(workspaceRoot);
+			if (!cfg || cfg.targetPackages.length === 0) {
+				return null; // no tracelens-wrapped flow recorded → nothing to trace
+			}
+			const exDir = path.join(workspaceRoot, '.vinv', 'exercise');
+			const driver = path.join(exDir, 'td-driver.py');
+			const outTrace = path.join(exDir, `td-${phase}.jsonl`);
+			try {
+				fs.mkdirSync(exDir, { recursive: true });
+				// Driver: import the target package(s). tracelens degrades on inline
+				// `-c`, so this is a real script FILE. Import fires module-level /
+				// subclass-registration code (e.g. a validator run per Tool subclass)
+				// — the import-time candidates. A handler that only runs on a request
+				// is not exercised by import → no samples → graceful watcher fallback.
+				fs.writeFileSync(driver, cfg.targetPackages.map((p) => `import ${p}`).join('\n') + '\n', 'utf8');
+			} catch {
+				return null;
+			}
+			const res = await runDriverUnderTracing(workspaceRoot, driver, [], outTrace);
+			if (!res.ok) {
+				return null;
+			}
+			let nodes;
+			try {
+				nodes = loadNodes(indexStoreDir(workspaceRoot));
+			} catch {
+				return null;
+			}
+			const samples = collectCallSamples(outTrace, nodes, target.row, target.metric ?? 'duration');
+			if (samples.length === 0) {
+				return null; // the driver never exercised the target — fall back
+			}
+			return { samples, errorSig: errorSignature(outTrace) };
 		},
 		resolve: (resolution) => {
 			let candidate;

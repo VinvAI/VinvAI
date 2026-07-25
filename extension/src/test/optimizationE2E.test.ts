@@ -960,4 +960,60 @@ suite('optimization end-to-end (verdict engine bridge)', () => {
 		assert.strictEqual(calls.resolutions.length, 0);
 		assert.strictEqual(calls.records.length, 0);
 	});
+
+	// ---- trace-diff fallback: judge a flow the probe path can't measure -------
+
+	/** Deps where probes are UNAVAILABLE (freezeProbes → null) but a trace-diff
+	 * measure supplies scripted before/after per-call samples. */
+	function traceDiffDeps(
+		before: { samples: number[]; errorSig: string },
+		after: { samples: number[]; errorSig: string },
+	): { deps: OptimizeEngineDeps; calls: Calls } {
+		const { deps, calls } = fakeDeps([]);
+		let phaseCount = 0;
+		return {
+			deps: {
+				...deps,
+				freezeProbes: async () => null, // no probe path → the fallback branch
+				measureTraceDiff: async () => (phaseCount++ === 0 ? before : after),
+			},
+			calls,
+		};
+	}
+
+	test('trace-diff: a faster function on an unprobeable flow resolves PROVEN and records the episode', async () => {
+		const slow = Array.from({ length: 30 }, () => 30);
+		const fast = Array.from({ length: 30 }, () => 6);
+		const { deps, calls } = traceDiffDeps(
+			{ samples: slow, errorSig: 'app.run|ValueError' }, // flow raises...
+			{ samples: fast, errorSig: 'app.run|ValueError' }, // ...identically after the fix
+		);
+		const result = await runVerifiedOptimization(
+			{ label: 'Optimize get_docs', opportunity: OPP },
+			accepting(calls),
+			deps,
+		);
+		assert.strictEqual(result.mode, 'verdict', 'trace-diff produced a verdict, not a watcher fallback');
+		assert.strictEqual(result.action, 'accept');
+		assert.strictEqual(calls.resolutions[0]?.status, 'proven');
+		assert.strictEqual(calls.revert, 0, 'a proven win is kept');
+		assert.strictEqual(calls.records.length, 1, 'the episode is recorded → the exercise/ artifact');
+	});
+
+	test('trace-diff: a behavior change (different error signature) resolves REGRESSED and reverts', async () => {
+		const s = Array.from({ length: 30 }, () => 30);
+		const f = Array.from({ length: 30 }, () => 6);
+		const { deps, calls } = traceDiffDeps(
+			{ samples: s, errorSig: 'app.run|ValueError' },
+			{ samples: f, errorSig: '' }, // the flow no longer raises — behavior changed
+		);
+		const result = await runVerifiedOptimization(
+			{ label: 'Optimize get_docs', opportunity: OPP },
+			accepting(calls),
+			deps,
+		);
+		assert.strictEqual(result.mode, 'verdict');
+		assert.strictEqual(calls.resolutions[0]?.status, 'regressed');
+		assert.strictEqual(calls.revert, 1, 'a behavior change is reverted');
+	});
 });
