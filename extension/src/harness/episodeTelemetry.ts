@@ -470,6 +470,63 @@ export function effectiveEpsilon(policy: EpisodePolicy, armCount: number): numbe
 	return Math.min(policy.epsilon0, Math.max(policy.epsilon_min, decayed));
 }
 
+/** Observations a posterior has accrued beyond the policy's flat prior. */
+function armObservations(p: ArmPosterior, policy: EpisodePolicy): number {
+	return Math.max(0, p.alpha + p.beta - policy.ts_prior_alpha - policy.ts_prior_beta);
+}
+
+/**
+ * Fraction of composition features whose posterior evidence is still SPARSE —
+ * the local-maxima/dip guard's trigger. A feature is sparse when either of its
+ * two levels has fewer than K effective observations (summed over the arms at
+ * that level), where K = max(1, total_observations / |arms|) — i.e. the mean
+ * per-arm pull count, derived from the trace itself, never a hardcoded count.
+ * While a feature level is under-observed its effect on the verified-fix rate
+ * is unresolved, so exploration must not anneal away: a few early failures on
+ * one level (a posterior "dip") would otherwise let Thompson sampling starve
+ * exactly the arms that could disprove the dip.
+ */
+export function sparseFeatureFraction(
+	policy: EpisodePolicy,
+	posteriors: ArmPosterior[],
+): number {
+	const obs = posteriors.map((p) => armObservations(p, policy));
+	const total = obs.reduce((a, b) => a + b, 0);
+	const k = Math.max(1, total / Math.max(1, posteriors.length));
+	let sparse = 0;
+	for (const feature of EPISODE_FEATURES) {
+		let n0 = 0;
+		let n1 = 0;
+		for (let a = 0; a < posteriors.length; a++) {
+			if (armLevels(a)[feature] === 1) {
+				n1 += obs[a];
+			} else {
+				n0 += obs[a];
+			}
+		}
+		if (Math.min(n0, n1) < k) {
+			sparse += 1;
+		}
+	}
+	return sparse / EPISODE_FEATURES.length;
+}
+
+/**
+ * The exploration floor actually served: the evidence-decayed ε (OPE support)
+ * raised by a PRINCIPLED optimism bonus while any feature's evidence is sparse
+ * (see sparseFeatureFraction). The bonus is ε₀ scaled by the sparse-feature
+ * fraction — proportional to how much of the composition space is still
+ * unresolved, ceiling-clamped at ε₀ — so a feature with thin evidence keeps a
+ * selection probability bounded away from zero (≥ floor/|arms| via the uniform
+ * mixture) no matter how confident the rest of the posterior is, and the bonus
+ * vanishes entirely once every feature level has ≥K observations.
+ */
+export function explorationFloor(policy: EpisodePolicy, posteriors: ArmPosterior[]): number {
+	const decayed = effectiveEpsilon(policy, posteriors.length);
+	const optimism = policy.epsilon0 * sparseFeatureFraction(policy, posteriors);
+	return Math.min(policy.epsilon0, Math.max(decayed, optimism));
+}
+
 // ---- Thompson sampling over the arm grid (Beta-Bernoulli) -----------------
 // Why Thompson, not ε-greedy + a UCB/Bernstein promotion gate: episode pulls
 // are EXPENSIVE (one full coding-agent dispatch each) and the reward is
@@ -607,7 +664,10 @@ export interface ArmDecision {
 export function selectEpisodeArm(policy: EpisodePolicy, rng: () => number = Math.random): ArmDecision {
 	const arms = episodeArmSet(policy);
 	const posteriors = armPosteriors(policy, arms.length);
-	const floor = effectiveEpsilon(policy, arms.length);
+	// The floor is the decayed ε raised by the sparse-feature optimism bonus
+	// (dip guard) — see explorationFloor. Uniform over ALL arms so the OPE
+	// support guarantee is untouched; sparse-feature arms simply keep more of it.
+	const floor = explorationFloor(policy, posteriors);
 	// Greedy arm = highest posterior mean (for the explored flag / reporting).
 	let greedy = 0;
 	for (let a = 1; a < arms.length; a++) {
@@ -629,7 +689,15 @@ export function selectEpisodeArm(policy: EpisodePolicy, rng: () => number = Math
 }
 
 export interface EpisodeEvent {
-	type: 'episode_start' | 'attempt' | 'acceptance' | 'candidate_defect' | 'mutation_smoke' | 'stall' | 'dispute' | 'revert' | 'infra_blocked' | 'episode_end' | 'reconciliation' | 'policy_invalidated' | 'policy_updated';
+	// 'optimization_outcome' is appended by the exercise/optimize verdict
+	// bridge when a measured optimization verdict resolves (possibly long
+	// after episode_end): {"type":"optimization_outcome","at":unix-seconds,
+	// "episode_id","row","waste_kind","predicted_ms","delta_ms",
+	// "verdict":"proven"|"inconclusive"|"regressed"|"reverted-behavior",
+	// "attempt"}. The policy updater re-labels the episode from it (a measured
+	// verdict IS an objective oracle) and calibrates predicted-vs-measured
+	// speedups from it. It carries `at` (unix seconds) rather than `ts`.
+	type: 'episode_start' | 'attempt' | 'acceptance' | 'candidate_defect' | 'mutation_smoke' | 'stall' | 'dispute' | 'revert' | 'infra_blocked' | 'episode_end' | 'reconciliation' | 'policy_invalidated' | 'policy_updated' | 'optimization_outcome';
 	ts: string;
 	episode_id?: string;
 	[key: string]: unknown;

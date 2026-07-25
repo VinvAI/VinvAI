@@ -2322,9 +2322,12 @@ export async function runEpisode(
 			// Session bookkeeping must never mask the episode result.
 		}
 		// Close the loop: every finished episode re-estimates the policy from
-		// the full ledger (arm posteriors, greedy arm, attempt budget).
+		// the full ledger (arm posteriors, greedy arm, attempt budget) —
+		// including any optimization_outcome verdicts that resolved since the
+		// last update (they re-label their episodes as objective evidence) —
+		// and refreshes the workspace's optimization-calibration artifact.
 		try {
-			maybeUpdateEpisodePolicy();
+			maybeUpdateEpisodePolicy(workspaceRoot);
 		} catch {
 			// A failed update never blocks the episode result; the next end retries.
 		}
