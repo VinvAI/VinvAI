@@ -28,6 +28,7 @@ maths and the revert/retry logic are unit-tested directly.
 
 from __future__ import annotations
 
+import math
 import random
 import statistics
 import time
@@ -36,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .throughput import sweep_path
 
 # Minimum practical relative improvement for an optimization to count.
 # Documented default: 0.10 (10%) — overridable via the learned policy file
@@ -45,6 +47,10 @@ DEFAULT_MIN_EFFECT = 0.10
 # MEDIAN P95 (relative-to-trace, never an absolute ms threshold). Documented
 # default: 3.0 — overridable via policy key ``optimize.outlier_factor``.
 DEFAULT_OUTLIER_FACTOR = 3.0
+# Minimum R² a USL fit must reach before a throughput-ceiling opportunity is
+# emitted (a noisy sweep must not seed an episode). Documented default: 0.8 —
+# overridable via policy key ``optimize.usl_min_r2``.
+DEFAULT_USL_MIN_R2 = 0.8
 # Bootstrap resamples for the CI.
 _BOOTSTRAP_N = 2000
 
@@ -210,6 +216,14 @@ def detect_opportunities(
     itself — decisive with only two endpoints). It is flagged when it exceeds
     ``outlier_factor`` × that median AND, when at least three other endpoints
     exist, the median + 3 robust deviations (MAD × 1.4826) band.
+
+    THROUGHPUT CEILING: when a concurrency sweep artifact exists
+    (``.vinv/exercise/throughput_sweep.json``, written by the
+    ``throughput-sweep`` CLI command), a ``throughput-ceiling`` opportunity is
+    appended when the USL fit is valid (a real knee: ``kappa > 0``), the knee
+    lies WITHIN the swept concurrency range (the ceiling was observed, not
+    extrapolated), and R² clears the ``optimize.usl_min_r2`` policy gate
+    (documented default ``DEFAULT_USL_MIN_R2`` = 0.8).
     """
     if repo is None:
         repo = profile.get("repo")
@@ -223,32 +237,110 @@ def detect_opportunities(
         cov = ep.get("coverage", {})
         if p95 > 0 and cov.get("handler_observed"):
             eligible.append((ep, p95))
-    if len(eligible) < 2:
-        return []  # a lone endpoint has no distribution to be an outlier of
     out: list[Opportunity] = []
-    for i, (ep, p95) in enumerate(eligible):
-        others = [p for j, (_, p) in enumerate(eligible) if j != i]
-        med = statistics.median(others)
-        if med <= 0:
-            continue
-        threshold = med * outlier_factor
-        if len(others) >= 3:
-            mad = statistics.median([abs(v - med) for v in others])
-            threshold = max(threshold, med + 3 * 1.4826 * mad)
-        if p95 >= threshold:
-            out.append(Opportunity(
-                kind="latency-p95",
-                endpoint_id=ep["api_id"],
-                endpoint=f"{ep['method']} {ep['path']}",
-                detail=(
-                    f"P95 latency {p95}ms is {p95 / med:.1f}x the median P95 of the "
-                    f"service's other endpoints ({round(med, 1)}ms)"
-                ),
-                metric="p95_ms",
-                value=p95,
-            ))
+    # A lone endpoint has no distribution to be an outlier of.
+    if len(eligible) >= 2:
+        for i, (ep, p95) in enumerate(eligible):
+            others = [p for j, (_, p) in enumerate(eligible) if j != i]
+            med = statistics.median(others)
+            if med <= 0:
+                continue
+            threshold = med * outlier_factor
+            if len(others) >= 3:
+                mad = statistics.median([abs(v - med) for v in others])
+                threshold = max(threshold, med + 3 * 1.4826 * mad)
+            if p95 >= threshold:
+                out.append(Opportunity(
+                    kind="latency-p95",
+                    endpoint_id=ep["api_id"],
+                    endpoint=f"{ep['method']} {ep['path']}",
+                    detail=(
+                        f"P95 latency {p95}ms is {p95 / med:.1f}x the median P95 of the "
+                        f"service's other endpoints ({round(med, 1)}ms)"
+                    ),
+                    metric="p95_ms",
+                    value=p95,
+                ))
     out.sort(key=lambda o: -o.value)
+    if repo is not None:
+        ceiling = _throughput_ceiling_opportunity(profile, repo)
+        if ceiling is not None:
+            out.append(ceiling)
     return out
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _throughput_ceiling_opportunity(
+    profile: dict[str, Any], repo: Path | str,
+) -> Opportunity | None:
+    """The throughput-ceiling opportunity from the sweep artifact, if earned.
+
+    Emission condition (all must hold):
+      1. ``.vinv/exercise/throughput_sweep.json`` exists with a non-null USL
+         fit (``fit_usl`` already withheld degenerate sweeps as null);
+      2. the fit has a real knee — ``kappa > 0`` and ``knee`` present;
+      3. the knee lies within [min, max] of the swept concurrencies, so the
+         ceiling was actually OBSERVED in the sweep, never extrapolated;
+      4. R² >= the ``optimize.usl_min_r2`` policy gate (default
+         ``DEFAULT_USL_MIN_R2``) — a noisy fit seeds nothing.
+
+    The detail names σ (contention), κ (coherency), the knee, and the peak —
+    exactly what an optimization episode needs to know what to attack.
+    """
+    doc = store.read_json(sweep_path(Path(repo)))
+    if not isinstance(doc, dict):
+        return None
+    fit = doc.get("fit")
+    if not isinstance(fit, dict):
+        return None
+    sigma = _as_float(fit.get("sigma"))
+    kappa = _as_float(fit.get("kappa"))
+    r2 = _as_float(fit.get("r2"))
+    knee = _as_float(fit.get("knee"))
+    peak = _as_float(fit.get("peak_rps"))
+    if None in (sigma, kappa, r2, knee, peak) or kappa <= 0:
+        return None
+    swept = [
+        c for p in doc.get("points", []) if isinstance(p, dict)
+        for c in [_as_float(p.get("concurrency"))] if c is not None
+    ]
+    if not swept or not (min(swept) <= knee <= max(swept)):
+        return None  # the ceiling would be an extrapolation, not an observation
+    min_r2 = policy_value(repo, "optimize.usl_min_r2", DEFAULT_USL_MIN_R2)
+    if r2 < min_r2:
+        return None
+    path = str(doc.get("endpoint") or "")
+    endpoint = f"GET {path}"
+    # Best effort: resolve the profile's api_id for the swept path; the raw
+    # "METHOD path" stands in when the sweep target isn't in the profile.
+    endpoint_id = next(
+        (
+            ep["api_id"] for ep in profile.get("endpoints", [])
+            if ep.get("path") == path and str(ep.get("method", "")).upper() == "GET"
+            and ep.get("api_id")
+        ),
+        endpoint,
+    )
+    return Opportunity(
+        kind="throughput-ceiling",
+        endpoint_id=endpoint_id,
+        endpoint=endpoint,
+        detail=(
+            f"USL fit (R²={r2:.2f}): contention σ={sigma:.3f}, coherency "
+            f"κ={kappa:.5f} put the knee at N*≈{knee:.1f} — inside the swept "
+            f"range [{min(swept):.0f}, {max(swept):.0f}] — capping throughput "
+            f"at ≈{peak:.1f} req/s"
+        ),
+        metric="req_per_s",
+        value=peak,
+    )
 
 
 # ---- revert-learn-retry decision -------------------------------------------

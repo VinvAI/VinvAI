@@ -16,14 +16,25 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
+from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
 
+from . import store
 from .execute import ProbeResult, execute_probe
 
 # Hard caps so a throughput probe can never become an unbounded load test.
 _MAX_REQUESTS = 500
 _MAX_CONCURRENCY = 32
+
+# Doubling ladder up to the hard concurrency cap — the default sweep levels.
+DEFAULT_SWEEP_CONCURRENCIES = (1, 2, 4, 8, 16, 32)
+
+
+def sweep_path(repo: Path) -> Path:
+    """Where a concurrency sweep lands: ``.vinv/exercise/throughput_sweep.json``."""
+    return store.exercise_dir(repo) / "throughput_sweep.json"
 
 
 def percentile(values: list[float], pct: float) -> float:
@@ -111,3 +122,60 @@ def measure_throughput(
         p99_ms=percentile(latencies, 0.99),
         error_rate=errors / n,
     )
+
+
+def run_sweep(
+    base_url: str,
+    endpoint: str,
+    concurrencies: Sequence[int] = DEFAULT_SWEEP_CONCURRENCIES,
+    *,
+    method: str = "GET",
+    requests_per_level: int = 40,
+    exercise_id: str = "vinv-throughput-sweep",
+    probe_fn: Callable[..., ProbeResult] = execute_probe,
+) -> list[ThroughputResult]:
+    """Sweep one endpoint across concurrency levels via the bounded driver.
+
+    Levels are deduplicated, sorted, and clamped to the existing hard
+    concurrency cap. The per-level request count is the overall request budget
+    (``_MAX_REQUESTS``) split evenly across levels — never more than asked for
+    — and floored at the level itself so the thread pool actually saturates.
+    Each level is one :func:`measure_throughput` call, so every existing bound
+    applies per level too; the returned results carry per-level error rates for
+    the sweep artifact.
+    """
+    levels = sorted({max(1, min(int(c), _MAX_CONCURRENCY)) for c in concurrencies})
+    per_level = max(1, min(requests_per_level, _MAX_REQUESTS // max(1, len(levels))))
+    return [
+        measure_throughput(
+            base_url, method, endpoint,
+            requests=max(per_level, level), concurrency=level,
+            exercise_id=exercise_id, probe_fn=probe_fn,
+        )
+        for level in levels
+    ]
+
+
+def pick_sweep_endpoint(executions: Iterable[dict[str, Any]]) -> str | None:
+    """The healthy default sweep target from ``results.jsonl`` execution rows.
+
+    A sweep fires the SAME request repeatedly, so only parameter-free GET paths
+    (no ``{...}``/``<...>`` placeholders to fill) qualify; among those, pick the
+    one with the most 2xx observations — the endpoint the exercise phase found
+    healthiest. Ties break lexicographically for determinism. None when no row
+    qualifies (caller must then ask for an explicit ``--endpoint``).
+    """
+    counts: Counter[str] = Counter()
+    for row in executions:
+        path = row.get("path")
+        status = row.get("status")
+        if (
+            isinstance(path, str) and path
+            and "{" not in path and "<" not in path
+            and str(row.get("method", "")).upper() == "GET"
+            and isinstance(status, int) and 200 <= status < 300
+        ):
+            counts[path] += 1
+    if not counts:
+        return None
+    return min(counts, key=lambda p: (-counts[p], p))

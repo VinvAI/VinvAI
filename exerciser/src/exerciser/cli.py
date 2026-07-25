@@ -25,6 +25,8 @@ from .profile import build_profile
 from .regress import replay_suite
 from .run import run_exercise
 from .scorecard import build_scorecard
+from .throughput import pick_sweep_endpoint, run_sweep, sweep_path
+from .usl import fit_usl
 
 
 def _force_utf8_stdio() -> None:
@@ -158,6 +160,49 @@ def regress_cmd(repo_path, base_url, service, verbose):
             Path(repo_path), base_url, service=service,
             logger=logging.getLogger("exerciser.regress"),
         )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("throughput-sweep")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--base-url", required=True, help="Live service base URL to sweep.")
+@click.option("--endpoint", default=None,
+              help="GET path to sweep (default: the parameter-free GET path with the "
+                   "most 2xx observations in results.jsonl).")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def throughput_sweep_cmd(repo_path, base_url, endpoint, verbose):
+    """Concurrency sweep of one healthy GET endpoint + a USL fit.
+
+    Runs the bounded thread-pool driver at each concurrency level, fits the
+    Universal Scalability Law to the (concurrency, req/s) points, and writes
+    .vinv/exercise/throughput_sweep.json — the artifact detect_opportunities
+    reads to emit "throughput-ceiling" opportunities.
+    """
+    _configure_logging(verbose)
+    try:
+        repo = Path(repo_path)
+        if endpoint is None:
+            endpoint = pick_sweep_endpoint(store.read_jsonl(store.results_path(repo)))
+            if endpoint is None:
+                _emit({
+                    "status": "error",
+                    "error": "no healthy parameter-free GET endpoint in results.jsonl "
+                             "(run `exerciser run` first, or pass --endpoint)",
+                    "repo_path": repo_path,
+                })
+                return
+        points = run_sweep(base_url, endpoint)
+        fit = fit_usl([(p.concurrency, p.req_per_s) for p in points])
+        doc = {
+            "endpoint": endpoint,
+            "points": [p.to_json() for p in points],
+            "fit": fit.to_json() if fit is not None else None,
+        }
+        store.write_json(sweep_path(repo), doc)
+        result = {"status": "ok", "sweep_file": str(sweep_path(repo)), **doc}
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
         return
