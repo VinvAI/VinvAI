@@ -718,7 +718,7 @@ function argShapeKey(
 	schema: string | null,
 	summary: Record<string, unknown> | null,
 ): string {
-	return `${schema ?? ''} ${summary ? JSON.stringify(summary) : ''}`;
+	return `${schema ?? ''}\u0000${summary ? JSON.stringify(summary) : ''}`;
 }
 
 /**

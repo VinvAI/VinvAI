@@ -88,6 +88,7 @@ import { composeTrajectoryReport, readEpisodeEvents } from '../harness/trajector
 import {
 	collectCacheCandidates,
 	collectMemoryTrends,
+	securityGuardReasons,
 	theilSenSlope,
 } from '../harness/runtimeAnalysis';
 import {
@@ -1765,11 +1766,12 @@ suite('Runtime analyses (memory trends + cache candidates)', () => {
 		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-cache-'));
 		try {
 			writeTrace(ws, 's0', [
-				// fn0: 4 calls, 1 distinct hash, 400ms total → 300ms reclaimable.
-				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
-				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
-				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
-				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
+				// fn0: 4 calls, 1 distinct hash, constant result, 400ms total →
+				// 300ms reclaimable (functional dependence observed).
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'r0' }),
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'r0' }),
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'r0' }),
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'r0' }),
 				// fn1: duplicates BUT reads the clock → caching changes behavior.
 				enter('src.mod1.fn1', 'bbbb'),
 				exit('src.mod1.fn1', { duration_ms: 50, determinism_sources: ['time'] }),
@@ -2071,5 +2073,103 @@ suite('Goal suggestion (dispatch-card default via the goal engine)', () => {
 		assert.strictEqual(parseGoalOutput('{"status": "ok", "goal": "  "}'), undefined);
 		assert.strictEqual(parseGoalOutput('not json at all'), undefined);
 		assert.strictEqual(parseGoalOutput(''), undefined);
+	});
+});
+
+suite('Cache soundness gates (functional dependence + ceiling cap + security guard)', () => {
+	function writeTrace(ws: string, session: string, lines: string[], mtimeSec: number): void {
+		const dir = path.join(ws, '.vinv', 'captures', session, 'svc');
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, 'trace.jsonl');
+		fs.writeFileSync(file, lines.join('\n'));
+		fs.utimesSync(file, mtimeSec, mtimeSec);
+	}
+	const enter = (component: string, argsHash: string): string =>
+		JSON.stringify({ event: 'enter', component, args_hash: argsHash });
+	const exit = (component: string, extra: Record<string, unknown> = {}): string =>
+		JSON.stringify({ event: 'exit', component, error_type: 'None', ...extra });
+	/** One paired call: same args hash, chosen result hash, 100ms. */
+	const call = (comp: string, args: string, result: string, ms = 100): string[] => [
+		enter(comp, args),
+		exit(comp, { duration_ms: ms, result_hash: result }),
+	];
+
+	test('a repeated input whose OUTPUT varied is not cacheable (arg-hash collapse defence)', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-fdep-'));
+		try {
+			// The real-world shape this guards: arg hashing collapsed 62 distinct
+			// embedder requests to one hash, but their results differed — observed
+			// same-input→different-output means caching is provably wrong.
+			writeTrace(ws, 's0', [
+				...call('src.mod0.fn0', 'collapsed', 'r1'),
+				...call('src.mod0.fn0', 'collapsed', 'r2'),
+				...call('src.mod0.fn0', 'collapsed', 'r3'),
+			], Math.floor(Date.now() / 1000));
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('a duplicated call with NO recorded result hash is not assumed cacheable', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-nores-'));
+		try {
+			writeTrace(ws, 's0', [
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
+				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
+			], Math.floor(Date.now() / 1000));
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('reclaimable time is capped at the NEWEST session total (the ceiling)', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-cap-'));
+		try {
+			const t = Math.floor(Date.now() / 1000);
+			// Old session: 4 duplicate calls at 100ms → 300ms of duplication.
+			writeTrace(ws, 's0', [
+				...call('src.mod0.fn0', 'aaaa', 'r0'),
+				...call('src.mod0.fn0', 'aaaa', 'r0'),
+				...call('src.mod0.fn0', 'aaaa', 'r0'),
+				...call('src.mod0.fn0', 'aaaa', 'r0'),
+			], t - 100);
+			// Newest session: the symbol costs only 50ms now — you cannot reclaim
+			// 300ms from a symbol that currently spends 50ms.
+			writeTrace(ws, 's1', [...call('src.mod0.fn0', 'aaaa', 'r0', 50)], t);
+			const out = collectCacheCandidates(ws, [makeNode(0)]);
+			assert.strictEqual(out.length, 1);
+			assert.ok(out[0].reclaimable_ms <= 50, `capped at newest session (got ${out[0].reclaimable_ms})`);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('security guard: crypto-importing files are excluded, directly and transitively', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-guard-'));
+		try {
+			// mod0 imports a password-hashing lib; mod1 imports mod0; mod2 is clean.
+			fs.mkdirSync(path.join(ws, 'src'), { recursive: true });
+			fs.writeFileSync(path.join(ws, 'src', 'mod0.py'), 'import pwdlib\n\ndef fn0(p, h):\n    return True\n');
+			fs.writeFileSync(path.join(ws, 'src', 'mod1.py'), 'from src.mod0 import fn0\n\ndef fn1(s, e):\n    return fn0(e, s)\n');
+			fs.writeFileSync(path.join(ws, 'src', 'mod2.py'), 'def fn2(x):\n    return x\n');
+			const nodes = [makeNode(0), makeNode(1), makeNode(2)];
+			const lines: string[] = [];
+			for (const comp of ['src.mod0.fn0', 'src.mod1.fn1', 'src.mod2.fn2']) {
+				lines.push(...call(comp, 'aaaa', 'r0'), ...call(comp, 'aaaa', 'r0'));
+			}
+			writeTrace(ws, 's0', lines, Math.floor(Date.now() / 1000));
+
+			const reasons = securityGuardReasons(ws, nodes);
+			assert.ok(reasons.get(0)?.includes('pwdlib'), 'direct crypto import is guarded with the module named');
+			assert.ok(reasons.get(1)?.includes('security-sensitive'), 'importing a guarded module inherits the guard');
+			assert.strictEqual(reasons.get(2), undefined, 'a clean file is not guarded');
+
+			const out = collectCacheCandidates(ws, nodes);
+			assert.deepStrictEqual(out.map((c) => c.row), [2], 'only the clean symbol is offered as cacheable');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
 	});
 });
