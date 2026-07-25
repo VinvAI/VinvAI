@@ -60,6 +60,38 @@ import {
 	type PersistedOptimizeAttempt,
 } from './optimizationAnalysis';
 import { appendEpisodeEvent, type EpisodeEvent } from './episodeTelemetry';
+import { readEpisodeEvents } from './trajectoryReport';
+
+/**
+ * The policy updater joins optimization_outcome events to episodes by the
+ * EPISODE LOOP's id (the one episode_start/episode_end carry) — the bridge's
+ * own `opt-*` id never matches, which would leave the bandit blind to real
+ * optimization runs. This finds the newest episode_end at or after the
+ * dispatch started; the bridge id is the honest fallback when no loop episode
+ * completed (headless drivers, declined offers).
+ */
+function ledgerEpisodeIdSince(sinceUnix: number, fallback: string): string {
+	try {
+		const events = readEpisodeEvents() as Array<{
+			type?: string;
+			episode_id?: string;
+			at?: number;
+		}>;
+		for (let i = events.length - 1; i >= 0; i -= 1) {
+			const e = events[i];
+			if (
+				e.type === 'episode_end' &&
+				typeof e.episode_id === 'string' &&
+				(e.at ?? 0) >= sinceUnix
+			) {
+				return e.episode_id;
+			}
+		}
+	} catch {
+		// Unreadable ledger → fallback id; the event still records the verdict.
+	}
+	return fallback;
+}
 
 // ---- the maths: paired bootstrap CI (port of optimize.py) -------------------
 
@@ -466,6 +498,44 @@ export interface OptimizeEngineDeps {
 		files_changed: string[];
 	}) => void;
 	notify: (message: string) => void;
+	/**
+	 * Fallback hand-off: called when the engine dispatched WITHOUT a measurable
+	 * frozen set, so the session-timing watcher must own the row again — the
+	 * bridge tag would otherwise orphan it (dispatched forever, judged by
+	 * neither loop). Optional: test deps and sweeps without a panel row omit it.
+	 */
+	releaseToWatcher?: () => void;
+	/**
+	 * Learned minimum-detectable-effect: receives the null-split noise floor
+	 * measured from the BEFORE samples (half-width of the CI of a no-change
+	 * comparison; null when too few samples), persists it as the repo's learned
+	 * `optimize.min_effect` policy, and returns the effective min effect the
+	 * verdict should use. Optional: absent → the documented default applies.
+	 */
+	persistLearnedMinEffect?: (noiseFloorRel: number | null) => number | undefined;
+}
+
+/**
+ * A no-change comparison from the BEFORE samples alone: odd vs even passes of
+ * each probe. Its CI half-width is the measured noise floor — the smallest
+ * relative effect this probe set can honestly resolve (doc §3.4: derive the
+ * minimum detectable effect from measurement noise, not a constant).
+ */
+export function nullSplitComparison(
+	before: Map<string, ProbeMeasurement>,
+): MetricComparison | null {
+	const evens: number[] = [];
+	const odds: number[] = [];
+	for (const m of before.values()) {
+		if (m.latencies.length >= 4) {
+			evens.push(median(m.latencies.filter((_, i) => i % 2 === 0)));
+			odds.push(median(m.latencies.filter((_, i) => i % 2 === 1)));
+		}
+	}
+	if (evens.length < 3) {
+		return null;
+	}
+	return pairedBootstrapImprovement(evens, odds, { minEffect: 0 });
 }
 
 export interface OptimizeRunOptions {
@@ -626,12 +696,24 @@ export async function runVerifiedOptimization(
 			// Dispatched without a measurable frozen set: the session-timing
 			// reconcile (noise-band screen) picks the row up when a fresh capture
 			// lands. No CI, no auto-revert — we never judge on evidence we lack.
+			// Release the row back to the watcher so it is not orphaned under the
+			// bridge tag with a verdict that will never come.
+			deps.releaseToWatcher?.();
 			return { mode: 'fallback' };
 		}
 		// Lineage endpoint vs the ORIGINAL frozen baseline — `before` never moves.
 		const after = await deps.measure(frozen as FrozenProbeSet);
 		const paired = pairProbeSamples(before as Map<string, ProbeMeasurement>, after);
-		lastComparison = pairedBootstrapImprovement(paired.before, paired.after);
+		// Minimum detectable effect from the measured noise floor when the deps
+		// can persist it; the documented default otherwise.
+		const nullCmp = nullSplitComparison(before as Map<string, ProbeMeasurement>);
+		const noiseFloor = nullCmp ? Math.abs(nullCmp.ci_high - nullCmp.ci_low) / 2 : null;
+		const learnedMinEffect = deps.persistLearnedMinEffect?.(noiseFloor);
+		lastComparison = pairedBootstrapImprovement(
+			paired.before,
+			paired.after,
+			learnedMinEffect !== undefined ? { minEffect: learnedMinEffect } : {},
+		);
 		lastBehaviorOk = paired.behaviorOk;
 		files = await deps.changedFiles();
 		decision = decideOptimization(
@@ -745,6 +827,7 @@ export function buildWorkspaceDeps(
 	target: { row?: number },
 ): OptimizeEngineDeps {
 	const episodeId = `opt-${crypto.randomUUID()}`;
+	const startedAtUnix = Math.floor(Date.now() / 1000);
 	let frozenTarget: FrozenProbeTarget | null = null;
 	return {
 		freezeProbes: async () => {
@@ -762,7 +845,15 @@ export function buildWorkspaceDeps(
 		},
 		snapshot: () => captureWorkspaceSnapshot(workspaceRoot, episodeId).catch(() => null),
 		revert: async () => {
-			await revertToSnapshot(workspaceRoot, episodeId);
+			const result = await revertToSnapshot(workspaceRoot, episodeId);
+			// Environment drift is a silent revert-killer: surface what the file
+			// restore fixed and what it cannot (already-installed packages).
+			if (result.lockfilesRestored.length > 0) {
+				void vscode.window.showWarningMessage(
+					`Vinv: revert restored ${result.lockfilesRestored.join(', ')} — the episode changed ` +
+						'dependency lockfiles. Installed packages may still differ; re-run your install step.',
+				);
+			}
 		},
 		markDispatched: () => {
 			if (target.row !== undefined) {
@@ -770,6 +861,36 @@ export function buildWorkspaceDeps(
 					engine: 'bridge',
 				});
 			}
+		},
+		releaseToWatcher: () => {
+			if (target.row !== undefined) {
+				// Re-tag as watcher-owned: the fallback dispatch has no episode-bound
+				// verdict coming, so the session-timing reconcile must judge the row.
+				optimizationSourceInstance()?.markRowDispatched(workspaceRoot, target.row, {
+					engine: 'watch',
+				});
+			}
+		},
+		persistLearnedMinEffect: (noiseFloorRel) => {
+			// Learned MDE: at least the measured noise floor, never below a 3%
+			// practical floor nor above 25% (a floor that high means the probe set
+			// is too noisy to verify anything — flag via the policy value itself).
+			const learned = Math.min(0.25, Math.max(0.03, noiseFloorRel ?? 0.03));
+			try {
+				const file = path.join(workspaceRoot, '.vinv', 'exercise', 'policy.json');
+				fs.mkdirSync(path.dirname(file), { recursive: true });
+				let policy: Record<string, unknown> = {};
+				try {
+					policy = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+				} catch {
+					policy = {};
+				}
+				policy['optimize.min_effect'] = Number(learned.toFixed(4));
+				fs.writeFileSync(file, JSON.stringify(policy, null, 1), 'utf8');
+			} catch {
+				// The learned value still applies to THIS verdict even unpersisted.
+			}
+			return learned;
 		},
 		resolve: (resolution) => {
 			let candidate;
@@ -790,7 +911,11 @@ export function buildWorkspaceDeps(
 					type: 'optimization_outcome',
 					ts: new Date().toISOString(),
 					at: Math.floor(Date.now() / 1000),
-					episode_id: episodeId,
+					// Join key for the policy updater: the LOOP's episode id (the one
+					// episode_start/episode_end carry), found in the ledger for the
+					// episode this dispatch ran. The bridge's own id is the fallback
+					// when no loop episode completed (headless/test dispatches).
+					episode_id: ledgerEpisodeIdSince(startedAtUnix, episodeId),
 					row: target.row ?? -1,
 					waste_kind: candidate?.waste_kind ?? resolution.opportunity_kind,
 					predicted_ms: candidate?.outcome?.predicted_ms ?? 0,

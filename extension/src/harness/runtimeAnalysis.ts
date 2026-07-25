@@ -263,6 +263,9 @@ interface ExitEvent {
 	result_hash?: string;
 	/** Shape of the return value, on exit events ('NoneType' for None). */
 	result_schema?: string;
+	/** wall − cpu time for this call (tracelens ≥ calibration era) — ground
+	 * truth for "this call WAITED" vs the regex/side-effect heuristics. */
+	blocked_ms?: number | string;
 	/** Request-tree fields (present on every raw-capture event). */
 	request_id?: string;
 	thread_id?: number | string;
@@ -760,6 +763,15 @@ function parseTs(ts: string | undefined): number {
 }
 
 function isIoExit(ev: ExitEvent): boolean {
+	// Ground truth first: a call that spent the MAJORITY of its wall time off
+	// the CPU (blocked_ms = wall − cpu, exported by calibrated tracelens) was
+	// waiting — no allowlist can beat the clock. Heuristics remain the
+	// fallback for traces predating the field.
+	const blocked = Number(ev.blocked_ms);
+	const wall = Number(ev.duration_ms);
+	if (Number.isFinite(blocked) && Number.isFinite(wall) && wall > 0) {
+		return blocked / wall > 0.5;
+	}
 	if (Array.isArray(ev.side_effects) && ev.side_effects.length > 0) {
 		return true;
 	}

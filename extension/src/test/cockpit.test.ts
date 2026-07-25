@@ -88,9 +88,12 @@ import { composeTrajectoryReport, readEpisodeEvents } from '../harness/trajector
 import {
 	collectCacheCandidates,
 	collectMemoryTrends,
+	collectRequestSpans,
+	collectSymbolTimings,
 	securityGuardReasons,
 	theilSenSlope,
 } from '../harness/runtimeAnalysis';
+import { computeOptimizationCandidates } from '../harness/optimizationAnalysis';
 import {
 	captureWorkspaceSnapshot,
 	revertToSnapshot,
@@ -2263,6 +2266,71 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 
 			const out = collectCacheCandidates(ws, nodes);
 			assert.deepStrictEqual(out.map((c) => c.row), [2], 'only the clean symbol is offered as cacheable');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+});
+
+suite('Seam fixes (validation round)', () => {
+	function writeTrace(ws: string, session: string, lines: string[], mtimeSec: number): void {
+		const dir = path.join(ws, '.vinv', 'captures', session, 'svc');
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, 'trace.jsonl');
+		fs.writeFileSync(file, lines.join('\n'));
+		fs.utimesSync(file, mtimeSec, mtimeSec);
+	}
+	const line = (o: Record<string, unknown>): string => JSON.stringify(o);
+
+	test('blocked_ms majority rule decides io-ness ahead of the heuristics', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-blocked-'));
+		try {
+			const t = Math.floor(Date.now() / 1000);
+			// One request, one parent with two sequential children: child A waited
+			// (blocked 90% of wall — IO by the clock, no side_effects at all);
+			// child B burned CPU (blocked ~0) despite a 'db' side effect claim.
+			const req = { request_id: 'R', thread_id: 1 };
+			writeTrace(ws, 's0', [
+				line({ ...req, event: 'enter', component: 'src.mod0.fn0', depth: '0', parent_component: 'None', ts: new Date(1000).toISOString() }),
+				line({ ...req, event: 'enter', component: 'src.mod1.fn1', depth: '1', parent_component: 'src.mod0.fn0', ts: new Date(1010).toISOString() }),
+				line({ ...req, event: 'exit', component: 'src.mod1.fn1', depth: '1', parent_component: 'src.mod0.fn0', ts: new Date(1060).toISOString(), duration_ms: 50, blocked_ms: 45, error_type: null }),
+				line({ ...req, event: 'enter', component: 'src.mod2.fn2', depth: '1', parent_component: 'src.mod0.fn0', ts: new Date(1070).toISOString() }),
+				line({ ...req, event: 'exit', component: 'src.mod2.fn2', depth: '1', parent_component: 'src.mod0.fn0', ts: new Date(1130).toISOString(), duration_ms: 60, blocked_ms: 1, side_effects: ['db'], error_type: null }),
+				line({ ...req, event: 'exit', component: 'src.mod0.fn0', depth: '0', parent_component: 'None', ts: new Date(1140).toISOString(), duration_ms: 140, error_type: null }),
+			], t);
+			const nodes = [makeNode(0), makeNode(1), makeNode(2)];
+			const roots = collectRequestSpans(ws, nodes);
+			assert.strictEqual(roots.length, 1);
+			const [a, b] = roots[0].children;
+			assert.strictEqual(a.io, true, 'blocked 45/50ms → waiting, io by the clock');
+			assert.strictEqual(b.io, false, 'blocked 1/60ms → CPU-bound, the side-effect claim loses to the clock');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('every waste signal clamps predicted_ms to the newest-session ceiling', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-clamp-'));
+		try {
+			const t = Math.floor(Date.now() / 1000);
+			// Session 0: fn0 costs 900ms of self time across 3 calls. Session 1
+			// (newest): only 90ms — a signal aggregating both sessions could
+			// predict ~900ms of a symbol that now spends 90ms.
+			const mk = (ms: number): string[] => [
+				line({ event: 'enter', component: 'src.mod0.fn0', request_id: 'R', thread_id: 1, args_hash: `h${ms}${Math.random()}` }),
+				line({ event: 'exit', component: 'src.mod0.fn0', request_id: 'R', thread_id: 1, duration_ms: ms, error_type: null }),
+			];
+			writeTrace(ws, 's0', [mk(300), mk(300), mk(300)].flat(), t - 100);
+			writeTrace(ws, 's1', [mk(90)].flat(), t);
+			const nodes = [makeNode(0)];
+			const timings = collectSymbolTimings(ws, nodes);
+			const list = computeOptimizationCandidates({ nodes, edges: [], timings, cacheByRow: new Map() });
+			for (const c of list) {
+				assert.ok(
+					c.predicted_ms <= c.total_ms + 1e-9,
+					`${c.name}: predicted ${c.predicted_ms} must not exceed newest-session total ${c.total_ms}`,
+				);
+			}
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
