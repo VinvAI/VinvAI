@@ -37,7 +37,19 @@ import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import type { CacheCandidate, SymbolSessionTiming, TraceSpan } from './runtimeAnalysis';
 
 /** Which evidence signal drove a candidate's predicted recoverable time. */
-export type WasteKind = 'cache' | 'fanout' | 'per-call' | 'n-plus-1' | 'serial-async';
+export type WasteKind =
+	| 'cache'
+	| 'fanout'
+	| 'per-call'
+	| 'n-plus-1'
+	| 'serial-async'
+	// unexplained wait: a call's duration far exceeds its callees plus this
+	// component's own typical self-work, and the wait is NOT I/O — the
+	// queueing / lock-contention shape (§1.5 / §2.5).
+	| 'wait'
+	// GC pressure: the session's gc_pause total is an outlier against the
+	// trace's own symbol-cost distribution, attributed to top allocators (§20).
+	| 'gc-pressure';
 
 /** Lifecycle of one optimization opportunity through the proof loop. */
 export type OptimizationStatus =
@@ -252,26 +264,68 @@ interface SpanSignal {
 	serialCount: number;
 	/** exclusive time — duration spent IN this symbol, not its callees. */
 	selfMs: number;
+	/** unexplained wait: self time beyond this component's own typical
+	 * self-work, on calls whose wait is NOT explained as I/O. */
+	waitMs: number;
+	waitCount: number;
 }
 
 /** A callee is "repeated" (N+1) when it fires at least this many times under one parent in one request. */
 const N_PLUS_ONE_MIN = 4;
 
 /**
- * Walks the request span forest and derives the structural signals. All three
- * are RELATIVE to the observed requests (no absolute ms thresholds): N+1 is a
- * repetition count, staircase is a sequencing fact, self-time is a subtraction.
+ * Statistical floor for the unexplained-wait test: a component needs at least
+ * this many observed calls before "its typical self-work" is a distribution to
+ * compare against (3 points, same floor collectMemoryTrends uses for a trend)
+ * — not a tunable business rule.
+ */
+const WAIT_MIN_SAMPLES = 3;
+
+/**
+ * Walks the request span forest and derives the structural signals. All of
+ * them are RELATIVE to the observed requests (no absolute ms thresholds): N+1
+ * is a repetition count, staircase is a sequencing fact, self-time is a
+ * subtraction, and unexplained wait compares a call's self time against the
+ * same component's own distribution across the trace's other requests.
  */
 function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
 	const sig = new Map<number, SpanSignal>();
 	const get = (row: number): SpanSignal => {
 		let s = sig.get(row);
 		if (!s) {
-			s = { nPlusOneMs: 0, nCount: 0, nParent: '', serialMs: 0, serialCount: 0, selfMs: 0 };
+			s = {
+				nPlusOneMs: 0,
+				nCount: 0,
+				nParent: '',
+				serialMs: 0,
+				serialCount: 0,
+				selfMs: 0,
+				waitMs: 0,
+				waitCount: 0,
+			};
 			sig.set(row, s);
 		}
 		return s;
 	};
+	// Pre-pass for the unexplained-wait signal: every call's self time
+	// (duration − children) per component, across ALL requests in the trace.
+	// "Typical self-work" is the median of this distribution — the same
+	// component's own behaviour elsewhere in the trace, never an ms constant.
+	const selfByComponent = new Map<string, number[]>();
+	const collectSelf = (span: TraceSpan): void => {
+		if (!span.errored && span.durationMs > 0) {
+			const childSum = span.children.reduce((a, c) => a + c.durationMs, 0);
+			const list = selfByComponent.get(span.component) ?? [];
+			list.push(Math.max(0, span.durationMs - childSum));
+			selfByComponent.set(span.component, list);
+		}
+		for (const c of span.children) {
+			collectSelf(c);
+		}
+	};
+	for (const r of roots) {
+		collectSelf(r);
+	}
 	const visit = (span: TraceSpan): void => {
 		const childSum = span.children.reduce((a, c) => a + c.durationMs, 0);
 		// Self time: what this symbol spent in its own body, not its callees.
@@ -331,6 +385,27 @@ function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
 				}
 			}
 		}
+		// Unexplained wait (§1.5 queueing / §2.5 lock-wait): this call's self
+		// time (duration − children) far exceeds the SAME component's typical
+		// self-work across the other requests in the trace — beyond the
+		// component's own observed spread (median + scaled MAD), so the test is
+		// relative to this trace, never an ms constant. Calls whose
+		// blocked_ms-derived io flag already explains the wait as I/O are
+		// skipped: that clock belongs to the staircase detector. The
+		// recoverable time is the gap beyond typical self-work.
+		if (span.row !== null && !span.errored && !span.io && span.durationMs > 0) {
+			const dist = selfByComponent.get(span.component) ?? [];
+			if (dist.length >= WAIT_MIN_SAMPLES) {
+				const med = median(dist);
+				const mad = median(dist.map((v) => Math.abs(v - med)));
+				const self = Math.max(0, span.durationMs - childSum);
+				if (self > med + mad * 1.4826) {
+					const s = get(span.row);
+					s.waitMs += self - med;
+					s.waitCount += 1;
+				}
+			}
+		}
 		for (const c of span.children) {
 			visit(c);
 		}
@@ -374,6 +449,67 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 		}
 	}
 	const medianPerCall = median(perCallCosts);
+
+	// GC pressure (§20) pre-aggregation, per newest session. The session's
+	// gc_pause total and each symbol's allocation footprint ride in on the
+	// timings (collectSymbolTimings). GC becomes an optimization signal only
+	// when the session's pause total is an OUTLIER against this trace's own
+	// distribution of symbol costs — GC costing more than the typical symbol —
+	// and then only the session's top allocators (the Pareto head of allocated
+	// bytes, same coverage idiom as candidate selection) carry the flag, each
+	// bounded by its share of the session's GC time.
+	interface GcSessionAgg {
+		pause: number;
+		pauseCount: number;
+		totalAlloc: number;
+		costs: number[];
+		allocByRow: Map<number, number>;
+	}
+	const gcAgg = new Map<string, GcSessionAgg>();
+	for (const [row, sess] of timings) {
+		const l = latest(sess);
+		if (!l) {
+			continue;
+		}
+		const agg = gcAgg.get(l.session) ?? {
+			pause: 0,
+			pauseCount: 0,
+			totalAlloc: 0,
+			costs: [],
+			allocByRow: new Map<number, number>(),
+		};
+		agg.pause = Math.max(agg.pause, l.gc_pause_ms ?? 0);
+		agg.pauseCount = Math.max(agg.pauseCount, l.gc_pause_count ?? 0);
+		const alloc = Math.max(0, l.alloc_bytes ?? 0);
+		if (alloc > 0) {
+			agg.totalAlloc += alloc;
+			agg.allocByRow.set(row, alloc);
+		}
+		if (l.total_ms > 0) {
+			agg.costs.push(l.total_ms);
+		}
+		gcAgg.set(l.session, agg);
+	}
+	const GC_ALLOC_COVERAGE = 0.8;
+	const gcMedianCost = new Map<string, number>();
+	const gcTopAllocators = new Map<string, Set<number>>();
+	for (const [sess, agg] of gcAgg) {
+		if (agg.pause <= 0 || agg.totalAlloc <= 0) {
+			continue;
+		}
+		gcMedianCost.set(sess, median(agg.costs));
+		const sorted = [...agg.allocByRow.entries()].sort((a, b) => b[1] - a[1]);
+		const top = new Set<number>();
+		let cum = 0;
+		for (const [row, alloc] of sorted) {
+			if (cum / agg.totalAlloc >= GC_ALLOC_COVERAGE) {
+				break;
+			}
+			top.add(row);
+			cum += alloc;
+		}
+		gcTopAllocators.set(sess, top);
+	}
 
 	// Busiest caller's newest-session call count, per callee row (fanout).
 	const maxCallerCalls = new Map<number, number>();
@@ -468,6 +604,36 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 				bestMs = ss.serialMs;
 				bestKind = 'serial-async';
 				bestReason = `${ss.serialCount} independent I/O calls run back-to-back — awaiting them concurrently (gather) overlaps the waits`;
+			}
+			if (ss.waitMs > bestMs && ss.waitCount > 0) {
+				bestMs = ss.waitMs;
+				bestKind = 'wait';
+				const perRequest = ss.waitMs / ss.waitCount;
+				bestReason = `waits ${perRequest.toFixed(1)}ms per request that neither its callees nor I/O explain — the shape of lock contention or queueing; find what the call is waiting on`;
+			}
+		}
+
+		// GC pressure: only when gc_pause events exist for this row's newest
+		// session, the session's GC total out-costs the typical symbol, and this
+		// row is one of the session's top allocators. Recoverable is the row's
+		// allocation share of the GC total — bounded by the GC share by
+		// construction, and by the symbol's own cost via the ceiling below.
+		const gcSess = gcAgg.get(l.session);
+		const gcMed = gcMedianCost.get(l.session) ?? 0;
+		if (
+			gcSess &&
+			gcSess.pause > 0 &&
+			gcSess.totalAlloc > 0 &&
+			gcMed > 0 &&
+			gcSess.pause > gcMed &&
+			gcTopAllocators.get(l.session)?.has(row)
+		) {
+			const allocShare = Math.max(0, l.alloc_bytes ?? 0) / gcSess.totalAlloc;
+			const ms = gcSess.pause * allocShare;
+			if (ms > bestMs) {
+				bestMs = ms;
+				bestKind = 'gc-pressure';
+				bestReason = `garbage collection pauses cost ~${Math.round(ms)}ms during this symbol's requests (${gcSess.pauseCount} collection(s); it allocates ${Math.round(allocShare * 100)}% of traced bytes) — reduce allocations`;
 			}
 		}
 

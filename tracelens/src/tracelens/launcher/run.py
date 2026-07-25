@@ -1209,6 +1209,13 @@ def run_main(argv: list[str] | None = None) -> None:
         capture_determinism=capture_determinism,
     )
 
+    # GC-as-latency-source (§20): observe gc.callbacks and emit gc_pause lines
+    # into the same trace JSONL — same bootstrap point and failure contract as
+    # the calibration above (loud via _health, never blocking the run).
+    from tracelens.launcher import gc_events as _gc_events_mod
+
+    _run_state["gc_events"] = _gc_events_mod.install(output)
+
     # T1.3 — pre-import scan of the universe of instrumentable functions.
     coverage = (
         _scan_mod.scan_targets(target_names, roots=target_roots)

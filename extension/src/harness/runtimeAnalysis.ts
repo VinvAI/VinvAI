@@ -233,6 +233,19 @@ interface SessionTrace {
 	file: string;
 }
 
+/**
+ * Session identity shared by every cross-session collector: `<dir>@<mtime>`.
+ * A session's identity must change when a run is RE-TRACED: services commonly
+ * overwrite the same capture directory in place (same dirname, new
+ * trace.jsonl), so the directory alone cannot tell "the fix's after-run" from
+ * "the same run already measured". Folding the trace mtime in makes every
+ * genuine re-trace a new session (reconcileOutcome sees the after-run the
+ * moment it lands), and every collector keying on this joins exactly.
+ */
+function sessionKeyOf(s: SessionTrace): string {
+	return `${s.session}@${Math.round(s.mtimeMs)}`;
+}
+
 /** Groups trace files into sessions ordered oldest → newest by mtime. */
 function sessionTraces(workspaceRoot: string): SessionTrace[] {
 	const out: SessionTrace[] = [];
@@ -656,6 +669,56 @@ export interface SymbolSessionTiming {
 	total_ms: number;
 	/** Completed calls (exits) observed for this symbol in this session. */
 	calls: number;
+	/**
+	 * Sum of positive mem_delta_bytes over this symbol's successful calls in
+	 * the session — its gross observed allocation footprint, the attribution
+	 * basis for the gc-pressure detector. Undefined when the trace carries no
+	 * memory data (memory axis off), which downstream must read as "no
+	 * allocation visibility", never "allocates nothing".
+	 */
+	alloc_bytes?: number;
+	/**
+	 * The SESSION's total GC pause ms / collection count (identical on every
+	 * symbol observed in the session) — session-level facts threaded here so
+	 * the pure analyzer (computeOptimizationCandidates) receives GC evidence
+	 * through the one timings channel every caller already passes. Undefined
+	 * when the session's trace has no gc_pause lines.
+	 */
+	gc_pause_ms?: number;
+	gc_pause_count?: number;
+}
+
+/** Per-session GC pause pressure, parsed from the tracer's gc_pause lines. */
+export interface GcSessionPressure {
+	/** Sum of gc_pause duration_ms across the session. */
+	total_pause_ms: number;
+	/** Number of collections observed. */
+	count: number;
+}
+
+/**
+ * Total GC pause time and collection count per capture session, keyed by the
+ * same `<dir>@<mtime>` session identity collectSymbolTimings uses (so the two
+ * join exactly). Sessions whose trace predates gc_pause emission simply do not
+ * appear — absence means "no GC visibility", never "zero pauses".
+ */
+export function collectGcPressure(workspaceRoot: string): Map<string, GcSessionPressure> {
+	const out = new Map<string, GcSessionPressure>();
+	for (const s of sessionTraces(workspaceRoot)) {
+		let total = 0;
+		let count = 0;
+		for (const ev of eventsOf(s.file)) {
+			if (ev.event !== 'gc_pause') {
+				continue;
+			}
+			total += Number(ev.duration_ms ?? 0) || 0;
+			count += 1;
+		}
+		if (count > 0) {
+			out.set(sessionKeyOf(s), { total_pause_ms: total, count });
+		}
+	}
+	return out;
 }
 
 /**
@@ -674,20 +737,19 @@ export function collectSymbolTimings(
 	nodes: GraphNode[],
 ): Map<number, SymbolSessionTiming[]> {
 	const rowsFor = buildComponentMatcher(nodes);
-	// row -> session -> {ms, calls}
-	const perRow = new Map<number, Map<string, { ms: number; calls: number }>>();
+	// row -> session -> {ms, calls, alloc, sawMem}
+	const perRow = new Map<
+		number,
+		Map<string, { ms: number; calls: number; alloc: number; sawMem: boolean }>
+	>();
 	const sessions = sessionTraces(workspaceRoot);
-	// Session identity for the proof loop must change when a run is RE-TRACED.
-	// A service commonly overwrites the same capture directory in place (same
-	// dirname, new trace.jsonl), so the directory alone cannot tell "the fix's
-	// after-run" from "the same run I already measured" — the before/after diff
-	// would never fire and the candidate would stick on 'dispatched' forever.
-	// Folding the trace mtime into the key makes every genuine re-trace a new
-	// session, so reconcileOutcome sees the after-run the moment it lands.
-	const keyOf = (s: SessionTrace): string => `${s.session}@${Math.round(s.mtimeMs)}`;
-	const sessionOrder = [...new Set(sessions.map(keyOf))];
+	// Session identity is the shared `<dir>@<mtime>` key (sessionKeyOf): the
+	// proof loop must see a RE-TRACE into the same directory as a NEW session,
+	// or the before/after diff would never fire and the candidate would stick
+	// on 'dispatched' forever.
+	const sessionOrder = [...new Set(sessions.map(sessionKeyOf))];
 	for (const s of sessions) {
-		const sessionKey = keyOf(s);
+		const sessionKey = sessionKeyOf(s);
 		for (const ev of eventsOf(s.file)) {
 			// Exit carries the duration AND marks one completed call — counting
 			// exits (not enters) keeps ms and calls on the same event so a torn
@@ -708,21 +770,49 @@ export function collectSymbolTimings(
 			if (rows.length !== 1) {
 				continue; // ambiguous joins never contribute evidence
 			}
-			const bySession = perRow.get(rows[0]) ?? new Map<string, { ms: number; calls: number }>();
-			const acc = bySession.get(sessionKey) ?? { ms: 0, calls: 0 };
+			const bySession =
+				perRow.get(rows[0]) ??
+				new Map<string, { ms: number; calls: number; alloc: number; sawMem: boolean }>();
+			const acc = bySession.get(sessionKey) ?? { ms: 0, calls: 0, alloc: 0, sawMem: false };
 			acc.ms += Number(ev.duration_ms ?? 0) || 0;
 			acc.calls += 1;
+			// Gross allocation footprint for the gc-pressure detector: only the
+			// POSITIVE deltas (a net-freeing call is not an allocator), and only
+			// when the trace actually carries memory data — a null mem_delta_bytes
+			// (memory axis off) must stay "no visibility", not a silent zero.
+			if (ev.mem_delta_bytes !== null && ev.mem_delta_bytes !== undefined) {
+				acc.sawMem = true;
+				acc.alloc += Math.max(0, Number(ev.mem_delta_bytes) || 0);
+			}
 			bySession.set(sessionKey, acc);
 			perRow.set(rows[0], bySession);
 		}
 	}
+	// Session-level GC facts ride on every timing entry (same value per
+	// session): the pure analyzer receives GC evidence through this one
+	// channel, with no extra plumbing at any call site.
+	const gcBySession = collectGcPressure(workspaceRoot);
 	const out = new Map<number, SymbolSessionTiming[]>();
 	for (const [row, bySession] of perRow) {
 		const ordered = sessionOrder
 			.filter((sess) => bySession.has(sess))
 			.map((sess) => {
-				const acc = bySession.get(sess) as { ms: number; calls: number };
-				return { session: sess, total_ms: acc.ms, calls: acc.calls };
+				const acc = bySession.get(sess) as {
+					ms: number;
+					calls: number;
+					alloc: number;
+					sawMem: boolean;
+				};
+				const t: SymbolSessionTiming = { session: sess, total_ms: acc.ms, calls: acc.calls };
+				if (acc.sawMem) {
+					t.alloc_bytes = acc.alloc;
+				}
+				const gc = gcBySession.get(sess);
+				if (gc) {
+					t.gc_pause_ms = gc.total_pause_ms;
+					t.gc_pause_count = gc.count;
+				}
+				return t;
 			});
 		if (ordered.length > 0) {
 			out.set(row, ordered);

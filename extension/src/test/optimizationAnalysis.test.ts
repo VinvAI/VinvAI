@@ -8,7 +8,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
-import type { CacheCandidate, SymbolSessionTiming } from '../harness/runtimeAnalysis';
+import {
+	collectGcPressure,
+	collectSymbolTimings,
+	type CacheCandidate,
+	type SymbolSessionTiming,
+	type TraceSpan,
+} from '../harness/runtimeAnalysis';
 import {
 	appendOptimizeAttempt,
 	attemptKey,
@@ -450,5 +456,201 @@ suite('optimizationAnalysis: predicted → proven loop', () => {
 		const done = reconcileOutcome(d, [timing('s1', 200, 100), timing('s2', 40, 100)], false);
 		assert.strictEqual(done.status, 'regressed');
 		assert.strictEqual(done.outcome!.behavior_ok, false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Wave-2 detectors: unexplained wait (§1.5 queueing / §2.5 lock-wait) and GC
+// pressure (§20).
+// ---------------------------------------------------------------------------
+
+/** TraceSpan fixture: non-errored, non-I/O by default. */
+function span(
+	row: number | null,
+	component: string,
+	startMs: number,
+	durationMs: number,
+	opts: Partial<TraceSpan> = {},
+): TraceSpan {
+	return { row, component, startMs, durationMs, errored: false, io: false, children: [], ...opts };
+}
+
+/** A handler call at `start` with two 4ms db children and the given duration. */
+function handlerCall(start: number, durationMs: number, opts: Partial<TraceSpan> = {}): TraceSpan {
+	const h = span(0, 'pkg.mod0.handler', start, durationMs, opts);
+	h.children.push(span(1, 'pkg.mod1.db', start + 1, 4));
+	h.children.push(span(1, 'pkg.mod1.db', start + 5, 4));
+	return h;
+}
+
+suite('optimizationAnalysis: unexplained-wait detector', () => {
+	const nodes = [node(0, 'handler'), node(1, 'db')];
+
+	function waitCandidates(spans: TraceSpan[]): OptimizationCandidate[] {
+		// handler: 4 calls, 130ms total; db: 8 calls, 32ms — matches the span
+		// fixture so per-call competition is realistic, not degenerate.
+		const timings = new Map<number, SymbolSessionTiming[]>([
+			[0, [timing('s1', 130, 4)]],
+			[1, [timing('s1', 32, 8)]],
+		]);
+		return computeOptimizationCandidates({
+			nodes,
+			edges: [],
+			timings,
+			cacheByRow: new Map(),
+			spans,
+		});
+	}
+
+	test('a call whose duration neither callees nor typical self-work explain is flagged', () => {
+		// Three requests behave (self 2ms); the fourth waits 90ms beyond typical
+		// with the SAME callees — the queueing / lock-contention shape.
+		const spans = [
+			handlerCall(0, 10),
+			handlerCall(100, 10),
+			handlerCall(200, 10),
+			handlerCall(300, 100),
+		];
+		const c = waitCandidates(spans).find((x) => x.row === 0);
+		assert.ok(c, 'the waiting handler must surface');
+		assert.strictEqual(c!.waste_kind, 'wait');
+		// self on the slow call = 100 − 8 = 92; typical self (median) = 2 → 90.
+		assert.ok(Math.abs(c!.predicted_ms - 90) < 1e-6, `predicted ${c!.predicted_ms}`);
+		assert.match(c!.reason, /neither its callees nor I\/O explain/);
+	});
+
+	test('negative: when the children explain the long call, no wait is claimed', () => {
+		// The slow request is slow because its CALLEES are slow (2×49ms I/O
+		// reads) — the handler's own self time stays typical, so there is no
+		// unexplained gap anywhere: the parent's time is explained by children,
+		// the children's by their io flag (the staircase detector's clock).
+		const slow = span(0, 'pkg.mod0.handler', 300, 100);
+		slow.children.push(span(1, 'pkg.mod1.db', 301, 49, { io: true }));
+		slow.children.push(span(1, 'pkg.mod1.db', 351, 49, { io: true }));
+		const spans = [handlerCall(0, 10), handlerCall(100, 10), handlerCall(200, 10), slow];
+		assert.ok(
+			!waitCandidates(spans).some((c) => c.waste_kind === 'wait'),
+			'children-explained time must not be reported as unexplained wait',
+		);
+	});
+
+	test('negative: a wait the io flag already explains belongs to the staircase detector', () => {
+		const spans = [
+			handlerCall(0, 10),
+			handlerCall(100, 10),
+			handlerCall(200, 10),
+			handlerCall(300, 100, { io: true }),
+		];
+		assert.ok(
+			!waitCandidates(spans).some((c) => c.waste_kind === 'wait'),
+			'blocked_ms-derived I/O wait must not double-report as lock/queue wait',
+		);
+	});
+});
+
+suite('optimizationAnalysis: gc-pressure detector', () => {
+	const gcNodes = [node(0, 'ingest'), node(1, 'lookup'), node(2, 'render')];
+
+	function gcTiming(
+		total_ms: number,
+		calls: number,
+		alloc_bytes: number,
+		gc?: { ms: number; count: number },
+	): SymbolSessionTiming {
+		return {
+			session: 's1',
+			total_ms,
+			calls,
+			alloc_bytes,
+			...(gc ? { gc_pause_ms: gc.ms, gc_pause_count: gc.count } : {}),
+		};
+	}
+
+	function gcCandidates(gc?: { ms: number; count: number }): OptimizationCandidate[] {
+		// ingest allocates 90% of traced bytes; the session's GC total (60ms)
+		// out-costs the trace's typical symbol (median cost 30ms).
+		const timings = new Map<number, SymbolSessionTiming[]>([
+			[0, [gcTiming(80, 40, 9_000_000, gc)]],
+			[1, [gcTiming(30, 10, 500_000, gc)]],
+			[2, [gcTiming(20, 5, 500_000, gc)]],
+		]);
+		return computeOptimizationCandidates({
+			nodes: gcNodes,
+			edges: [],
+			timings,
+			cacheByRow: new Map(),
+		});
+	}
+
+	test('an outlier GC total flags the top allocator, bounded by its GC share', () => {
+		const list = gcCandidates({ ms: 60, count: 12 });
+		const c = list.find((x) => x.row === 0);
+		assert.ok(c, 'the top allocator must surface');
+		assert.strictEqual(c!.waste_kind, 'gc-pressure');
+		// 60ms of GC × 90% allocation share = 54ms recoverable.
+		assert.ok(Math.abs(c!.predicted_ms - 54) < 1e-6, `predicted ${c!.predicted_ms}`);
+		assert.match(c!.reason, /garbage collection pauses/);
+		assert.match(c!.reason, /reduce allocations/);
+		// Small allocators never carry the flag, even in a flagged session.
+		assert.ok(!list.some((x) => x.row !== 0 && x.waste_kind === 'gc-pressure'));
+	});
+
+	test('negative: no gc_pause events → the kind never fires', () => {
+		assert.ok(!gcCandidates(undefined).some((c) => c.waste_kind === 'gc-pressure'));
+	});
+
+	test('negative: GC below the typical symbol cost is not an outlier', () => {
+		// 10ms of GC against a 30ms median symbol — GC is cheap here, relative
+		// to this trace's own cost distribution.
+		assert.ok(!gcCandidates({ ms: 10, count: 3 }).some((c) => c.waste_kind === 'gc-pressure'));
+	});
+});
+
+suite('runtimeAnalysis: gc_pause parsing and the timings channel', () => {
+	let root: string;
+
+	setup(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-gc-'));
+	});
+
+	teardown(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	function writeTrace(lines: string[]): void {
+		const d = path.join(root, '.vinv', 'captures', 'r1', 'svc');
+		fs.mkdirSync(d, { recursive: true });
+		fs.writeFileSync(path.join(d, 'trace.jsonl'), lines.join('\n') + '\n');
+	}
+
+	test('per-session GC totals join the shared session identity and ride on timings', () => {
+		writeTrace([
+			JSON.stringify({ event: 'gc_pause', ts: 'T', duration_ms: 2.5, generation: 0 }),
+			JSON.stringify({ event: 'gc_pause', ts: 'T', duration_ms: 1.5, generation: 2, request_id: 'r' }),
+			JSON.stringify({ component: 'pkg.mod0.handler', event: 'enter' }),
+			JSON.stringify({ component: 'pkg.mod0.handler', event: 'exit', duration_ms: 5, mem_delta_bytes: 4096 }),
+		]);
+		const gc = collectGcPressure(root);
+		assert.strictEqual(gc.size, 1);
+		const [key, p] = [...gc.entries()][0];
+		assert.match(key, /@\d+$/, 'gc sessions must use the <dir>@<mtime> identity');
+		assert.strictEqual(p.count, 2);
+		assert.ok(Math.abs(p.total_pause_ms - 4.0) < 1e-9);
+		const t = collectSymbolTimings(root, [node(0, 'handler')]).get(0)![0];
+		assert.strictEqual(t.gc_pause_count, 2);
+		assert.ok(Math.abs((t.gc_pause_ms ?? 0) - 4.0) < 1e-9);
+		assert.strictEqual(t.alloc_bytes, 4096);
+	});
+
+	test('a trace without gc_pause or memory data leaves the fields undefined', () => {
+		writeTrace([
+			JSON.stringify({ component: 'pkg.mod0.handler', event: 'enter' }),
+			JSON.stringify({ component: 'pkg.mod0.handler', event: 'exit', duration_ms: 5, mem_delta_bytes: null }),
+		]);
+		assert.strictEqual(collectGcPressure(root).size, 0);
+		const t = collectSymbolTimings(root, [node(0, 'handler')]).get(0)![0];
+		assert.strictEqual(t.gc_pause_ms, undefined, 'no gc visibility must not read as 0ms');
+		assert.strictEqual(t.alloc_bytes, undefined, 'memory axis off must not read as 0 bytes');
+		assert.strictEqual(t.total_ms, 5);
 	});
 });

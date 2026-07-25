@@ -36,6 +36,8 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
     oracle_violations_nonempty = 0
     invalid_json = 0
     tracer_calibration: dict[str, Any] | None = None
+    gc_pause_count = 0
+    gc_pause_total_ms = 0.0
     if not log_path.is_file():
         return {"error": f"log not found: {log_path}"}
     with log_path.open(encoding="utf-8") as fh:
@@ -55,6 +57,15 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
                 # verbatim so summary.json is overhead-self-describing; it is
                 # not a span row and must not pollute component/request stats.
                 tracer_calibration = obj
+                continue
+            if ev == "gc_pause":
+                # GC observer line (launcher/gc_events.py) — accounted in its
+                # own block below; not a span row, so it must not pollute
+                # component/request statistics (no phantom "?" component).
+                gc_pause_count += 1
+                d = obj.get("duration_ms")
+                if isinstance(d, int | float):
+                    gc_pause_total_ms += float(d)
                 continue
             comp = obj.get("component", "?")
             components[comp] += 1
@@ -106,6 +117,13 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
         # Per-call tracer overhead measured at startup (median/MAD ns + active
         # axes); None for traces captured without a calibration header.
         "tracer_calibration": tracer_calibration,
+        # GC pauses observed during the run (gc_events observer); None for
+        # traces captured without gc_pause lines — "no visibility", not "zero".
+        "gc": (
+            None
+            if gc_pause_count == 0
+            else {"count": gc_pause_count, "total_pause_ms": round(gc_pause_total_ms, 4)}
+        ),
     }
 
 
