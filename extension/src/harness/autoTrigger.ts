@@ -984,7 +984,13 @@ export async function runVerifiedHotspotEpisode(
 		void vscode.window.showInformationMessage(noPlanMessage(prep, 'hotspots'));
 		return;
 	}
-	const deps = buildWorkspaceDeps(workspaceRoot, { row });
+	// A memory opportunity is judged in BYTES; everything else in ms. The
+	// trace-diff fallback reads the target's per-call samples in this unit.
+	const metric: 'duration' | 'bytes' =
+		plan.opportunity.kind === 'alloc-churn' || plan.opportunity.kind === 'mem-leak'
+			? 'bytes'
+			: 'duration';
+	const deps = buildWorkspaceDeps(workspaceRoot, { row, metric });
 	const result = await runVerifiedOptimization(
 		{ label: plan.label, opportunity: plan.opportunity },
 		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks, deps.episodeId),

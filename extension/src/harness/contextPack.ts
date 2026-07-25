@@ -486,6 +486,9 @@ export const PLAYBOOK_KINDS = [
 	'wait',
 	'gc-pressure',
 	'throughput-ceiling',
+	// memory dimension (bytes): the allocation/retention waste kinds.
+	'alloc-churn',
+	'mem-leak',
 ] as const;
 
 export type PlaybookKind = (typeof PLAYBOOK_KINDS)[number];

@@ -90,122 +90,27 @@ function ledgerEpisodeIdSince(sinceUnix: number, fallback: string): string {
 }
 
 // ---- the maths: paired bootstrap CI (port of optimize.py) -------------------
+// Extracted to the vscode-free optimizeStats module so the trace-diff verdict
+// shares the identical statistics. Re-exported here for existing importers.
 
-/** Minimum practical relative improvement for an optimization to count (10%). */
-export const DEFAULT_MIN_EFFECT = 0.1;
-/** Bootstrap resamples for the CI. */
-const BOOTSTRAP_N = 2000;
+import {
+	comparisonToJson,
+	DEFAULT_MIN_EFFECT,
+	median,
+	pairedBootstrapImprovement,
+	seededRng,
+	type MetricComparison,
+} from './optimizeStats';
+import { collectCallSamples, errorSignature, traceDiffVerdict } from './traceDiff';
+import { runDriverUnderTracing, tracedConfig } from './tracedRun';
+import { indexStoreDir, loadNodes } from '../graph/indexGraph';
 
-/** A paired before/after metric comparison with a bootstrap CI. */
-export interface MetricComparison {
-	before_median: number;
-	after_median: number;
-	/** (before - after) / before, positive = faster. */
-	rel_improvement: number;
-	ci_low: number;
-	ci_high: number;
-	/** effect >= min AND CI excludes zero (positive). */
-	improved: boolean;
-}
-
-/** JSON shape identical to optimize.py's MetricComparison.to_json(). */
-export function comparisonToJson(c: MetricComparison): Record<string, number | boolean> {
-	const r = (v: number, d: number): number => {
-		const f = 10 ** d;
-		return Math.round(v * f) / f;
-	};
-	return {
-		before_median: r(c.before_median, 3),
-		after_median: r(c.after_median, 3),
-		rel_improvement: r(c.rel_improvement, 4),
-		ci_low: r(c.ci_low, 4),
-		ci_high: r(c.ci_high, 4),
-		improved: c.improved,
-	};
-}
-
-function median(values: number[]): number {
-	if (values.length === 0) {
-		return 0;
-	}
-	const s = [...values].sort((a, b) => a - b);
-	const mid = Math.floor(s.length / 2);
-	return s.length % 2 === 1 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
-/** Deterministic PRNG (xmur3 string seed → mulberry32) for the bootstrap. */
-function seededRng(seed: string): () => number {
-	let h = 1779033703 ^ seed.length;
-	for (let i = 0; i < seed.length; i += 1) {
-		h = Math.imul(h ^ seed.charCodeAt(i), 3432918353);
-		h = (h << 13) | (h >>> 19);
-	}
-	let a = (h ^= h >>> 16) >>> 0;
-	return () => {
-		a |= 0;
-		a = (a + 0x6d2b79f5) | 0;
-		let t = Math.imul(a ^ (a >>> 15), 1 | a);
-		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-		return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-	};
-}
-
-/**
- * Relative improvement of `after` over `before` with a bootstrap 95% CI.
- * Paired: before[i] and after[i] are the SAME request measured twice, so
- * resampling draws index sets and keeps the pairing. `improved` is true only
- * when the point estimate meets the minimum practical effect AND the CI lower
- * bound is > 0.
- */
-export function pairedBootstrapImprovement(
-	before: number[],
-	after: number[],
-	options: { minEffect?: number; seed?: number; resamples?: number } = {},
-): MetricComparison {
-	const minEffect = options.minEffect ?? DEFAULT_MIN_EFFECT;
-	const resamples = options.resamples ?? BOOTSTRAP_N;
-	const n = Math.min(before.length, after.length);
-	if (n === 0) {
-		return {
-			before_median: 0,
-			after_median: 0,
-			rel_improvement: 0,
-			ci_low: 0,
-			ci_high: 0,
-			improved: false,
-		};
-	}
-	const b = before.slice(0, n);
-	const a = after.slice(0, n);
-	const bMed = median(b);
-	const aMed = median(a);
-	const point = bMed > 0 ? (bMed - aMed) / bMed : 0;
-
-	const rng = seededRng(`opt ${options.seed ?? 1729}`);
-	const stats: number[] = [];
-	for (let r = 0; r < resamples; r += 1) {
-		const bb: number[] = [];
-		const aa: number[] = [];
-		for (let i = 0; i < n; i += 1) {
-			const idx = Math.floor(rng() * n);
-			bb.push(b[idx]);
-			aa.push(a[idx]);
-		}
-		const bm = median(bb);
-		stats.push(bm > 0 ? (bm - median(aa)) / bm : 0);
-	}
-	stats.sort((x, y) => x - y);
-	const lo = stats[Math.floor(0.025 * stats.length)];
-	const hi = stats[Math.min(stats.length - 1, Math.floor(0.975 * stats.length))];
-	return {
-		before_median: bMed,
-		after_median: aMed,
-		rel_improvement: point,
-		ci_low: lo,
-		ci_high: hi,
-		improved: point >= minEffect && lo > 0,
-	};
-}
+export {
+	comparisonToJson,
+	DEFAULT_MIN_EFFECT,
+	pairedBootstrapImprovement,
+	type MetricComparison,
+};
 
 // ---- the decision: revert-learn-retry (port of optimize.py) -----------------
 
@@ -505,6 +410,18 @@ export interface OptimizeEngineDeps {
 	 */
 	releaseToWatcher?: () => void;
 	/**
+	 * Trace-diff measurement: run a DRIVER under tracing and return the target
+	 * row's per-call samples plus the flow's error signature. Called 'before'
+	 * (original code) and 'after' (post-dispatch). This is what lets the engine
+	 * judge a flow the probe path CANNOT measure — one that raises, has no ready
+	 * probes, or is judged on bytes — by comparing the two traces. Optional:
+	 * returns null when no driver exercises the target (→ watcher fallback,
+	 * exactly today's behavior, so this never regresses the probe path).
+	 */
+	measureTraceDiff?: (
+		phase: 'before' | 'after',
+	) => Promise<{ samples: number[]; errorSig: string } | null>;
+	/**
 	 * Learned minimum-detectable-effect: receives the null-split noise floor
 	 * measured from the BEFORE samples (half-width of the CI of a no-change
 	 * comparison; null when too few samples), persists it as the repo's learned
@@ -627,6 +544,16 @@ export async function runVerifiedOptimization(
 		: 0;
 	const measurable = Boolean(frozen && before && beforePairs >= minPaired);
 
+	// Trace-diff before-capture: when the probe path is NOT measurable (a flow
+	// that raises, no ready probes, or a memory candidate), capture the target's
+	// per-call samples from a traced driver run on the ORIGINAL code, so the
+	// fallback branch can judge from the before/after traces instead of orphaning
+	// the row to the watcher. Best-effort — a null keeps today's behavior exactly.
+	const tdBefore =
+		!measurable && deps.measureTraceDiff
+			? await deps.measureTraceDiff('before').catch(() => null)
+			: null;
+
 	await deps.snapshot();
 
 	// Doom-loop guard: what earlier episodes (possibly before a restart)
@@ -692,11 +619,56 @@ export async function runVerifiedOptimization(
 			break;
 		}
 		if (!measurable) {
-			// Dispatched without a measurable frozen set: the session-timing
-			// reconcile (noise-band screen) picks the row up when a fresh capture
-			// lands. No CI, no auto-revert — we never judge on evidence we lack.
-			// Release the row back to the watcher so it is not orphaned under the
-			// bridge tag with a verdict that will never come.
+			// Trace-diff verdict: the probe path could not measure, but if we
+			// captured before-samples we can re-run the driver on the FIXED code and
+			// compare the two traces per call — a real verdict on a flow the probe
+			// path can't touch. Guarded: any gap (no dep, no driver, too few
+			// samples) falls through to the watcher, exactly today's behavior.
+			if (tdBefore && deps.measureTraceDiff) {
+				const tdAfter = await deps.measureTraceDiff('after').catch(() => null);
+				if (tdAfter && tdBefore.samples.length > 0 && tdAfter.samples.length > 0) {
+					const behaviorOk = tdBefore.errorSig === tdAfter.errorSig;
+					const v = traceDiffVerdict(tdBefore.samples, tdAfter.samples, behaviorOk);
+					if (v.status === 'regressed') {
+						await deps.revert();
+					}
+					const action: OptimizeAction = v.status === 'regressed' ? 'revert-and-stop' : 'accept';
+					const attempt: OptimizeAttempt = {
+						approach: `${opts.label} — trace-diff (${tdBefore.samples.length}→${tdAfter.samples.length} per-call samples)`,
+						comparison: v.comparison,
+						behavior_suite_passed: behaviorOk,
+						reverted: v.status === 'regressed',
+						learning:
+							v.status === 'proven'
+								? ''
+								: v.status === 'regressed'
+									? behaviorOk
+										? 'the after-run was worse beyond the CI'
+										: 'the after-run failed the flow differently (behavior change)'
+									: 'no significant change measured (CI includes zero or below the 10% floor)',
+					};
+					deps.resolve({
+						status: v.status,
+						comparison: v.comparison,
+						behaviorOk,
+						reverted: v.status === 'regressed',
+						attempt: 1,
+						opportunity_kind: opts.opportunity.kind,
+					});
+					deps.recordEpisode({
+						label: opts.label,
+						opportunity: opts.opportunity,
+						action,
+						reason: `trace-diff verdict: ${v.status}`,
+						attempts: [attempt],
+						files_changed: v.status === 'proven' ? await deps.changedFiles() : [],
+					});
+					return { mode: 'verdict', action, comparison: v.comparison, behaviorOk, attempts: [attempt] };
+				}
+			}
+			// No trace-diff evidence: the session-timing reconnect (noise-band
+			// screen) picks the row up when a fresh capture lands. Release the row
+			// back to the watcher so it is not orphaned under the bridge tag.
 			deps.releaseToWatcher?.();
 			return { mode: 'fallback' };
 		}
@@ -823,7 +795,7 @@ function probePasses(): number {
  */
 export function buildWorkspaceDeps(
 	workspaceRoot: string,
-	target: { row?: number },
+	target: { row?: number; metric?: 'duration' | 'bytes' },
 ): OptimizeEngineDeps {
 	const episodeId = `opt-${crypto.randomUUID()}`;
 	const startedAtUnix = Math.floor(Date.now() / 1000);
@@ -905,6 +877,44 @@ export function buildWorkspaceDeps(
 				// The learned value still applies to THIS verdict even unpersisted.
 			}
 			return learned;
+		},
+		measureTraceDiff: async (phase) => {
+			if (target.row === undefined) {
+				return null;
+			}
+			const cfg = tracedConfig(workspaceRoot);
+			if (!cfg || cfg.targetPackages.length === 0) {
+				return null; // no tracelens-wrapped flow recorded → nothing to trace
+			}
+			const exDir = path.join(workspaceRoot, '.vinv', 'exercise');
+			const driver = path.join(exDir, 'td-driver.py');
+			const outTrace = path.join(exDir, `td-${phase}.jsonl`);
+			try {
+				fs.mkdirSync(exDir, { recursive: true });
+				// Driver: import the target package(s). tracelens degrades on inline
+				// `-c`, so this is a real script FILE. Import fires module-level /
+				// subclass-registration code (e.g. a validator run per Tool subclass)
+				// — the import-time candidates. A handler that only runs on a request
+				// is not exercised by import → no samples → graceful watcher fallback.
+				fs.writeFileSync(driver, cfg.targetPackages.map((p) => `import ${p}`).join('\n') + '\n', 'utf8');
+			} catch {
+				return null;
+			}
+			const res = await runDriverUnderTracing(workspaceRoot, driver, [], outTrace);
+			if (!res.ok) {
+				return null;
+			}
+			let nodes;
+			try {
+				nodes = loadNodes(indexStoreDir(workspaceRoot));
+			} catch {
+				return null;
+			}
+			const samples = collectCallSamples(outTrace, nodes, target.row, target.metric ?? 'duration');
+			if (samples.length === 0) {
+				return null; // the driver never exercised the target — fall back
+			}
+			return { samples, errorSig: errorSignature(outTrace) };
 		},
 		resolve: (resolution) => {
 			let candidate;
