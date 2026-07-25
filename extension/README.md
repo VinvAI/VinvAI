@@ -40,6 +40,10 @@ Handed those same five issues to each setup, same prompts, Vinv grading every ru
 
 One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#case-study-commodity-models-out-fix-frontier-ones)
 
+The loop keeps finding real ones on the same template: it detected from live traces that the app's **default database pool makes requests queue for connection checkouts** under concurrent load, dispatched the pool-sizing fix, and proved it — sustained-load median **75.6ms → 41.2ms (45.4% faster, 95% CI [36.3%, 45.8%])**, responses byte-identical. Two earlier attempts whose measurement windows couldn't certify the win were auto-reverted; only the evidence-backed change landed.
+
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof.gif" alt="Vinv detects connection-pool starvation on the FastAPI template, dispatches the fix, and proves a 45.4% median improvement with a paired-bootstrap 95% confidence interval" width="720" />
+
 **Before you install:** the extension is one click, but Vinv builds its engines on first run (`git clone` + `uv sync` + `cargo build` in a terminal you can watch) and fetches a one-time ~500 MB local embedding model. You need [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs), plus a coding-agent CLI you already pay for. No account, no API keys, about four minutes.
 
 The engines it drives — the zero-edit Python tracer (`tracelens`), the semantic index (`index`, Rust), the analysis agents (`handbook`, `bringup`, `identification`, `goal`), and the local embedding sidecar (`vinv-embedder`) — live in the same monorepo and run **from source on your machine**. No accounts, no API keys, no telemetry.
