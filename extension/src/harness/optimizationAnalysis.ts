@@ -35,6 +35,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import type { CacheCandidate, SymbolSessionTiming, TraceSpan } from './runtimeAnalysis';
+import { removeExpiredOptimizationEvidence } from './optimizationEvidence';
 
 /** Which evidence signal drove a candidate's predicted recoverable time. */
 export type WasteKind =
@@ -1057,6 +1058,15 @@ export function recordCandidateSightings(
 	if (expired.size === 0) {
 		return;
 	}
+	// An expired key retires BOTH artifacts it anchors: its attempt lines
+	// (compacted below) and its offloaded evidence file .vinv/context/opt-*.md
+	// (written by the pack composer) — one expiry mechanism, two artifacts.
+	// Key shape is `${row}:${signature}`; the signature is everything after the
+	// first ':' (rows are plain integers, so ':' cannot appear earlier).
+	removeExpiredOptimizationEvidence(
+		workspaceRoot,
+		[...expired].map((key) => key.slice(key.indexOf(':') + 1)),
+	);
 	// Compaction: drop the expired keys' attempts; keep a bounded tail of
 	// session lines (older ones can no longer change any surviving key's count).
 	const survivors = store.attempts.filter((a) => !expired.has(a.key));

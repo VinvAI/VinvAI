@@ -18,6 +18,19 @@ import type { GraphSnapshot } from '../graph/indexGraph';
 import { contextWalk, groundSymbolMentions, type WalkAnchor } from '../graph/contextWalk';
 import { walkParams, type EpisodeArm, type EpisodePolicy } from './episodeTelemetry';
 import type { TaskIntent } from './taskIntent';
+import {
+	optimizationEvidencePath,
+	optimizationEvidenceRelPath,
+	writeOptimizationEvidence,
+} from './optimizationEvidence';
+import { loadOpportunityBoard, opportunityBoardPath } from './opportunityBoard';
+import {
+	loadOptimizationCalibration,
+	loadPriorOptimizeAttempts,
+	opportunitySignature,
+	optimizationCalibrationPath,
+	optimizeAttemptsPath,
+} from './optimizationAnalysis';
 
 /** Composition budgets from the learned policy — nothing here is a constant. */
 export interface PackBudgets {
@@ -78,6 +91,27 @@ export interface PackTask {
 	 * a low reward always arrives with WHY and WHAT TO CHANGE.
 	 */
 	reward_report?: string;
+	/**
+	 * Optimization-episode context offload: when set, the heavy evidence (the
+	 * candidate's span proof + persisted attempt history) is written ONCE to
+	 * `.vinv/context/opt-<signature>.md` and the pack body carries only the
+	 * one-line summary plus the file path — the harness agent reads the file
+	 * when it needs depth. The file expires with the attempt store's
+	 * session-relative rule (see optimizationEvidence.ts).
+	 */
+	optimization?: OptimizationOffload;
+}
+
+/** The offload payload an optimization dispatch attaches to its task. */
+export interface OptimizationOffload {
+	/** Opportunity signature (optimizationAnalysis.opportunitySignature). */
+	signature: string;
+	/** One-line summary printed in the pack body next to the link. */
+	summary: string;
+	/** Heavy evidence: the ranked candidates' span proof (offloaded). */
+	span_proof?: string;
+	/** Heavy evidence: prior-attempt history (offloaded). */
+	attempt_history?: string;
 }
 
 export interface ComposedPack {
@@ -187,6 +221,24 @@ export function composePackContent(
 		lines.push('## Issue');
 		lines.push('');
 		lines.push(task.issue.trim());
+		lines.push('');
+	}
+	if (task.optimization) {
+		// Context offload: the pack links the evidence file instead of inlining
+		// it. writeContextPack writes/refreshes the file; this section is the
+		// reload instruction the agent follows when it needs depth.
+		lines.push('## Offloaded evidence (read on demand)');
+		lines.push('');
+		lines.push(
+			`- \`${optimizationEvidenceRelPath(task.optimization.signature)}\` — ${task.optimization.summary}`,
+		);
+		lines.push('');
+		lines.push(
+			'That file holds the full span proof and the prior-attempt history for this ' +
+				'opportunity. This pack deliberately carries only the one-line summary — read the ' +
+				'file (workspace-relative path above) when you need the measured evidence or what ' +
+				'earlier attempts already tried.',
+		);
 		lines.push('');
 	}
 	if (task.operator_note) {
@@ -396,7 +448,177 @@ export function writeContextPack(
 	);
 	const dir = contextPackDir(workspaceRoot);
 	fs.mkdirSync(dir, { recursive: true });
+	if (task.optimization) {
+		// Offload BEFORE the pack lands: the pack links this file, so the link
+		// must never dangle for the agent that reads the pack a moment later.
+		writeOptimizationEvidence(workspaceRoot, {
+			signature: task.optimization.signature,
+			title: task.title,
+			span_proof: task.optimization.span_proof,
+			attempt_history: task.optimization.attempt_history,
+		});
+	}
 	const target = path.join(dir, `pack-${id}.md`);
 	fs.writeFileSync(target, content, 'utf8');
 	return { id, path: target, content, sliceRows };
+}
+
+// ---- knowledge slices: optimization playbooks -------------------------------
+//
+// The playbooks are distilled practitioner guidance per waste kind, shipped as
+// DATA with the extension (extension/resources/playbooks/<kind>.md — that
+// directory is not .vscodeignore'd, so it lands in the .vsix next to out/).
+// The MCP `vinv_session action="playbook"` surface serves a slice through
+// composePlaybookSlice below: the playbook text PLUS the live artifact paths
+// holding this workspace's current evidence for that kind.
+
+/** Every playbook kind that ships. Detector provenance, on this HEAD:
+ * cache/n-plus-1/serial-async/fanout/per-call are extension waste kinds
+ * (optimizationAnalysis), wait is the tracelens blocked_ms signal, and
+ * throughput-ceiling is the exerciser USL sweep; gc-pressure has no dedicated
+ * detector yet and is reached from per-call/memory evidence. */
+export const PLAYBOOK_KINDS = [
+	'cache',
+	'n-plus-1',
+	'serial-async',
+	'fanout',
+	'per-call',
+	'wait',
+	'gc-pressure',
+	'throughput-ceiling',
+] as const;
+
+export type PlaybookKind = (typeof PLAYBOOK_KINDS)[number];
+
+/** Where the shipped playbooks live, given the installed extension dir. */
+export function playbooksDir(extensionDir: string): string {
+	return path.join(extensionDir, 'resources', 'playbooks');
+}
+
+/**
+ * Loads one playbook. Loud on both failure modes: an unknown kind lists the
+ * valid ones (agent typo), a missing file names the path (packaging bug) —
+ * neither may degrade to an empty slice that looks like guidance.
+ */
+export function loadPlaybook(extensionDir: string, kind: string): string {
+	if (!(PLAYBOOK_KINDS as readonly string[]).includes(kind)) {
+		throw new Error(
+			`unknown playbook kind '${kind}' — valid kinds: ${PLAYBOOK_KINDS.join(', ')}`,
+		);
+	}
+	const file = path.join(playbooksDir(extensionDir), `${kind}.md`);
+	try {
+		return fs.readFileSync(file, 'utf8');
+	} catch {
+		throw new Error(`playbook file missing at ${file} — the extension package is incomplete`);
+	}
+}
+
+/** The sweep-level attempt signature that dispatches this kind's candidates
+ * (autoTrigger's OptimizeOpportunity construction: cache rides the cache
+ * sweep, every other board kind rides the hotspot sweep). */
+function sweepSignatureFor(kind: string): { label: string; signature: string } {
+	return kind === 'cache'
+		? {
+				label: 'cache sweep',
+				signature: opportunitySignature({ kind: 'cache-sweep', endpoint_id: 'cache-candidates' }),
+			}
+		: {
+				label: 'hotspot sweep',
+				signature: opportunitySignature({ kind: 'hotspot-sweep', endpoint_id: 'hotspots' }),
+			};
+}
+
+/**
+ * The playbook slice the MCP `playbook` action returns: the shipped guidance
+ * for `kind` plus the live artifact paths carrying this workspace's current
+ * evidence — the board entries of that kind, the persisted attempt history
+ * behind their signatures, the offloaded evidence files, and the learned
+ * calibration ratio. Pure reads; throws (loudly) only on an unknown kind or a
+ * missing playbook file.
+ */
+export function composePlaybookSlice(
+	workspaceRoot: string,
+	extensionDir: string,
+	kind: string,
+): string {
+	const playbook = loadPlaybook(extensionDir, kind);
+	const lines: string[] = [playbook.trimEnd(), '', '---', ''];
+	lines.push(`## Live evidence for kind '${kind}' in this workspace`);
+	lines.push('');
+
+	// Board entries of this kind (full lifecycle — the agent sees held ones too).
+	const board = loadOpportunityBoard(workspaceRoot).filter((e) => e.kind === kind);
+	lines.push(`Opportunity board (${opportunityBoardPath(workspaceRoot)}):`);
+	if (board.length === 0) {
+		lines.push(
+			`- no board entries of kind '${kind}' right now — the analyzer posts them as trace evidence arrives`,
+		);
+	}
+	for (const e of board) {
+		lines.push(
+			`- [${e.status}] ${e.name} at ${e.file}:${e.line} — ~${Math.round(e.predicted_ms)}ms predicted: ` +
+				`${e.evidence}${e.resolution ? ` → ${e.resolution}` : ''} (id ${e.id})`,
+		);
+	}
+	lines.push('');
+
+	// Attempt history for those candidates' dispatch signatures + the sweep key.
+	const attemptsFile = optimizeAttemptsPath(workspaceRoot);
+	lines.push(`Attempt history (${attemptsFile}):`);
+	let attemptLines = 0;
+	for (const e of board) {
+		const signature = opportunitySignature({ kind: e.kind, endpoint_id: e.name });
+		const attempts = loadPriorOptimizeAttempts(workspaceRoot, e.row, signature);
+		if (attempts.length > 0) {
+			attemptLines += 1;
+			lines.push(
+				`- ${e.name}: ${attempts.length} prior attempt(s) — ` +
+					attempts.map((a) => a.verdict).join(', ') +
+					`; offloaded evidence: ${optimizationEvidencePath(workspaceRoot, signature)}` +
+					(fs.existsSync(optimizationEvidencePath(workspaceRoot, signature))
+						? ''
+						: ' (not written yet)'),
+			);
+		}
+	}
+	const sweep = sweepSignatureFor(kind);
+	const sweepAttempts = loadPriorOptimizeAttempts(workspaceRoot, undefined, sweep.signature);
+	if (sweepAttempts.length > 0) {
+		attemptLines += 1;
+		lines.push(
+			`- ${sweep.label}: ${sweepAttempts.length} prior attempt(s) — ` +
+				sweepAttempts.map((a) => a.verdict).join(', '),
+		);
+	}
+	if (attemptLines === 0) {
+		lines.push(`- no persisted attempts for kind '${kind}' yet`);
+	}
+	lines.push('');
+
+	// Learned calibration for this kind's predictions.
+	const calibration = loadOptimizationCalibration(workspaceRoot);
+	const ratio = calibration?.[kind];
+	lines.push(`Calibration (${optimizationCalibrationPath(workspaceRoot)}):`);
+	lines.push(
+		ratio !== undefined
+			? `- learned ratio ${ratio.toFixed(3)} — '${kind}' predictions have historically delivered ` +
+					`${(ratio * 100).toFixed(0)}% of the predicted ms; ranking already applies this deflation`
+			: `- no learned ratio for '${kind}' yet — predictions are taken at face value until outcomes accrue`,
+	);
+	lines.push('');
+
+	// Episode verdicts + kind-specific extras.
+	lines.push('Episode verdicts:');
+	lines.push(
+		`- ${path.join(workspaceRoot, '.vinv', 'exercise', 'optimize.jsonl')} — one row per finished ` +
+			'optimization episode (attempts, paired-bootstrap CIs, accept/revert)',
+	);
+	if (kind === 'throughput-ceiling') {
+		lines.push(
+			`- ${path.join(workspaceRoot, '.vinv', 'exercise', 'throughput_sweep.json')} — the USL ` +
+				'concurrency-sweep fit this kind is detected from (re-run the sweep to verify a fix)',
+		);
+	}
+	return lines.join('\n');
 }

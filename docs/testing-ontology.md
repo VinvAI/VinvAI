@@ -16,8 +16,11 @@ flowchart TD
   X --> B[Golden baselines<br/>exercise/baselines/]
   X --> I[Issue clusters<br/>exercise/issues.json]
   X --> L[State ledger<br/>exercise/state_ledger.jsonl]
-  C --> O[Opportunities<br/>profile.json]
-  O --> EP[Optimization episodes<br/>exercise/optimize.jsonl]
+  C --> O[Opportunities<br/>profile.json + exercise/throughput_sweep.json]
+  O --> BD[Opportunity board<br/>reports/opportunities.jsonl]
+  BD --> EP[Optimization episodes<br/>exercise/optimize.jsonl]
+  EP --> AT[Attempt store + offloads<br/>exercise/optimize_attempts.jsonl + context/opt-*.md]
+  EP --> LR[Learning<br/>reports/optimization_calibration.json + exercise/policy.json]
   B --> R[Regress replay<br/>exercise/regress.jsonl]
   L --> R
   EP --> R
@@ -95,17 +98,48 @@ The run loop, in order:
 - **Issue clusters** (`issues.json`): 5xx/crash/invariant-violation/scenario-
   setup failures, deduped by signature, dispatched as fix episodes.
 
-## 6. Improvement loop — `profile.json` → `exercise/optimize.jsonl`
+## 6. Improvement loop — detection → board → episodes → learning
 
-`detect_opportunities` flags healthy-but-slow endpoints (P95 over threshold)
-and throughput ceilings. Each episode: **improve → verify → revert → learn →
-retry**, where *verify* = (a) the behavior suite replays byte/shape-identical
-AND (b) the paired-bootstrap 95% CI of relative improvement excludes zero.
-Fail either → auto-revert, with the learning threaded into the retry's
-context. A faster-but-wrong change reverts no matter the speedup. Every
-episode is recorded via `optimize.record_episode` with its CIs, suite
-verdicts, outcome, and files changed. *Done =* each opportunity has an
-episode ending in `accept` or `revert-and-stop`.
+The full optimization walk has its own ontology document
+([optimization-ontology.md](optimization-ontology.md)) with per-node
+writers/readers/expiry; these are its artifacts in this walk's order:
+
+- **Detection inputs**: `profile.json` (exerciser behavioral profile —
+  `detect_opportunities` flags `latency-p95` endpoints as leave-one-out
+  outliers vs the service's own distribution) and
+  `exercise/throughput_sweep.json` (USL concurrency-sweep fit, written by the
+  `throughput-sweep` CLI — a valid in-range knee becomes a
+  `throughput-ceiling` opportunity). The extension's waste-prior ranker
+  detects `cache`/`fanout`/`per-call`/`n-plus-1`/`serial-async` directly from
+  the capture traces.
+- **`reports/opportunities.jsonl`** — the opportunity board every extension
+  surface posts to and dispatch consumes. Append-only, newest-status-wins per
+  content-signature id; lifecycle `posted → dispatched → resolved | expired`.
+  Only `posted` entries dispatch; expiry = signature absent from fresh
+  evidence for 3 consecutive new capture sessions; compacted at >4 lines per
+  live entry.
+- **Episodes**: **improve → verify → revert → learn → retry**, where
+  *verify* = (a) the behavior suite replays byte/shape-identical AND (b) the
+  paired-bootstrap 95% CI of relative improvement excludes zero and clears
+  the learned `optimize.min_effect`. Fail either → auto-revert. A
+  faster-but-wrong change reverts no matter the speedup. Every episode lands
+  in `exercise/optimize.jsonl` (CIs, suite verdicts, outcome, files changed —
+  same row shape from both the exerciser and the extension engine). *Done =*
+  each opportunity has an episode ending in `accept` or `revert-and-stop`.
+- **`exercise/optimize_attempts.jsonl`** — per-attempt memory keyed by (row,
+  opportunity signature): a re-dispatch seeds "what was already tried" into
+  the next prompt. Keys unsighted for 3 fresh capture sessions expire and
+  compact away.
+- **`context/opt-<signature>.md`** — offloaded heavy evidence (span proof +
+  attempt history) that episode packs link instead of inlining; written by
+  the pack composer, removed by the attempt store's expiry pass (same rule,
+  same moment).
+- **Learning**: `reports/optimization_calibration.json` (per-waste-kind
+  shrunk |measured|/predicted ratio, written by the episode policy updater,
+  deflates future rankings) and `exercise/policy.json` (learned scalars:
+  `optimize.min_effect` from each episode's measured noise floor,
+  `optimize.outlier_factor`, `optimize.usl_min_r2` — read by both verdict
+  paths, overwritten in place).
 
 ## 7. Drift accounting — `exercise/state_ledger.jsonl`
 
@@ -137,7 +171,8 @@ the next run.
 For any repo: verify §1 services traced → §2 every entry point resolves a
 call tree → §3 every endpoint has a full input matrix and live semantic
 replies → §4 run to full exercise with clean canary → §5 baselines and
-invariants recorded, issues dispatched → §6 every opportunity has a decided
-episode → §7 ledger cleaned or acknowledged → §8 regress green → §9 both
-surfaces render. Any step that cannot complete must leave a loud artifact
+invariants recorded, issues dispatched → §6 the board holds no stale
+`posted` entries and every opportunity has a decided episode (walk order in
+[optimization-ontology.md](optimization-ontology.md)) → §7 ledger cleaned or
+acknowledged → §8 regress green → §9 both surfaces render. Any step that cannot complete must leave a loud artifact
 (expired reply, canary failure, issue cluster) — silence is a bug.

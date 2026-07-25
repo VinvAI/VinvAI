@@ -61,6 +61,7 @@ import {
 	enqueueEpisodeRequest,
 	type EpisodeRequestKind,
 } from '../harness/requestQueue';
+import { composePlaybookSlice, PLAYBOOK_KINDS } from '../harness/contextPack';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const workspaceRoot = process.argv[2] ?? process.cwd();
@@ -162,7 +163,10 @@ const INSTRUCTIONS =
 	'action="cache_candidates" lists duplicate-recomputation sites; ' +
 	'action="opportunities" shows the live optimization opportunity board — the ' +
 	'shared ledger every sweep posts to and dispatch consumes (posted entries ' +
-	'are dispatchable; dispatched/resolved never re-dispatch until they expire). ' +
+	'are dispatchable; dispatched/resolved never re-dispatch until they expire); ' +
+	'action="playbook" with kind (e.g. cache, n-plus-1, throughput-ceiling) ' +
+	'returns distilled fix guidance for that kind of performance waste plus the ' +
+	'file paths holding this workspace’s current evidence of it. ' +
 	'To ACT: action="fix" with an issue description (and optional service) ' +
 	'queues a closed-loop fix episode that the Vinv extension dispatches to the ' +
 	'coding harness; action="run_sweep" with sweep one of ' +
@@ -212,19 +216,29 @@ const FEEDBACK_TOOL = {
 const SESSION_TOOL = {
 	name: 'vinv_session',
 	description:
-		'Read the Vinv trajectory and drive Vinv actions from chat. READ: ' +
-		'action="trajectory" (the full trajectory: episodes, rewards, goals, disputes), ' +
-		'action="status" (short summary), action="issues" (functions raising ' +
-		'errors in live traces), action="hotspots" (Pareto head of traced time), ' +
-		'action="memory_trends" (cross-session leak suspects), ' +
-		'action="cache_candidates" (duplicate-recomputation sites), ' +
+		'Read what Vinv has observed about this workspace at runtime, and drive its ' +
+		'automated fix/optimize runs ("episodes"), from chat. READ: ' +
+		'action="trajectory" (every episode so far — what was tried, whether it ' +
+		'verified, the reward, the standing goal, any disputes), ' +
+		'action="status" (one-paragraph session summary), ' +
+		'action="issues" (functions observed raising errors in captured runtime traces), ' +
+		'action="hotspots" (the few functions where most traced runtime concentrates), ' +
+		'action="memory_trends" (symbols retaining more memory every capture session — ' +
+		'leak suspects), ' +
+		'action="cache_candidates" (functions recomputing identical inputs — ' +
+		'memoization sites with measured reclaimable time), ' +
 		'action="opportunities" (the live optimization opportunity board with ' +
-		'per-entry status: posted entries are dispatchable, dispatched/resolved ' +
-		'never re-dispatch until expiry). ACT: ' +
-		'action="fix" with issue (and optional service) queues a closed-loop fix ' +
-		'episode; action="run_sweep" with sweep queues an evidence-seeded ' +
-		'episode; action="set_goal"/"set_budget" steer future episodes. ' +
-		'Queued episodes are dispatched by the Vinv extension in the editor.',
+		'per-entry lifecycle status: posted entries are dispatchable, ' +
+		'dispatched/resolved never re-dispatch until they expire), ' +
+		'action="playbook" with kind (distilled how-to-fix guidance for one kind of ' +
+		'performance waste — fix patterns, traps, verification discipline — plus the ' +
+		'file paths holding this workspace’s current evidence of that kind: board ' +
+		'entries, prior optimization attempts, learned prediction calibration). ACT: ' +
+		'action="fix" with issue (and optional service) queues an automated fix run ' +
+		'that a coding agent executes and Vinv verifies; action="run_sweep" with sweep ' +
+		'queues a run pre-seeded with the named evidence (error clusters, hotspots, ' +
+		'leak trends, or cache sites); action="set_goal"/"set_budget" steer future ' +
+		'runs. Queued runs are picked up by the Vinv extension in the editor.',
 	inputSchema: {
 		type: 'object',
 		properties: {
@@ -238,12 +252,20 @@ const SESSION_TOOL = {
 					'memory_trends',
 					'cache_candidates',
 					'opportunities',
+					'playbook',
 					'fix',
 					'run_sweep',
 					'set_goal',
 					'set_budget',
 				],
 				description: 'Operation to perform.',
+			},
+			kind: {
+				type: 'string',
+				enum: [...PLAYBOOK_KINDS],
+				description:
+					'For action="playbook": which waste kind to get guidance and live ' +
+					'evidence paths for.',
 			},
 			goal: {
 				type: 'string',
@@ -267,7 +289,12 @@ const SESSION_TOOL = {
 			sweep: {
 				type: 'string',
 				enum: ['runtime_errors', 'hotspots', 'memory_trends', 'cache_candidates'],
-				description: 'For action="run_sweep": which evidence-seeded sweep to queue.',
+				description:
+					'For action="run_sweep": which evidence seeds the queued run — ' +
+					'runtime_errors (fix functions observed raising errors), hotspots ' +
+					'(optimize where traced time concentrates), memory_trends ' +
+					'(investigate leak suspects), cache_candidates (memoize measured ' +
+					'duplicate recomputation).',
 			},
 		},
 		required: ['action'],
@@ -639,6 +666,7 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 			if (name === 'vinv_session') {
 				const args = (params.arguments ?? {}) as {
 					action?: string;
+					kind?: string;
 					goal?: string;
 					budget?: number;
 					issue?: string;
@@ -646,6 +674,25 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 					sweep?: string;
 					campaign?: string; // pre-rename alias for sweep
 				};
+				if (args.action === 'playbook') {
+					// The knowledge slice: shipped guidance for one waste kind + the
+					// live artifact paths behind it. Failures are LOUD tool errors
+					// (unknown kind lists the valid ones; a missing playbook file
+					// names the packaging gap) — never an empty slice.
+					try {
+						reply(req.id, {
+							content: [
+								{
+									type: 'text',
+									text: composePlaybookSlice(workspaceRoot, extensionDir, args.kind ?? ''),
+								},
+							],
+						});
+					} catch (e) {
+						replyError(req.id, -32602, e instanceof Error ? e.message : String(e));
+					}
+					return;
+				}
 				const readText = args.action ? sessionReadAction(args.action) : null;
 				if (readText !== null) {
 					reply(req.id, { content: [{ type: 'text', text: readText }] });
@@ -731,7 +778,8 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 					req.id,
 					-32602,
 					'Invalid vinv_session arguments. Read actions (trajectory, status, issues, ' +
-						'hotspots, memory_trends, cache_candidates, opportunities) take no value; fix needs issue ' +
+						'hotspots, memory_trends, cache_candidates, opportunities) take no value; ' +
+						`playbook needs kind in ${PLAYBOOK_KINDS.join('|')}; fix needs issue ` +
 						'(service optional); run_sweep needs sweep in ' +
 						'runtime_errors|hotspots|memory_trends|cache_candidates; set_goal needs ' +
 						'goal; set_budget needs an integer budget from 1 to 20.',

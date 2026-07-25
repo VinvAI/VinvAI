@@ -56,7 +56,10 @@ import {
 	type OpportunityInput,
 } from './opportunityBoard';
 import { readEpisodeEvents } from './trajectoryReport';
-import type { OptimizationCandidate } from './optimizationAnalysis';
+import {
+	opportunitySignature as attemptSignature,
+	type OptimizationCandidate,
+} from './optimizationAnalysis';
 
 // The pure analyses live in runtimeAnalysis.ts (vscode-free, shared with the
 // MCP server); re-exported here so existing imports and tests keep working.
@@ -614,10 +617,17 @@ export function prepareOptimizationSweep(
 	if (dispatchable.length === 0) {
 		return { plan: null, candidateCount: subset.length, heldCount: held };
 	}
+	// Context offload: the FULL evidence lines (the span proof) go to the
+	// offloaded evidence file the pack links; the issue body carries only the
+	// compact target list so packs stay small (reference, not inline).
 	const lines = dispatchable.map(
 		({ candidate: c }) =>
 			`- ${c.name} at ${c.file}:${c.line} — ~${Math.round(c.predicted_ms)}ms recoverable ` +
 			`of ${Math.round(c.total_ms)}ms (${c.waste_kind}): ${c.reason}`,
+	);
+	const compact = dispatchable.map(
+		({ candidate: c }) =>
+			`- ${c.name} at ${c.file}:${c.line} — ~${Math.round(c.predicted_ms)}ms recoverable (${c.waste_kind})`,
 	);
 	// Security-sensitive symbols stay real candidates (bcrypt DOMINATES an
 	// auth-heavy trace) but the constraint rides the prompt: the agent must not
@@ -649,7 +659,7 @@ export function prepareOptimizationSweep(
 					'The optimization analyzer found these symbols recomputing identical ' +
 					'inputs (same args_hash AND the same observed result — functional ' +
 					'dependence, no recorded nondeterminism):\n\n' +
-					lines.join('\n') +
+					compact.join('\n') +
 					'\n\nDecide per symbol whether memoization is safe (watch invalidation ' +
 					'and unbounded growth — prefer bounded/keyed caches) and implement only ' +
 					'where the evidence supports it.' +
@@ -669,7 +679,7 @@ export function prepareOptimizationSweep(
 					'The optimization analyzer ranked these symbols by predicted RECOVERABLE ' +
 					'time (measured cost × waste prior, relative to this trace — hot but ' +
 					'already-optimal symbols are excluded):\n\n' +
-					lines.join('\n') +
+					compact.join('\n') +
 					'\n\nFor each: the waste kind names the likely fix (fanout/n-plus-1 → ' +
 					'batch or hoist at the caller; per-call → a better algorithm; ' +
 					'serial-async → await the independent I/O concurrently). Change only ' +
@@ -683,33 +693,43 @@ export function prepareOptimizationSweep(
 					...(guarded ? [GUARD_CRITERION] : []),
 				],
 			};
+	const opportunity: OptimizeOpportunity = wantCache
+		? {
+				kind: 'cache-sweep',
+				endpoint_id: 'cache-candidates',
+				endpoint: 'duplicate-recomputation sites',
+				detail:
+					'board-deduped head of reclaimable duplicated work dispatched as a memoization episode',
+				metric: 'probe_latency_ms',
+				value: totalPredicted,
+			}
+		: {
+				kind: 'hotspot-sweep',
+				endpoint_id: 'hotspots',
+				endpoint: 'ranked optimization candidates',
+				detail:
+					'board-deduped head of predicted recoverable time dispatched as one optimization episode',
+				metric: 'probe_latency_ms',
+				value: totalPredicted,
+			};
+	const summary = wantCache
+		? `~${totalPredicted}ms of traced time is duplicate recomputation in ${dispatchable.length} symbol(s)`
+		: `~${totalPredicted}ms of traced time is predicted recoverable in ${dispatchable.length} symbol(s)`;
+	// The pack composer offloads this to .vinv/context/opt-<signature>.md and
+	// links it; the same signature keys the attempt store, so both expire
+	// together (see optimizationEvidence.ts).
+	task.optimization = {
+		signature: attemptSignature(opportunity),
+		summary,
+		span_proof: lines.join('\n'),
+	};
 	return {
 		plan: {
 			task,
 			boardIds: dispatchable.map((d) => d.id),
-			summary: wantCache
-				? `~${totalPredicted}ms of traced time is duplicate recomputation in ${dispatchable.length} symbol(s)`
-				: `~${totalPredicted}ms of traced time is predicted recoverable in ${dispatchable.length} symbol(s)`,
+			summary,
 			label: wantCache ? 'Cache recomputation sites' : 'Optimize recoverable-time candidates',
-			opportunity: wantCache
-				? {
-						kind: 'cache-sweep',
-						endpoint_id: 'cache-candidates',
-						endpoint: 'duplicate-recomputation sites',
-						detail:
-							'board-deduped head of reclaimable duplicated work dispatched as a memoization episode',
-						metric: 'probe_latency_ms',
-						value: totalPredicted,
-					}
-				: {
-						kind: 'hotspot-sweep',
-						endpoint_id: 'hotspots',
-						endpoint: 'ranked optimization candidates',
-						detail:
-							'board-deduped head of predicted recoverable time dispatched as one optimization episode',
-						metric: 'probe_latency_ms',
-						value: totalPredicted,
-					},
+			opportunity,
 		},
 		candidateCount: subset.length,
 		heldCount: held,
@@ -779,7 +799,7 @@ export function prepareRowOptimization(
 			(totalMs > 0 ? ` — ${Math.round(totalMs)}ms across ${calls} call(s).` : '.') +
 			(candidate
 				? `\n\nThe optimization analyzer predicts ~${Math.round(candidate.predicted_ms)}ms ` +
-					`recoverable (${candidate.waste_kind}): ${candidate.reason}`
+					`recoverable (${candidate.waste_kind}).`
 				: '') +
 			'\n\nDecide whether the win is a better algorithm, caching, batching, or ' +
 			'making the work async/parallel — and change only what the evidence ' +
@@ -793,20 +813,34 @@ export function prepareRowOptimization(
 			...(guardReason ? [GUARD_CRITERION] : []),
 		],
 	};
+	const opportunity: OptimizeOpportunity = {
+		kind: candidate ? candidate.waste_kind : 'latency-symbol',
+		endpoint_id: node.name,
+		endpoint: `${node.name} (${node.file}:${node.start_line})`,
+		detail: 'panel dispatch of a ranked optimization candidate',
+		metric: 'probe_latency_ms',
+		value: candidate ? Math.round(candidate.predicted_ms) : 0,
+	};
+	const rowSummary = `optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`;
+	// Full span proof goes to the offloaded evidence file; the issue above
+	// keeps only the prediction one-liner (reference, not inline).
+	task.optimization = {
+		signature: attemptSignature(opportunity),
+		summary: rowSummary,
+		span_proof: candidate
+			? `- ${candidate.name} at ${candidate.file}:${candidate.line} — ` +
+				`~${Math.round(candidate.predicted_ms)}ms recoverable of ${Math.round(candidate.total_ms)}ms ` +
+				`(${candidate.waste_kind}): ${candidate.reason}`
+			: `- ${node.name} at ${node.file}:${node.start_line} — ` +
+				`${Math.round(totalMs)}ms across ${calls} call(s) (panel dispatch; no ranked candidate)`,
+	};
 	return {
 		plan: {
 			task,
 			boardIds: [entry.id],
-			summary: `optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`,
+			summary: rowSummary,
 			label: `Optimize ${node.name}`,
-			opportunity: {
-				kind: candidate ? candidate.waste_kind : 'latency-symbol',
-				endpoint_id: node.name,
-				endpoint: `${node.name} (${node.file}:${node.start_line})`,
-				detail: 'panel dispatch of a ranked optimization candidate',
-				metric: 'probe_latency_ms',
-				value: candidate ? Math.round(candidate.predicted_ms) : 0,
-			},
+			opportunity,
 		},
 		candidateCount: 1,
 		heldCount: 0,
@@ -826,8 +860,22 @@ async function offerPreparedOptimization(
 	plan: OptimizationPlan,
 	hooks?: DispatchHooks,
 ): Promise<boolean> {
-	return offerOrDispatch(context, workspaceRoot, plan.task, plan.summary, {
-		priorLearning: hooks?.priorLearning,
+	// The retry seed (persisted attempt history + this episode's learning) is
+	// OFFLOADED, not inlined: it rides the task's optimization block into
+	// .vinv/context/opt-<signature>.md, which the pack links with a one-line
+	// summary. Deliberately NOT passed as priorLearning — that path would
+	// inline it into the pack body again.
+	const task =
+		hooks?.priorLearning && plan.task.optimization
+			? {
+					...plan.task,
+					optimization: { ...plan.task.optimization, attempt_history: hooks.priorLearning },
+				}
+			: plan.task;
+	return offerOrDispatch(context, workspaceRoot, task, plan.summary, {
+		// Inline fallback ONLY for a plan without an offload block (should not
+		// happen for optimization plans; kept so learning is never dropped).
+		priorLearning: task.optimization ? undefined : hooks?.priorLearning,
 		onAccept: async () => {
 			try {
 				markOpportunitiesDispatched(workspaceRoot, plan.boardIds);
