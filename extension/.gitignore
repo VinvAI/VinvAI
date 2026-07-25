@@ -17,3 +17,6 @@ bin/index
 
 # Vinv local artifacts (captures, index, reports)
 .vinv/
+
+# One-time OSS-announcement marker, written to the install dir at runtime
+.vinv-oss-announced

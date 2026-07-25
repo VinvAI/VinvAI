@@ -1,6 +1,6 @@
 {
 	"name": "VinvAI",
-	"displayName": "Vinv — Runtime Context for AI Coding Agents",
+	"displayName": "VinvAI",
 	"description": "Your agent says done — Vinv runs the code and checks. Traces a real run, exercises every endpoint, grades fixes against tests the agent never sees. Runtime context bandits: commodity models out-fix frontier ones.",
 	"version": "0.0.9",
 	"publisher": "VinvAI",
