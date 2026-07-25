@@ -1,0 +1,90 @@
+name: release
+
+# On merge to main that touches the extension, auto-bump the version, build the
+# .vsix, commit + tag the bump, and publish a GitHub Release with the .vsix
+# attached. Marketplace publishing (vsce/ovsx) is intentionally NOT done here —
+# add it later once VSCE_PAT / OVSX_PAT secrets exist.
+#
+# REQUIRES a RELEASE_TOKEN secret: the default GITHUB_TOKEN cannot push the bump
+# commit to a protected main. Create a fine-grained PAT or GitHub App token with
+# "Contents: write" on this repo, add it as the RELEASE_TOKEN secret, and add a
+# branch-protection / ruleset *bypass* entry for that identity. Without it the
+# push step fails.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extension/**'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Skip the release job's own bump commit, or it would trigger itself forever.
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify RELEASE_TOKEN is configured
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_TOKEN" ]; then
+            echo "::error::RELEASE_TOKEN secret is not set. It must be a PAT or GitHub App token that can push to protected main (add a ruleset bypass for it). See the header of .github/workflows/release.yml."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install extension deps
+        run: npm ci --prefix extension
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          cd extension
+          # Change "patch" to "minor" for 0.x.0 bumps. Updates package.json and
+          # package-lock.json; no git tag (we tag the release commit ourselves).
+          npm version patch --no-git-tag-version
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build VSIX
+        run: npm run package --prefix extension  # runs vscode:prepublish (typecheck + bundle), then vsce package
+
+      - name: Locate VSIX
+        id: vsix
+        run: echo "path=$(ls extension/*.vsix | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: Commit, tag, and push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add extension/package.json extension/package-lock.json
+          git commit -m "chore(release): bump extension to v${VERSION}"
+          git tag -a "v${VERSION}" -m "Vinv extension v${VERSION}"
+          git push origin HEAD:main
+          git push origin "v${VERSION}"
+
+      - name: Publish GitHub Release with the VSIX
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: Vinv extension v${{ steps.bump.outputs.version }}
+          files: ${{ steps.vsix.outputs.path }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}

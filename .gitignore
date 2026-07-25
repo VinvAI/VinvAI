@@ -51,8 +51,10 @@ nuitka-crash-report.xml
 /.claude/
 .vscode/
 
-# CI workflows — kept out of the public tree. README feature clips live in
-# .github/assets/clips/ (larger media stays on the CDN).
+# Only selected .github/ paths are tracked. README feature clips live in
+# .github/assets/clips/ (larger media stays on the CDN). CI workflows ARE
+# tracked so GitHub Actions can run them.
 /.github/*
 !/.github/assets/
 !/.github/CODEOWNERS
+!/.github/workflows/
