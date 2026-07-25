@@ -82,7 +82,7 @@ Vinv's engines are open source and run entirely on your machine:
 - **`vinv-embedder`** — a local embedding model for code search, so **no cloud keys** are needed.
 - **Analysis agents** (`handbook`, `bringup`, `identification`, `goal`) — write the plain-language handbook, work out how each service starts, and drive the closed-loop episodes.
 
-One click ("**Vinv: Install Engines**") runs `git clone <monorepo> ~/.vinv/engines && uv sync` in a visible terminal. Already have the monorepo checked out? Vinv finds it automatically. Requires [uv](https://docs.astral.sh/uv/getting-started/installation/) and [Rust](https://rustup.rs).
+Already have the monorepo checked out? Vinv finds it automatically.
 
 ---
 
