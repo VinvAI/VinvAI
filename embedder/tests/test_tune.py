@@ -80,8 +80,10 @@ def test_tune_benchmarks_all_devices_and_persists_winner(tmp_path, monkeypatch):
     _patch_torch(monkeypatch)
 
     class _Engine:
-        # cpu twice as fast as mps in the fake
-        speeds = {"mps": 0.02, "cpu": 0.01}
+        # cpu 10x faster than mps in the fake. The gap must dwarf CI scheduler
+        # jitter: a smaller margin (e.g. 10ms) gets swamped on a loaded macOS
+        # runner and the measured winner flips at random.
+        speeds = {"mps": 0.1, "cpu": 0.01}
 
         def __init__(self, model_name, device="auto"):
             self.device = device
