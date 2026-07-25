@@ -79,6 +79,26 @@ requires review from the Engineering team (see `.github/CODEOWNERS`).
 - Keep the diff reviewable — call out anything unusual, and flag if you used an
   AI agent to write it (see below) so reviewers know where to look hardest.
 
+## Docs & assets
+
+Small shortcuts here cause outsized breakage, so a few hard rules:
+
+- **Images load from the `images.vinv.ai` CDN — never a `github.com/.../raw/…`
+  URL.** If the CDN doesn't have your image, don't hardcode a GitHub link as a
+  workaround — get the file uploaded to the CDN. The CDN doesn't auto-sync from
+  the repo, so a committed asset can still be missing/stale there; verify before
+  relying on it. (img.shields.io badges are fine.)
+- **Never commit runtime or local state** — install-dir markers, generated
+  reports, per-workspace config, anything under `.vinv/`. Gitignore it. A
+  committed one-time marker disables its feature on every fresh checkout.
+- **No unused assets.** A file referenced by nothing is dead weight — wire it up
+  or don't add it.
+- **Renaming a heading breaks its anchor** (removing an emoji counts). Update
+  every link to the old `#anchor`, in both READMEs and cross-repo
+  `github.com/VinvAI/VinvAI#…` links.
+- **Don't rename brand identifiers** (`displayName`, publisher, package name,
+  the "VinvAI" brand) as a side effect of a copy change — that needs sign-off.
+
 ## Ground rules
 
 These are load-bearing — they're the product's promises, not style preferences.

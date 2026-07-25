@@ -118,6 +118,36 @@ agent failure modes reviewers watch for most.
 Before handing back a diff, re-read it and cut anything that isn't load-bearing.
 If a reviewer would ask "why is this here?", answer it now or remove it.
 
+## Docs, images & repo hygiene — don't take the easy shortcut
+
+The shortcut that's quick for you now but leaves a mess in the repo. Real
+lessons from past PRs:
+
+- **README / marketplace images load from the `images.vinv.ai` CDN — never a
+  `github.com/.../raw/...` or `raw.githubusercontent.com` URL.** If the CDN
+  doesn't have your image yet, that is NOT a reason to hardcode a GitHub-raw
+  link — flag it so the file gets uploaded to the CDN. The CDN maps
+  filename→filename with `.github/assets/` but does **not** auto-sync (there's
+  no CDN workflow), so a committed asset can be missing or stale on the CDN;
+  verify with `curl` before relying on it. (Badge images from img.shields.io
+  are fine — the rule is about content images.)
+- **Never commit runtime or local state.** Files an engine or the extension
+  writes at runtime — install-dir markers, generated reports, per-workspace
+  config, anything under `.vinv/` — are local state, not source. Gitignore
+  them. A committed marker that gates a one-time action silently disables that
+  action for every fresh checkout.
+- **Don't commit unused assets.** An image or file referenced by nothing is
+  dead weight — wire it up or don't add it.
+- **Editing a heading breaks its anchor.** Every `##` heading owns a link
+  anchor; renaming one — *including removing an emoji* — changes `#the-anchor`.
+  Grep for links to the old anchor in both READMEs and in cross-repo
+  `github.com/VinvAI/VinvAI#...` links, and fix them. A dangling `#-…` anchor
+  (leading dash left over from an emoji heading) is the classic tell.
+- **Don't rename brand identifiers as a side effect.** Marketing copy,
+  description, and keywords are fair game; the `displayName`, publisher,
+  package name, and the "VinvAI" brand are not — get sign-off before changing
+  them.
+
 ## Don't hallucinate the tree
 
 Before referencing a function, flag, module, or file, confirm it exists in the
