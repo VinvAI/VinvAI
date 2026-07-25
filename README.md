@@ -304,5 +304,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`,
 <div align="center">
 <sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo.</sub>
 
-<sub><a href="https://vinv.ai">vinv.ai</a> · <a href="https://www.linkedin.com/company/vinvai/">LinkedIn</a> · Python first, TS &amp; Go next · <b>Context beats model size.</b></sub>
+<sub><a href="https://vinv.ai">vinv.ai</a> · <a href="https://open-vsx.org/extension/VinvAI/VinvAI">Open VSX</a> · <a href="https://www.linkedin.com/company/vinvai/">LinkedIn</a> · <a href="mailto:support@vinv.ai">support@vinv.ai</a> · Python first, TS &amp; Go next · <b>Context beats model size.</b></sub>
 </div>
