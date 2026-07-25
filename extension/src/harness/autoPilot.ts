@@ -29,6 +29,7 @@ import {
 	initialServiceState,
 	markBlockedOnHarness,
 	markGaveUp,
+	grantMoreBudget,
 	markGreen,
 	markNotAService,
 	noteSetupAttempt,
@@ -74,7 +75,12 @@ import {
 	verifyServiceReplay,
 	type EpisodeTask,
 } from './episodeLoop';
-import { getHarnessId, isAutoPilotEnabled } from '../config/settings';
+import {
+	extendAutoPilotBudgets,
+	getAutoPilotBudgets,
+	getHarnessId,
+	isAutoPilotEnabled,
+} from '../config/settings';
 
 // ---- run state (single-flight per window) ----------------------------------
 
@@ -191,6 +197,33 @@ export interface AutoPilotRunOptions {
 }
 
 /**
+ * Asks whether an exhausted service deserves more effort, returning the number
+ * of extra fix episodes to grant (0 = stop). Presented only when a budget
+ * actually runs out, so it is never noise: by this point Vinv has already
+ * spent every attempt it was allowed and the alternative is silently giving
+ * up on the service.
+ */
+async function offerBudgetTopUp(service: string, reason: string): Promise<number> {
+	const MORE = 'Try 3 more';
+	const MANY = 'Try 10 more';
+	const STOP = 'Stop here';
+	const choice = await vscode.window.showWarningMessage(
+		`Vinv: out of budget on ${service} — ${reason}. Give it more attempts?`,
+		{ modal: false },
+		MORE,
+		MANY,
+		STOP,
+	);
+	if (choice === MORE) {
+		return 3;
+	}
+	if (choice === MANY) {
+		return 10;
+	}
+	return 0;
+}
+
+/**
  * Runs Auto-Pilot for the workspace. Resolves when the run settles (all
  * green, budgets exhausted, cancelled, or nothing to do). Never throws — any
  * step that throws is caught, logged, and counted against the budget.
@@ -283,7 +316,7 @@ async function drive(
 	token: vscode.CancellationToken,
 	report: (label: string) => void,
 ): Promise<void> {
-	const budgets: AutoPilotBudgets = DEFAULT_BUDGETS;
+	let budgets: AutoPilotBudgets = getAutoPilotBudgets();
 	let discovered = isProjectDiscovered(workspaceRoot);
 	let services: ServiceState[] = discovered ? buildServiceStates(workspaceRoot) : [];
 	// The post-green ledger: insights → probes, with the shared fix budgets.
@@ -524,6 +557,20 @@ async function drive(
 		const signature = failureSignature(step, failureDetail ?? '');
 		const { state: budgeted, decision } = decideOnFailure(current, step, signature, budgets);
 		if (decision.next === 'give-up') {
+			// Budget exhausted is a question, not a verdict: the human decides
+			// whether this service is worth more effort. Answering raises the
+			// stored budgets, so the same service does not re-ask next run.
+			const extra = await offerBudgetTopUp(svc.name, decision.reason);
+			if (extra > 0) {
+				extendAutoPilotBudgets(extra);
+				budgets = getAutoPilotBudgets();
+				// Reset what this service has already spent — a higher ceiling
+				// over exhausted counters would give up again immediately.
+				replace(grantMoreBudget(budgeted));
+				report(`Budget raised for ${svc.name} — retrying with ${extra} more attempts.`);
+				log(`  budget top-up: +${extra} (now ${JSON.stringify(budgets)})`);
+				continue;
+			}
 			replace(markGaveUp(budgeted, decision.reason));
 			report(`Giving up on ${svc.name} — ${decision.reason}`);
 			log(`  last failure: ${(failureDetail ?? '').slice(0, 2000)}`);

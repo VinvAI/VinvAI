@@ -19,11 +19,22 @@
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
-**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) (VS Code · Cursor · Windsurf · VSCodium) · [**vinv.ai/#install**](https://vinv.ai/#install)
-
-<sub>Or build the engines from source (~4 min: compiles the Rust index and fetches a one-time ~500 MB local embedding model). First trace about a minute after that.</sub>
+**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**one-click, pick your editor**](https://vinv.ai/#install)
 
 </div>
+
+Or straight from your editor's CLI:
+
+| Editor | Command |
+|---|---|
+| VS Code | `code --install-extension VinvAI.VinvAI` |
+| Cursor | `cursor --install-extension VinvAI.VinvAI` |
+| Windsurf | `windsurf --install-extension VinvAI.VinvAI` |
+| VSCodium | `codium --install-extension VinvAI.VinvAI` |
+| Trae | `trae --install-extension VinvAI.VinvAI` |
+| VS Code Insiders | `code-insiders --install-extension VinvAI.VinvAI` |
+
+<sub>First run builds the engines (~4 min: compiles the Rust index, fetches a one-time ~500 MB local embedding model). Needs [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs). First trace about a minute after that.</sub>
 
 ```bash
 git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
@@ -81,7 +92,7 @@ Give your coding agent runtime context — ten capabilities, one loop:
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
 - **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
 - **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
-- **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph.
+- **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph. The budget is yours: set attempts per service in **Configure**, and when a run exhausts them Vinv asks whether to grant more instead of quietly giving up.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
 - **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
@@ -96,9 +107,9 @@ Vinv ties **every runtime trace to the exact code segment that produced it** and
 - **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game.
 - **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
-## We ran it on a repo you know
+## The same run, in detail
 
-Not our repo — yours. We pointed Vinv at [**fastapi/full-stack-fastapi-template**](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all-local on an M-series MacBook:
+Everything above came from one all-local pass on that template, on an M-series MacBook:
 
 - **Indexed 855 symbols across 151 files with 516 call edges in 27.6s** — cold, from clone.
 - **Semantic search: 5/6 natural questions hit the right symbol in the top 5, p50 64ms:**
@@ -141,7 +152,7 @@ Traffic only shows you the code paths users happen to hit. The behavior exercise
 | Symbols covered | — | 18 → **37 / 44** |
 | Regression cases banked | 0 | **125** (replayable forever) |
 
-The **authenticated sweep** (every endpoint replayed under credentials the login scenario captured, with freshly created resource IDs fed to the by-id endpoints) surfaced **four real bugs in a 35k★ template** that anonymous traffic can never reach:
+The **authenticated sweep** (every endpoint replayed under credentials the login scenario captured, with freshly created resource IDs fed to the by-id endpoints) surfaced **four real bugs** that anonymous traffic can never reach:
 
 1. `GET /api/v1/users/` → **HTTP 500** — an invalid email stored by an unvalidated private endpoint poisons response serialization
 2. `POST /api/v1/private/users/` → **IntegrityError escapes as a 500** — `email: str` instead of `EmailStr`, no duplicate guard
@@ -291,5 +302,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. [Apache License 2.0](LICENSE) © 2026 VinvAI.
 
 <div align="center">
-<sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo. Python first, TS & Go next · <b>Your agent says it's done. Vinv says prove it.</b></sub>
+<sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo.</sub>
+
+<sub><a href="https://vinv.ai">vinv.ai</a> · <a href="https://open-vsx.org/extension/VinvAI/VinvAI">Open VSX</a> · <a href="https://www.linkedin.com/company/vinvai/">LinkedIn</a> · <a href="mailto:support@vinv.ai">support@vinv.ai</a> · Python first, TS &amp; Go next · <b>Context beats model size.</b></sub>
 </div>

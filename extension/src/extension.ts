@@ -76,7 +76,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		void vscode.window
 			.showInformationMessage(
-				'🎉 Vinv is now free & open source. Everything runs on your machine: no account, no API keys, no telemetry. Your agent says it’s done — Vinv says prove it.',
+				'🎉 Vinv is now free & open source. Everything runs on your machine: no account, no API keys, no telemetry. Your agent stops guessing: it gets the real run, joined to your code.',
 				'⭐ Star on GitHub',
 				'Get Started',
 			)
