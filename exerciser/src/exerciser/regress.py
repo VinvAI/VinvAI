@@ -20,6 +20,7 @@ from typing import Any, Callable
 from . import state, store
 from .baseline import apply_baselines, status_class
 from .execute import ProbeResult, execute_probe
+from .optimize import bootstrap_median_ci
 from .scenario import run_scenario
 from .throughput import percentile
 
@@ -212,7 +213,11 @@ def _confirm_perf_diff(
     A single replay's latency includes cold caches, connection setup, and
     first-hit warmup — measured live, one warm request dropped a "4.9ms →
     19.4ms" phantom to baseline. Replay a few more times and keep the diff
-    only if the MEDIAN still exceeds the factor.
+    only when the MEDIAN exceeds the factor AND the bootstrap 95% CI of that
+    median clears it too. The bare ``>factor`` comparison is only the SCREEN
+    that triggers this confirmation; the CI is what makes the verdict — the
+    same discipline as the optimization loop's paired-bootstrap acceptance
+    (a drifting single sample cannot mint a perf diff on its own).
     """
     inp = case["input"]
     latencies: list[float] = []
@@ -231,13 +236,15 @@ def _confirm_perf_diff(
     if not latencies or not isinstance(prev, (int, float)):
         return None
     median = percentile(latencies, 0.5)
-    if median > prev * latency_factor:
+    ci_low, _ = bootstrap_median_ci(latencies)
+    if median > prev * latency_factor and ci_low > prev * latency_factor:
         return {
             "kind": "perf",
             "endpoint": f"{case['method']} {case['path']}",
             "input_class": case["input_class"],
             "detail": (f"latency {prev}ms → median {median}ms over "
-                       f"{len(latencies)} replays (>{latency_factor}x)"),
+                       f"{len(latencies)} replays (95% CI low {round(ci_low, 1)}ms; "
+                       f">{latency_factor}x)"),
         }
     return None
 

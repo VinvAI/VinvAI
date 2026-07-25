@@ -24,12 +24,10 @@ import { openAskVinv } from '../views/askVinv';
 import { adjudicatePendingEdges } from '../graph/graphEnhancer';
 import {
 	offerEpisodeForBringupFailure,
-	offerEpisodeForCacheCandidates,
-	offerEpisodeForHotspots,
-	offerEpisodeForHotspot,
 	offerEpisodeForMemoryTrends,
+	runVerifiedCacheSweep,
+	runVerifiedHotspotEpisode,
 } from '../harness/autoTrigger';
-import { optimizationSourceInstance } from '../views/optimizationSource';
 import { openOptimizationReport } from '../views/optimizationReportView';
 import {
 	disputeVerifiedEpisode,
@@ -591,44 +589,42 @@ export function registerCommands(
 				`Vinv: Episode budget is now ${updated.episode_budget} (${updated.episodes_used} used on this goal).`,
 			);
 		}),
-		// Performance sweep: dispatch the trace's latency Pareto head to the
-		// harness as an optimization episode (algorithm/caching/async decisions
-		// belong to the agent; the evidence and verification belong to Vinv).
+		// Performance sweep: dispatch the trace's latency Pareto head through the
+		// optimization verdict engine (algorithm/caching/async decisions belong
+		// to the agent; the frozen-probe evidence, the paired-bootstrap verdict,
+		// and the revert belong to Vinv — exerciseOptimize.ts).
 		vscode.commands.registerCommand('vinv-vs.optimizeHotspots', () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			void offerEpisodeForHotspots(context, folder.uri.fsPath);
+			void runVerifiedHotspotEpisode(context, folder.uri.fsPath);
 		}),
 		// Scoped optimization: one symbol (the row clicked in the Optimization
-		// panel). Freezes the candidate's before-cost in the source BEFORE
-		// dispatching, so the predicted→proven loop measures the change against
-		// the pre-fix trace. No row → fall back to the whole-Pareto sweep.
+		// panel), through the same verdict engine. The panel row flips to
+		// 'dispatched' only AFTER the dispatch is confirmed (the engine's
+		// onAccept hook) — a declined offer leaves no phantom "Agent optimizing…"
+		// state and freezes no before-cost. No row → the whole-Pareto sweep.
 		vscode.commands.registerCommand('vinv-vs.optimizeHotspot', (row?: number) => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			if (typeof row !== 'number') {
-				void offerEpisodeForHotspots(context, folder.uri.fsPath);
-				return;
-			}
-			// Only ONE episode runs at a time. Without this guard, clicking a
-			// second hotspot while the first is in flight stamped it 'dispatched'
-			// in the UI while offerOrDispatch silently refused it (busy-lock) — a
-			// phantom "Agent optimizing…" that never actually ran. Refuse loudly
-			// instead, and do not freeze a before-cost for a run that won't happen.
+			// Only ONE episode runs at a time. Refuse loudly instead of letting
+			// offerOrDispatch's busy-lock silently swallow the click.
 			if (isEpisodeRunning()) {
 				void vscode.window.showWarningMessage(
 					'Vinv: an optimization episode is already running — wait for it to finish before optimizing another hotspot.',
 				);
 				return;
 			}
-			optimizationSourceInstance()?.markRowDispatched(folder.uri.fsPath, row);
-			void offerEpisodeForHotspot(context, folder.uri.fsPath, row);
+			void runVerifiedHotspotEpisode(
+				context,
+				folder.uri.fsPath,
+				typeof row === 'number' ? row : undefined,
+			);
 		}),
 		// Opens the full-page Optimization report (the evidence surface: ranked
 		// recoverable time + predicted→proven verdicts). The sidebar view is the
@@ -741,14 +737,15 @@ export function registerCommands(
 			void offerEpisodeForMemoryTrends(context, folder.uri.fsPath);
 		}),
 		// Cache sweep: deterministic symbols recomputing identical inputs
-		// (same args_hash) become a memoization episode.
+		// (same args_hash) become a memoization episode, judged by the same
+		// verdict engine as every other optimization dispatch.
 		vscode.commands.registerCommand('vinv-vs.analyzeCacheOpportunities', () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			void offerEpisodeForCacheCandidates(context, folder.uri.fsPath);
+			void runVerifiedCacheSweep(context, folder.uri.fsPath);
 		}),
 		// Brings back an escalation the operator closed without deciding — the
 		// episode is suspended, not aborted, until they answer.

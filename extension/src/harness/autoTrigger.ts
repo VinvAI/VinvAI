@@ -31,6 +31,12 @@ import {
 } from './harnessRunner';
 import { pickHarness } from './harnessPicker';
 import { loadRuntimeOverlay, loadNodes, indexStoreDir } from '../graph/indexGraph';
+import {
+	buildWorkspaceDeps,
+	runVerifiedOptimization,
+	type OptimizeOpportunity,
+	type OptimizeRunResult,
+} from './exerciseOptimize';
 import { readAndClearRequests, restoreEpisodeRequests } from './requestQueue';
 import {
 	collectCacheCandidates,
@@ -65,14 +71,36 @@ function serviceFixTask(event: ServiceExitEvent): EpisodeTask {
 	};
 }
 
+/** Hooks a caller can attach to the offer/dispatch flow. */
+export interface DispatchHooks {
+	/**
+	 * Invoked the moment the dispatch is CONFIRMED (auto-dispatch decided to
+	 * run, or the user clicked the offer and picked a harness) but before the
+	 * episode starts. This is the only safe place to record "dispatched" state
+	 * — a declined offer never reaches it, so no phantom bookkeeping.
+	 */
+	onAccept?: () => void | Promise<void>;
+	/** Prior attempts' learning, seeded into the pack (revert-learn-retry). */
+	priorLearning?: string;
+}
+
+/**
+ * Returns true only when an episode actually ran (accepted or auto-dispatched
+ * AND not infra-blocked) — the caller's signal that "dispatched" state may be
+ * recorded and an after-measurement is meaningful.
+ */
 async function offerOrDispatch(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	task: EpisodeTask,
 	summary: string,
-): Promise<void> {
+	hooks?: DispatchHooks,
+): Promise<boolean> {
 	if (isEpisodeRunning()) {
-		return; // one loop at a time; the running episode already owns the harness
+		return false; // one loop at a time; the running episode already owns the harness
+	}
+	if (hooks?.priorLearning) {
+		task = { ...task, priorFailureSeed: hooks.priorLearning };
 	}
 	// Auto-dispatch only when the configured harness is actually present AND
 	// runs without a human (Cursor's chat and Cascade need someone to press
@@ -86,11 +114,12 @@ async function offerOrDispatch(
 		// (markHarnessBlocked already surfaced the remediation once) — the issue
 		// stays blocked-on-you and re-dispatches fresh after login.
 		if ((await preflightHarnessAuth(harnessId)) !== 'ok') {
-			return;
+			return false;
 		}
 		void vscode.window.showInformationMessage(`Vinv: ${summary} — dispatching a fix episode…`);
+		await hooks?.onAccept?.();
 		await runEpisode(context, workspaceRoot, task);
-		return;
+		return !getHarnessBlock(harnessId);
 	}
 	const choice = await vscode.window.showWarningMessage(
 		`Vinv: ${summary}`,
@@ -99,12 +128,15 @@ async function offerOrDispatch(
 	);
 	if (choice === 'Fix with Harness') {
 		// A click means a human is present — ask which agent gets the episode.
-		const harnessId = await pickHarness();
-		if (!harnessId) {
-			return;
+		const picked = await pickHarness();
+		if (!picked) {
+			return false;
 		}
-		await runEpisode(context, workspaceRoot, task, harnessId);
+		await hooks?.onAccept?.();
+		await runEpisode(context, workspaceRoot, task, picked);
+		return !getHarnessBlock(picked);
 	}
+	return false;
 }
 
 /**
@@ -267,13 +299,15 @@ export function registerEpisodeRequestTrigger(context: vscode.ExtensionContext):
 					await offerEpisodeForRuntimeErrors(context, root);
 					break;
 				case 'hotspots':
-					await offerEpisodeForHotspots(context, root);
+					// Chat-requested sweeps ride the same verdict engine as the
+					// panel: frozen probes, episode-bound verdict, real revert.
+					await runVerifiedHotspotEpisode(context, root);
 					break;
 				case 'memory-trends':
 					await offerEpisodeForMemoryTrends(context, root);
 					break;
 				case 'cache-candidates':
-					await offerEpisodeForCacheCandidates(context, root);
+					await runVerifiedCacheSweep(context, root);
 					break;
 			}
 		}
@@ -483,19 +517,20 @@ export function registerRuntimeErrorTrigger(context: vscode.ExtensionContext): v
 export async function offerEpisodeForHotspots(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
-): Promise<void> {
+	hooks?: DispatchHooks,
+): Promise<boolean> {
 	let hotspots: Hotspot[] = [];
 	try {
 		const nodes = loadNodes(indexStoreDir(workspaceRoot));
 		hotspots = selectHotspots(nodes, loadRuntimeOverlay(workspaceRoot, nodes));
 	} catch {
-		return;
+		return false;
 	}
 	if (hotspots.length === 0) {
 		void vscode.window.showInformationMessage(
 			'Vinv: No latency hotspots — capture a trace first (run a service and exercise it).',
 		);
-		return;
+		return false;
 	}
 	const lines = hotspots.map(
 		(h) =>
@@ -519,11 +554,12 @@ export async function offerEpisodeForHotspots(
 			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
 		],
 	};
-	await offerOrDispatch(
+	return offerOrDispatch(
 		context,
 		workspaceRoot,
 		task,
 		`the trace concentrates ${(hotspots.reduce((s, h) => s + h.share, 0) * 100).toFixed(0)}% of runtime in ${hotspots.length} symbol(s)`,
+		hooks,
 	);
 }
 
@@ -539,7 +575,8 @@ export async function offerEpisodeForHotspot(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	row: number,
-): Promise<void> {
+	hooks?: DispatchHooks,
+): Promise<boolean> {
 	let node: { name: string; file: string; start_line: number } | undefined;
 	let totalMs = 0;
 	let calls = 0;
@@ -551,12 +588,11 @@ export async function offerEpisodeForHotspot(
 		totalMs = rt?.total_ms ?? 0;
 		calls = rt?.calls ?? 0;
 	} catch {
-		return;
+		return false;
 	}
 	if (!node) {
 		// Row is not resolvable against the current store — do the safe thing.
-		await offerEpisodeForHotspots(context, workspaceRoot);
-		return;
+		return offerEpisodeForHotspots(context, workspaceRoot, hooks);
 	}
 	const task: EpisodeTask = {
 		kind: 'general',
@@ -576,11 +612,12 @@ export async function offerEpisodeForHotspot(
 			'Behavior is unchanged: the service still starts, serves, and raises no new errors',
 		],
 	};
-	await offerOrDispatch(
+	return offerOrDispatch(
 		context,
 		workspaceRoot,
 		task,
 		`optimize ${node.name}${totalMs > 0 ? ` (${Math.round(totalMs)}ms in the trace)` : ''}`,
+		hooks,
 	);
 }
 
@@ -645,18 +682,19 @@ export async function offerEpisodeForMemoryTrends(
 export async function offerEpisodeForCacheCandidates(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
-): Promise<void> {
+	hooks?: DispatchHooks,
+): Promise<boolean> {
 	let candidates: ReturnType<typeof collectCacheCandidates> = [];
 	try {
 		candidates = collectCacheCandidates(workspaceRoot, loadNodes(indexStoreDir(workspaceRoot)));
 	} catch {
-		return;
+		return false;
 	}
 	if (candidates.length === 0) {
 		void vscode.window.showInformationMessage(
 			'Vinv: No cache opportunities — no deterministic symbol was re-called with identical arguments in the captured traces.',
 		);
-		return;
+		return false;
 	}
 	const lines = candidates.map(
 		(c) =>
@@ -681,10 +719,106 @@ export async function offerEpisodeForCacheCandidates(
 			'Behavior is unchanged: same results, no new errors, memory stays bounded',
 		],
 	};
-	await offerOrDispatch(
+	return offerOrDispatch(
 		context,
 		workspaceRoot,
 		task,
 		`~${Math.round(candidates.reduce((s, c) => s + c.reclaimable_ms, 0))}ms of traced time is duplicate recomputation in ${candidates.length} symbol(s)`,
+		hooks,
 	);
+}
+
+/**
+ * The verified sweeps and the panel dispatch — every optimization episode
+ * flows through the exerciseOptimize verdict engine (paired-bootstrap CI on
+ * the frozen probe set, episode-bound after-run, real revert, optimize.jsonl).
+ * These wrappers compose the existing offer/dispatch flows with the engine;
+ * they are what the commands and the chat-request sweeps invoke.
+ */
+export async function runVerifiedHotspotEpisode(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	row?: number,
+): Promise<void> {
+	let label = 'Optimize latency hotspots';
+	let opportunity: OptimizeOpportunity = {
+		kind: 'hotspot-sweep',
+		endpoint_id: 'hotspots',
+		endpoint: 'traced latency hotspots',
+		detail: 'Pareto head of traced time dispatched as one optimization episode',
+		metric: 'probe_latency_ms',
+		value: 0,
+	};
+	if (row !== undefined) {
+		try {
+			const n = loadNodes(indexStoreDir(workspaceRoot))[row];
+			if (n) {
+				label = `Optimize ${n.name}`;
+				opportunity = {
+					kind: 'latency-symbol',
+					endpoint_id: n.name,
+					endpoint: `${n.name} (${n.file}:${n.start_line})`,
+					detail: 'panel dispatch of a ranked optimization candidate',
+					metric: 'probe_latency_ms',
+					value: 0,
+				};
+			}
+		} catch {
+			// Store unreadable — keep the generic labels; the offer flow re-checks.
+		}
+	}
+	const result = await runVerifiedOptimization(
+		{ label, opportunity },
+		(hooks) =>
+			row !== undefined
+				? offerEpisodeForHotspot(context, workspaceRoot, row, hooks)
+				: offerEpisodeForHotspots(context, workspaceRoot, hooks),
+		buildWorkspaceDeps(workspaceRoot, { row }),
+	);
+	announceVerdict(result, label);
+}
+
+/** Cache sweep through the same verdict engine (see runVerifiedHotspotEpisode). */
+export async function runVerifiedCacheSweep(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+): Promise<void> {
+	const label = 'Cache recomputation sites';
+	const result = await runVerifiedOptimization(
+		{
+			label,
+			opportunity: {
+				kind: 'cache-sweep',
+				endpoint_id: 'cache-candidates',
+				endpoint: 'duplicate-recomputation sites',
+				detail: 'Pareto head of reclaimable duplicated work dispatched as a memoization episode',
+				metric: 'probe_latency_ms',
+				value: 0,
+			},
+		},
+		(hooks) => offerEpisodeForCacheCandidates(context, workspaceRoot, hooks),
+		buildWorkspaceDeps(workspaceRoot, {}),
+	);
+	announceVerdict(result, label);
+}
+
+/** One closing notification per engine-judged episode. */
+function announceVerdict(result: OptimizeRunResult, label: string): void {
+	if (result.mode !== 'verdict' || !result.comparison) {
+		return; // declined (nothing ran) or fallback (watcher reconcile will report)
+	}
+	const c = result.comparison;
+	if (result.action === 'accept') {
+		void vscode.window.showInformationMessage(
+			`Vinv: "${label}" verified and kept — ${(c.rel_improvement * 100).toFixed(1)}% faster ` +
+				`(95% CI [${(c.ci_low * 100).toFixed(1)}%, ${(c.ci_high * 100).toFixed(1)}%], ` +
+				'behavior suite intact).',
+		);
+	} else {
+		void vscode.window.showWarningMessage(
+			`Vinv: "${label}" did not verify — the change was reverted ` +
+				`(${result.behaviorOk ? 'no significant speedup' : 'behavior changed'}; ` +
+				'the full evidence is in the Findings view).',
+		);
+	}
 }

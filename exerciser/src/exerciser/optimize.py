@@ -104,6 +104,30 @@ def paired_bootstrap_improvement(
     return MetricComparison(b_med, a_med, point, lo, hi, improved)
 
 
+def bootstrap_median_ci(
+    samples: list[float],
+    *,
+    seed: int = 1729,
+    resamples: int = _BOOTSTRAP_N,
+) -> tuple[float, float]:
+    """Bootstrap 95% CI of the median of ``samples``.
+
+    The one-sample companion to :func:`paired_bootstrap_improvement`: regress
+    uses it to confirm a suspected perf regression only when the WHOLE CI of
+    the re-measured median clears the threshold — one noisy replay cannot
+    manufacture a verdict.
+    """
+    if not samples:
+        return 0.0, 0.0
+    rng = random.Random(f"median {seed}")
+    n = len(samples)
+    stats = sorted(
+        statistics.median([samples[rng.randrange(n)] for _ in range(n)])
+        for _ in range(resamples)
+    )
+    return stats[int(0.025 * len(stats))], stats[min(len(stats) - 1, int(0.975 * len(stats)))]
+
+
 # ---- opportunity detection from a profile ----------------------------------
 
 @dataclass
@@ -129,25 +153,50 @@ class Opportunity:
 def detect_opportunities(
     profile: dict[str, Any],
     *,
-    p95_outlier_ms: float = 200.0,
+    outlier_factor: float = 3.0,
 ) -> list[Opportunity]:
     """Detect optimization opportunities from a behavioral profile.
 
-    A P95 latency above ``p95_outlier_ms`` on a healthy endpoint is an
-    opportunity to speed up; the detection reuses the profile the exerciser
-    already produces (the extension's existing hotspot/cache sweeps cover the
-    symbol-level angle — this is the endpoint-level companion).
+    An endpoint whose P95 latency is an OUTLIER relative to the service's own
+    per-endpoint P95 distribution is an opportunity to speed up. The test is
+    RELATIVE — no absolute ms threshold — because scale is the service's, not
+    ours: a 60ms endpoint among 5ms endpoints on a local service is exactly the
+    outlier a 200ms floor misses, while a uniformly-300ms service has no
+    outlier at all (that is a baseline, not an opportunity).
+
+    Leave-one-out: each endpoint's P95 is compared against the median of the
+    OTHER endpoints' P95s (so an outlier cannot hide by dragging the median
+    toward itself — decisive with only two endpoints). It is flagged when it
+    exceeds ``outlier_factor`` × that median AND, when at least three other
+    endpoints exist, the median + 3 robust deviations (MAD × 1.4826) band.
     """
-    out: list[Opportunity] = []
+    eligible: list[tuple[dict[str, Any], float]] = []
     for ep in profile.get("endpoints", []):
-        p95 = ep.get("latency", {}).get("p95_ms", 0.0)
+        p95 = float(ep.get("latency", {}).get("p95_ms", 0.0) or 0.0)
         cov = ep.get("coverage", {})
-        if p95 >= p95_outlier_ms and cov.get("handler_observed"):
+        if p95 > 0 and cov.get("handler_observed"):
+            eligible.append((ep, p95))
+    if len(eligible) < 2:
+        return []  # a lone endpoint has no distribution to be an outlier of
+    out: list[Opportunity] = []
+    for i, (ep, p95) in enumerate(eligible):
+        others = [p for j, (_, p) in enumerate(eligible) if j != i]
+        med = statistics.median(others)
+        if med <= 0:
+            continue
+        threshold = med * outlier_factor
+        if len(others) >= 3:
+            mad = statistics.median([abs(v - med) for v in others])
+            threshold = max(threshold, med + 3 * 1.4826 * mad)
+        if p95 >= threshold:
             out.append(Opportunity(
                 kind="latency-p95",
                 endpoint_id=ep["api_id"],
                 endpoint=f"{ep['method']} {ep['path']}",
-                detail=f"P95 latency {p95}ms exceeds the {p95_outlier_ms}ms outlier threshold",
+                detail=(
+                    f"P95 latency {p95}ms is {p95 / med:.1f}× the median P95 of the "
+                    f"service's other endpoints ({round(med, 1)}ms)"
+                ),
                 metric="p95_ms",
                 value=p95,
             ))

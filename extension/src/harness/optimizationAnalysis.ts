@@ -64,6 +64,24 @@ export interface OptimizationOutcome {
 	behavior_ok?: boolean;
 	/** the dispatched episode's title, for the evidence trail. */
 	episode_title?: string;
+	/**
+	 * Which loop owns this dispatch's verdict. 'bridge' = the exerciseOptimize
+	 * verdict engine (paired-bootstrap CI over the frozen probe set, bound to
+	 * the episode) — the session-timing reconcile must NOT touch these rows.
+	 * Absent/'watch' = the legacy fallback that waits for a fresh capture.
+	 */
+	engine?: 'bridge' | 'watch';
+	/** The paired-bootstrap comparison, when the bridge judged this row. */
+	ci?: {
+		before_median: number;
+		after_median: number;
+		rel_improvement: number;
+		ci_low: number;
+		ci_high: number;
+		improved: boolean;
+	};
+	/** True when the change was actually rolled back (revertToSnapshot ran). */
+	reverted?: boolean;
 }
 
 /** One ranked optimization opportunity. */
@@ -444,12 +462,19 @@ export function markDispatched(
 }
 
 /**
- * Closes the loop for a dispatched candidate once a FRESH capture session has
- * arrived (a newer session key than the one recorded at dispatch). Compares
- * the new session's cost against the before baseline and issues an honest
+ * FALLBACK reconcile for a dispatched candidate once a fresh capture session
+ * has arrived (a newer session key than the one recorded at dispatch).
+ * Compares the new session's cost against the before baseline and issues a
  * verdict: `proven` only when the drop clears the noise band AND no new errors
  * appeared, `regressed` on a rise beyond the band, `inconclusive` inside it.
  * Returns the candidate unchanged while it is still waiting for the after-run.
+ *
+ * The MAD noise band here is a SCREEN, not the authority: rows dispatched
+ * through the exerciseOptimize verdict engine (outcome.engine === 'bridge')
+ * are judged by the paired-bootstrap CI on the frozen probe set, bound to the
+ * episode — the caller must not route those rows here. This path remains only
+ * for dispatches the engine could not measure (no running service / no
+ * replayable probes), where a fresh session's timing is the best evidence left.
  */
 export function reconcileOutcome(
 	candidate: OptimizationCandidate,

@@ -285,17 +285,28 @@ function getReportHtml(): string {
 
 		function verdict(c) {
 			const o = c.outcome || {};
+			const pc = (v) => (v * 100).toFixed(1) + '%';
+			const ciNote = o.ci
+				? ' Paired-bootstrap: ' + pc(o.ci.rel_improvement) + ' (95% CI [' + pc(o.ci.ci_low) + ', ' + pc(o.ci.ci_high) + ']) over the frozen probe set.'
+				: '';
+			const kept = o.reverted === true
+				? ' The change was reverted to the pre-episode snapshot.'
+				: (o.reverted === false ? ' The change was kept.' : '');
 			if (c.status === 'proven') {
 				return '<div class="verdict proven"><b>Proven ' + ms(Math.abs(o.delta_ms || 0)) + ' faster</b> — predicted ~' + ms(o.predicted_ms || 0) +
-					', measured beyond the ±' + ms(o.noise_band_ms || 0) + ' noise band. Behavior unchanged.</div>';
+					(o.ci ? '.' : ', measured beyond the ±' + ms(o.noise_band_ms || 0) + ' noise band.') + ' Behavior unchanged.' + ciNote + '</div>';
 			}
 			if (c.status === 'regressed') {
 				const broke = o.behavior_ok === false;
 				return '<div class="verdict regressed"><b>' + (broke ? 'Regressed — behavior changed' : 'Regressed ' + ms(o.delta_ms || 0)) + '</b> — ' +
-					(broke ? 'the after-run showed new errors on this symbol; the change was not kept.' : 'the after-run was slower beyond the noise band.') + '</div>';
+					(broke ? 'the after-run no longer answered identically.' : (o.ci ? 'the after-run was significantly slower.' : 'the after-run was slower beyond the noise band.')) +
+					ciNote + (kept || ' The change was not kept.') + '</div>';
 			}
 			if (c.status === 'inconclusive') {
-				return '<div class="verdict"><b>Inconclusive</b> — the change landed inside the ±' + ms(o.noise_band_ms || 0) + ' noise band, so no honest speedup can be claimed.</div>';
+				return '<div class="verdict"><b>Inconclusive</b> — ' +
+					(o.ci ? 'no significant speedup (the CI includes zero or the effect is below 10%), so no honest claim can be made.'
+						: 'the change landed inside the ±' + ms(o.noise_band_ms || 0) + ' noise band, so no honest speedup can be claimed.') +
+					ciNote + kept + '</div>';
 			}
 			return '';
 		}

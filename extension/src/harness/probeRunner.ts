@@ -432,6 +432,99 @@ function pickProbeTarget(workspaceRoot: string): { service: string; port: number
 	return null;
 }
 
+// ---- frozen replay for the optimization verdict engine ----------------------
+
+/** A frozen probe request set bound to one live service target. */
+export interface FrozenProbeTarget {
+	service: string;
+	port: number;
+	specs: ProbeSpec[];
+}
+
+/** One probe's samples across the replay passes (exerciseOptimize's unit). */
+export interface ProbeMeasurement {
+	/** Latencies of replays that produced a response, in pass order. */
+	latencies: number[];
+	/** Observed HTTP status per pass (null = no response). */
+	statuses: Array<number | null>;
+	/** Structural response-shape hash per pass. */
+	shapes: string[];
+	/** Human label ("GET /path") for verdict evidence. */
+	label?: string;
+}
+
+/**
+ * Freezes the CURRENT ready probe request set against the running service —
+ * the identical requests the optimization verdict engine replays before and
+ * after a change (a re-synthesized set could differ between the two runs and
+ * silently unpair the comparison). Deterministic synthesis from the newest
+ * traces plus any persisted authored probes; needs-authoring specs are
+ * excluded (nothing is dispatched here). Null when there is no running
+ * service with a known port or no observed endpoints.
+ */
+export function freezeReadyProbeSpecs(workspaceRoot: string): FrozenProbeTarget | null {
+	const manifest = readInsightManifest(workspaceRoot);
+	const endpoints = manifest?.endpoints ?? [];
+	if (endpoints.length === 0) {
+		return null;
+	}
+	const target = pickProbeTarget(workspaceRoot);
+	if (!target || !isServiceRunning(target.service)) {
+		return null;
+	}
+	let corpus: TraceCorpus | null = null;
+	try {
+		corpus = loadCorpus(workspaceRoot);
+	} catch {
+		corpus = null;
+	}
+	const handlers = endpoints.map((e) => e.handler).filter((h): h is string => Boolean(h));
+	const examples = corpus
+		? argExamplesFromCorpus(corpus, handlers)
+		: new Map<string, Record<string, ArgExample>>();
+	const specs = synthesizeProbeSpecs(endpoints, examples);
+	const persisted = readProbeFile(workspaceRoot, target.service);
+	for (const old of persisted?.probes ?? []) {
+		if (old.source === 'authored' && old.status === 'ready' && !specs.some((s) => s.id === old.id)) {
+			specs.push(old);
+		}
+	}
+	const ready = specs.filter((s) => s.status === 'ready');
+	return ready.length > 0 ? { service: target.service, port: target.port, specs: ready } : null;
+}
+
+/**
+ * Replays a frozen spec list `passes` times against the service and collects
+ * per-probe samples. Purely mechanical (no synthesis, no authoring, no issue
+ * recompute) — this is the measurement half of the paired comparison, so it
+ * must do nothing but replay the frozen requests.
+ */
+export async function replayProbeSpecs(
+	port: number,
+	specs: ProbeSpec[],
+	passes: number,
+): Promise<Map<string, ProbeMeasurement>> {
+	const out = new Map<string, ProbeMeasurement>();
+	for (let pass = 0; pass < passes; pass += 1) {
+		for (const spec of specs) {
+			const res = await httpProbe(port, spec);
+			const m = out.get(spec.id) ?? {
+				latencies: [],
+				statuses: [],
+				shapes: [],
+				label: `${spec.method} ${spec.path}`,
+			};
+			if (!res.error) {
+				m.latencies.push(res.latencyMs);
+			}
+			m.statuses.push(res.status);
+			m.shapes.push(res.shapeHash);
+			out.set(spec.id, m);
+		}
+	}
+	return out;
+}
+
 // ---- authoring hand-off -----------------------------------------------------
 
 /** Validates authored probes from the agent reply (contract-checked). */
