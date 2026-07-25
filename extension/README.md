@@ -10,7 +10,7 @@
 
 [![Editors](https://img.shields.io/badge/editors-VS%20Code%20%2B%20Cursor-D71921?style=flat-square)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![Traces Python](https://img.shields.io/badge/traces-Python%2C%20zero%20edits-D71921?style=flat-square)](https://vinv.ai)
-[![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](https://github.com/VinvAI/VinvAI#-privacy)
+[![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](https://github.com/VinvAI/VinvAI#privacy)
 [![License](https://img.shields.io/badge/license-Apache%202.0-D71921?style=flat-square)](https://github.com/VinvAI/VinvAI/blob/HEAD/LICENSE)
 [![Made by VinvAI](https://img.shields.io/badge/made%20by-VinvAI-D71921?style=flat-square)](https://vinv.ai)
 
@@ -26,7 +26,7 @@
 
 Vinv is a free, open-source extension that puts a verification loop around the coding agent you already use. It runs your service under tracing, builds context from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
 
-**On five real bugs in a 35k★ FastAPI template: a cheap commodity model holding Vinv's evidence fixed 5. A frontier model working blind fixed 1. The same commodity model, blind, fixed 0.** One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#-case-study-commodity-models-out-fix-frontier-ones)
+**On five real bugs in a 35k★ FastAPI template: a cheap commodity model holding Vinv's evidence fixed 5. A frontier model working blind fixed 1. The same commodity model, blind, fixed 0.** One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#case-study-commodity-models-out-fix-frontier-ones)
 
 **Before you install:** the extension is one click, but Vinv builds its engines on first run (`git clone` + `uv sync` + `cargo build` in a terminal you can watch) and fetches a one-time ~500 MB local embedding model. You need [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs), plus a coding-agent CLI you already pay for. No account, no API keys, about four minutes.
 
@@ -63,7 +63,7 @@ The engines it drives — the zero-edit Python tracer (`tracelens`), the semanti
 
 ## Proof on a repo you know
 
-One run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all local: **0/23 → 23/23 endpoints executed**, symbol coverage **18 → 37/44** via the authenticated sweep, **125 regression cases banked**, and **4 real bugs found and fixed** — a 500 on `GET /users/`, an IntegrityError escaping an unvalidated private endpoint, a crashing `assert` in email config, and an unsanitized header in password-recovery HTML. Full story with screenshots in the [repo README](https://github.com/VinvAI/VinvAI#-we-ran-it-on-a-repo-you-know).
+One run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★), all local: **0/23 → 23/23 endpoints executed**, symbol coverage **18 → 37/44** via the authenticated sweep, **125 regression cases banked**, and **4 real bugs found and fixed** — a 500 on `GET /users/`, an IntegrityError escaping an unvalidated private endpoint, a crashing `assert` in email config, and an unsanitized header in password-recovery HTML. Full story with screenshots in the [repo README](https://github.com/VinvAI/VinvAI#we-ran-it-on-a-repo-you-know).
 
 ---
 
