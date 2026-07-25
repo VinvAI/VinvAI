@@ -26,6 +26,7 @@ def _usl(n: float, lam: float, sigma: float, kappa: float) -> float:
 
 # ---- fitting -----------------------------------------------------------------
 
+
 def test_fit_recovers_known_parameters_under_noise():
     lam, sigma, kappa = 120.0, 0.06, 0.002  # true knee ≈ 21.7, inside the sweep
     rng = random.Random(42)
@@ -90,6 +91,7 @@ def test_linear_scaling_has_no_knee():
 
 # ---- sweep driver ------------------------------------------------------------
 
+
 def _ok_probe(base, method, path, **kw):
     return ProbeResult(200, 2.0, {}, "json:a", None, None, "json")
 
@@ -100,7 +102,11 @@ def _err_probe(base, method, path, **kw):
 
 def test_run_sweep_levels_deduped_sorted_clamped():
     points = run_sweep(
-        "http://x", "/ping", (4, 2, 2, 64), requests_per_level=8, probe_fn=_ok_probe,
+        "http://x",
+        "/ping",
+        (4, 2, 2, 64),
+        requests_per_level=8,
+        probe_fn=_ok_probe,
     )
     assert [p.concurrency for p in points] == [2, 4, 32]  # 64 clamps to the hard cap
     # Per-level request count floors at the level so the pool saturates.
@@ -126,33 +132,52 @@ def test_pick_sweep_endpoint_most_healthy_parameter_free_get():
     assert pick_sweep_endpoint(rows) == "/items"
     assert pick_sweep_endpoint([]) is None
     # Ties break lexicographically for determinism.
-    tied = [{"method": "GET", "path": "/b", "status": 200},
-            {"method": "GET", "path": "/a", "status": 204}]
+    tied = [
+        {"method": "GET", "path": "/b", "status": 200},
+        {"method": "GET", "path": "/a", "status": 204},
+    ]
     assert pick_sweep_endpoint(tied) == "/a"
 
 
 # ---- throughput-ceiling emission --------------------------------------------
 
-def _sweep_doc(*, knee=21.8, r2=0.95, sigma=0.05, kappa=0.002, peak=830.0,
-               concurrencies=(1, 2, 4, 8, 16, 32), fit_null=False):
+
+def _sweep_doc(
+    *,
+    knee=21.8,
+    r2=0.95,
+    sigma=0.05,
+    kappa=0.002,
+    peak=830.0,
+    concurrencies=(1, 2, 4, 8, 16, 32),
+    fit_null=False,
+):
     return {
         "endpoint": "/ping",
         "points": [
-            {"concurrency": c, "req_per_s": _usl(c, 100.0, sigma, kappa),
-             "error_rate": 0.0}
+            {"concurrency": c, "req_per_s": _usl(c, 100.0, sigma, kappa), "error_rate": 0.0}
             for c in concurrencies
         ],
-        "fit": None if fit_null else {
-            "sigma": sigma, "kappa": kappa, "r2": r2, "knee": knee, "peak_rps": peak,
+        "fit": None
+        if fit_null
+        else {
+            "sigma": sigma,
+            "kappa": kappa,
+            "r2": r2,
+            "knee": knee,
+            "peak_rps": peak,
         },
     }
 
 
 def test_detect_emits_throughput_ceiling_from_sweep_file(tmp_path):
     store.write_json(sweep_path(tmp_path), _sweep_doc())
-    profile = {"repo": str(tmp_path), "endpoints": [
-        {"api_id": "GET_ping", "method": "GET", "path": "/ping"},
-    ]}
+    profile = {
+        "repo": str(tmp_path),
+        "endpoints": [
+            {"api_id": "GET_ping", "method": "GET", "path": "/ping"},
+        ],
+    }
     ops = detect_opportunities(profile)
     assert len(ops) == 1
     op = ops[0]
@@ -205,26 +230,32 @@ def test_detect_r2_gate_default_and_policy_override(tmp_path):
 
 # ---- CLI ---------------------------------------------------------------------
 
+
 def test_cli_throughput_sweep_end_to_end(tmp_path, monkeypatch):
     # Endpoint selection reads results.jsonl; the sweep itself is faked with
     # points off a known USL curve so no live server is touched.
-    store.write_jsonl(store.results_path(tmp_path), [
-        {"method": "GET", "path": "/ping", "status": 200},
-        {"method": "GET", "path": "/ping", "status": 200},
-        {"method": "POST", "path": "/items", "status": 201},
-    ])
+    store.write_jsonl(
+        store.results_path(tmp_path),
+        [
+            {"method": "GET", "path": "/ping", "status": 200},
+            {"method": "GET", "path": "/ping", "status": 200},
+            {"method": "POST", "path": "/items", "status": 201},
+        ],
+    )
 
     def fake_sweep(base_url, endpoint, *args, **kwargs):
         assert base_url == "http://x" and endpoint == "/ping"
         return [
-            ThroughputResult(f"GET {endpoint}", c, 40, 1.0,
-                             _usl(c, 100.0, 0.05, 0.002), 1.0, 2.0, 3.0, 0.0)
+            ThroughputResult(
+                f"GET {endpoint}", c, 40, 1.0, _usl(c, 100.0, 0.05, 0.002), 1.0, 2.0, 3.0, 0.0
+            )
             for c in (1, 2, 4, 8, 16, 32)
         ]
 
     monkeypatch.setattr(cli, "run_sweep", fake_sweep)
     result = CliRunner().invoke(
-        cli.main, ["throughput-sweep", str(tmp_path), "--base-url", "http://x"],
+        cli.main,
+        ["throughput-sweep", str(tmp_path), "--base-url", "http://x"],
     )
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
@@ -241,7 +272,8 @@ def test_cli_throughput_sweep_end_to_end(tmp_path, monkeypatch):
 
 def test_cli_throughput_sweep_errors_without_candidate(tmp_path):
     result = CliRunner().invoke(
-        cli.main, ["throughput-sweep", str(tmp_path), "--base-url", "http://x"],
+        cli.main,
+        ["throughput-sweep", str(tmp_path), "--base-url", "http://x"],
     )
     assert result.exit_code == 1
     out = json.loads(result.output)

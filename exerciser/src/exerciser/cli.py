@@ -85,17 +85,25 @@ def main() -> None:
 @main.command("plan")
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
 @click.option("--service", default=None, help="Optional service label.")
-@click.option("--base-url", default=None,
-              help="Live service base URL; its OpenAPI is fetched for real shapes/paths.")
+@click.option(
+    "--base-url",
+    default=None,
+    help="Live service base URL; its OpenAPI is fetched for real shapes/paths.",
+)
 @click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
-@click.option("--seed", default=1729, show_default=True, help="Seed for deterministic input generation.")
+@click.option(
+    "--seed", default=1729, show_default=True, help="Seed for deterministic input generation."
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def plan_cmd(repo_path, service, base_url, store_dir, seed, verbose):
     _configure_logging(verbose)
     try:
         result = build_plan(
-            Path(repo_path), service=service, base_url=base_url,
-            store_dir=store_dir, seed=seed,
+            Path(repo_path),
+            service=service,
+            base_url=base_url,
+            store_dir=store_dir,
+            seed=seed,
             logger=logging.getLogger("exerciser.plan"),
         )
     except Exception as exc:  # surface as error JSON
@@ -110,18 +118,32 @@ def plan_cmd(repo_path, service, base_url, store_dir, seed, verbose):
 @click.option("--service", default=None, help="Optional service label.")
 @click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
 @click.option("--budget", default=200, show_default=True, help="Max probes across all rounds.")
-@click.option("--rounds", default=3, show_default=True,
-              help="No-improvement patience: stop after K rounds add no new symbol.")
+@click.option(
+    "--rounds",
+    default=3,
+    show_default=True,
+    help="No-improvement patience: stop after K rounds add no new symbol.",
+)
 @click.option("--seed", default=1729, show_default=True, help="Seed for strategy sampling.")
-@click.option("--settle", default=0.8, show_default=True,
-              help="Seconds to wait for spans to flush before re-joining coverage.")
+@click.option(
+    "--settle",
+    default=0.8,
+    show_default=True,
+    help="Seconds to wait for spans to flush before re-joining coverage.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settle, verbose):
     _configure_logging(verbose)
     try:
         result = run_exercise(
-            Path(repo_path), base_url, service=service, store_dir=store_dir,
-            budget=budget, rounds=rounds, seed=seed, settle_s=settle,
+            Path(repo_path),
+            base_url,
+            service=service,
+            store_dir=store_dir,
+            budget=budget,
+            rounds=rounds,
+            seed=seed,
+            settle_s=settle,
             logger=logging.getLogger("exerciser.run"),
         )
     except Exception as exc:
@@ -139,7 +161,9 @@ def profile_cmd(repo_path, service, store_dir, verbose):
     _configure_logging(verbose)
     try:
         result = build_profile(
-            Path(repo_path), service=service, store_dir=store_dir,
+            Path(repo_path),
+            service=service,
+            store_dir=store_dir,
             logger=logging.getLogger("exerciser.profile"),
         )
     except Exception as exc:
@@ -157,7 +181,9 @@ def regress_cmd(repo_path, base_url, service, verbose):
     _configure_logging(verbose)
     try:
         result = replay_suite(
-            Path(repo_path), base_url, service=service,
+            Path(repo_path),
+            base_url,
+            service=service,
             logger=logging.getLogger("exerciser.regress"),
         )
     except Exception as exc:
@@ -169,9 +195,12 @@ def regress_cmd(repo_path, base_url, service, verbose):
 @main.command("throughput-sweep")
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
 @click.option("--base-url", required=True, help="Live service base URL to sweep.")
-@click.option("--endpoint", default=None,
-              help="GET path to sweep (default: the parameter-free GET path with the "
-                   "most 2xx observations in results.jsonl).")
+@click.option(
+    "--endpoint",
+    default=None,
+    help="GET path to sweep (default: the parameter-free GET path with the "
+    "most 2xx observations in results.jsonl).",
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def throughput_sweep_cmd(repo_path, base_url, endpoint, verbose):
     """Concurrency sweep of one healthy GET endpoint + a USL fit.
@@ -187,12 +216,14 @@ def throughput_sweep_cmd(repo_path, base_url, endpoint, verbose):
         if endpoint is None:
             endpoint = pick_sweep_endpoint(store.read_jsonl(store.results_path(repo)))
             if endpoint is None:
-                _emit({
-                    "status": "error",
-                    "error": "no healthy parameter-free GET endpoint in results.jsonl "
-                             "(run `exerciser run` first, or pass --endpoint)",
-                    "repo_path": repo_path,
-                })
+                _emit(
+                    {
+                        "status": "error",
+                        "error": "no healthy parameter-free GET endpoint in results.jsonl "
+                        "(run `exerciser run` first, or pass --endpoint)",
+                        "repo_path": repo_path,
+                    }
+                )
                 return
         points = run_sweep(base_url, endpoint)
         fit = fit_usl([(p.concurrency, p.req_per_s) for p in points])

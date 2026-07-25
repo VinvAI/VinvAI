@@ -96,8 +96,12 @@ def measure_throughput(
 
     def _one(_: int) -> ProbeResult:
         return probe_fn(
-            base_url, method, path,
-            body=body, path_params=path_params or {}, query=query or {},
+            base_url,
+            method,
+            path,
+            body=body,
+            path_params=path_params or {},
+            query=query or {},
             exercise_id=exercise_id,
         )
 
@@ -148,9 +152,13 @@ def run_sweep(
     per_level = max(1, min(requests_per_level, _MAX_REQUESTS // max(1, len(levels))))
     return [
         measure_throughput(
-            base_url, method, endpoint,
-            requests=max(per_level, level), concurrency=level,
-            exercise_id=exercise_id, probe_fn=probe_fn,
+            base_url,
+            method,
+            endpoint,
+            requests=max(per_level, level),
+            concurrency=level,
+            exercise_id=exercise_id,
+            probe_fn=probe_fn,
         )
         for level in levels
     ]
@@ -170,10 +178,13 @@ def pick_sweep_endpoint(executions: Iterable[dict[str, Any]]) -> str | None:
         path = row.get("path")
         status = row.get("status")
         if (
-            isinstance(path, str) and path
-            and "{" not in path and "<" not in path
+            isinstance(path, str)
+            and path
+            and "{" not in path
+            and "<" not in path
             and str(row.get("method", "")).upper() == "GET"
-            and isinstance(status, int) and 200 <= status < 300
+            and isinstance(status, int)
+            and 200 <= status < 300
         ):
             counts[path] += 1
     if not counts:

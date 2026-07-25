@@ -69,9 +69,7 @@ def test_run_calibration_writes_header_line(
     assert row["ts"].startswith("2")  # iso-ish, matches other trace lines
 
 
-def test_run_calibration_disabled_by_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_run_calibration_disabled_by_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRACELENS_NO_CALIBRATION", "1")
     out = tmp_path / "trace.jsonl"
     assert (
@@ -200,9 +198,7 @@ def test_run_writes_calibration_header_and_summary(
         check=False,
     )
     assert r.returncode == 0, f"run failed: {r.stderr}"
-    rows = [
-        json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()
-    ]
+    rows = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
     headers = [row for row in rows if row.get("event") == "tracer_calibration"]
     assert len(headers) == 1, "exactly one calibration header per run"
     assert headers[0] == rows[0], "calibration is a HEADER — first line of the trace"

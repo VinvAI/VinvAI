@@ -150,7 +150,7 @@ def decayed_compact(
     keep: set[int] = set()
     for idxs in by_key.values():
         for k, i in enumerate(reversed(idxs)):  # k=0 is the newest for this key
-            if k == 0 or _row_unit(rows[i]) < decay ** k:
+            if k == 0 or _row_unit(rows[i]) < decay**k:
                 keep.add(i)
     kept = [rows[i] for i in sorted(keep)]
     return kept, len(rows) - len(kept)
@@ -159,7 +159,8 @@ def decayed_compact(
 def _results_key(row: dict[str, Any]) -> str:
     return json.dumps(
         [row.get("endpoint_id"), row.get("strategy"), input_fingerprint(row.get("input"))],
-        sort_keys=True, default=str,
+        sort_keys=True,
+        default=str,
     )
 
 
@@ -169,12 +170,14 @@ def _optimize_key(row: dict[str, Any]) -> str:
     if label:
         return str(label)
     opp = row.get("opportunity") or {}
-    return json.dumps([opp.get("kind"), opp.get("endpoint_id"), opp.get("endpoint")],
-                      sort_keys=True, default=str)
+    return json.dumps(
+        [opp.get("kind"), opp.get("endpoint_id"), opp.get("endpoint")], sort_keys=True, default=str
+    )
 
 
 def compact_state_ledger(
-    rows: list[dict[str, Any]], plan_api_ids: set[str],
+    rows: list[dict[str, Any]],
+    plan_api_ids: set[str],
 ) -> tuple[list[dict[str, Any]], int]:
     """Drop confirmed-cleaned rows and rows whose endpoint left the plan.
 
@@ -213,13 +216,19 @@ def compact_artifacts(
     log = logger or logging.getLogger(__name__)
     plan_api_ids = {str(ep.get("api_id")) for ep in plan.get("endpoints", [])}
 
-    targets: list[tuple[Path, Callable[[list[dict[str, Any]]], tuple[list[dict[str, Any]], int]]]] = [
+    targets: list[
+        tuple[Path, Callable[[list[dict[str, Any]]], tuple[list[dict[str, Any]], int]]]
+    ] = [
         (store.results_path(repo), lambda rows: decayed_compact(rows, _results_key)),
         (ledger_path(repo), lambda rows: compact_state_ledger(rows, plan_api_ids)),
-        (store.exercise_dir(repo) / "optimize.jsonl",
-         lambda rows: decayed_compact(rows, _optimize_key)),
-        (store.exercise_dir(repo) / "regress.jsonl",
-         lambda rows: decayed_compact(rows, lambda _r: "replay")),
+        (
+            store.exercise_dir(repo) / "optimize.jsonl",
+            lambda rows: decayed_compact(rows, _optimize_key),
+        ),
+        (
+            store.exercise_dir(repo) / "regress.jsonl",
+            lambda rows: decayed_compact(rows, lambda _r: "replay"),
+        ),
     ]
 
     dropped: dict[str, dict[str, int]] = {}
@@ -231,13 +240,11 @@ def compact_artifacts(
         kept, n_dropped = compactor(rows)
         if n_dropped > 0:
             store.write_jsonl(path, kept)
-        dropped[path.name] = {"before": len(rows), "after": len(kept),
-                              "dropped": n_dropped}
+        dropped[path.name] = {"before": len(rows), "after": len(kept), "dropped": n_dropped}
         parts.append(f"{path.name} {len(rows)}->{len(kept)} (-{n_dropped})")
 
     total = sum(d["dropped"] for d in dropped.values())
-    line = (f"compaction @{int(time.time())}: "
-            + (", ".join(parts) if parts else "no logs present"))
+    line = f"compaction @{int(time.time())}: " + (", ".join(parts) if parts else "no logs present")
     # Loud one-line artifact (atomic: tmp + rename, matching store's discipline).
     out = compaction_summary_path(repo)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -89,14 +89,22 @@ def _endpoint_profile(
     # Status / exception distribution.
     status_dist: dict[str, int] = {}
     for ex in ep_execs:
-        key = str(ex.get("status")) if ex.get("status") is not None else (ex.get("error") or "no-response")
+        key = (
+            str(ex.get("status"))
+            if ex.get("status") is not None
+            else (ex.get("error") or "no-response")
+        )
         status_dist[key] = status_dist.get(key, 0) + 1
 
     latencies = [float(ex["latency_ms"]) for ex in ep_execs if ex.get("latency_ms") is not None]
 
     cov = endpoint_coverage(
-        repo, api_id, service=service, store_dir=store_dir,
-        handler=handler, logger=logger,
+        repo,
+        api_id,
+        service=service,
+        store_dir=store_dir,
+        handler=handler,
+        logger=logger,
     )
 
     # Invariants over the SUCCESSFUL responses.
@@ -106,12 +114,14 @@ def _endpoint_profile(
         if ex.get("status_class") != "2xx-3xx":
             continue
         idx += 1
-        obs.append(Observation(
-            body=ex.get("body"),
-            output_size=ex.get("output_size", 0),
-            input_size=ex.get("input_size", 0),
-            call_index=idx,
-        ))
+        obs.append(
+            Observation(
+                body=ex.get("body"),
+                output_size=ex.get("output_size", 0),
+                input_size=ex.get("input_size", 0),
+                call_index=idx,
+            )
+        )
     invariants = learn_invariants(obs)
 
     return {
@@ -167,8 +177,15 @@ def build_profile(
     for api_id, ep_execs in sorted(by_ep.items()):
         method, path, handler = meta[api_id]
         prof = _endpoint_profile(
-            repo, ep_execs, api_id, method, path, handler,
-            service=service, store_dir=store_dir, logger=log,
+            repo,
+            ep_execs,
+            api_id,
+            method,
+            path,
+            handler,
+            service=service,
+            store_dir=store_dir,
+            logger=log,
         )
         profiles.append(prof)
         for inv in prof["invariants"]:
@@ -190,9 +207,14 @@ def build_profile(
     # dispatches as optimization episodes.
     result["opportunities"] = [o.to_json() for o in detect_opportunities(result)]
     store.write_json(store.profile_path(repo), result)
-    store.write_json(store.invariants_path(repo), {
-        "version": 1, "count": len(all_invariants), "invariants": all_invariants,
-    })
+    store.write_json(
+        store.invariants_path(repo),
+        {
+            "version": 1,
+            "count": len(all_invariants),
+            "invariants": all_invariants,
+        },
+    )
     store.profile_md_path(repo).write_text(render_profile_md(result), encoding="utf-8")
     result["output_file"] = str(store.profile_path(repo))
     result["report_file"] = str(store.profile_md_path(repo))
@@ -221,15 +243,19 @@ def render_profile_md(profile: dict[str, Any]) -> str:
             lines.append(f"- {status}: {n}")
         lines.append("")
         cov = p["coverage"]
-        lines.append(f"**Coverage** — {cov['covered']}/{cov['total']} symbols "
-                     f"({cov['pct']}%)"
-                     + (f", handler observed" if cov["handler_observed"] else ", handler NOT observed"))
+        lines.append(
+            f"**Coverage** — {cov['covered']}/{cov['total']} symbols "
+            f"({cov['pct']}%)"
+            + (", handler observed" if cov["handler_observed"] else ", handler NOT observed")
+        )
         if cov["uncovered"]:
             shown = ", ".join(cov["uncovered"][:10])
             more = "" if len(cov["uncovered"]) <= 10 else f" (+{len(cov['uncovered']) - 10} more)"
             lines.append(f"- uncovered: {shown}{more}")
         lines.append("")
-        lines.append(f"**Execution time** — P50 {p['latency']['p50_ms']}ms · P95 {p['latency']['p95_ms']}ms")
+        lines.append(
+            f"**Execution time** — P50 {p['latency']['p50_ms']}ms · P95 {p['latency']['p95_ms']}ms"
+        )
         lines.append("")
         if p["side_effects"]:
             lines.append("**Side effects**")
@@ -239,7 +265,9 @@ def render_profile_md(profile: dict[str, Any]) -> str:
         if p["invariants"]:
             lines.append("**Invariants**")
             for inv in p["invariants"]:
-                lines.append(f"- {inv['description']} (support {inv['support']}, "
-                             f"confidence {inv['confidence']})")
+                lines.append(
+                    f"- {inv['description']} (support {inv['support']}, "
+                    f"confidence {inv['confidence']})"
+                )
             lines.append("")
     return "\n".join(lines) + "\n"

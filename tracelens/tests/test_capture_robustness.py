@@ -43,8 +43,7 @@ def _write_target_project(root: Path, *, script_body: str) -> tuple[Path, Path]:
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("", encoding="utf-8")
     (pkg / "main.py").write_text(
-        "def work(item):\n"
-        "    return {'item': item}\n",
+        "def work(item):\n" "    return {'item': item}\n",
         encoding="utf-8",
     )
     script = proj / "app.py"
@@ -100,7 +99,10 @@ def _components(trace_path: Path) -> set[str]:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
-@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(
+    os.name == "posix" and os.geteuid() == 0,
+    reason="root ignores directory permissions",
+)
 def test_readonly_output_dir_is_one_clear_error(tmp_path: Path) -> None:
     proj, script = _write_target_project(tmp_path, script_body="print('hi')\n")
     ro = tmp_path / "ro"
@@ -119,7 +121,10 @@ def test_readonly_output_dir_is_one_clear_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
-@pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0, reason="root ignores directory permissions")
+@pytest.mark.skipif(
+    os.name == "posix" and os.geteuid() == 0,
+    reason="root ignores directory permissions",
+)
 def test_uncreatable_output_dir_is_one_clear_error(tmp_path: Path) -> None:
     proj, script = _write_target_project(tmp_path, script_body="print('hi')\n")
     ro = tmp_path / "ro"
@@ -229,9 +234,7 @@ def test_selfcheck_flags_proxy_provider(
 ) -> None:
     from opentelemetry import trace as otel_trace
 
-    monkeypatch.setattr(
-        otel_trace, "get_tracer_provider", lambda: otel_trace.ProxyTracerProvider()
-    )
+    monkeypatch.setattr(otel_trace, "get_tracer_provider", lambda: otel_trace.ProxyTracerProvider())
     out = tmp_path / "trace.jsonl"
     out.write_text("", encoding="utf-8")
     problems = run_mod._capture_selfcheck(str(out))
@@ -246,10 +249,7 @@ def test_selfcheck_warns_when_instrumented_but_zero_spans_exported(tmp_path: Pat
     proj, script = _write_target_project(
         tmp_path,
         script_body=(
-            "import time\n"
-            "from demopkg.main import work\n"
-            "work(1)\n"
-            "time.sleep(1.0)\n"
+            "import time\n" "from demopkg.main import work\n" "work(1)\n" "time.sleep(1.0)\n"
         ),
     )
     out = tmp_path / "trace.jsonl"
@@ -345,10 +345,7 @@ def test_smoke_summary_carries_capture_health(tmp_path: Path) -> None:
     proj, script = _write_target_project(
         tmp_path,
         script_body=(
-            "import time\n"
-            "from demopkg.main import work\n"
-            "work(1)\n"
-            "time.sleep(0.2)\n"
+            "import time\n" "from demopkg.main import work\n" "work(1)\n" "time.sleep(0.2)\n"
         ),
     )
     out = tmp_path / "trace.jsonl"

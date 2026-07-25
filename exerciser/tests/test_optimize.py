@@ -39,8 +39,13 @@ def test_noisy_no_effect_ci_includes_zero():
 
 
 def _ep_loo(api_id: str, p95: float, observed: bool = True) -> dict:
-    return {"api_id": api_id, "method": "GET", "path": f"/{api_id.lower()}",
-            "latency": {"p95_ms": p95}, "coverage": {"handler_observed": observed}}
+    return {
+        "api_id": api_id,
+        "method": "GET",
+        "path": f"/{api_id.lower()}",
+        "latency": {"p95_ms": p95},
+        "coverage": {"handler_observed": observed},
+    }
 
 
 def test_detect_opportunities_relative_outlier():
@@ -55,7 +60,9 @@ def test_detect_opportunities_relative_outlier():
 def test_detect_opportunities_local_fast_service():
     # The absolute-200ms bug: on a local service where everything is single-digit
     # ms, a 60ms endpoint IS the opportunity — the old floor returned [] forever.
-    profile = {"endpoints": [_ep_loo("A", 5.0), _ep_loo("B", 4.0), _ep_loo("C", 60.0), _ep_loo("D", 6.0)]}
+    profile = {
+        "endpoints": [_ep_loo("A", 5.0), _ep_loo("B", 4.0), _ep_loo("C", 60.0), _ep_loo("D", 6.0)]
+    }
     ops = detect_opportunities(profile)
     assert [o.endpoint_id for o in ops] == ["C"]
 
@@ -72,18 +79,28 @@ def test_detect_opportunities_needs_observed_handler_and_peers():
     profile = {"endpoints": [_ep_loo("A", 500.0), _ep_loo("B", 10.0, observed=False)]}
     assert detect_opportunities(profile) == []
 
+
 def _ep(api_id, path, p95, observed=True):
-    return {"api_id": api_id, "method": "GET", "path": path,
-            "latency": {"p95_ms": p95}, "coverage": {"handler_observed": observed}}
+    return {
+        "api_id": api_id,
+        "method": "GET",
+        "path": path,
+        "latency": {"p95_ms": p95},
+        "coverage": {"handler_observed": observed},
+    }
 
 
 def test_detect_opportunities_relative_to_trace():
     # 500ms vs a rest-of-trace median of ~10ms — an outlier at the default
     # factor 3.0. NO absolute ms threshold anywhere.
-    profile = {"endpoints": [
-        _ep("A", "/slow", 500.0), _ep("B", "/fast", 10.0),
-        _ep("C", "/fast2", 12.0), _ep("D", "/unseen", 900.0, observed=False),
-    ]}
+    profile = {
+        "endpoints": [
+            _ep("A", "/slow", 500.0),
+            _ep("B", "/fast", 10.0),
+            _ep("C", "/fast2", 12.0),
+            _ep("D", "/unseen", 900.0, observed=False),
+        ]
+    }
     ops = detect_opportunities(profile)
     assert [o.endpoint_id for o in ops] == ["A"]
     assert "median P95" in ops[0].detail
@@ -100,9 +117,14 @@ def test_detect_single_endpoint_has_no_reference():
 
 
 def test_outlier_factor_policy_override(tmp_path):
-    profile = {"repo": str(tmp_path), "endpoints": [
-        _ep("A", "/slow", 40.0), _ep("B", "/fast", 10.0), _ep("C", "/fast2", 12.0),
-    ]}
+    profile = {
+        "repo": str(tmp_path),
+        "endpoints": [
+            _ep("A", "/slow", 40.0),
+            _ep("B", "/fast", 10.0),
+            _ep("C", "/fast2", 12.0),
+        ],
+    }
     # Default factor 3.0: 40 >= 3 * median(10, 12) → detected.
     assert [o.endpoint_id for o in detect_opportunities(profile)] == ["A"]
     # The learned policy tightens the factor; detection reads it via the
@@ -164,8 +186,9 @@ def test_reverting_optimization_informs_the_retry():
     cmp = MetricComparison(100, 130, -0.30, -0.45, -0.15, False)
     d1 = decide_optimization("attempt-1", cmp, behavior_suite_passed=True)
     assert d1.action == "revert-and-retry"
-    d2 = decide_optimization("attempt-2", cmp, behavior_suite_passed=True,
-                             prior_attempts=d1.attempts)
+    d2 = decide_optimization(
+        "attempt-2", cmp, behavior_suite_passed=True, prior_attempts=d1.attempts
+    )
     # The second decision carries BOTH attempts' learning forward.
     assert len(d2.attempts) == 2
     assert d2.attempts[0].reverted and d2.attempts[1].reverted
@@ -174,17 +197,27 @@ def test_reverting_optimization_informs_the_retry():
 def test_record_and_read_episodes(tmp_path):
     """Episodes persist with CI evidence — the findings view's data source."""
     from exerciser.optimize import (
-        MetricComparison, Opportunity, OptimizeAttempt, OptimizeDecision,
-        read_episodes, record_episode,
+        MetricComparison,
+        Opportunity,
+        OptimizeAttempt,
+        OptimizeDecision,
+        read_episodes,
+        record_episode,
     )
-    opp = Opportunity("latency-p95", "GET_items", "GET /items",
-                      "P95 240ms exceeds 200ms", "p95_ms", 240.0)
+
+    opp = Opportunity(
+        "latency-p95", "GET_items", "GET /items", "P95 240ms exceeds 200ms", "p95_ms", 240.0
+    )
     cmp_ = MetricComparison(240.0, 130.0, 0.46, 0.31, 0.58, True)
-    dec = OptimizeDecision("accept", "significant", "", [
-        OptimizeAttempt("add index on items.owner_id", cmp_, True, False, ""),
-    ])
-    record_episode(tmp_path, opp, dec,
-                   files_changed=["app/crud.py"], label="items index")
+    dec = OptimizeDecision(
+        "accept",
+        "significant",
+        "",
+        [
+            OptimizeAttempt("add index on items.owner_id", cmp_, True, False, ""),
+        ],
+    )
+    record_episode(tmp_path, opp, dec, files_changed=["app/crud.py"], label="items index")
     eps = read_episodes(tmp_path)
     assert len(eps) == 1
     assert eps[0]["action"] == "accept"

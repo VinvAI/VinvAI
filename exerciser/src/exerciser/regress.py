@@ -41,7 +41,8 @@ def _suite_from_results(executions: list[dict[str, Any]]) -> list[dict[str, Any]
             continue
         key = json.dumps(
             [ex["endpoint_id"], ex["strategy"], inp.get("path_params", {}), inp.get("query")],
-            sort_keys=True, default=str,
+            sort_keys=True,
+            default=str,
         )
         probe_id = hashlib.sha256(key.encode()).hexdigest()[:16]
         seen[probe_id] = {
@@ -63,7 +64,9 @@ def _suite_from_results(executions: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _fresh_auth_headers(
-    repo: Path, base_url: str, probe_fn: ProbeFn,
+    repo: Path,
+    base_url: str,
+    probe_fn: ProbeFn,
 ) -> list[dict[str, str]]:
     """Re-capture live credentials by replaying the plan's scenario SETUP chains.
 
@@ -83,15 +86,21 @@ def _fresh_auth_headers(
             steps = []
             for s in setup:
                 method, path = _split_endpoint(s.get("endpoint", ""))
-                steps.append({
-                    "method": method, "path": path,
-                    "inputs": s.get("inputs") or {},
-                    "capture": s.get("capture") or {},
-                    "expect": {"status": "2xx"},
-                })
+                steps.append(
+                    {
+                        "method": method,
+                        "path": path,
+                        "inputs": s.get("inputs") or {},
+                        "capture": s.get("capture") or {},
+                        "expect": {"status": "2xx"},
+                    }
+                )
             res = run_scenario(
-                base_url, "auth-refresh", steps,
-                exercise_id="vinv-regress-auth", probe_fn=probe_fn,
+                base_url,
+                "auth-refresh",
+                steps,
+                exercise_id="vinv-regress-auth",
+                probe_fn=probe_fn,
             )
             template_steps = steps + [{"inputs": splan.get("inputs") or {}}]
             for hdrs in _resolved_auth_headers(template_steps, res.variables):
@@ -125,8 +134,7 @@ def replay_suite(
 
     # Fresh credentials for authed cases (captured live, never from disk).
     fresh_auth = (
-        _fresh_auth_headers(repo, base_url, probe_fn)
-        if any(c.get("auth") for c in suite) else []
+        _fresh_auth_headers(repo, base_url, probe_fn) if any(c.get("auth") for c in suite) else []
     )
     auth_skipped = 0
 
@@ -138,36 +146,45 @@ def replay_suite(
             auth_skipped += 1  # credentials not reproducible right now
             continue
         result = probe_fn(
-            base_url, case["method"], case["path"],
+            base_url,
+            case["method"],
+            case["path"],
             body=inp.get("body"),
             path_params=inp.get("path_params") or {},
             query=inp.get("query") or {},
             headers=fresh_auth[0] if case.get("auth") else None,
             exercise_id=exercise_id,
         )
-        observations.append({
-            "probeId": case["probeId"],
-            "endpointId": case["endpoint_id"],
-            "method": case["method"],
-            "path": case["path"],
-            "httpStatus": result.status,
-            "handler": case.get("handler"),
-            "shapeHash": result.shape_hash,
-        })
+        observations.append(
+            {
+                "probeId": case["probeId"],
+                "endpointId": case["endpoint_id"],
+                "method": case["method"],
+                "path": case["path"],
+                "httpStatus": result.status,
+                "handler": case.get("handler"),
+                "shapeHash": result.shape_hash,
+            }
+        )
         diff = _case_diff(case, result, latency_regression_factor)
         if diff and diff["kind"] == "perf":
             diff = _confirm_perf_diff(
-                case, base_url, latency_regression_factor, probe_fn, exercise_id,
+                case,
+                base_url,
+                latency_regression_factor,
+                probe_fn,
+                exercise_id,
                 headers=fresh_auth[0] if case.get("auth") else None,
             )
-        if diff and diff["kind"] == "behavior" and (
-            state.input_values(inp) & planted
-        ):
+        if diff and diff["kind"] == "behavior" and (state.input_values(inp) & planted):
             # The replayed input contains data the exerciser planted in an
             # earlier run — the world changed, not the code. Report it as
             # drift; the next `run` re-goldens the baseline (newest wins).
-            diff = {**diff, "kind": "environment",
-                    "detail": diff["detail"] + " [input matches engine-planted state]"}
+            diff = {
+                **diff,
+                "kind": "environment",
+                "detail": diff["detail"] + " [input matches engine-planted state]",
+            }
         if diff:
             diffs.append(diff)
 
@@ -188,8 +205,9 @@ def replay_suite(
         "same": sum(1 for v in verdicts.values() if v["verdict"] == "same"),
         "diffs": diffs,
     }
-    log.info("regress: %d cases, %d degraded, %d diffs",
-             len(suite), summary["degraded"], len(diffs))
+    log.info(
+        "regress: %d cases, %d degraded, %d diffs", len(suite), summary["degraded"], len(diffs)
+    )
     # Durable history: every replay appends its summary, so the findings view
     # (and any agent) can see diff kinds trend across runs, not just the last.
     store.append_jsonl(
@@ -223,7 +241,9 @@ def _confirm_perf_diff(
     latencies: list[float] = []
     for _ in range(replays):
         res = probe_fn(
-            base_url, case["method"], case["path"],
+            base_url,
+            case["method"],
+            case["path"],
             body=inp.get("body"),
             path_params=inp.get("path_params") or {},
             query=inp.get("query") or {},
@@ -242,15 +262,19 @@ def _confirm_perf_diff(
             "kind": "perf",
             "endpoint": f"{case['method']} {case['path']}",
             "input_class": case["input_class"],
-            "detail": (f"latency {prev}ms → median {median}ms over "
-                       f"{len(latencies)} replays (95% CI low {round(ci_low, 1)}ms; "
-                       f">{latency_factor}x)"),
+            "detail": (
+                f"latency {prev}ms → median {median}ms over "
+                f"{len(latencies)} replays (95% CI low {round(ci_low, 1)}ms; "
+                f">{latency_factor}x)"
+            ),
         }
     return None
 
 
 def _case_diff(
-    case: dict[str, Any], result: ProbeResult, latency_factor: float,
+    case: dict[str, Any],
+    result: ProbeResult,
+    latency_factor: float,
 ) -> dict[str, Any] | None:
     """One replay case's diff vs. what run recorded, or None when unchanged."""
     exp_status = case["expected_status"]

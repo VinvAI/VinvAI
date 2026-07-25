@@ -57,6 +57,7 @@ _BOOTSTRAP_N = 2000
 
 # ---- learned policy overrides ------------------------------------------------
 
+
 def policy_path(repo: Path) -> Path:
     return store.exercise_dir(repo) / "policy.json"
 
@@ -167,13 +168,13 @@ def bootstrap_median_ci(
     rng = random.Random(f"median {seed}")
     n = len(samples)
     stats = sorted(
-        statistics.median([samples[rng.randrange(n)] for _ in range(n)])
-        for _ in range(resamples)
+        statistics.median([samples[rng.randrange(n)] for _ in range(n)]) for _ in range(resamples)
     )
     return stats[int(0.025 * len(stats))], stats[min(len(stats) - 1, int(0.975 * len(stats)))]
 
 
 # ---- opportunity detection from a profile ----------------------------------
+
 
 @dataclass
 class Opportunity:
@@ -229,7 +230,9 @@ def detect_opportunities(
         repo = profile.get("repo")
     if outlier_factor is None:
         outlier_factor = policy_value(
-            repo, "optimize.outlier_factor", DEFAULT_OUTLIER_FACTOR,
+            repo,
+            "optimize.outlier_factor",
+            DEFAULT_OUTLIER_FACTOR,
         )
     eligible: list[tuple[dict[str, Any], float]] = []
     for ep in profile.get("endpoints", []):
@@ -250,17 +253,19 @@ def detect_opportunities(
                 mad = statistics.median([abs(v - med) for v in others])
                 threshold = max(threshold, med + 3 * 1.4826 * mad)
             if p95 >= threshold:
-                out.append(Opportunity(
-                    kind="latency-p95",
-                    endpoint_id=ep["api_id"],
-                    endpoint=f"{ep['method']} {ep['path']}",
-                    detail=(
-                        f"P95 latency {p95}ms is {p95 / med:.1f}x the median P95 of the "
-                        f"service's other endpoints ({round(med, 1)}ms)"
-                    ),
-                    metric="p95_ms",
-                    value=p95,
-                ))
+                out.append(
+                    Opportunity(
+                        kind="latency-p95",
+                        endpoint_id=ep["api_id"],
+                        endpoint=f"{ep['method']} {ep['path']}",
+                        detail=(
+                            f"P95 latency {p95}ms is {p95 / med:.1f}x the median P95 of the "
+                            f"service's other endpoints ({round(med, 1)}ms)"
+                        ),
+                        metric="p95_ms",
+                        value=p95,
+                    )
+                )
     out.sort(key=lambda o: -o.value)
     if repo is not None:
         ceiling = _throughput_ceiling_opportunity(profile, repo)
@@ -278,7 +283,8 @@ def _as_float(value: Any) -> float | None:
 
 
 def _throughput_ceiling_opportunity(
-    profile: dict[str, Any], repo: Path | str,
+    profile: dict[str, Any],
+    repo: Path | str,
 ) -> Opportunity | None:
     """The throughput-ceiling opportunity from the sweep artifact, if earned.
 
@@ -308,8 +314,11 @@ def _throughput_ceiling_opportunity(
     if None in (sigma, kappa, r2, knee, peak) or kappa <= 0:
         return None
     swept = [
-        c for p in doc.get("points", []) if isinstance(p, dict)
-        for c in [_as_float(p.get("concurrency"))] if c is not None
+        c
+        for p in doc.get("points", [])
+        if isinstance(p, dict)
+        for c in [_as_float(p.get("concurrency"))]
+        if c is not None
     ]
     if not swept or not (min(swept) <= knee <= max(swept)):
         return None  # the ceiling would be an extrapolation, not an observation
@@ -322,8 +331,10 @@ def _throughput_ceiling_opportunity(
     # "METHOD path" stands in when the sweep target isn't in the profile.
     endpoint_id = next(
         (
-            ep["api_id"] for ep in profile.get("endpoints", [])
-            if ep.get("path") == path and str(ep.get("method", "")).upper() == "GET"
+            ep["api_id"]
+            for ep in profile.get("endpoints", [])
+            if ep.get("path") == path
+            and str(ep.get("method", "")).upper() == "GET"
             and ep.get("api_id")
         ),
         endpoint,
@@ -344,6 +355,7 @@ def _throughput_ceiling_opportunity(
 
 
 # ---- revert-learn-retry decision -------------------------------------------
+
 
 @dataclass
 class OptimizeAttempt:
@@ -424,12 +436,14 @@ def decide_optimization(
         return OptimizeDecision(
             "revert-and-stop",
             f"reverted after {attempt_no} attempts without an accepted improvement",
-            learning, attempts,
+            learning,
+            attempts,
         )
     return OptimizeDecision("revert-and-retry", learning, learning, attempts)
 
 
 # ---- durable episode log -----------------------------------------------------
+
 
 def episode_log_path(repo: Path) -> Path:
     return store.exercise_dir(repo) / "optimize.jsonl"
@@ -452,15 +466,20 @@ def record_episode(
     runner) invoke it once per finished episode.
     """
     opp = opportunity.to_json() if isinstance(opportunity, Opportunity) else dict(opportunity)
-    store.append_jsonl(episode_log_path(repo), [{
-        "at": time.time(),
-        "label": label or opp.get("endpoint") or opp.get("endpoint_id"),
-        "opportunity": opp,
-        "action": decision.action,
-        "reason": decision.reason,
-        "attempts": [a.to_json() for a in decision.attempts],
-        "files_changed": files_changed or [],
-    }])
+    store.append_jsonl(
+        episode_log_path(repo),
+        [
+            {
+                "at": time.time(),
+                "label": label or opp.get("endpoint") or opp.get("endpoint_id"),
+                "opportunity": opp,
+                "action": decision.action,
+                "reason": decision.reason,
+                "attempts": [a.to_json() for a in decision.attempts],
+                "files_changed": files_changed or [],
+            }
+        ],
+    )
 
 
 def read_episodes(repo: Path) -> list[dict[str, Any]]:

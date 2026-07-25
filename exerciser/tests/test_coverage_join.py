@@ -31,14 +31,30 @@ def _write_trace(repo: Path, components: list[str]) -> None:
     tdir.mkdir(parents=True, exist_ok=True)
     lines = []
     for i, comp in enumerate(components):
-        lines.append(json.dumps({
-            "event": "enter", "component": comp, "request_id": f"r{i}",
-            "thread_id": 1, "depth": 0,
-        }))
-        lines.append(json.dumps({
-            "event": "exit", "component": comp, "request_id": f"r{i}",
-            "thread_id": 1, "depth": 0, "duration_ms": 12.5, "status": "ok",
-        }))
+        lines.append(
+            json.dumps(
+                {
+                    "event": "enter",
+                    "component": comp,
+                    "request_id": f"r{i}",
+                    "thread_id": 1,
+                    "depth": 0,
+                }
+            )
+        )
+        lines.append(
+            json.dumps(
+                {
+                    "event": "exit",
+                    "component": comp,
+                    "request_id": f"r{i}",
+                    "thread_id": 1,
+                    "depth": 0,
+                    "duration_ms": 12.5,
+                    "status": "ok",
+                }
+            )
+        )
     (tdir / "trace.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -131,16 +147,30 @@ def test_reprofile_marks_planted_case_observed(tmp_path, monkeypatch):
     (repo / ".vinv" / "exercise").mkdir(parents=True)
     rows = []
     for i, latency in enumerate([12.0, 30.5, 288.0]):
-        rows.append({
-            "round": 1, "endpoint_id": "GET_api_v1_items_", "api_id": "GET_api_v1_items_",
-            "method": "GET", "path": "/api/v1/items/", "handler": "read_items",
-            "strategy": "schema_valid", "provenance": "schema", "input_class": "valid",
-            "input": {"body": None, "path_params": {}, "query": {}},
-            "expected": "2xx", "status": 200, "status_class": "2xx-3xx",
-            "latency_ms": latency, "shape_hash": "json:items", "error": None,
-            "request_id": None, "output_size": 10, "input_size": 1,
-            "body": {"count": i},
-        })
+        rows.append(
+            {
+                "round": 1,
+                "endpoint_id": "GET_api_v1_items_",
+                "api_id": "GET_api_v1_items_",
+                "method": "GET",
+                "path": "/api/v1/items/",
+                "handler": "read_items",
+                "strategy": "schema_valid",
+                "provenance": "schema",
+                "input_class": "valid",
+                "input": {"body": None, "path_params": {}, "query": {}},
+                "expected": "2xx",
+                "status": 200,
+                "status_class": "2xx-3xx",
+                "latency_ms": latency,
+                "shape_hash": "json:items",
+                "error": None,
+                "request_id": None,
+                "output_size": 10,
+                "input_size": 1,
+                "body": {"count": i},
+            }
+        )
     store.write_jsonl(store.results_path(repo), rows)
     _write_trace(repo, ["app.api.routes.items.read_items"])
 
@@ -165,20 +195,38 @@ def test_legacy_rows_do_not_pin_handler_to_none(tmp_path, monkeypatch):
     def fake_endpoint_profile(repo, ep_execs, api_id, method, path, handler, **kw):
         seen[api_id] = handler
         return {
-            "api_id": api_id, "method": method, "path": path, "handler": handler,
+            "api_id": api_id,
+            "method": method,
+            "path": path,
+            "handler": handler,
             "latency": {"p50_ms": 1.0, "p95_ms": 2.0},
-            "inputs_explored": {}, "status_distribution": {},
-            "status_classes": {}, "coverage": {"covered": 0, "total": 0, "pct": 0.0,
-                                               "uncovered": [], "handler_observed": False},
-            "side_effects": [], "invariants": [],
+            "inputs_explored": {},
+            "status_distribution": {},
+            "status_classes": {},
+            "coverage": {
+                "covered": 0,
+                "total": 0,
+                "pct": 0.0,
+                "uncovered": [],
+                "handler_observed": False,
+            },
+            "side_effects": [],
+            "invariants": [],
         }
 
     monkeypatch.setattr(profile_mod, "_endpoint_profile", fake_endpoint_profile)
     from exerciser import store
+
     rows = [
         {"endpoint_id": "GET_x", "method": "GET", "path": "/x", "status": 200, "latency_ms": 1.0},
-        {"endpoint_id": "GET_x", "method": "GET", "path": "/x", "status": 200,
-         "latency_ms": 1.0, "handler": "x-read_x"},
+        {
+            "endpoint_id": "GET_x",
+            "method": "GET",
+            "path": "/x",
+            "status": 200,
+            "latency_ms": 1.0,
+            "handler": "x-read_x",
+        },
     ]
     store.append_jsonl(store.results_path(tmp_path), rows)
     profile_mod.build_profile(tmp_path)
@@ -190,11 +238,21 @@ def test_display_form_handler_normalizes_to_trace_symbol(tmp_path):
     trace component '…routes.items.read_items'."""
     import json as _json
     from exerciser.coverage import handler_observed_in_trace
+
     cap = tmp_path / ".vinv" / "captures" / "s0" / "app"
     cap.mkdir(parents=True)
-    (cap / "trace.jsonl").write_text(_json.dumps({
-        "event": "enter", "component": "app.api.routes.items.read_items",
-        "request_id": "R", "thread_id": 1,
-    }) + "\n")
+    (cap / "trace.jsonl").write_text(
+        _json.dumps(
+            {
+                "event": "enter",
+                "component": "app.api.routes.items.read_items",
+                "request_id": "R",
+                "thread_id": 1,
+            }
+        )
+        + "\n"
+    )
     assert handler_observed_in_trace(tmp_path, "items-read_items()", trace=str(cap / "trace.jsonl"))
-    assert not handler_observed_in_trace(tmp_path, "items-missing()", trace=str(cap / "trace.jsonl"))
+    assert not handler_observed_in_trace(
+        tmp_path, "items-missing()", trace=str(cap / "trace.jsonl")
+    )

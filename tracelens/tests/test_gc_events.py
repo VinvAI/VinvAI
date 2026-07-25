@@ -38,11 +38,7 @@ def _clean_observer() -> Any:
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
-    return [
-        json.loads(ln)
-        for ln in path.read_text(encoding="utf-8").splitlines()
-        if ln.strip()
-    ]
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
 
 def _pauses(path: Path) -> list[dict[str, Any]]:
@@ -86,9 +82,9 @@ def test_request_id_threaded_when_in_scope(tmp_path: Path) -> None:
         otel_context.detach(clean)
     gc_events.uninstall()
     pauses = _pauses(out)
-    assert any(p.get("request_id") == "req-under-gc" for p in pauses), (
-        "collections during an active request must carry its request_id"
-    )
+    assert any(
+        p.get("request_id") == "req-under-gc" for p in pauses
+    ), "collections during an active request must carry its request_id"
     # Outside any request scope the field is OMITTED (the clean-context collect
     # above guarantees at least one such pause), and when present it is never
     # null or empty.
@@ -125,8 +121,18 @@ def test_install_failure_is_loud_not_blocking(tmp_path: Path) -> None:
 def test_summary_accounts_gc_without_polluting_stats(tmp_path: Path) -> None:
     log = tmp_path / "t.jsonl"
     rows = [
-        {"event": "gc_pause", "ts": "2026-07-25T00:00:00.000Z", "duration_ms": 1.5, "generation": 0},
-        {"event": "gc_pause", "ts": "2026-07-25T00:00:00.500Z", "duration_ms": 2.5, "generation": 2},
+        {
+            "event": "gc_pause",
+            "ts": "2026-07-25T00:00:00.000Z",
+            "duration_ms": 1.5,
+            "generation": 0,
+        },
+        {
+            "event": "gc_pause",
+            "ts": "2026-07-25T00:00:00.500Z",
+            "duration_ms": 2.5,
+            "generation": 2,
+        },
         {
             "ts": "2026-07-25T00:00:01.000Z",
             "request_id": "r1",
@@ -173,9 +179,7 @@ def test_run_emits_gc_pause_lines(tmp_path: Path) -> None:
     pkg = proj / "demopkg"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("", encoding="utf-8")
-    (pkg / "main.py").write_text(
-        "def work(item):\n    return {'item': item}\n", encoding="utf-8"
-    )
+    (pkg / "main.py").write_text("def work(item):\n    return {'item': item}\n", encoding="utf-8")
     script = proj / "app.py"
     script.write_text(
         "import gc\nfrom demopkg.main import work\nwork(1)\ngc.collect()\n",

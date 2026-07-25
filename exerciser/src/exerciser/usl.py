@@ -85,7 +85,9 @@ def _linspace(lo: float, hi: float, n: int) -> list[float]:
 
 
 def _sse_and_lambda(
-    pts: Sequence[tuple[float, float]], sigma: float, kappa: float,
+    pts: Sequence[tuple[float, float]],
+    sigma: float,
+    kappa: float,
 ) -> tuple[float, float]:
     """Least-squares error at (sigma, kappa) with the closed-form lambda*.
 
@@ -112,7 +114,10 @@ def fit_usl(points: Iterable[tuple[float, float]]) -> USLFit | None:
     pts = [
         (float(n), float(y))
         for n, y in points
-        if float(n) >= 1.0 and float(y) > 0.0 and math.isfinite(float(n)) and math.isfinite(float(y))
+        if float(n) >= 1.0
+        and float(y) > 0.0
+        and math.isfinite(float(n))
+        and math.isfinite(float(y))
     ]
     if len({n for n, _ in pts}) < 3:
         return None  # three parameters need at least three distinct supports

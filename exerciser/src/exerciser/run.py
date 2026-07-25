@@ -56,27 +56,31 @@ def _candidates_for_endpoint(ep: dict[str, Any]) -> dict[str, list[Candidate]]:
         strat = inp.get("strategy")
         if strat not in grouped:
             continue
-        grouped[strat].append(Candidate(
-            strategy=strat,
-            provenance=inp.get("provenance", "schema"),
-            input_class=inp.get("class", strat),
-            body=inp.get("body"),
-            path_params=inp.get("path_params") or {},
-            query=inp.get("query") or {},
-            headers=inp.get("headers") or {},
-        ))
+        grouped[strat].append(
+            Candidate(
+                strategy=strat,
+                provenance=inp.get("provenance", "schema"),
+                input_class=inp.get("class", strat),
+                body=inp.get("body"),
+                path_params=inp.get("path_params") or {},
+                query=inp.get("query") or {},
+                headers=inp.get("headers") or {},
+            )
+        )
     # Semantic inputs (from a stored harness reply) feed the 'semantic' arm.
     for splan in ep.get("semantic_inputs", []) or []:
         inputs = splan.get("inputs") or {}
-        grouped["semantic"].append(Candidate(
-            strategy="semantic",
-            provenance="semantic",
-            input_class="semantic",
-            body=inputs.get("body"),
-            path_params=inputs.get("path_params") or {},
-            query=inputs.get("query") or {},
-            headers=inputs.get("headers") or {},
-        ))
+        grouped["semantic"].append(
+            Candidate(
+                strategy="semantic",
+                provenance="semantic",
+                input_class="semantic",
+                body=inputs.get("body"),
+                path_params=inputs.get("path_params") or {},
+                query=inputs.get("query") or {},
+                headers=inputs.get("headers") or {},
+            )
+        )
     return grouped
 
 
@@ -139,9 +143,7 @@ def run_exercise(
     grouped_by_ep: dict[str, dict[str, list[Candidate]]] = {}
     covered_ids_by_ep: dict[str, set[str]] = {}
     # Handler symbol per endpoint, for the trace-primary handler_observed join.
-    handler_by_id: dict[str, str | None] = {
-        e["api_id"]: e.get("handler") for e in endpoints
-    }
+    handler_by_id: dict[str, str | None] = {e["api_id"]: e.get("handler") for e in endpoints}
     for ep in endpoints:
         api_id = ep["api_id"]
         grouped = _candidates_for_endpoint(ep)
@@ -150,7 +152,8 @@ def run_exercise(
             continue
         grouped_by_ep[api_id] = grouped
         bandits[api_id] = seed_from_prior(
-            EndpointBandit(strategies=avail), priors.get(api_id),
+            EndpointBandit(strategies=avail),
+            priors.get(api_id),
         )
         covered_ids_by_ep[api_id] = set()
 
@@ -168,14 +171,22 @@ def run_exercise(
     # ledger rows actually exist.
     def _early_auth_headers() -> list[dict[str, str]]:
         from .regress import _fresh_auth_headers  # lazy: avoids an import cycle
+
         return _fresh_auth_headers(repo, base_url, probe_fn)
 
     reattempt = state.reattempt_teardown(
-        repo, endpoints, base_url, probe_fn, auth_headers_fn=_early_auth_headers,
+        repo,
+        endpoints,
+        base_url,
+        probe_fn,
+        auth_headers_fn=_early_auth_headers,
     )
     if reattempt["reattempted"]:
-        log.info("state ledger: re-attempted teardown of %d stale row(s), cleaned %d",
-                 reattempt["reattempted"], reattempt["cleaned"])
+        log.info(
+            "state ledger: re-attempted teardown of %d stale row(s), cleaned %d",
+            reattempt["reattempted"],
+            reattempt["cleaned"],
+        )
 
     executions: list[dict[str, Any]] = []
     spent = 0
@@ -204,7 +215,9 @@ def run_exercise(
             cursor[(api_id, strategy)] = idx + 1
 
             result = probe_fn(
-                base_url, ep["method"], ep["path"],
+                base_url,
+                ep["method"],
+                ep["path"],
                 body=candidate.body,
                 path_params=candidate.path_params,
                 query=candidate.query,
@@ -212,15 +225,24 @@ def run_exercise(
                 exercise_id=exercise_id,
             )
             spent += 1
-            executions.append(_execution_row(
-                round_no, ep, candidate, result,
-            ))
+            executions.append(
+                _execution_row(
+                    round_no,
+                    ep,
+                    candidate,
+                    result,
+                )
+            )
         # After the round, settle then re-join coverage for every active endpoint.
         if settle_s > 0:
             time.sleep(settle_s)
         for api_id in list(active_ids):
             cov = coverage_fn(
-                repo, api_id, service=service, store_dir=store_dir, logger=log,
+                repo,
+                api_id,
+                service=service,
+                store_dir=store_dir,
+                logger=log,
                 handler=handler_by_id.get(api_id),
             )
             new_ids = set(cov.get("covered_ids", set())) - covered_ids_by_ep[api_id]
@@ -235,14 +257,24 @@ def run_exercise(
             no_improve_rounds += 1
         else:
             no_improve_rounds = 0
-        log.info("round %d: %d probes spent, %d new symbols (no-improve %d/%d)",
-                 round_no, spent, round_new_symbols, no_improve_rounds, rounds)
+        log.info(
+            "round %d: %d probes spent, %d new symbols (no-improve %d/%d)",
+            round_no,
+            spent,
+            round_new_symbols,
+            no_improve_rounds,
+            rounds,
+        )
 
     # Stateful sequential scenarios: any endpoint whose semantic plan carries
     # SETUP steps (authored by the harness) is a multi-step flow — execute it with
     # variable capture/substitution so token/id state flows between steps.
     scenarios, live_auth_headers = _run_scenarios(
-        endpoints, base_url, exercise_id, probe_fn, log,
+        endpoints,
+        base_url,
+        exercise_id,
+        probe_fn,
+        log,
     )
     # A scenario whose SETUP failed (or whose endpoint step bounced on auth) is
     # EXPIRED: its harness-authored reply no longer matches the environment.
@@ -265,14 +297,22 @@ def run_exercise(
     # flips DELETE/PATCH-by-id endpoints from 0 coverage to real coverage.
     # Runs BEFORE persistence so its rows feed coverage, issues, and baselines.
     ledger_ids = sorted(
-        {v for row in state.record_creations(executions)
-         for v in row.get("response_values", [])}
-        | {v for row in store.read_jsonl(state.ledger_path(repo))
-           if not row.get("cleaned") for v in row.get("response_values", [])}
+        {v for row in state.record_creations(executions) for v in row.get("response_values", [])}
+        | {
+            v
+            for row in store.read_jsonl(state.ledger_path(repo))
+            if not row.get("cleaned")
+            for v in row.get("response_values", [])
+        }
     )
     authed_rows = _auth_sweep(
-        endpoints, base_url, exercise_id, probe_fn,
-        live_auth_headers, ledger_ids, log,
+        endpoints,
+        base_url,
+        exercise_id,
+        probe_fn,
+        live_auth_headers,
+        ledger_ids,
+        log,
     )
     executions.extend(authed_rows)
 
@@ -282,22 +322,31 @@ def run_exercise(
     else:
         store.write_jsonl(store.results_path(repo), executions)
     if scenarios:
-        store.write_json(store.exercise_dir(repo) / "scenarios.json",
-                         {"version": 1, "scenarios": scenarios})
+        store.write_json(
+            store.exercise_dir(repo) / "scenarios.json", {"version": 1, "scenarios": scenarios}
+        )
 
     # Coverage snapshot for the summary.
     coverage_rows = []
     for api_id in grouped_by_ep:
-        cov = coverage_fn(repo, api_id, service=service, store_dir=store_dir, logger=log,
-                          handler=handler_by_id.get(api_id))
-        coverage_rows.append({
-            "api_id": api_id,
-            "covered": cov.get("covered", 0),
-            "total": cov.get("total", 0),
-            "pct": cov.get("pct", 0.0),
-            "uncovered": cov.get("uncovered", []),
-            "handler_observed": cov.get("handler_observed", False),
-        })
+        cov = coverage_fn(
+            repo,
+            api_id,
+            service=service,
+            store_dir=store_dir,
+            logger=log,
+            handler=handler_by_id.get(api_id),
+        )
+        coverage_rows.append(
+            {
+                "api_id": api_id,
+                "covered": cov.get("covered", 0),
+                "total": cov.get("total", 0),
+                "pct": cov.get("pct", 0.0),
+                "uncovered": cov.get("uncovered", []),
+                "handler_observed": cov.get("handler_observed", False),
+            }
+        )
 
     # Failure clustering → issues.json (deterministic probes + scenario failures).
     clusters = cluster_failures(executions + scenario_failures)
@@ -308,10 +357,17 @@ def run_exercise(
     # Whatever stays uncleaned is acknowledged pollution — regress reads the
     # ledger to tell environment drift from real behavior regressions.
     creations = state.record_creations(executions)
-    cleaned = state.attempt_teardown(
-        creations, endpoints, base_url, probe_fn,
-        auth_headers=live_auth_headers,
-    ) if creations else 0
+    cleaned = (
+        state.attempt_teardown(
+            creations,
+            endpoints,
+            base_url,
+            probe_fn,
+            auth_headers=live_auth_headers,
+        )
+        if creations
+        else 0
+    )
     state.append_ledger(repo, creations)
 
     # Golden behavior baselines from the healthy executions.
@@ -343,8 +399,12 @@ def run_exercise(
         "auth_credential_sets": len(live_auth_headers),
         "state_created": len(creations),
         "state_cleaned": cleaned,
-        "baseline_recorded": sum(1 for v in baseline_verdicts.values() if v["verdict"] == "recorded"),
-        "baseline_degraded": sum(1 for v in baseline_verdicts.values() if v["verdict"] == "degraded"),
+        "baseline_recorded": sum(
+            1 for v in baseline_verdicts.values() if v["verdict"] == "recorded"
+        ),
+        "baseline_degraded": sum(
+            1 for v in baseline_verdicts.values() if v["verdict"] == "degraded"
+        ),
         "bandit": summary["pooled"],
         "results_file": str(store.results_path(repo)),
         "issues_file": str(store.issues_path(repo)),
@@ -373,25 +433,32 @@ def _run_scenarios(
             steps: list[dict[str, Any]] = []
             for s in splan.get("setup", []) or []:
                 method, path = _split_endpoint(s.get("endpoint", ""))
-                steps.append({
-                    "method": method or ep["method"],
-                    "path": path or ep["path"],
-                    "inputs": s.get("inputs") or {},
-                    "capture": s.get("capture") or {},
-                    "expect": {"status": "2xx"},
-                })
+                steps.append(
+                    {
+                        "method": method or ep["method"],
+                        "path": path or ep["path"],
+                        "inputs": s.get("inputs") or {},
+                        "capture": s.get("capture") or {},
+                        "expect": {"status": "2xx"},
+                    }
+                )
             # The endpoint itself as the final step.
-            steps.append({
-                "method": ep["method"],
-                "path": ep["path"],
-                "inputs": splan.get("inputs") or {},
-                "capture": {},
-                "expect": splan.get("expect") or {},
-            })
+            steps.append(
+                {
+                    "method": ep["method"],
+                    "path": ep["path"],
+                    "inputs": splan.get("inputs") or {},
+                    "capture": {},
+                    "expect": splan.get("expect") or {},
+                }
+            )
             try:
                 res = run_scenario(
-                    base_url, f"{ep['method']} {ep['path']}", steps,
-                    exercise_id=exercise_id, probe_fn=probe_fn,
+                    base_url,
+                    f"{ep['method']} {ep['path']}",
+                    steps,
+                    exercise_id=exercise_id,
+                    probe_fn=probe_fn,
                 )
                 record = res.to_json()
                 record["api_id"] = ep["api_id"]
@@ -434,7 +501,9 @@ def _environment_canary(
             inputs = setup[0].get("inputs") or {}
             try:
                 res = probe_fn(
-                    base_url, method, path,
+                    base_url,
+                    method,
+                    path,
                     body=inputs.get("body"),
                     path_params=inputs.get("path_params") or {},
                     query=inputs.get("query") or {},
@@ -443,8 +512,7 @@ def _environment_canary(
                     exercise_id=exercise_id,
                 )
             except Exception as exc:
-                failed.append({"step": f"{method} {path}", "status": None,
-                               "error": str(exc)})
+                failed.append({"step": f"{method} {path}", "status": None, "error": str(exc)})
                 continue
             checked += 1
             if not (isinstance(res.status, int) and 200 <= res.status < 300):
@@ -456,8 +524,8 @@ def _environment_canary(
             "preconditions (reset database? unseeded credentials?). Re-run the "
             "service's seeding/prestart, or the scenarios will expire and be "
             "re-dispatched for authorship.",
-            len(failed), "; ".join(f"{f['step']} -> {f.get('status') or f.get('error')}"
-                                   for f in failed),
+            len(failed),
+            "; ".join(f"{f['step']} -> {f.get('status') or f.get('error')}" for f in failed),
         )
     return {"checked": checked, "failed": failed}
 
@@ -484,8 +552,7 @@ def _auth_sweep(
     # Creators before consumers: a 2xx authed POST mints a real id that the
     # GET/PATCH/DELETE-by-id endpoints later in the SAME sweep can target.
     method_order = {"POST": 0, "PUT": 1, "GET": 2, "PATCH": 3, "DELETE": 4}
-    ordered = sorted(endpoints,
-                     key=lambda e: method_order.get(str(e.get("method")), 5))
+    ordered = sorted(endpoints, key=lambda e: method_order.get(str(e.get("method")), 5))
     live_ids: list[str] = list(ledger_ids)
     rows: list[dict[str, Any]] = []
     for hdrs in auth_headers:
@@ -500,9 +567,7 @@ def _auth_sweep(
                 # Real ids we created beat generated ones for hitting rows;
                 # most recent first (this sweep's own creations).
                 for vid in list(reversed(live_ids))[:max_id_substitutions]:
-                    variants.append(
-                        {**base, "path_params": {k: vid for k in pparams}}
-                    )
+                    variants.append({**base, "path_params": {k: vid for k in pparams}})
             for inp in variants:
                 candidate = Candidate(
                     strategy="authed",
@@ -515,9 +580,13 @@ def _auth_sweep(
                 )
                 try:
                     result = probe_fn(
-                        base_url, ep["method"], ep["path"],
-                        body=candidate.body, path_params=candidate.path_params,
-                        query=candidate.query, headers=candidate.headers,
+                        base_url,
+                        ep["method"],
+                        ep["path"],
+                        body=candidate.body,
+                        path_params=candidate.path_params,
+                        query=candidate.query,
+                        headers=candidate.headers,
                         exercise_id=exercise_id,
                     )
                 except Exception as exc:
@@ -527,19 +596,21 @@ def _auth_sweep(
                 row["auth"] = True
                 rows.append(row)
                 # Harvest ids minted by this sweep for later endpoints.
-                if (ep["method"] in state._MUTATING
-                        and isinstance(result.status, int)
-                        and 200 <= result.status < 300):
+                if (
+                    ep["method"] in state._MUTATING
+                    and isinstance(result.status, int)
+                    and 200 <= result.status < 300
+                ):
                     for v in sorted(state.scalar_values(result.body)):
                         if v not in live_ids:
                             live_ids.append(v)
-    log.info("auth sweep: %d probes across %d credential sets",
-             len(rows), len(auth_headers))
+    log.info("auth sweep: %d probes across %d credential sets", len(rows), len(auth_headers))
     return rows
 
 
 def _resolved_auth_headers(
-    steps: list[dict[str, Any]], variables: dict[str, Any],
+    steps: list[dict[str, Any]],
+    variables: dict[str, Any],
 ) -> list[dict[str, str]]:
     """Header sets that resolved through captured variables (live credentials)."""
     out: list[dict[str, str]] = []
@@ -588,7 +659,9 @@ def _mark_expired_scenarios(scenarios: list[dict[str, Any]]) -> list[dict[str, A
 
 
 def _expire_semantic_reply(
-    repo: Path, scenario: dict[str, Any], log: logging.Logger,
+    repo: Path,
+    scenario: dict[str, Any],
+    log: logging.Logger,
 ) -> None:
     """Invalidate the stored harness reply behind an expired scenario.
 
@@ -624,22 +697,38 @@ def _scenario_failure_rows(scenarios: list[dict[str, Any]]) -> list[dict[str, An
         for idx, step in enumerate(sc.get("steps", [])):
             status = step.get("status")
             is_setup = idx < planned - 1
-            is_failure = (status is None and step.get("error")) or (
-                isinstance(status, int) and status >= 500
-            ) or (is_setup and not step.get("ok"))
+            is_failure = (
+                (status is None and step.get("error"))
+                or (isinstance(status, int) and status >= 500)
+                or (is_setup and not step.get("ok"))
+            )
             if not is_failure:
                 continue
             method, path = _split_endpoint(step.get("endpoint", ""))
-            rows.append({
-                "round": 0, "endpoint_id": step.get("endpoint", ""), "api_id": step.get("endpoint", ""),
-                "method": method, "path": path, "handler": None,
-                "strategy": "semantic", "provenance": "semantic", "input_class": "semantic",
-                "input": {"scenario": sc.get("name")}, "expected": "2xx (a valid scenario step)",
-                "status": status, "status_class": status_class(status),
-                "latency_ms": step.get("latency_ms"), "shape_hash": step.get("shape_hash", "empty"),
-                "error": step.get("error"), "request_id": None,
-                "output_size": 0, "input_size": 0, "body": None,
-            })
+            rows.append(
+                {
+                    "round": 0,
+                    "endpoint_id": step.get("endpoint", ""),
+                    "api_id": step.get("endpoint", ""),
+                    "method": method,
+                    "path": path,
+                    "handler": None,
+                    "strategy": "semantic",
+                    "provenance": "semantic",
+                    "input_class": "semantic",
+                    "input": {"scenario": sc.get("name")},
+                    "expected": "2xx (a valid scenario step)",
+                    "status": status,
+                    "status_class": status_class(status),
+                    "latency_ms": step.get("latency_ms"),
+                    "shape_hash": step.get("shape_hash", "empty"),
+                    "error": step.get("error"),
+                    "request_id": None,
+                    "output_size": 0,
+                    "input_size": 0,
+                    "body": None,
+                }
+            )
     return rows
 
 
@@ -651,7 +740,10 @@ def _split_endpoint(spec: str) -> tuple[str, str]:
 
 
 def _execution_row(
-    round_no: int, ep: dict[str, Any], candidate: Candidate, result: ProbeResult,
+    round_no: int,
+    ep: dict[str, Any],
+    candidate: Candidate,
+    result: ProbeResult,
 ) -> dict[str, Any]:
     return {
         "round": round_no,
@@ -719,7 +811,8 @@ def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, A
             continue
         key = _json.dumps(
             [ex["endpoint_id"], ex["strategy"], ex.get("input", {}).get("path_params", {})],
-            sort_keys=True, default=str,
+            sort_keys=True,
+            default=str,
         )
         probe_id = hashlib.sha256(key.encode()).hexdigest()[:16]
         seen[probe_id] = {

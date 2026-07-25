@@ -153,8 +153,12 @@ def endpoint_coverage(
     log = logger or logging.getLogger(__name__)
     try:
         result = map_trace_to_tree(
-            repo, api_id=api_id, trace=trace, service=service,
-            store_dir=store_dir, logger=log,
+            repo,
+            api_id=api_id,
+            trace=trace,
+            service=service,
+            store_dir=store_dir,
+            logger=log,
         )
     except Exception as exc:  # no static overlay — zero coverage, trace still speaks
         observed = handler_observed_in_trace(repo, handler, service=service, trace=trace)
@@ -163,7 +167,9 @@ def endpoint_coverage(
                 "coverage: tracemap failed for %s (%s) but handler %r appears in "
                 "the captured spans — reporting handler_observed=true with zero "
                 "symbol coverage",
-                api_id, exc, handler,
+                api_id,
+                exc,
+                handler,
             )
         else:
             log.debug("coverage: tracemap failed for %s: %s", api_id, exc)
@@ -183,20 +189,26 @@ def endpoint_coverage(
     handler_name = handler or entrypoint.get("handler")
     tracemap_observed = bool(result.get("handler_observed"))
     observed = tracemap_observed or handler_observed_in_trace(
-        repo, handler_name, service=service, trace=trace,
+        repo,
+        handler_name,
+        service=service,
+        trace=trace,
     )
     if observed and not tracemap_observed:
         log.warning(
             "coverage: %s handler %r appears in the captured spans though the "
             "static-tree overlay missed it — reporting handler_observed=true",
-            api_id, handler_name,
+            api_id,
+            handler_name,
         )
     return {
         "api_id": api_id,
         "covered_ids": covered_ids,
         "covered": len(covered_ids),
         "total": len(all_ids),
-        "pct": cov.get("pct", round(100.0 * len(covered_ids) / len(all_ids), 1) if all_ids else 0.0),
+        "pct": cov.get(
+            "pct", round(100.0 * len(covered_ids) / len(all_ids), 1) if all_ids else 0.0
+        ),
         "uncovered": _uncovered_names(tree),
         "handler_observed": observed,
     }

@@ -78,15 +78,17 @@ def record_creations(executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         response = sorted(scalar_values(ex.get("body")))
         if not planted and not response:
             continue
-        rows.append({
-            "endpoint_id": ex.get("endpoint_id"),
-            "method": ex.get("method"),
-            "path": ex.get("path"),
-            "status": status,
-            "planted": planted,
-            "response_values": response,
-            "cleaned": False,
-        })
+        rows.append(
+            {
+                "endpoint_id": ex.get("endpoint_id"),
+                "method": ex.get("method"),
+                "path": ex.get("path"),
+                "status": status,
+                "planted": planted,
+                "response_values": response,
+                "cleaned": False,
+            }
+        )
     return rows
 
 
@@ -105,8 +107,7 @@ def _delete_targets(endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if any(s.startswith("{") for s in segs[:-1]):
             continue  # only the trailing segment may be a param
-        out.append({"path": ep["path"], "prefix": segs[:-1],
-                    "param": segs[-1][1:-1]})
+        out.append({"path": ep["path"], "prefix": segs[:-1], "param": segs[-1][1:-1]})
     return out
 
 
@@ -143,15 +144,20 @@ def attempt_teardown(
         for tgt in targets:
             if done or len(tgt["prefix"]) >= len(segs) + 1:
                 continue
-            if segs[:len(tgt["prefix"])] != tgt["prefix"]:
+            if segs[: len(tgt["prefix"])] != tgt["prefix"]:
                 continue
             for value in candidates:
                 for headers in header_sets:
                     try:
                         res = probe_fn(
-                            base_url, "DELETE", tgt["path"],
-                            body=None, path_params={tgt["param"]: value},
-                            query={}, headers=headers, exercise_id=exercise_id,
+                            base_url,
+                            "DELETE",
+                            tgt["path"],
+                            body=None,
+                            path_params={tgt["param"]: value},
+                            query={},
+                            headers=headers,
+                            exercise_id=exercise_id,
                         )
                     except Exception:
                         continue
@@ -166,7 +172,8 @@ def attempt_teardown(
             if done:
                 break
         row["teardown_status"] = (
-            "cleaned" if row.get("cleaned")
+            "cleaned"
+            if row.get("cleaned")
             else ("failed-again" if row["teardown_attempts"] > 1 else "failed")
         )
     return cleaned
@@ -192,8 +199,7 @@ def reattempt_teardown(
     Best-effort throughout: a failure here never blocks the run.
     """
     rows = store.read_jsonl(ledger_path(repo))
-    stale = [r for r in rows
-             if not r.get("cleaned") and (r.get("response_values"))]
+    stale = [r for r in rows if not r.get("cleaned") and (r.get("response_values"))]
     if not stale:
         return {"reattempted": 0, "cleaned": 0}
     headers = list(auth_headers or [])
@@ -203,8 +209,12 @@ def reattempt_teardown(
         except Exception:
             headers = []
     cleaned = attempt_teardown(
-        stale, endpoints, base_url, probe_fn,
-        auth_headers=headers, exercise_id="vinv-reteardown",
+        stale,
+        endpoints,
+        base_url,
+        probe_fn,
+        auth_headers=headers,
+        exercise_id="vinv-reteardown",
     )
     # A run-start retry is by definition a re-attempt of a prior run's failure.
     for r in stale:

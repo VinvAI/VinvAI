@@ -761,9 +761,7 @@ def _capture_selfcheck(output: str) -> list[str]:
         if output and output != "-":
             p = Path(output)
             if not p.is_file():
-                problems.append(
-                    f"trace output {output} does not exist — no span has been written"
-                )
+                problems.append(f"trace output {output} does not exist — no span has been written")
             elif not os.access(p, os.W_OK):
                 problems.append(f"trace output {output} is not writable")
         from tracelens.launcher.import_hook import rewrite_status as _rs

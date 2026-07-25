@@ -21,10 +21,15 @@ def _execs(n_endpoints, rounds):
     out = []
     for r in range(rounds):
         for e in range(n_endpoints):
-            out.append({
-                "endpoint_id": f"EP_{e}", "method": "GET", "path": f"/e{e}",
-                "status": 200 if r % 2 else 500, "round": r,
-            })
+            out.append(
+                {
+                    "endpoint_id": f"EP_{e}",
+                    "method": "GET",
+                    "path": f"/e{e}",
+                    "status": 200 if r % 2 else 500,
+                    "round": r,
+                }
+            )
     return out
 
 
@@ -39,8 +44,10 @@ def test_latest_per_endpoint_wins():
 def test_long_run_stays_under_token_budget():
     # A big many-endpoint many-round run.
     execs = _execs(200, 30)
-    cov = [{"api_id": f"EP_{e}", "covered": 1, "total": 4, "uncovered": ["a", "b", "c"]}
-           for e in range(200)]
+    cov = [
+        {"api_id": f"EP_{e}", "covered": 1, "total": 4, "uncovered": ["a", "b", "c"]}
+        for e in range(200)
+    ]
     summary = compact_results(execs, cov)
     assert within_budget(summary, TOKEN_BUDGET)
     assert estimate_tokens(summary) <= TOKEN_BUDGET
@@ -62,10 +69,15 @@ def test_gap_endpoints_lead():
 
 # ---- generation compaction ---------------------------------------------------
 
+
 def _result_row(endpoint="EP_0", strategy="schema_valid", body=None, round_no=0):
     return {
-        "endpoint_id": endpoint, "method": "GET", "path": "/e0",
-        "strategy": strategy, "round": round_no, "status": 200,
+        "endpoint_id": endpoint,
+        "method": "GET",
+        "path": "/e0",
+        "strategy": strategy,
+        "round": round_no,
+        "status": 200,
         "input": {"body": body, "path_params": {}, "query": {}},
     }
 
@@ -81,8 +93,9 @@ def test_decayed_compact_keeps_newest_per_key_and_bounds_history():
 
 
 def test_decayed_compact_is_idempotent():
-    rows = [_result_row(strategy=s, round_no=r)
-            for s in ("schema_valid", "observed") for r in range(30)]
+    rows = [
+        _result_row(strategy=s, round_no=r) for s in ("schema_valid", "observed") for r in range(30)
+    ]
     kept1, dropped1 = decayed_compact(rows, lambda r: r["strategy"])
     kept2, dropped2 = decayed_compact(kept1, lambda r: r["strategy"])
     assert dropped1 > 0
@@ -92,7 +105,8 @@ def test_decayed_compact_is_idempotent():
 def test_decayed_compact_distinct_keys_all_survive():
     rows = [_result_row(endpoint=f"EP_{i}") for i in range(20)]
     kept, dropped = decayed_compact(
-        rows, lambda r: r["endpoint_id"],
+        rows,
+        lambda r: r["endpoint_id"],
     )
     assert dropped == 0 and len(kept) == 20
 
@@ -111,18 +125,22 @@ def test_state_ledger_drops_cleaned_and_vanished_endpoints():
 
 def test_compact_artifacts_end_to_end_idempotent_and_loud(tmp_path):
     # Unbounded logs from many runs.
-    store.write_jsonl(store.results_path(tmp_path),
-                      [_result_row(round_no=r) for r in range(50)])
-    store.write_jsonl(ledger_path(tmp_path), [
-        {"endpoint_id": "EP_0", "planted": ["a@b.test"], "cleaned": True},
-        {"endpoint_id": "EP_gone", "planted": ["c@d.test"], "cleaned": False},
-        {"endpoint_id": "EP_0", "planted": ["e@f.test"], "cleaned": False},
-    ])
-    store.write_jsonl(store.exercise_dir(tmp_path) / "optimize.jsonl",
-                      [{"label": "GET /slow", "action": "revert-and-retry", "at": i}
-                       for i in range(30)])
-    store.write_jsonl(store.exercise_dir(tmp_path) / "regress.jsonl",
-                      [{"cases": 5, "at": i} for i in range(30)])
+    store.write_jsonl(store.results_path(tmp_path), [_result_row(round_no=r) for r in range(50)])
+    store.write_jsonl(
+        ledger_path(tmp_path),
+        [
+            {"endpoint_id": "EP_0", "planted": ["a@b.test"], "cleaned": True},
+            {"endpoint_id": "EP_gone", "planted": ["c@d.test"], "cleaned": False},
+            {"endpoint_id": "EP_0", "planted": ["e@f.test"], "cleaned": False},
+        ],
+    )
+    store.write_jsonl(
+        store.exercise_dir(tmp_path) / "optimize.jsonl",
+        [{"label": "GET /slow", "action": "revert-and-retry", "at": i} for i in range(30)],
+    )
+    store.write_jsonl(
+        store.exercise_dir(tmp_path) / "regress.jsonl", [{"cases": 5, "at": i} for i in range(30)]
+    )
     plan = {"endpoints": [{"api_id": "EP_0"}]}
 
     first = compact_artifacts(tmp_path, plan)

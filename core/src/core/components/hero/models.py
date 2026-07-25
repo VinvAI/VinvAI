@@ -16,13 +16,17 @@ import hashlib
 import time
 from collections import OrderedDict
 from enum import Enum
-from typing import Annotated, Any, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Callable
 
 import json as _json
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator, model_validator
 
 from core.components.bootstrap.paths import DEFAULT_VINV_ENGINE_SHARED_DIR
+
+if TYPE_CHECKING:  # annotation-only: the runtime imports stay function-local
+    import asyncio
+    from pathlib import Path
 
 
 def _coerce_json_str(v: Any) -> str | None:
@@ -41,7 +45,7 @@ def _coerce_json_str(v: Any) -> str | None:
     if v.startswith("```"):
         first_nl = v.find("\n")
         if first_nl != -1:
-            v = v[first_nl + 1:]
+            v = v[first_nl + 1 :]
         if v.rstrip().endswith("```"):
             v = v.rstrip()[:-3].rstrip()
     return v or None
@@ -249,7 +253,11 @@ class HeroTaskRequest(BaseModel):
             if "dependency_types" in data and data["dependency_types"] is None:
                 data["dependency_types"] = {}
             # Coerce task_id to str if int (e.g. 0) to avoid ValidationError (A-Team RCA).
-            if "task_id" in data and data["task_id"] is not None and not isinstance(data["task_id"], str):
+            if (
+                "task_id" in data
+                and data["task_id"] is not None
+                and not isinstance(data["task_id"], str)
+            ):
                 data = {**data, "task_id": str(data["task_id"])}
         return data
 
@@ -315,11 +323,11 @@ class CommunicationType(str, Enum):
     BROADCAST = "broadcast"
     FILE_DELIVERY = "file_delivery"
     # Blackboard-architecture message types (paper: arxiv 2507.01701)
-    BLACKBOARD_PUBLIC = "blackboard_public"      # public-space contributions
-    BLACKBOARD_PRIVATE = "blackboard_private"    # private debate / self-reflection
-    BLACKBOARD_CLEAN = "blackboard_clean"        # cleaner marks a message removed
+    BLACKBOARD_PUBLIC = "blackboard_public"  # public-space contributions
+    BLACKBOARD_PRIVATE = "blackboard_private"  # private debate / self-reflection
+    BLACKBOARD_CLEAN = "blackboard_clean"  # cleaner marks a message removed
     # Agent↔User collaboration via blackboard
-    AGENT_USER_COLLAB = "agent_user_collab"      # agent requests user collaboration
+    AGENT_USER_COLLAB = "agent_user_collab"  # agent requests user collaboration
     USER_COLLAB_RESPONSE = "user_collab_response"  # user responds to agent collab
 
 
@@ -395,7 +403,7 @@ class SharedScratchpad:
         self,
         max_cache_entries: int | None = None,
         cache_ttl_seconds: float | None = None,
-        persist_path: "Path | str | None" = None,
+        persist_path: Path | str | None = None,
     ) -> None:
         import asyncio as _asyncio
         import os as _os
@@ -429,6 +437,7 @@ class SharedScratchpad:
         self._persist_path: Path | None = None
         if persist_path is not None:
             from pathlib import Path as _P
+
             self._persist_path = _P(persist_path)
             self._restore_from_disk()
 
@@ -451,14 +460,18 @@ class SharedScratchpad:
         # Check if compression should be triggered
         await self._maybe_compress_blackboard()
 
-    _bb_compress_task: "asyncio.Task | None" = None
+    _bb_compress_task: asyncio.Task | None = None
 
     async def _maybe_compress_blackboard(self) -> None:
         """Fire non-blocking background compression if blackboard exceeds trigger."""
         import asyncio as _asyncio
+
         if self._bb_compress_task is not None and not self._bb_compress_task.done():
             return  # Already compressing
-        total = sum(len(m.content.get("message", "") if isinstance(m.content, dict) else str(m.content)) for m in self.messages)
+        total = sum(
+            len(m.content.get("message", "") if isinstance(m.content, dict) else str(m.content))
+            for m in self.messages
+        )
         if total < self._BLACKBOARD_COMPRESS_TRIGGER_CHARS:
             return
         self._bb_compress_task = _asyncio.ensure_future(self._compress_blackboard_bg())
@@ -470,8 +483,8 @@ class SharedScratchpad:
         briefly to swap the compressed content — agents reading the
         blackboard between lock acquisitions see consistent snapshots.
         """
-        import asyncio as _asyncio
         import logging as _logging
+
         _log = _logging.getLogger("vinv_engine.scratchpad.compress")
         try:
             from core.components.context_compressor import smart_fit
@@ -480,7 +493,8 @@ class SharedScratchpad:
 
         _CRITICAL_TYPES = {CommunicationType.TASK_OUTPUT, CommunicationType.FILE_DELIVERY}
         candidates = [
-            (i, m) for i, m in enumerate(self.messages)
+            (i, m)
+            for i, m in enumerate(self.messages)
             if m.message_type not in _CRITICAL_TYPES
             and not getattr(m, "_bb_compressed", False)
             and len(str(m.content)) > 2000
@@ -508,14 +522,18 @@ class SharedScratchpad:
                         msg._bb_compressed = True  # type: ignore[attr-defined]
                 _log.info(
                     "blackboard_compress_msg idx=%d original=%d compressed=%d",
-                    idx, len(raw), len(compressed),
+                    idx,
+                    len(raw),
+                    len(compressed),
                 )
             except Exception as _e:
                 _log.debug("blackboard_compress_skip idx=%d error=%s", idx, _e)
         _log.info("blackboard_compress_done")
 
     async def async_add_private_message(
-        self, message: AgentMessage, participants: list[str],
+        self,
+        message: AgentMessage,
+        participants: list[str],
     ) -> None:
         """Write to a private space visible only to *participants*."""
         key = tuple(sorted(participants))
@@ -528,14 +546,17 @@ class SharedScratchpad:
         async with self._alock:
             msgs = list(self.messages)
         return [
-            m for m in msgs
+            m
+            for m in msgs
             if m.receiver in ("*", receiver)
             and m.sender != receiver
             and id(m) not in self._cleaned_ids
         ]
 
     async def async_read_new_messages(
-        self, agent_name: str, cursor: int = 0,
+        self,
+        agent_name: str,
+        cursor: int = 0,
     ) -> tuple[list[AgentMessage], int]:
         """Return messages added since *cursor*, filtered for *agent_name*.
 
@@ -548,7 +569,8 @@ class SharedScratchpad:
             new_msgs = self.messages[cursor:]
             new_cursor = len(self.messages)
         filtered = [
-            m for m in new_msgs
+            m
+            for m in new_msgs
             if m.receiver in ("*", agent_name)
             and m.sender != agent_name
             and id(m) not in self._cleaned_ids
@@ -556,7 +578,8 @@ class SharedScratchpad:
         return filtered, new_cursor
 
     async def async_get_private_messages(
-        self, agent_name: str,
+        self,
+        agent_name: str,
     ) -> list[AgentMessage]:
         """Return private-space messages where *agent_name* is a participant."""
         results: list[AgentMessage] = []
@@ -607,10 +630,7 @@ class SharedScratchpad:
 
         # ---- Public space ----
         async with self._alock:
-            public_msgs = [
-                m for m in self.messages
-                if id(m) not in self._cleaned_ids
-            ]
+            public_msgs = [m for m in self.messages if id(m) not in self._cleaned_ids]
 
         if public_msgs:
             pub_lines = ["═══ BLACKBOARD — PUBLIC SPACE ═══"]
@@ -704,6 +724,7 @@ class SharedScratchpad:
     def _format_message(m: AgentMessage) -> str:
         """Format a single blackboard message for prompt injection."""
         import datetime as _dt
+
         ts = _dt.datetime.fromtimestamp(m.timestamp).strftime("%H:%M:%S")
         header = f"[{ts}] {m.sender} → {m.receiver} ({m.message_type.value})"
         body_parts: list[str] = []
@@ -744,16 +765,18 @@ class SharedScratchpad:
                 self._cleaned_ids.add(id(target))
             else:
                 return False
-        await self.async_add_message(AgentMessage(
-            sender=cleaner_agent,
-            receiver="*",
-            message_type=CommunicationType.BLACKBOARD_CLEAN,
-            content={
-                "cleaned_index": message_index,
-                "cleaned_sender": target.sender,
-                "reason": "redundant or obsolete",
-            },
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=cleaner_agent,
+                receiver="*",
+                message_type=CommunicationType.BLACKBOARD_CLEAN,
+                content={
+                    "cleaned_index": message_index,
+                    "cleaned_sender": target.sender,
+                    "reason": "redundant or obsolete",
+                },
+            )
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -771,12 +794,14 @@ class SharedScratchpad:
         collect exactly the files this blackboard wrote — and nothing else.
         """
         import os as _os
+
         # Track ownership even if registry indexing fails below: the clear-time
         # collection must still find the file (collect_paths tombstones
         # unregistered paths with a synthesized entry).
         self._own_offload_paths.add(_os.path.abspath(str(path)))
         try:
             from core.components.common.offload_registry import register_offload
+
             register_offload(path, content, kind="task_output")
         except Exception:
             pass
@@ -796,6 +821,7 @@ class SharedScratchpad:
         """
         try:
             from core.components.common.offload_registry import collect_paths
+
             own = set(self._own_offload_paths)
             if own:
                 collect_paths(own)
@@ -830,17 +856,18 @@ class SharedScratchpad:
         offloaded_path: str | None = None
         if len(full_json) > self._TASK_OUTPUT_OFFLOAD_CHARS:
             import os
+
             shared_dir = os.environ.get("VINV_ENGINE_SHARED_DIR", DEFAULT_VINV_ENGINE_SHARED_DIR)
             os.makedirs(shared_dir, exist_ok=True)
             offloaded_path = os.path.join(shared_dir, f"task_output_{task_id}.md")
             try:
+
                 def _write():
                     # errors="replace": task_name may carry lone surrogates.
-                    with open(
-                        offloaded_path, "w", encoding="utf-8", errors="replace"
-                    ) as fh:
+                    with open(offloaded_path, "w", encoding="utf-8", errors="replace") as fh:
                         fh.write(f"# Task Output: {task_name}\n\n")
                         fh.write(full_json)
+
                 await _asyncio.to_thread(_write)
                 self._register_task_output_offload(offloaded_path, full_json)
                 stored_output = {
@@ -861,42 +888,46 @@ class SharedScratchpad:
             content["file_artifacts"] = file_artifacts
         if offloaded_path:
             content.setdefault("file_artifacts", [])
-            content["file_artifacts"].append({
-                "path": offloaded_path,
-                "type": "task_output_offload",
-            })
-        await self.async_add_message(AgentMessage(
-            sender=actor,
-            receiver="*",
-            message_type=CommunicationType.TASK_OUTPUT,
-            content=content,
-            task_id=task_id,
-            task_name=task_name,
-            output_data=stored_output,
-        ))
+            content["file_artifacts"].append(
+                {
+                    "path": offloaded_path,
+                    "type": "task_output_offload",
+                }
+            )
+        await self.async_add_message(
+            AgentMessage(
+                sender=actor,
+                receiver="*",
+                message_type=CommunicationType.TASK_OUTPUT,
+                content=content,
+                task_id=task_id,
+                task_name=task_name,
+                output_data=stored_output,
+            )
+        )
 
     async def async_get_task_outputs(
-        self, task_ids: list[str] | None = None,
+        self,
+        task_ids: list[str] | None = None,
     ) -> list[AgentMessage]:
         async with self._alock:
             msgs = list(self.messages)
         return [
-            m for m in msgs
+            m
+            for m in msgs
             if m.message_type == CommunicationType.TASK_OUTPUT
             and (task_ids is None or m.task_id in task_ids)
             and id(m) not in self._cleaned_ids
         ]
 
     async def async_get_completed_task_summary(
-        self, task_ids: list[str] | None = None,
+        self,
+        task_ids: list[str] | None = None,
     ) -> str:
         outputs = await self.async_get_task_outputs(task_ids=task_ids)
         if not outputs:
             return ""
-        header = (
-            "DEPENDENCY TASK OUTPUTS:" if task_ids
-            else "COMPLETED TASKS SO FAR:"
-        )
+        header = "DEPENDENCY TASK OUTPUTS:" if task_ids else "COMPLETED TASKS SO FAR:"
         lines = [header]
         for m in outputs:
             status = "SUCCESS" if m.content.get("success") else "FAILED"
@@ -910,35 +941,50 @@ class SharedScratchpad:
         return "\n".join(lines)
 
     async def async_add_knowledge_share(
-        self, sender: str, receiver: str, data: dict[str, Any],
+        self,
+        sender: str,
+        receiver: str,
+        data: dict[str, Any],
     ) -> None:
-        await self.async_add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.KNOWLEDGE_SHARE,
-            content=data,
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.KNOWLEDGE_SHARE,
+                content=data,
+            )
+        )
 
     async def async_broadcast_data(
-        self, sender: str, data: dict[str, Any],
+        self,
+        sender: str,
+        data: dict[str, Any],
     ) -> None:
-        await self.async_add_message(AgentMessage(
-            sender=sender,
-            receiver="*",
-            message_type=CommunicationType.BROADCAST,
-            content=data,
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=sender,
+                receiver="*",
+                message_type=CommunicationType.BROADCAST,
+                content=data,
+            )
+        )
 
     async def async_add_file_delivery(
-        self, sender: str, receiver: str, file_path: str, description: str = "",
+        self,
+        sender: str,
+        receiver: str,
+        file_path: str,
+        description: str = "",
     ) -> None:
-        await self.async_add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.FILE_DELIVERY,
-            content={"description": description},
-            file_path=file_path,
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.FILE_DELIVERY,
+                content={"description": description},
+                file_path=file_path,
+            )
+        )
 
     # ------------------------------------------------------------------
     # Async agent↔user collaboration via blackboard
@@ -972,6 +1018,7 @@ class SharedScratchpad:
             request_id — callers can poll async_get_user_collab_response(request_id)
         """
         import uuid as _uuid
+
         request_id = f"collab_{_uuid.uuid4().hex[:12]}"
         msg = AgentMessage(
             sender=sender,
@@ -999,7 +1046,8 @@ class SharedScratchpad:
         """
         async with self._alock:
             return [
-                m for m in self.messages
+                m
+                for m in self.messages
                 if m.receiver == "user"
                 and m.message_type == CommunicationType.AGENT_USER_COLLAB
                 and not self._is_cleaned(m)
@@ -1017,20 +1065,23 @@ class SharedScratchpad:
         blackboard. The original requesting agent picks it up via
         async_get_user_collab_response().
         """
-        await self.async_add_message(AgentMessage(
-            sender=responder,
-            receiver="*",
-            message_type=CommunicationType.USER_COLLAB_RESPONSE,
-            content={
-                "request_id": request_id,
-                "response": response_text,
-            },
-            insight=f"[USER→AGENT] response to {request_id}: {response_text[:200]}",
-            confidence=1.0,
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=responder,
+                receiver="*",
+                message_type=CommunicationType.USER_COLLAB_RESPONSE,
+                content={
+                    "request_id": request_id,
+                    "response": response_text,
+                },
+                insight=f"[USER→AGENT] response to {request_id}: {response_text[:200]}",
+                confidence=1.0,
+            )
+        )
 
     async def async_get_user_collab_response(
-        self, request_id: str,
+        self,
+        request_id: str,
     ) -> str | None:
         """Check if the user has responded to a specific collaboration request.
 
@@ -1062,20 +1113,23 @@ class SharedScratchpad:
         description: str = "",
         ttl_seconds: float = 600.0,
     ) -> None:
-        await self.async_add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.KNOWLEDGE_SHARE,
-            content={
-                "type": "credential_handoff",
-                "description": description,
-                "credentials": credentials,
-                "expires_at": time.time() + ttl_seconds,
-            },
-        ))
+        await self.async_add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.KNOWLEDGE_SHARE,
+                content={
+                    "type": "credential_handoff",
+                    "description": description,
+                    "credentials": credentials,
+                    "expires_at": time.time() + ttl_seconds,
+                },
+            )
+        )
 
     async def async_get_credentials_for(
-        self, receiver: str,
+        self,
+        receiver: str,
     ) -> list[dict[str, Any]]:
         now = time.time()
         results: list[dict[str, Any]] = []
@@ -1087,12 +1141,14 @@ class SharedScratchpad:
             ):
                 expires = m.content.get("expires_at", 0)
                 if expires > now:
-                    results.append({
-                        "from": m.sender,
-                        "description": m.content.get("description", ""),
-                        "credentials": m.content.get("credentials", {}),
-                        "expires_in_seconds": round(expires - now),
-                    })
+                    results.append(
+                        {
+                            "from": m.sender,
+                            "description": m.content.get("description", ""),
+                            "credentials": m.content.get("credentials", {}),
+                            "expires_in_seconds": round(expires - now),
+                        }
+                    )
         return results
 
     # ------------------------------------------------------------------
@@ -1100,7 +1156,10 @@ class SharedScratchpad:
     # ------------------------------------------------------------------
 
     async def async_cache_tool_result(
-        self, tool_name: str, tool_args: dict, result: Any,
+        self,
+        tool_name: str,
+        tool_args: dict,
+        result: Any,
     ) -> None:
         async with self._alock:
             self._evict_expired()
@@ -1110,7 +1169,9 @@ class SharedScratchpad:
                 self._tool_cache.popitem(last=False)
 
     async def async_get_cached_result(
-        self, tool_name: str, tool_args: dict,
+        self,
+        tool_name: str,
+        tool_args: dict,
     ) -> Any | None:
         async with self._alock:
             self._evict_expired()
@@ -1122,6 +1183,7 @@ class SharedScratchpad:
 
     async def async_clear(self) -> None:
         import asyncio as _asyncio
+
         async with self._alock:
             self.messages.clear()
             self._private_spaces.clear()
@@ -1139,13 +1201,12 @@ class SharedScratchpad:
         run they belong to ends, preserving them would cause stale instructions
         to appear as current user requests in the next run.
         """
-        return (
-            isinstance(m.content, dict)
-            and m.content.get("type") == "user_live_instruction"
-        )
+        return isinstance(m.content, dict) and m.content.get("type") == "user_live_instruction"
 
     async def async_clear_goal_scoped(
-        self, current_goal: str = "", project_id: str = "",
+        self,
+        current_goal: str = "",
+        project_id: str = "",
     ) -> None:
         if not current_goal and not project_id:
             await self.async_clear()
@@ -1175,6 +1236,7 @@ class SharedScratchpad:
         for m in preserved:
             await self._async_persist_append(m)
         import asyncio as _asyncio
+
         await _asyncio.to_thread(self._gc_task_output_offloads)
 
     # ==================================================================
@@ -1190,21 +1252,25 @@ class SharedScratchpad:
         with self._lock:
             msgs = list(self.messages)
         return [
-            m for m in msgs
+            m
+            for m in msgs
             if m.receiver in ("*", receiver)
             and m.sender != receiver
             and id(m) not in self._cleaned_ids
         ]
 
     def read_new_messages(
-        self, agent_name: str, cursor: int = 0,
+        self,
+        agent_name: str,
+        cursor: int = 0,
     ) -> tuple[list[AgentMessage], int]:
         """Sync cursor-based delta read.  See ``async_read_new_messages``."""
         with self._lock:
             new_msgs = self.messages[cursor:]
             new_cursor = len(self.messages)
         filtered = [
-            m for m in new_msgs
+            m
+            for m in new_msgs
             if m.receiver in ("*", agent_name)
             and m.sender != agent_name
             and id(m) not in self._cleaned_ids
@@ -1221,16 +1287,17 @@ class SharedScratchpad:
         return results
 
     def get_blackboard_content_sync(
-        self, agent_name: str, *, max_chars: int | None = None,
+        self,
+        agent_name: str,
+        *,
+        max_chars: int | None = None,
     ) -> str:
         """Synchronous version of ``async_get_blackboard_content``."""
         if max_chars is None:
             max_chars = self._BLACKBOARD_MAX_PUBLIC_CHARS
         sections: list[str] = []
         with self._lock:
-            public_msgs = [
-                m for m in self.messages if id(m) not in self._cleaned_ids
-            ]
+            public_msgs = [m for m in self.messages if id(m) not in self._cleaned_ids]
         if public_msgs:
             pub_lines = ["═══ BLACKBOARD — PUBLIC SPACE ═══"]
             for m in public_msgs:
@@ -1298,14 +1365,13 @@ class SharedScratchpad:
         offloaded_path: str | None = None
         if len(full_json) > self._TASK_OUTPUT_OFFLOAD_CHARS:
             import os
+
             shared_dir = os.environ.get("VINV_ENGINE_SHARED_DIR", DEFAULT_VINV_ENGINE_SHARED_DIR)
             os.makedirs(shared_dir, exist_ok=True)
             offloaded_path = os.path.join(shared_dir, f"task_output_{task_id}.md")
             try:
                 # errors="replace": task_name may carry lone surrogates.
-                with open(
-                    offloaded_path, "w", encoding="utf-8", errors="replace"
-                ) as fh:
+                with open(offloaded_path, "w", encoding="utf-8", errors="replace") as fh:
                     fh.write(f"# Task Output: {task_name}\n\n")
                     fh.write(full_json)
                 self._register_task_output_offload(offloaded_path, full_json)
@@ -1327,40 +1393,43 @@ class SharedScratchpad:
             content["file_artifacts"] = file_artifacts
         if offloaded_path:
             content.setdefault("file_artifacts", [])
-            content["file_artifacts"].append({
-                "path": offloaded_path,
-                "type": "task_output_offload",
-            })
-        self.add_message(AgentMessage(
-            sender=actor,
-            receiver="*",
-            message_type=CommunicationType.TASK_OUTPUT,
-            content=content,
-            task_id=task_id,
-            task_name=task_name,
-            output_data=stored_output,
-        ))
+            content["file_artifacts"].append(
+                {
+                    "path": offloaded_path,
+                    "type": "task_output_offload",
+                }
+            )
+        self.add_message(
+            AgentMessage(
+                sender=actor,
+                receiver="*",
+                message_type=CommunicationType.TASK_OUTPUT,
+                content=content,
+                task_id=task_id,
+                task_name=task_name,
+                output_data=stored_output,
+            )
+        )
 
     def get_task_outputs(self, task_ids: list[str] | None = None) -> list[AgentMessage]:
         with self._lock:
             msgs = list(self.messages)
         return [
-            m for m in msgs
+            m
+            for m in msgs
             if m.message_type == CommunicationType.TASK_OUTPUT
             and (task_ids is None or m.task_id in task_ids)
             and id(m) not in self._cleaned_ids
         ]
 
     def get_completed_task_summary(
-        self, task_ids: list[str] | None = None,
+        self,
+        task_ids: list[str] | None = None,
     ) -> str:
         outputs = self.get_task_outputs(task_ids=task_ids)
         if not outputs:
             return ""
-        header = (
-            "DEPENDENCY TASK OUTPUTS:" if task_ids
-            else "COMPLETED TASKS SO FAR:"
-        )
+        header = "DEPENDENCY TASK OUTPUTS:" if task_ids else "COMPLETED TASKS SO FAR:"
         lines = [header]
         for m in outputs:
             status = "SUCCESS" if m.content.get("success") else "FAILED"
@@ -1374,33 +1443,46 @@ class SharedScratchpad:
         return "\n".join(lines)
 
     def add_knowledge_share(
-        self, sender: str, receiver: str, data: dict[str, Any],
+        self,
+        sender: str,
+        receiver: str,
+        data: dict[str, Any],
     ) -> None:
-        self.add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.KNOWLEDGE_SHARE,
-            content=data,
-        ))
+        self.add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.KNOWLEDGE_SHARE,
+                content=data,
+            )
+        )
 
     def broadcast_data(self, sender: str, data: dict[str, Any]) -> None:
-        self.add_message(AgentMessage(
-            sender=sender,
-            receiver="*",
-            message_type=CommunicationType.BROADCAST,
-            content=data,
-        ))
+        self.add_message(
+            AgentMessage(
+                sender=sender,
+                receiver="*",
+                message_type=CommunicationType.BROADCAST,
+                content=data,
+            )
+        )
 
     def add_file_delivery(
-        self, sender: str, receiver: str, file_path: str, description: str = "",
+        self,
+        sender: str,
+        receiver: str,
+        file_path: str,
+        description: str = "",
     ) -> None:
-        self.add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.FILE_DELIVERY,
-            content={"description": description},
-            file_path=file_path,
-        ))
+        self.add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.FILE_DELIVERY,
+                content={"description": description},
+                file_path=file_path,
+            )
+        )
 
     def add_credential_handoff(
         self,
@@ -1410,17 +1492,19 @@ class SharedScratchpad:
         description: str = "",
         ttl_seconds: float = 600.0,
     ) -> None:
-        self.add_message(AgentMessage(
-            sender=sender,
-            receiver=receiver,
-            message_type=CommunicationType.KNOWLEDGE_SHARE,
-            content={
-                "type": "credential_handoff",
-                "description": description,
-                "credentials": credentials,
-                "expires_at": time.time() + ttl_seconds,
-            },
-        ))
+        self.add_message(
+            AgentMessage(
+                sender=sender,
+                receiver=receiver,
+                message_type=CommunicationType.KNOWLEDGE_SHARE,
+                content={
+                    "type": "credential_handoff",
+                    "description": description,
+                    "credentials": credentials,
+                    "expires_at": time.time() + ttl_seconds,
+                },
+            )
+        )
 
     def get_credentials_for(self, receiver: str) -> list[dict[str, Any]]:
         now = time.time()
@@ -1433,12 +1517,14 @@ class SharedScratchpad:
             ):
                 expires = m.content.get("expires_at", 0)
                 if expires > now:
-                    results.append({
-                        "from": m.sender,
-                        "description": m.content.get("description", ""),
-                        "credentials": m.content.get("credentials", {}),
-                        "expires_in_seconds": round(expires - now),
-                    })
+                    results.append(
+                        {
+                            "from": m.sender,
+                            "description": m.content.get("description", ""),
+                            "credentials": m.content.get("credentials", {}),
+                            "expires_in_seconds": round(expires - now),
+                        }
+                    )
         return results
 
     def cache_tool_result(self, tool_name: str, tool_args: dict, result: Any) -> None:
@@ -1506,6 +1592,7 @@ class SharedScratchpad:
         try:
             import asyncio as _asyncio
             from core.components.common.persistence import AtomicWriter
+
             await _asyncio.to_thread(
                 AtomicWriter.append_line,
                 self._persist_path,
@@ -1519,9 +1606,11 @@ class SharedScratchpad:
             return
         try:
             import asyncio as _asyncio
+
             def _trunc():
                 if self._persist_path.exists():
                     self._persist_path.write_text("")
+
             await _asyncio.to_thread(_trunc)
         except Exception:
             pass
@@ -1535,6 +1624,7 @@ class SharedScratchpad:
             return
         try:
             from core.components.common.persistence import AtomicWriter
+
             AtomicWriter.append_line(self._persist_path, message.model_dump(mode="json"))
         except Exception:
             pass
@@ -1559,6 +1649,7 @@ class SharedScratchpad:
             return
         try:
             from core.components.common.persistence import AtomicWriter
+
             lines = AtomicWriter.read_lines(self._persist_path)
         except Exception:
             return
@@ -1621,11 +1712,13 @@ class StreamChannel:
         """Producer publishes a data chunk to the channel."""
         if self.closed:
             return
-        self.chunks.append({
-            "data": data,
-            "timestamp": time.time(),
-            "index": len(self.chunks),
-        })
+        self.chunks.append(
+            {
+                "data": data,
+                "timestamp": time.time(),
+                "index": len(self.chunks),
+            }
+        )
         for cb in self._on_publish_callbacks:
             try:
                 cb(self.channel_id, data)
@@ -1664,6 +1757,7 @@ class SharedContext:
 
     def __init__(self) -> None:
         import threading as _threading
+
         self._data: dict[str, Any] = {}
         self._streams: dict[str, StreamChannel] = {}
         self._lock = _threading.Lock()
@@ -1789,9 +1883,18 @@ class LedgerEntry:
     """
 
     __slots__ = (
-        "task_id", "task_name", "actor_used", "success",
-        "raw_output", "content", "distilled", "file_artifacts", "url_artifacts",
-        "appended_at", "quality_score", "compression_audit",
+        "task_id",
+        "task_name",
+        "actor_used",
+        "success",
+        "raw_output",
+        "content",
+        "distilled",
+        "file_artifacts",
+        "url_artifacts",
+        "appended_at",
+        "quality_score",
+        "compression_audit",
         "stored_result",
     )
 
@@ -1839,6 +1942,7 @@ class ContextLedger:
 
     def __init__(self) -> None:
         import threading as _threading
+
         self._entries: dict[str, LedgerEntry] = {}
         self._order: list[str] = []
         self._lock = _threading.Lock()
@@ -1879,6 +1983,7 @@ class ContextLedger:
 
 def _env_float(key: str, default: float) -> float:
     import os as _os
+
     raw = _os.environ.get(key)
     if raw is not None:
         try:
@@ -1890,6 +1995,7 @@ def _env_float(key: str, default: float) -> float:
 
 def _env_int(key: str, default: int) -> int:
     import os as _os
+
     raw = _os.environ.get(key)
     if raw is not None:
         try:
@@ -1907,15 +2013,33 @@ class OverrideConfig(BaseModel):
     """
 
     enabled: bool = True
-    threshold: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_THRESHOLD", 0.30))
-    moving_average_alpha: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MA_ALPHA", 0.7))
-    min_actor_confidence: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MIN_ACTOR_CONF", 0.70))
-    max_validator_confidence: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MAX_VALIDATOR_CONF", 0.95))
-    planner_trust_prior: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_PLANNER_TRUST_PRIOR", 0.72))
-    planner_trust_decay: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_PLANNER_TRUST_DECAY", 0.45))
-    q_delta_sensitivity: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_Q_DELTA_SENSITIVITY", 5.0))
-    maturity_visits: int = Field(default_factory=lambda: _env_int("VINV_ENGINE_OVERRIDE_MATURITY_VISITS", 10))
-    conservatism_bias: float = Field(default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_CONSERVATISM_BIAS", 0.10))
+    threshold: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_THRESHOLD", 0.30)
+    )
+    moving_average_alpha: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MA_ALPHA", 0.7)
+    )
+    min_actor_confidence: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MIN_ACTOR_CONF", 0.70)
+    )
+    max_validator_confidence: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_MAX_VALIDATOR_CONF", 0.95)
+    )
+    planner_trust_prior: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_PLANNER_TRUST_PRIOR", 0.72)
+    )
+    planner_trust_decay: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_PLANNER_TRUST_DECAY", 0.45)
+    )
+    q_delta_sensitivity: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_Q_DELTA_SENSITIVITY", 5.0)
+    )
+    maturity_visits: int = Field(
+        default_factory=lambda: _env_int("VINV_ENGINE_OVERRIDE_MATURITY_VISITS", 10)
+    )
+    conservatism_bias: float = Field(
+        default_factory=lambda: _env_float("VINV_ENGINE_OVERRIDE_CONSERVATISM_BIAS", 0.10)
+    )
 
 
 # ---------------------------------------------------------------------------

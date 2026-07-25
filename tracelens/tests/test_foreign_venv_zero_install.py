@@ -48,9 +48,7 @@ def _write_app(tmp_path: Path) -> Path:
     )
     main = tmp_path / "main.py"
     main.write_text(
-        "import svc\n\n"
-        "for c in range(5):\n"
-        "    svc.tick(c)\n",
+        "import svc\n\n" "for c in range(5):\n" "    svc.tick(c)\n",
         encoding="utf-8",
     )
     return main
