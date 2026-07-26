@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "Context beats model size. Vinv traces a real run, joins every call to your code, exercises every endpoint, and grades fixes against tests the agent never sees. Runtime context bandits for coding agents.",
-	"version": "0.0.12",
+	"version": "0.0.13",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
