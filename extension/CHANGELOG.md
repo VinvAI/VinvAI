@@ -4,6 +4,37 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] — 2026-07-26
+
+### 🐛 Fixed
+
+- **Trustworthy optimization verdicts.** The Optimize panel no longer shows
+  misleading outcomes. A disputed opportunity now ends with a clear
+  **Dismissed — not a real opportunity** marker (verdict badge + a "Dismissed"
+  tile) instead of lingering as "in progress." The session-timing watcher only
+  reports **Proven** / **Regressed** when a fix actually landed in your working
+  tree — verified by a dispatch-time diff signature that also recognizes fixes in
+  a symbol's **callee** files — so ordinary run-to-run variance (e.g. a cold vs
+  warm connection) can no longer be mistaken for a real speedup. Byte-unit
+  (memory) candidates now read in bytes, not milliseconds. (#39)
+- **tracelens:** `build_metrics` now emits an explicit ISO-8601 timestamp format.
+
+### ✨ Added
+
+- **Auto-measure on accept.** When you accept an optimization that vinv could not
+  verify automatically, it now re-traces the flow to compute the real
+  before/after itself, instead of waiting for a manual **Measure Optimization**
+  click. (#39)
+
+### 🔧 Maintenance
+
+- Pinned the uv workspace to Python 3.13 and made `requires-python` consistent
+  across the engine packages; added `[project.urls]` metadata. (#16, #17)
+- Docs: a README FAQ plus editors/agents and license entries, a `tests/README`,
+  a `CITATION.cff`, a Windows-interpreter note in the planted-bug e2e README, and
+  removal of two stale ADRs. (#18, #19, #20, #21, #38)
+- Dropped a flaky wall-clock timing assertion in the tracelens tests. (#37)
+
 ## [0.1.0] — 2026-07-26
 
 ### Changed

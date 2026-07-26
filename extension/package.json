@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "The RL loop that makes your coding agents smarter and their written code production-ready. Vinv traces a real run, joins every call to your code, exercises every endpoint, and grades fixes against tests the agent never sees.",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
