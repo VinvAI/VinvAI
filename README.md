@@ -8,7 +8,7 @@
 
 <br><br>
 
-**Vinv is the reinforcement loop around your coding agent. It builds the context, runs the harness, and produces the evidence** — a real run traced to the exact line that served each request, every endpoint exercised, and acceptance tests written before the fix that the agent never sees.
+**Vinv is the RL loop that makes your coding agents smarter and their written code production-ready.** It builds the context, runs the harness, and produces the evidence — a real run traced to the exact line that served each request, every endpoint exercised, and acceptance tests written before the fix that the agent never sees.
 
 <sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
 

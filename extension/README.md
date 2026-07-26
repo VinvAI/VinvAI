@@ -2,7 +2,9 @@
 
 <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv wordmark and tagline" width="700" />
 
-### Vinv runs your code and hands your agent what actually happened.
+### The RL loop that makes your coding agents smarter and their written code production-ready.
+
+<sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
 
 **Zero-edit Python tracing · Code Graph · Behavior exerciser · Answers with citations · Fix &amp; verify loop · Two MCP servers · Auto-Pilot · Entirely local**
 
@@ -26,7 +28,7 @@
 
 ## What is Vinv?
 
-Vinv is a free, open-source extension that puts a verification loop around the coding agent you already use. It runs your service under tracing, builds context from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
+Vinv is a free, open-source extension — the RL loop that makes your coding agents smarter and their written code production-ready. It builds the context, runs the harness, and produces the evidence: it runs your service under tracing, builds context from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
 
 ### Context beats model size — on a repo you know
 
