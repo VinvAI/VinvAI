@@ -30,29 +30,40 @@ jobs:
     if: ${{ !startsWith(github.event.head_commit.message, 'chore(release):') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Verify RELEASE_TOKEN is configured
+      - name: Check RELEASE_TOKEN
+        id: gate
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
+          # Gracefully skip (green, not red) when the optional publish token isn't
+          # configured — a missing deploy secret shouldn't fail every commit's CI.
+          # Set RELEASE_TOKEN (a PAT or GitHub App token that can push to protected
+          # main, with a ruleset bypass) to enable auto-release. See this file's header.
           if [ -z "$RELEASE_TOKEN" ]; then
-            echo "::error::RELEASE_TOKEN secret is not set. It must be a PAT or GitHub App token that can push to protected main (add a ruleset bypass for it). See the header of .github/workflows/release.yml."
-            exit 1
+            echo "::warning::RELEASE_TOKEN secret is not set — skipping the release. Add it to enable auto-publish."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@v4
+        if: steps.gate.outputs.enabled == 'true'
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_TOKEN }}
 
       - uses: actions/setup-node@v4
+        if: steps.gate.outputs.enabled == 'true'
         with:
           node-version: 20
 
       - name: Install extension deps
+        if: steps.gate.outputs.enabled == 'true'
         run: npm ci --prefix extension
 
       - name: Bump patch version
         id: bump
+        if: steps.gate.outputs.enabled == 'true'
         run: |
           cd extension
           # Change "patch" to "minor" for 0.x.0 bumps. Updates package.json and
@@ -61,13 +72,16 @@ jobs:
           echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Build VSIX
+        if: steps.gate.outputs.enabled == 'true'
         run: npm run package --prefix extension  # runs vscode:prepublish (typecheck + bundle), then vsce package
 
       - name: Locate VSIX
         id: vsix
+        if: steps.gate.outputs.enabled == 'true'
         run: echo "path=$(ls extension/*.vsix | head -n1)" >> "$GITHUB_OUTPUT"
 
       - name: Commit, tag, and push
+        if: steps.gate.outputs.enabled == 'true'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -80,6 +94,7 @@ jobs:
           git push origin "v${VERSION}"
 
       - name: Publish GitHub Release with the VSIX
+        if: steps.gate.outputs.enabled == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.bump.outputs.version }}
