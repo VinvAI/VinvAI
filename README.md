@@ -325,6 +325,14 @@ Currently, Vinv fully supports Python backends with runtime tracing, semantic co
 Vinv generates acceptance tests before the fix and hides them from the agent. It runs these tests alongside checking the live port and verifying that any observable behavior (other than the bug fix) remains byte-identical.
 </details>
 
+<details><summary><b>Which editors and coding agents work?</b></summary>
+Editors: VS Code, Cursor, Windsurf, VSCodium, Trae, VS Code Insiders. Agents it drives: Claude Code, Cursor CLI, Codex CLI, Gemini CLI, Copilot Chat, Windsurf Cascade. See [Works with your agent](#works-with-your-agent).
+</details>
+
+<details><summary><b>Is it really free and open source?</b></summary>
+Yes — [Apache 2.0](LICENSE), every engine builds from source in this repo.
+</details>
+
 ## Privacy
 
 - **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
