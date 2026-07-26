@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+title: VinvAI
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - name: VinvAI
+repository-code: 'https://github.com/VinvAI/VinvAI'
+license: Apache-2.0
