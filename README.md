@@ -299,6 +299,32 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 | `callers_of` / `blast_radius` / `why_did_this_run` | Observed callers · transitive impact · entry-point paths |
 </details>
 
+## FAQ
+
+<details><summary><b>Do I need my own API keys?</b></summary>
+No. Vinv runs everything locally. The semantic index and code embedder run on your machine without requiring any provider keys. Your agent CLI (like Claude Code or Cursor) handles its own LLM communication using the authentication you already set up.
+</details>
+
+<details><summary><b>Is there any telemetry or data collection?</b></summary>
+No. Vinv is 100% local with zero telemetry. It operates entirely on your machine, storing per-repo state in `.vinv/` and per-machine state in `~/.vinv/`. Sensitive data in traces is redacted and never sent anywhere.
+</details>
+
+<details><summary><b>Why is the first run slow? (Build time)</b></summary>
+The first run takes around 4 minutes because Vinv needs to compile the Rust index and fetch the ~500 MB local embedding model. Subsequent runs and traces will start in seconds.
+</details>
+
+<details><summary><b>Does Vinv modify my code?</b></summary>
+No. Vinv uses a zero-edit tracer. It instruments your Python backend at runtime without requiring any SDK integrations, decorators, or modifications to your source code.
+</details>
+
+<details><summary><b>Which languages are supported?</b></summary>
+Currently, Vinv fully supports Python backends with runtime tracing, semantic code search, and verified fixes. TypeScript and Go support are coming next. Other stacks can still use the index, graph, and QnA features.
+</details>
+
+<details><summary><b>How does it know if a fix worked?</b></summary>
+Vinv generates acceptance tests before the fix and hides them from the agent. It runs these tests alongside checking the live port and verifying that any observable behavior (other than the bug fix) remains byte-identical.
+</details>
+
 ## Privacy
 
 - **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
