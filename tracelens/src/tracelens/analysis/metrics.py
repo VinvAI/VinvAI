@@ -27,7 +27,7 @@ def build_metrics(log: Path, out: Path, *, bucket: str = "60s") -> None:
     if df.empty:
         pd.DataFrame().to_parquet(out)
         return
-    df["_ts"] = pd.to_datetime(df["ts"], utc=True)
+    df["_ts"] = pd.to_datetime(df["ts"], utc=True, format="ISO8601")
     sec = max(1, int(bucket.rstrip("s")))
     df["bucket"] = df["_ts"].dt.floor(f"{sec}s")
     ex = df[df["event"] == "exit"].copy()
