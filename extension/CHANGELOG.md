@@ -4,6 +4,15 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.0] — 2026-07-26
+
+### Changed
+
+- First public open-source release. Refreshed the marketplace listing and product
+  description — "The RL loop that makes your coding agents smarter and their
+  written code production-ready." No functional changes to the extension since
+  0.0.13.
+
 ## [0.0.13] — 2026-07-26
 
 ### Changed
