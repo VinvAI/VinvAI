@@ -39,7 +39,8 @@ Prefer the Tracelens project venv (has `click` and other deps):
 ./tracelens/.venv/bin/python tests/e2e/planted_bug_golden/run.py --real-tracelens
 ```
 
-The runner auto-selects `tracelens/.venv/bin/python` when present. The fixture
+The runner auto-selects `tracelens/.venv/bin/python` (or
+`tracelens\.venv\Scripts\python` on Windows) when present. The fixture
 supplies a local test-only licensing shim for this E2E process. It does not
 alter or bypass production module code.
 

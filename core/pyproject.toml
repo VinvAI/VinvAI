@@ -32,6 +32,11 @@ dev = [
     "ruff>=0.6.0,<0.9.0",
 ]
 
+[project.urls]
+Homepage = "https://vinv.ai"
+Repository = "https://github.com/VinvAI/VinvAI"
+Issues = "https://github.com/VinvAI/VinvAI/issues"
+
 [tool.setuptools.package-dir]
 "" = "src"
 
