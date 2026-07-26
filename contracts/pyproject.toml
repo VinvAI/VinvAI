@@ -22,6 +22,11 @@ dev = [
     "hypothesis>=6.100.0,<7.0.0",
 ]
 
+[project.urls]
+Homepage = "https://vinv.ai"
+Repository = "https://github.com/VinvAI/VinvAI"
+Issues = "https://github.com/VinvAI/VinvAI/issues"
+
 [tool.setuptools.package-dir]
 "" = "src"
 

@@ -67,6 +67,11 @@ tracelens = "tracelens.otel.configurator:TracelensConfigurator"
 [tool.uv.sources]
 lens-contracts = { workspace = true }
 
+[project.urls]
+Homepage = "https://vinv.ai"
+Repository = "https://github.com/VinvAI/VinvAI"
+Issues = "https://github.com/VinvAI/VinvAI/issues"
+
 [tool.setuptools.package-dir]
 "" = "src"
 

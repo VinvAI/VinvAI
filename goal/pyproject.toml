@@ -22,6 +22,11 @@ dev = [
 [project.scripts]
 goal = "goal.cli:main"
 
+[project.urls]
+Homepage = "https://vinv.ai"
+Repository = "https://github.com/VinvAI/VinvAI"
+Issues = "https://github.com/VinvAI/VinvAI/issues"
+
 [tool.setuptools.package-dir]
 "" = "src"
 
