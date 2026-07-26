@@ -1,0 +1,31 @@
+name: 💡 Feature request
+description: Suggest an improvement or new capability for Vinv
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! Tell us the problem you're hitting first — the sharpest feature requests describe a real workflow that's blocked, not just a solution.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: What are you doing, and where does Vinv get in the way today?
+      placeholder: When I run a service that needs env vars, I have no way to…
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like Vinv to do?
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered
+      description: Workarounds you use today, or other approaches you thought about.
+    validations:
+      required: false

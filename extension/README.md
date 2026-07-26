@@ -12,6 +12,8 @@
 [![Traces Python](https://img.shields.io/badge/traces-Python%2C%20zero%20edits-D71921?style=flat-square)](https://vinv.ai)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](https://github.com/VinvAI/VinvAI#privacy)
 [![License](https://img.shields.io/badge/license-Apache%202.0-D71921?style=flat-square)](https://github.com/VinvAI/VinvAI/blob/HEAD/LICENSE)
+[![GitHub](https://img.shields.io/badge/GitHub-VinvAI-D71921?style=flat-square&logo=github&logoColor=white)](https://github.com/VinvAI/VinvAI)
+[![Support](https://img.shields.io/badge/support-support%40vinv.ai-D71921?style=flat-square)](mailto:support@vinv.ai)
 [![Made by VinvAI](https://img.shields.io/badge/made%20by-VinvAI-D71921?style=flat-square)](https://vinv.ai)
 
 <br/>

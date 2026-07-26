@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📧 Support
+    url: mailto:support@vinv.ai
+    about: Questions, setup help, or anything you'd rather not file publicly.
+  - name: 🌐 vinv.ai
+    url: https://vinv.ai
+    about: Docs, the case study, and more about how Vinv works.

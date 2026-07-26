@@ -17,6 +17,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-D71921?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921&label=version)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
+[![Tests](https://img.shields.io/github/actions/workflow/status/VinvAI/VinvAI/test.yml?branch=main&style=flat-square&label=tests)](https://github.com/VinvAI/VinvAI/actions/workflows/test.yml)
+[![Lint](https://img.shields.io/github/actions/workflow/status/VinvAI/VinvAI/lint.yml?branch=main&style=flat-square&label=lint)](https://github.com/VinvAI/VinvAI/actions/workflows/lint.yml)
+[![Open issues](https://img.shields.io/github/issues/VinvAI/VinvAI?style=flat-square&color=D71921&label=open%20issues)](https://github.com/VinvAI/VinvAI/issues)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
 **Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**one-click, pick your editor**](https://vinv.ai/#install)

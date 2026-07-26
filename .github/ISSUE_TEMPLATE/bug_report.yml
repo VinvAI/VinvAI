@@ -1,0 +1,71 @@
+name: 🐞 Bug report
+description: Something in the Vinv extension or engines isn't working
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Vinv runs entirely on your machine, so the details below are what let us reproduce a problem we can't see.
+        Please include a diagnostics bundle when you can: run **Vinv: Export Diagnostics (for Support)** from the Command Palette and attach the file.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+      placeholder: I pressed Cmd+Alt+R to run my service under tracing, but…
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a FastAPI project
+        2. Run "Vinv: Discover Project"
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: editor
+    attributes:
+      label: Editor
+      options:
+        - VS Code
+        - Cursor
+        - VSCodium
+        - Windsurf
+        - Other (note in "What happened")
+    validations:
+      required: true
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      description: Vinv extension version (from the Extensions panel)
+      placeholder: "0.0.12"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "macOS 14.5 / Windows 11 / Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: coding-agent
+    attributes:
+      label: Coding agent CLI
+      description: Which agent is Vinv configured to drive?
+      placeholder: "Claude Code / Cursor CLI / Codex / Gemini CLI / …"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / diagnostics
+      description: Attach the "Export Diagnostics" bundle, or paste relevant output from the Vinv output channel. This will be rendered as code — no need for backticks.
+      render: shell
+    validations:
+      required: false
