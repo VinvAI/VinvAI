@@ -222,6 +222,21 @@ suite('optimization report: verdict copy, direction, glossary, optional fields',
 		assert.ok(html.includes('title="Noise band:'));
 	});
 
+	test('a dismissed opportunity renders a terminal badge carrying the dispute', () => {
+		const html = api().verdict({
+			status: 'dismissed',
+			outcome: { dismiss_note: 'one-time import cost, not amortizable across processes' },
+		});
+		assert.ok(html.includes('Dismissed — not a real opportunity'), `dismissed badge: ${html}`);
+		assert.ok(html.includes('no change was made'), 'states nothing was changed');
+		assert.ok(html.includes('one-time import cost'), 'carries the verbatim dispute note');
+	});
+
+	test('a dismissed card gets the dismissed row class', () => {
+		const html = api().card({ ...base, status: 'dismissed', outcome: { dismiss_note: 'n/a' } }, 100);
+		assert.ok(html.includes('row dismissed'), `card class: ${html}`);
+	});
+
 	test('the measured axis label carries the direction on both sides', () => {
 		const slower = api().axis({ ...base, status: 'regressed', outcome: { delta_ms: 12 } }, 100);
 		assert.ok(slower.includes('measured 12ms slower'), slower);

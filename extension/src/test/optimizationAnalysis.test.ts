@@ -445,6 +445,25 @@ suite('optimizationAnalysis: predicted → proven loop', () => {
 		assert.strictEqual(done.outcome!.measured_after, 40);
 	});
 
+	test('a big drop with NO code change is DISMISSED, not proven (watcher integrity)', () => {
+		const d = markDispatched(candidate, [timing('s1', 200, 100)], 't');
+		// The same 160ms drop that reads PROVEN above — but with no file diff the
+		// move is cold→warm variance, not a fix, so it must never be credited.
+		const done = reconcileOutcome(d, [timing('s1', 200, 100), timing('s2', 40, 100)], true, false);
+		assert.strictEqual(done.status, 'dismissed');
+		assert.ok(
+			done.outcome!.dismiss_note && done.outcome!.dismiss_note.includes('No code change'),
+			'dismiss note explains why',
+		);
+		assert.strictEqual(done.outcome!.measured_after, 40);
+	});
+
+	test('the same drop WITH a code change is still PROVEN (gate open by default)', () => {
+		const d = markDispatched(candidate, [timing('s1', 200, 100)], 't');
+		const done = reconcileOutcome(d, [timing('s1', 200, 100), timing('s2', 40, 100)], true, true);
+		assert.strictEqual(done.status, 'proven');
+	});
+
 	test('a drop inside the band is INCONCLUSIVE (no false proof)', () => {
 		const d = markDispatched(candidate, [timing('s1', 200, 100)], 't');
 		const done = reconcileOutcome(d, [timing('s1', 200, 100), timing('s2', 190, 100)], true);

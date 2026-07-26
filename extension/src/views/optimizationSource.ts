@@ -18,6 +18,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import {
 	hasIndexStore,
 	indexStoreDir,
@@ -256,6 +258,9 @@ export class OptimizationSource implements vscode.Disposable {
 			// (paired-bootstrap CI bound to the episode); the capture watcher must
 			// leave them alone rather than reconcile against "any newer session".
 			frozen.outcome.engine = opts.engine ?? 'watch';
+			// Snapshot the working tree at dispatch, so the watcher can later tell a
+			// real fix (diff changed since here — incl. callee files) from a no-op.
+			frozen.outcome.dispatch_diff_sig = this.workingTreeDiffSig(root) ?? undefined;
 		}
 		this.tracked.set(row, frozen);
 		this.rebuildModelFrom(this.memoCandidates, root);
@@ -312,6 +317,45 @@ export class OptimizationSource implements vscode.Disposable {
 		return resolved;
 	}
 
+	/**
+	 * Marks a row DISMISSED — the operator agreed with the agent's dispute that
+	 * this is not a real optimization opportunity. Terminal: it stays visible in
+	 * the panel with the dispute note instead of leaving the row stuck at
+	 * 'dispatched' forever (a non-measurable symbol — e.g. a one-time import cost
+	 * — never gets a session-timing verdict, so nothing else ever resolves it).
+	 * No-op when the row was never a tracked/known candidate (e.g. a service-fix
+	 * episode's seed row) or already carries a measured terminal verdict.
+	 */
+	dismissRow(root: string, row: number, note?: string): OptimizationCandidate | undefined {
+		const existing = this.tracked.get(row) ?? this.model.candidates.find((c) => c.row === row);
+		if (!existing) {
+			return undefined; // not an optimize candidate — nothing to mark
+		}
+		if (
+			existing.status === 'proven' ||
+			existing.status === 'regressed' ||
+			existing.status === 'dismissed'
+		) {
+			return existing; // a real measured verdict (or a prior dismissal) wins
+		}
+		const dismissed: OptimizationCandidate = {
+			...existing,
+			status: 'dismissed',
+			outcome: {
+				predicted_ms: existing.outcome?.predicted_ms ?? existing.predicted_ms,
+				measured_before: existing.outcome?.measured_before ?? existing.total_ms,
+				noise_band_ms: existing.outcome?.noise_band_ms ?? 0,
+				baseline_sessions: existing.outcome?.baseline_sessions ?? 0,
+				before_session: existing.outcome?.before_session ?? '',
+				episode_title: existing.outcome?.episode_title ?? `Optimize ${existing.name}`,
+				dismiss_note: note?.slice(0, 600),
+			},
+		};
+		this.tracked.set(row, dismissed);
+		this.rebuildModelFrom(this.memoCandidates, root);
+		return dismissed;
+	}
+
 	private seedTrackedFromDisk(): void {
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		if (!root) {
@@ -336,6 +380,35 @@ export class OptimizationSource implements vscode.Disposable {
 	private behaviorOk(overlay: Record<number, RuntimeOverlay>, row: number): boolean {
 		const rt = overlay[row];
 		return !rt || rt.current_errors === 0;
+	}
+
+	/**
+	 * A hash of the working tree (tracked diff vs HEAD + untracked status) — the
+	 * watcher's integrity signal. Captured at dispatch and compared at reconcile:
+	 * if it changed, a fix was applied SOMEWHERE (including a callee file the
+	 * symbol depends on), so a measured drop is attributable; if it is identical,
+	 * nothing was changed and a "proven" would be a cold→warm-variance false
+	 * positive. Returns null when git cannot answer, so the caller falls back to
+	 * the prior timing-only behavior rather than over-dismissing.
+	 */
+	private workingTreeDiffSig(root: string): string | null {
+		try {
+			const diff = execFileSync('git', ['diff', 'HEAD', '--'], {
+				cwd: root,
+				encoding: 'utf8',
+				maxBuffer: 32 * 1024 * 1024,
+				timeout: 6000,
+			});
+			const status = execFileSync('git', ['status', '--porcelain'], {
+				cwd: root,
+				encoding: 'utf8',
+				maxBuffer: 8 * 1024 * 1024,
+				timeout: 6000,
+			});
+			return createHash('sha1').update(diff).update(' ').update(status).digest('hex');
+		} catch {
+			return null; // no repo / git unavailable / timeout — cannot confirm
+		}
 	}
 
 	private async refresh(): Promise<void> {
@@ -450,9 +523,23 @@ export class OptimizationSource implements vscode.Disposable {
 		// outcome remains visible until a later analysis supersedes the row.
 		// Bridge-owned rows are exempt: their verdict comes from the episode-bound
 		// paired-bootstrap engine, never from whatever capture landed most recently.
+		//
+		// Integrity gate: the session-timing watcher may only credit a "proven"
+		// (or blame a "regressed") for a symbol whose fix actually landed in the
+		// working tree since dispatch — otherwise cold→warm variance on a
+		// network-I/O symbol fakes a huge win for a change that never happened. The
+		// dispatch-diff signature catches fixes in callee files too, not just the
+		// symbol's own. Unknown sig → fall back to prior behavior, never over-dismiss.
+		const currentSig = this.workingTreeDiffSig(root);
 		for (const [row, tracked] of this.tracked) {
 			if (tracked.status === 'dispatched' && tracked.outcome?.engine !== 'bridge') {
-				this.tracked.set(row, reconcileOutcome(tracked, timings.get(row), this.behaviorOk(overlay, row)));
+				const dispatchSig = tracked.outcome?.dispatch_diff_sig;
+				const codeChanged =
+					currentSig === null || !dispatchSig ? true : currentSig !== dispatchSig;
+				this.tracked.set(
+					row,
+					reconcileOutcome(tracked, timings.get(row), this.behaviorOk(overlay, row), codeChanged),
+				);
 			}
 		}
 

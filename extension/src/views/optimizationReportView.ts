@@ -220,6 +220,7 @@ function getReportHtml(): string {
 		.row.working { border-color: var(--accent-fg); }
 		.row.proven { border-left: 3px solid var(--ink); }
 		.row.regressed { border-left: 3px solid var(--accent-fg); }
+		.row.dismissed { border-left: 3px solid var(--muted-2); opacity: 0.9; }
 		.rhd { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 		.rhd .nm { font-weight: 600; font-size: 14px; }
 		.rhd .loc { color: var(--muted-2); font-size: 10.5px; }
@@ -239,6 +240,7 @@ function getReportHtml(): string {
 		.verdict { padding: 8px 10px; border: 1px solid var(--line); margin: 2px 0 10px; line-height: 1.55; }
 		.verdict.proven { border-color: var(--ink); }
 		.verdict.regressed { border-color: var(--accent-fg); color: var(--accent-fg); }
+		.verdict.dismissed { border-color: var(--muted-2); color: var(--muted); }
 		.verdict b { letter-spacing: 0.02em; }
 		.acts { display: flex; gap: 8px; flex-wrap: wrap; }
 		.acts button { padding: 6px 13px; cursor: pointer; border-radius: 0; font-family: inherit; font-size: 9px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase; transition: background 0.2s, color 0.2s, border-color 0.2s; }
@@ -309,6 +311,7 @@ function getReportHtml(): string {
 			const open = cands.filter((c) => c.status === 'candidate');
 			const proven = cands.filter((c) => c.status === 'proven');
 			const working = cands.filter((c) => c.status === 'dispatched');
+			const dismissed = cands.filter((c) => c.status === 'dismissed');
 			const recTime = open.filter((c) => (c.unit || 'ms') === 'ms').reduce((s, c) => s + c.predicted_ms, 0);
 			const recMem = open.filter((c) => c.unit === 'bytes').reduce((s, c) => s + c.predicted_ms, 0);
 			const t = [
@@ -317,6 +320,7 @@ function getReportHtml(): string {
 				{ k: 'Recoverable memory', v: recMem > 0 ? '~' + fmtBytes(recMem) : '—' },
 				{ k: 'In progress', v: working.length },
 			];
+			if (dismissed.length > 0) { t.push({ k: 'Dismissed', v: dismissed.length }); }
 			document.getElementById('tiles').innerHTML = t.map((x) =>
 				'<div class="tile' + (x.hot ? ' hot' : '') + (x.good ? ' good' : '') + '"><div class="k">' + x.k + '</div><div class="v">' + x.v + '</div></div>').join('');
 		}
@@ -369,11 +373,15 @@ function getReportHtml(): string {
 						: 'the change landed inside the ±' + amt(c.unit, o.noise_band_ms || 0) + ' ' + gloss('noise band', 'noise') + ', so no honest win can be claimed.') +
 					ciNote + (kept || noAutoRevert) + '</div>';
 			}
+			if (c.status === 'dismissed') {
+				const note = o.dismiss_note ? ' ' + esc(o.dismiss_note) : '';
+				return '<div class="verdict dismissed"><b>Dismissed — not a real opportunity</b> — the coding agent disputed the premise and you agreed, so no change was made.' + note + '</div>';
+			}
 			return '';
 		}
 
 		function card(c, scale) {
-			const cls = c.status === 'dispatched' ? 'working' : (c.status === 'proven' ? 'proven' : (c.status === 'regressed' ? 'regressed' : ''));
+			const cls = c.status === 'dispatched' ? 'working' : (c.status === 'proven' ? 'proven' : (c.status === 'regressed' ? 'regressed' : (c.status === 'dismissed' ? 'dismissed' : '')));
 			let h = '<div class="row ' + cls + '">';
 			h += '<div class="rhd"><span class="nm">' + esc(c.name) + '</span>' +
 				'<span class="tag ' + esc(c.waste_kind) + '"' + (KIND_TIP[c.waste_kind] ? ' title="' + KIND_TIP[c.waste_kind] + '"' : '') + '>' + (KIND[c.waste_kind] || esc(c.waste_kind)) + '</span>' +

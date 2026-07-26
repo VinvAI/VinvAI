@@ -23,6 +23,30 @@ import { buildGraphSnapshot, hasIndexStore, type GraphSnapshot } from '../graph/
 import { enrichTagsFromFeedback } from '../graph/graphEnhancer';
 import { deriveSeedRows, packBudgets, writeContextPack, type PackTask } from './contextPack';
 import type { IndexHit } from '../qna/answer';
+import { optimizationSourceInstance } from '../views/optimizationSource';
+
+/**
+ * When the operator accepts an agent's dispute on an OPTIMIZE episode ("agree
+ * there is no issue"), the ranked opportunity is not real. Mark its row(s)
+ * DISMISSED so the Optimize panel shows a terminal "not a real opportunity"
+ * badge carrying the dispute, instead of leaving the row stuck at 'dispatched'
+ * (a non-measurable symbol never gets a session-timing verdict, so nothing else
+ * would ever resolve it). Guarded by task.optimization so only optimize
+ * episodes touch the board — a no-op for service-fix / error-cluster episodes.
+ */
+function dismissDisputedOptimization(root: string, task: EpisodeTask, dispute: string): void {
+	try {
+		const source = optimizationSourceInstance();
+		if (!source || !task.optimization) {
+			return;
+		}
+		for (const row of task.seedRows ?? []) {
+			source.dismissRow(root, row, dispute);
+		}
+	} catch {
+		// Panel bookkeeping must never break the episode's own completion.
+	}
+}
 
 /**
  * Renders the winning pack's cited symbols as retrieval hits so a verified
@@ -1660,6 +1684,11 @@ export async function runEpisode(
 							);
 							if (call === 'approve') {
 								verified = true;
+								// The operator agreed the disputed premise is not real — for an
+								// optimize episode that means the ranked row is not a genuine
+								// opportunity, so record it dismissed (a terminal panel badge)
+								// rather than leaving it stuck 'dispatched'.
+								dismissDisputedOptimization(workspaceRoot, task, directives.dispute);
 								queueProposalEpisodes(selectedProposals);
 								return;
 							}
