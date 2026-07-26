@@ -997,6 +997,7 @@ export async function runVerifiedHotspotEpisode(
 		deps,
 	);
 	announceVerdict(result, plan.label);
+	await autoMeasureAfterUnproven(result);
 }
 
 /** Cache sweep through the same verdict engine (see runVerifiedHotspotEpisode). */
@@ -1022,6 +1023,28 @@ export async function runVerifiedCacheSweep(
 		deps,
 	);
 	announceVerdict(result, plan.label);
+	await autoMeasureAfterUnproven(result);
+}
+
+/**
+ * Auto-measure after an accepted-but-unmeasured optimization. When the verdict
+ * engine could NOT self-measure the after-run (mode 'fallback' — the exercised
+ * flow has no auto-replayable probe, e.g. an auth'd POST endpoint), the
+ * operator's accept keeps the fix but leaves no before/after. Rather than making
+ * them click "Measure Optimization" by hand, kick off the re-trace automatically
+ * so the predicted→proven comparison runs on accept. A bridge-measured verdict
+ * ('verdict') already carries its CI; a declined episode ('declined') changed
+ * nothing — neither needs this.
+ */
+async function autoMeasureAfterUnproven(result: OptimizeRunResult): Promise<void> {
+	if (result.mode !== 'fallback') {
+		return;
+	}
+	try {
+		await vscode.commands.executeCommand('vinv-vs.measureOptimization');
+	} catch {
+		// Best-effort: the manual "Measure Optimization" command remains available.
+	}
 }
 
 /** One closing notification per engine-judged episode. */

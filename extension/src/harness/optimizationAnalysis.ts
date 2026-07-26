@@ -97,7 +97,8 @@ export type OptimizationStatus =
 	| 'dispatched' // an episode is running / awaiting a fresh after-run
 	| 'proven' // after-run measured a drop beyond the noise band
 	| 'inconclusive' // after-run landed inside the noise band — no honest claim
-	| 'regressed'; // after-run measured a rise beyond the noise band
+	| 'regressed' // after-run measured a rise beyond the noise band
+	| 'dismissed'; // agent disputed the premise and the operator agreed — not a real opportunity
 
 /** The measured result of a dispatched optimization, filled by the after-run. */
 export interface OptimizationOutcome {
@@ -137,6 +138,19 @@ export interface OptimizationOutcome {
 	};
 	/** True when the change was actually rolled back (revertToSnapshot ran). */
 	reverted?: boolean;
+	/**
+	 * When status is 'dismissed': the agent's dispute the operator agreed with
+	 * (verbatim, truncated) — the reason this ranked row is not a real
+	 * optimization opportunity. No measurement was taken.
+	 */
+	dismiss_note?: string;
+	/**
+	 * Working-tree diff signature captured at dispatch. The watcher compares it to
+	 * the current signature to tell a REAL fix (signature changed since dispatch —
+	 * anywhere, including callee files the symbol depends on) from a no-op dispute
+	 * (signature unchanged), instead of only checking the symbol's own file.
+	 */
+	dispatch_diff_sig?: string;
 }
 
 /** One ranked optimization opportunity. */
@@ -948,6 +962,7 @@ export function reconcileOutcome(
 	candidate: OptimizationCandidate,
 	timings: SymbolSessionTiming[] | undefined,
 	behaviorOk: boolean,
+	codeChanged = true,
 ): OptimizationCandidate {
 	if (candidate.status !== 'dispatched' || !candidate.outcome) {
 		return candidate;
@@ -960,6 +975,30 @@ export function reconcileOutcome(
 	const after = l.total_ms;
 	const delta = after - candidate.outcome.measured_before;
 	const band = candidate.outcome.noise_band_ms;
+	// Integrity gate: the watcher judges by session timing ALONE, so a symbol
+	// whose file was never changed must not be credited with a "proven" win (nor
+	// blamed for a "regressed"). Cold→warm variance on a network-I/O symbol (e.g.
+	// an MCP/TLS handshake ~17s cold at boot and ~3s warm) can dwarf the noise
+	// band and fake a huge speedup for a fix that never happened. With no code
+	// diff, the honest verdict is DISMISSED — nothing was optimized. (Signal is
+	// "uncommitted change to the file"; committing mid-verdict could hide a real
+	// change, but erring toward "not a win" never fabricates one.)
+	if (!codeChanged) {
+		return {
+			...candidate,
+			status: 'dismissed',
+			total_ms: after,
+			outcome: {
+				...candidate.outcome,
+				measured_after: after,
+				delta_ms: delta,
+				behavior_ok: behaviorOk,
+				dismiss_note:
+					`No code change was made for this symbol, so the measured ${Math.round(Math.abs(delta))}${candidate.unit === 'bytes' ? ' bytes' : 'ms'} ` +
+					'difference is run-to-run variance (e.g. a cold vs warm run), not a verified optimization.',
+			},
+		};
+	}
 	let status: OptimizationStatus;
 	if (!behaviorOk) {
 		// A behavior change disqualifies any timing claim — the fix broke
