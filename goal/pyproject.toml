@@ -29,7 +29,7 @@ goal = "goal.cli:main"
 where = ["src"]
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py312"
 line-length = 100
 src = ["src"]
 

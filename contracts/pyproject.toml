@@ -7,7 +7,7 @@ name = "lens-contracts"
 version = "0.1.0"
 description = "Canonical data contract for the lens system: SpanEvent, SampleEvent, ExternalCallEvent, ReplayCorpusRow, DeterminismBoundaryRecord."
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 license = { text = "Apache-2.0" }
 dependencies = [
     "pydantic>=2.0.0,<3.0.0",
