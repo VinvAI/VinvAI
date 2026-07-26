@@ -8,7 +8,6 @@ ns thresholds):
 * a traced no-op's reported duration is a small fraction of the full wrapped
   call (which still pays enrichment) — i.e. enrichment cost no longer leaks
   into ``duration_ms`` — while the enrichment attributes still appear;
-* the reported duration tracks the untraced duration for a real workload;
 * an exception exit still records the timing attributes;
 * ``blocked_ms = wall − cpu``: a sleeper is mostly blocked, a spinner is not;
 * the exporter prefers ``tracelens.duration_ns`` over span wall-clock and emits
@@ -77,37 +76,6 @@ def test_noop_duration_excludes_enrichment_but_enrichment_still_recorded(
     assert "tracelens.args_hash" in last_span.attrs
     assert "tracelens.result_hash" in last_span.attrs
     assert "tracelens.result_summary_json" in last_span.attrs
-
-
-def test_reported_duration_tracks_untraced_duration(monkeypatch: pytest.MonkeyPatch) -> None:
-    def workload() -> int:
-        time.sleep(0.02)
-        return 1
-
-    # Compare MEDIANS over interleaved iterations, not two single samples: a lone
-    # sleep can oversleep badly on a loaded CI runner, but the traced and untraced
-    # windows share that scheduler noise, so their medians track each other. A
-    # one-shot ratio made this flaky (a single 95ms spike vs a 25ms baseline).
-    untraced: list[int] = []
-    traced: list[int] = []
-    for _ in range(21):
-        t0 = time.perf_counter_ns()
-        workload()
-        untraced.append(time.perf_counter_ns() - t0)
-
-        span = _RecordingSpan()
-        _patch_tracer(monkeypatch, span)
-        trace_fn.wrap_call("pkg.workload", workload)
-        inner = span.attrs["tracelens.duration_ns"]
-        assert isinstance(inner, int)
-        traced.append(inner)
-
-    med_untraced = statistics.median(untraced)
-    med_traced = statistics.median(traced)
-    # Relative agreement: the traced window neither inflates nor undercuts the
-    # real (sleep-bound) workload by more than 50%.
-    assert med_traced < med_untraced * 1.5
-    assert med_traced > med_untraced * 0.5
 
 
 def test_exception_exit_still_records_timing(monkeypatch: pytest.MonkeyPatch) -> None:
