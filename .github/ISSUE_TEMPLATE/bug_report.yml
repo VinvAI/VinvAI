@@ -43,7 +43,7 @@ body:
     attributes:
       label: Extension version
       description: Vinv extension version (from the Extensions panel)
-      placeholder: "0.0.12"
+      placeholder: "0.0.13"
     validations:
       required: true
   - type: input

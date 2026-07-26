@@ -44,7 +44,11 @@ path without accepting unrelated string suffixes.
 
 ## Run
 
-Build the index first, then:
+Build the index first (`cargo build --release` in `index/`, which produces
+`./target/release/index` — this dev harness uses that binary directly, not the
+packaged `dist/index` from `scripts/build_binary.sh`). The `--store-dir` below is
+this harness's own scratch store under `~/.vinv_index/<repo-slug>`, separate from
+a repo's runtime `<repo>/.vinv/index`. Then:
 
 ```bash
 # gateway comes from the usual env (INDEX_GATEWAY_URL — defaults to the local sidecar)
@@ -89,7 +93,7 @@ python eval/sweep_retrieval.py \
   --json-output /tmp/vinv-retrieval-sweep.json
 ```
 
-The first policy is the shipping baseline (`docstring`, rank weight `0.005`).
+The first policy is the shipping baseline (`docstring`, rank weight `0.02`).
 The script selects on development utility (symbol nDCG minus a configurable
 context-token penalty), then reports a deterministic paired-bootstrap 95%
 interval on the unopened holdout. Do not promote a candidate whose holdout
@@ -166,16 +170,16 @@ Re-index (or re-query) under different settings and compare:
 - `INDEX_EMBED_MODE` = `signature` | `docstring` (default) | `full` — the
   document-representation knob. `docstring` favors exact-symbol precision;
   `signature` favors file-level recall (measured trade-off).
-- `INDEX_RANK_WEIGHT` — weight of the PageRank importance prior (default 0.005).
+- `INDEX_RANK_WEIGHT` — weight of the PageRank importance prior (default 0.02).
   Sweep it here to confirm it helps rather than being inert or overpowering RRF.
 
 ## Notes
 
 - Use a **real** embedding gateway for meaningful absolute numbers; a general
   code model gives indicative-but-not-production accuracy.
-- `questions.vinv.json` is a repository-grounded 52-question baseline balanced
+- `questions.vinv.json` is a repository-grounded 50-question baseline balanced
   across behavior, identifier, documentation, and graph-oriented retrieval.
-- `questions.vinv.holdout.json` adds 16 explicit holdout questions, balanced
+- `questions.vinv.holdout.json` adds 24 explicit holdout questions, balanced
   across the same categories and disjoint from development targets.
 - Answers (`file`/`symbol`) must match how `index` reports them: `file` is the
   repo-relative path; `symbol` is the function/method name.

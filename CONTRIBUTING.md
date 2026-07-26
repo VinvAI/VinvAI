@@ -190,6 +190,17 @@ Repo-level agent instruction files (`CLAUDE.md`, `AGENTS.md`, `.cursorrules`,
 etc.) are welcome — if you find yourself repeating the same context to an
 agent, propose one in a PR so the next contributor gets it for free.
 
+## Code of Conduct
+
+Participation in this project is governed by our
+[Code of Conduct](CODE_OF_CONDUCT.md). Be respectful; report unacceptable
+behavior to support@vinv.ai.
+
+## Security
+
+Found a vulnerability? **Don't open a public issue** — follow
+[SECURITY.md](SECURITY.md) for private disclosure.
+
 ## License
 
 By contributing you agree your contributions are licensed under the

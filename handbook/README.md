@@ -20,7 +20,7 @@ uv pip install --python .venv/bin/python -e .
 .venv/bin/handbook --help
 ```
 
-Build from inside the full repo checkout (it uses sibling packages).
+Build from inside the full repo checkout (it uses sibling packages). On Windows, the venv puts executables under `.venv\Scripts\` instead of `.venv/bin/` (e.g. `.venv\Scripts\python`, `.venv\Scripts\handbook --help`).
 
 ## `// 02 · use`
 

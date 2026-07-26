@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Third-party log-based tracing and RCA CLI (OTel launcher + offline analysis)"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
+license = { text = "Apache-2.0" }
 dependencies = [
     "opentelemetry-api>=1.27.0,<1.30.0",
     "opentelemetry-sdk>=1.27.0,<1.30.0",

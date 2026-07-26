@@ -15,7 +15,7 @@
     "dim": 3072,
     "embedding_backend": "gateway",
     "embedding_model": "text-embedding-3-large",
-    "repo_path": "/Users/sohamacharya/Desktop/VinvAI/Vinv",
+    "repo_path": "<repo>",
     "representation_mode": "docstring",
     "summary_model": "gpt-5.4-nano",
     "updated_unix": 1784099742,

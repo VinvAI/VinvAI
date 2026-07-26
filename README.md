@@ -274,7 +274,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 3. **Add your own test input** — on any Journey endpoint step, fill body/params/expected status and hit *Add input*. It lands in the same plan layer the AI-authored scenarios use, runs with the endpoint's auth setup on the next exercise, and becomes a permanent regression case.
 4. **See what got fixed** — Command Palette → **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The tab's backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
 5. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
-6. **Hunt waste on demand** — **"Vinv: Optimize Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** (recomputed-work finder) each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
+6. **Hunt waste on demand** — **"Vinv: Optimize Latency Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** (recomputed-work finder) each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
 
 ## MCP tools reference
 
@@ -308,7 +308,7 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 
 ## Contributing & license
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. [Apache License 2.0](LICENSE) © 2026 VinvAI.
+See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. By taking part you agree to our [Code of Conduct](CODE_OF_CONDUCT.md); to report a vulnerability, see [SECURITY.md](SECURITY.md). [Apache License 2.0](LICENSE) © 2026 VinvAI.
 
 <div align="center">
 <sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo.</sub>

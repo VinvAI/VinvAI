@@ -196,6 +196,37 @@ HTTP server end-to-end (`extension/src/test/probeBaseline.test.ts`).
   `scratch_allocation → +60 B` (buffer freed), landing in the JSONL and in
   the aggregation (`extension/src/test/traceMemory.test.ts`).
 
+## 6. Why symbol-level + runtime-join context is ahead
+
+The chain Vinv serves to an agent is
+`symbol name → exact snippet at file:lines → observed runtime facts`:
+`index query` returns ranked symbols with their real definition snippet and
+line span (verified: `wrap_call` → `tracelens/src/tracelens/runtime/trace_fn.py:117-127`
+with the actual `def` body and 12 graph neighbors), the MCP server passes
+that payload through intact with a logged decision id
+(`extension/src/mcp/indexServer.ts:530-560`), and the runtime MCP joins the
+same symbols to captured argument values, error exemplars, and call structure
+(`extension/src/mcp/runtimeServer.ts`).
+
+Comparable systems structure context differently:
+[Sourcegraph Cody](https://sourcegraph.com/blog/how-cody-understands-your-codebase)
+retrieves embedding/BM25-ranked *chunks* (plus code-graph context on
+enterprise), [Aider's repo map](https://aider.chat/2023/10/22/repomap.html)
+ranks tree-sitter *signatures* with PageRank over the def/ref graph but sends
+declarations rather than bodies, and
+[Copilot's workspace index](https://dzone.com/articles/github-copilot-multi-file-context-internal-architecture)
+blends embeddings of file chunks with editor state (open files, imports,
+recency). All three stop at *static* text: none joins retrieval to what the
+code **did at runtime**. Vinv's units are whole symbols (not arbitrary
+chunks), carry exact line provenance, and arrive already joined to trace
+evidence — which is why a fix episode's context pack can cite the failing
+argument values next to the definition it retrieves. The gap worth an issue:
+ranked retrieval is still snippet-per-symbol (no Cody-style multi-hop chunk
+expansion inside very large symbol bodies), and module-level doc blobs can
+outrank function symbols on vague behavioral queries (observed on
+"who wraps a function call…" — the module doc won; the identifier-phrased
+query returned the function).
+
 ## 7. The behavioral exerciser: coverage bandit + invariant confidence
 
 The `exerciser` engine drives EVERY discovered endpoint itself (not just observed
@@ -245,34 +276,3 @@ a line-for-line port of `probeBaseline.ts` so a Python regression pass and a
 TypeScript probe pass agree on a shape hash). Behavioral failure clusters
 (5xx/crash/invariant-violation) are deduped by the digit-normalized sha-prefix
 signature the rest of Vinv uses and fed into the same issue→episode dispatch.
-
-## 6. Why symbol-level + runtime-join context is ahead
-
-The chain Vinv serves to an agent is
-`symbol name → exact snippet at file:lines → observed runtime facts`:
-`index query` returns ranked symbols with their real definition snippet and
-line span (verified: `wrap_call` → `tracelens/src/tracelens/runtime/trace_fn.py:117-127`
-with the actual `def` body and 12 graph neighbors), the MCP server passes
-that payload through intact with a logged decision id
-(`extension/src/mcp/indexServer.ts:530-560`), and the runtime MCP joins the
-same symbols to captured argument values, error exemplars, and call structure
-(`extension/src/mcp/runtimeServer.ts`).
-
-Comparable systems structure context differently:
-[Sourcegraph Cody](https://sourcegraph.com/blog/how-cody-understands-your-codebase)
-retrieves embedding/BM25-ranked *chunks* (plus code-graph context on
-enterprise), [Aider's repo map](https://aider.chat/2023/10/22/repomap.html)
-ranks tree-sitter *signatures* with PageRank over the def/ref graph but sends
-declarations rather than bodies, and
-[Copilot's workspace index](https://dzone.com/articles/github-copilot-multi-file-context-internal-architecture)
-blends embeddings of file chunks with editor state (open files, imports,
-recency). All three stop at *static* text: none joins retrieval to what the
-code **did at runtime**. Vinv's units are whole symbols (not arbitrary
-chunks), carry exact line provenance, and arrive already joined to trace
-evidence — which is why a fix episode's context pack can cite the failing
-argument values next to the definition it retrieves. The gap worth an issue:
-ranked retrieval is still snippet-per-symbol (no Cody-style multi-hop chunk
-expansion inside very large symbol bodies), and module-level doc blobs can
-outrank function symbols on vague behavioral queries (observed on
-"who wraps a function call…" — the module doc won; the identifier-phrased
-query returned the function).

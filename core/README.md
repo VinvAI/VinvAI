@@ -3,9 +3,9 @@
 > **The shared runtime library.** Deterministic plumbing (native-index boundary, terminal transport, file tools) plus an embeddable agent stack. The standalone Vinv CLIs are harness-only prompt renderers and no longer depend on it; it ships for embedders and its own tooling.
 
 ![part of vinv](https://img.shields.io/badge/part_of-vinv-d71921?style=flat-square)
-![internal](https://img.shields.io/badge/audience-internal-0a0a0a?style=flat-square)
+![internal](https://img.shields.io/badge/internal_to-monorepo-0a0a0a?style=flat-square)
 
-Internal library — you don't install this directly.
+Internal to the monorepo — a workspace member that other Vinv engines depend on, not a package you install on its own.
 
 ## `// 01 · embed the agent runtime (optional)`
 

@@ -37,8 +37,6 @@ import {
 import { stopEmbedderIfStarted } from './embedder/sidecar';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
-	console.log('Vinv extension activated');
-
 	// On activation (install / window reload), reveal the Vinv sidebar so users
 	// land on it rather than the default Explorer.
 	void vscode.commands.executeCommand('workbench.view.extension.vinv');

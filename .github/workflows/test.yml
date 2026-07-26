@@ -24,7 +24,7 @@ jobs:
         run: uv sync
       - name: Run engine test suites
         run: |
-          for pkg in contracts core tracelens identification handbook bringup goal embedder; do
+          for pkg in contracts core tracelens identification handbook bringup goal embedder exerciser; do
             if [ -d "$pkg/tests" ] || ls "$pkg"/src/**/test_*.py >/dev/null 2>&1; then
               echo "::group::$pkg"
               (cd "$pkg" && uv run pytest -q)

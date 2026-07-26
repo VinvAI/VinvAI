@@ -3,9 +3,9 @@
 > **The data contract.** Every event Vinv records is pinned here as a typed model with a versioned schema — so traces written today stay readable tomorrow.
 
 ![part of vinv](https://img.shields.io/badge/part_of-vinv-d71921?style=flat-square)
-![internal](https://img.shields.io/badge/audience-internal-0a0a0a?style=flat-square)
+![internal](https://img.shields.io/badge/internal_to-monorepo-0a0a0a?style=flat-square)
 
-Internal library — `SpanEvent` and its generated schema are the executable contract used by
+Internal to the monorepo — a workspace member the other Vinv engines depend on, not a package you install on its own. `SpanEvent` and its generated schema are the executable contract used by
 Tracelens readers. Other event models remain forward-looking until a producer imports them.
 
 ## `// 01 · install`

@@ -43,3 +43,11 @@ cd goal
 uv sync --extra dev
 uv run pytest
 ```
+
+---
+
+<div align="center">
+
+part of **[vinv](../README.md)** · [vinv.ai](https://vinv.ai)
+
+</div>

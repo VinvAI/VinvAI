@@ -14,6 +14,8 @@ cd tracelens
 pip install -e .
 ```
 
+The examples below call `tracelens` directly, assuming it's on your `PATH`. When you install into a virtualenv, the console script lands in `.venv/bin/` on macOS/Linux and `.venv\Scripts\` on Windows — invoke it from there if it isn't on `PATH`.
+
 ## `// 03 · trace a run`
 
 ```bash

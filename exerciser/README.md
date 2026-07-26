@@ -33,6 +33,7 @@ Artifacts land under `<repo>/.vinv/exercise/`:
 | `invariants.json` | `profile` | learned invariants with Laplace confidence |
 | `issues.json` | `run`/`profile` | failure clusters by normalized signature (extension → episodes) |
 | `baselines/*.json` | `run`/`regress` | earned golden behavior baselines (degraded/same/improved) |
+| `scorecard.json` / `scorecard.md` | `scorecard` | per-service scorecard assembled from the artifacts above: endpoints n/m, coverage before→after, invariants, issues, latency (plus optimization deltas when a cycle ran) |
 
 ## Maths
 
@@ -68,3 +69,11 @@ restarts, new sessions, and machine reboots:
 Credentials are the deliberate exception: tokens captured by scenarios are used
 in-memory (sweep + teardown) and re-captured fresh by `regress` from the
 scenario setup chains — they are never written to disk.
+
+---
+
+<div align="center">
+
+part of **[vinv](../README.md)** · [vinv.ai](https://vinv.ai)
+
+</div>

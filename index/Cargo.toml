@@ -5,7 +5,7 @@ edition = "2021"
 description = "index — semantic code-index CLI (index / query / update)"
 readme = "README.md"
 license = "Apache-2.0"
-repository = "https://github.com/vinv-ai/vinv"
+repository = "https://github.com/VinvAI/VinvAI"
 
 # The binary is called `index`; the crate is `vinv-index` to avoid colliding
 # with the (reserved) `index` crate name.

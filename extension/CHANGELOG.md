@@ -4,6 +4,14 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.0.13] — 2026-07-26
+
+### Changed
+
+- Repository and documentation polish ahead of the open-source release: GitHub
+  issue templates, sidebar links, and README badges. No functional changes to
+  the extension.
+
 ## [0.0.12] — 2026-07-26
 
 ### ✨ Added
