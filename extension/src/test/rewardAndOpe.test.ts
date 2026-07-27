@@ -493,13 +493,19 @@ suite('Test-interpreter resolution', () => {
 				fs.mkdirSync(path.join(ws, name, 'bin'), { recursive: true });
 				fs.writeFileSync(path.join(ws, name, 'bin', 'python'), '');
 			}
+			// Only the real environments carry PEP 405's marker; node_modules and
+			// src have a `bin/python` shim and nothing else, which is exactly the
+			// case a shape-only rule would wrongly accept.
+			for (const name of ['.venv-smol', 'venv311']) {
+				fs.writeFileSync(path.join(ws, name, 'pyvenv.cfg'), 'home = /usr\n');
+			}
 			const found = discoverPythonCandidates(ws);
 			assert.ok(
 				found.includes(path.join(ws, '.venv-smol', 'bin', 'python')),
 				`a non-standard venv name must be discovered: ${found.join(', ')}`,
 			);
 			assert.ok(found.includes(path.join(ws, 'venv311', 'bin', 'python')));
-			// Shape alone is not enough — a directory must also LOOK like an env,
+			// A `bin/python` shim without PEP 405's marker is not an environment,
 			// so `node_modules/bin/python` and `src/bin/python` stay out.
 			assert.ok(!found.some((c) => c.includes(`${path.sep}node_modules${path.sep}`)));
 			assert.ok(!found.some((c) => c.includes(`${path.sep}src${path.sep}bin`)));
@@ -1189,5 +1195,36 @@ suite('Counterexample merge deferral (confirm gate)', () => {
 		// explicit merge call may change the oracle.
 		fs.writeFileSync(path.join(dir, 'test_counterexample.py'), 'def test_cx():\n    assert False\n');
 		assert.deepStrictEqual(fs.readFileSync(oracle), before);
+	});
+});
+
+suite('Virtual-env discovery is structural, not name-based', () => {
+	test('an environment with no venv-ish name at all is still found', () => {
+		// PEP 405 puts `pyvenv.cfg` at the root of every virtual environment, so
+		// its presence IS the environment. A name filter finds `.venv-smol` but
+		// misses `.direnv`, `env39` or `sandbox` — and the target repo may call
+		// its environment anything.
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-envshape-'));
+		try {
+			for (const name of ['sandbox', '.direnv', 'toolchain']) {
+				const bin = path.join(root, name, 'bin');
+				fs.mkdirSync(bin, { recursive: true });
+				fs.writeFileSync(path.join(bin, 'python'), '#!/bin/sh\n', { mode: 0o755 });
+				fs.writeFileSync(path.join(root, name, 'pyvenv.cfg'), 'home = /usr\n');
+			}
+			// A directory that merely LOOKS like source must not be offered.
+			fs.mkdirSync(path.join(root, 'mypkg'), { recursive: true });
+
+			const found = discoverPythonCandidates(root).filter((c) => c.startsWith(root));
+			for (const name of ['sandbox', '.direnv', 'toolchain']) {
+				assert.ok(
+					found.some((c) => c.includes(`${path.sep}${name}${path.sep}`)),
+					`${name} should be discovered by shape, got ${JSON.stringify(found)}`,
+				);
+			}
+			assert.ok(!found.some((c) => c.includes(`${path.sep}mypkg${path.sep}`)));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

@@ -272,8 +272,22 @@ export const UNIFIED_RUNNER = [
  * `my-virtualenv`, `env` are all created by real tooling (uv, poetry --local,
  * pdm --in-project, virtualenv, hand-rolled) and all put the interpreter in
  * the same place. */
-function looksLikeVenvDir(name: string): boolean {
-	return /venv|virtualenv/i.test(name) || name === 'env' || name === '.env';
+function isVirtualEnvDir(dir: string): boolean {
+	// PEP 405 puts `pyvenv.cfg` at the root of a virtual environment, so its
+	// presence IS the environment — no name heuristic can match that. A name
+	// filter (`/venv|virtualenv/`) finds `.venv-smol` but misses `.direnv`,
+	// `env39` or `sandbox`, and the target repo may call its environment
+	// anything at all.
+	//
+	// The marker is required rather than merely preferred: `bin/python` alone
+	// also matches shim directories a package manager creates (node_modules
+	// being the common one), and offering those as interpreters wastes a probe
+	// on something that was never an environment.
+	try {
+		return fs.existsSync(path.join(dir, 'pyvenv.cfg'));
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -314,7 +328,7 @@ export function discoverPythonCandidates(workspaceRoot: string): string[] {
 			.readdirSync(workspaceRoot, { withFileTypes: true })
 			.filter((d) => d.isDirectory() || d.isSymbolicLink())
 			.map((d) => d.name)
-			.filter(looksLikeVenvDir)
+			.filter((name) => isVirtualEnvDir(path.join(workspaceRoot, name)))
 			.sort();
 	} catch {
 		// Unreadable workspace root: the fixed candidates still apply.
@@ -388,7 +402,13 @@ export function workspacePackageNames(workspaceRoot: string): string[] {
 			continue;
 		}
 		for (const name of entries) {
-			if (name.startsWith('.') || NON_PACKAGE_DIRS.has(name.toLowerCase()) || looksLikeVenvDir(name)) {
+			// A virtual environment is not a package of the repo, whatever it is
+			// called — decided structurally, not by name.
+			if (
+				name.startsWith('.') ||
+				NON_PACKAGE_DIRS.has(name.toLowerCase()) ||
+				isVirtualEnvDir(path.join(base, name))
+			) {
 				continue;
 			}
 			if (fs.existsSync(path.join(base, name, '__init__.py')) && !names.includes(name)) {
