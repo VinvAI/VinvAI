@@ -55,9 +55,10 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from ._worker import worker_entrypoint
 from .agent_loop import AgentChannel, Question, question_key
 from .functions import detect_src_roots
-from .issues import FailureCluster, normalize_signature
+from .issues import FailureCluster, build_clusters
 
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -104,6 +105,44 @@ class FaultBoundary:
         }
 
 
+def _parse_typespec(raw: str | None) -> tuple[str, bool, str]:
+    """Normalise a declared type into ``(spec, optional, base)``.
+
+    Type annotations arrive spelled several ways for the same thing, and the
+    original one-line parse only understood one of them. ``Optional[str]``
+    rendered by ``__name__`` was the bare word "Optional" — no base type at all,
+    so 3 of its 4 faults never fired; rendered by ``str()`` it is
+    ``typing.Optional[str]``, where the module qualifier defeated the
+    ``startswith("optional")`` test. ``Union[str, None]`` is a third spelling.
+    ``str | None`` — the one spelling the single test used — happened to work,
+    which is why this looked correct.
+
+    Returns the lowered spec, whether ``None`` is admissible, and the base type
+    name to derive value faults from.
+    """
+    spec = (raw or "").strip().lower()
+    # Module qualifiers carry no meaning here: `typing.Optional[str]` and
+    # `Optional[str]` declare the same domain.
+    for prefix in ("typing.", "t.", "builtins."):
+        spec = spec.replace(prefix, "")
+
+    optional = (
+        "none" in spec or spec.endswith("?") or spec.startswith("optional[") or spec == "optional"
+    )
+
+    # Unwrap one Optional[...]/Union[...] layer, then take the first member: the
+    # faults are derived from the type the value actually carries when present.
+    inner = spec
+    for wrapper in ("optional[", "union["):
+        if inner.startswith(wrapper) and inner.endswith("]"):
+            inner = inner[len(wrapper) : -1]
+            break
+    members = [m.strip() for m in inner.replace("|", ",").split(",") if m.strip()]
+    base = next((m for m in members if m not in ("none", "nonetype")), "")
+    base = base.rstrip("?").strip() or "str"
+    return spec, optional, base
+
+
 def catalogue_faults(contract: dict[str, str]) -> list[Fault]:
     """Adversarial-but-legal values implied by a boundary's type contract.
 
@@ -113,10 +152,8 @@ def catalogue_faults(contract: dict[str, str]) -> list[Fault]:
     """
     faults: list[Fault] = []
     for name in sorted(contract):
-        spec = (contract[name] or "").strip().lower()
-        optional = "none" in spec or spec.endswith("?") or spec.startswith("optional")
-        base = spec.replace("optional[", "").replace("]", "")
-        base = base.split("|")[0].strip().rstrip("?") or "str"
+        spec, optional, base = _parse_typespec(contract[name])
+        del spec  # kept for readability of the parse step
 
         if optional:
             faults.append(Fault(name, "none", None, f"contract declares {name} as optional"))
@@ -480,56 +517,38 @@ def classify_row(row: dict[str, Any]) -> str | None:
     return None if row.get("error_type") in _TYPED_REJECTIONS else "fault-crash"
 
 
+def _fault_detail(row: dict[str, Any], kind: str) -> str:
+    if kind == "fault-divergence" and row.get("phase") == "chunk-sweep":
+        # Deliberately omits the split index so every failing split of one
+        # aggregator collapses into ONE finding rather than N.
+        return (
+            f"{row.get('error_type', 'error')} raised on a chunk-boundary "
+            "split while other splits succeeded"
+        )
+    if kind == "fault-divergence":
+        return str(row.get("error"))
+    return f"{row.get('error_type', 'error')} on {row.get('fault_label')}"
+
+
+def _fault_expected(row: dict[str, Any], kind: str) -> str:
+    if kind == "fault-divergence":
+        return "a stable aggregate across every split point"
+    return "handled, or refused with a typed error — the shape is " f"legal: {row.get('why_legal')}"
+
+
 def cluster_fault_failures(rows: list[dict[str, Any]]) -> list[FailureCluster]:
-    clusters: dict[str, FailureCluster] = {}
-    for row in rows:
-        kind = classify_row(row)
-        if kind is None:
-            continue
-        target = row.get("target", "?")
-        if kind == "fault-divergence" and row.get("phase") == "chunk-sweep":
-            # Deliberately omits the split index so every failing split of one
-            # aggregator collapses into ONE finding rather than N.
-            detail = (
-                f"{row.get('error_type', 'error')} raised on a chunk-boundary "
-                "split while other splits succeeded"
-            )
-        elif kind == "fault-divergence":
-            detail = str(row.get("error"))
-        else:
-            detail = f"{row.get('error_type', 'error')} on {row.get('fault_label')}"
-        sig = normalize_signature(kind, f"{target} {detail}")
-        cluster = clusters.get(sig)
-        if cluster is None:
-            cluster = FailureCluster(
-                signature=sig,
-                kind=kind,
-                title=f"{target} — {detail}"[:300],
-                endpoint_id=target,
-                method="FAULT",
-                path=target,
-                exemplar={
-                    "input": {
-                        "field": row.get("fault_field"),
-                        "label": row.get("fault_label"),
-                    },
-                    "strategy": f"fault/{row.get('fault_label', 'sweep')}",
-                    "status": None,
-                    "error": row.get("error"),
-                    "detail": detail,
-                    "expected": (
-                        "a stable aggregate across every split point"
-                        if kind == "fault-divergence"
-                        else (
-                            "handled, or refused with a typed error — the shape is "
-                            f"legal: {row.get('why_legal')}"
-                        )
-                    ),
-                },
-            )
-            clusters[sig] = cluster
-        cluster.count += 1
-    return sorted(clusters.values(), key=lambda c: (c.kind, c.path))
+    return build_clusters(
+        rows,
+        verdict=classify_row,
+        describe=_fault_detail,
+        method="FAULT",
+        strategy=lambda r, _k: f"fault/{r.get('fault_label', 'sweep')}",
+        expected=_fault_expected,
+        exemplar_extra=lambda r: {
+            "input": {"field": r.get("fault_field"), "label": r.get("fault_label")},
+            "error": r.get("error"),
+        },
+    )
 
 
 def infer_contract_from_signature(
@@ -566,7 +585,20 @@ def infer_contract_from_signature(
         "    ann = p.annotation\n"
         "    if ann is p.empty:\n"
         "        continue\n"
-        "    out[name] = getattr(ann, '__name__', None) or str(ann)\n"
+        # `getattr(ann, '__name__')` is the usual "pretty type name" recipe and
+        # is right for a plain class — but for a typing alias `__name__` is the
+        # CONSTRUCTOR's name, so `Optional[str]` renders as bare "Optional" and
+        # every parameter of it lost 3 of its 4 faults (only `none` survived;
+        # empty/whitespace/surrogate never fired). `list[int]`/`dict[...]`
+        # survived only by accident, because the lowercased constructor name
+        # still starts with "list"/"dict". `str(ann)` keeps the parameters, so
+        # prefer it whenever the annotation is subscripted.
+        "    origin = getattr(ann, '__origin__', None)\n"
+        "    args = getattr(ann, '__args__', None)\n"
+        "    if origin is not None or args:\n"
+        "        out[name] = str(ann)\n"
+        "    else:\n"
+        "        out[name] = getattr(ann, '__name__', None) or str(ann)\n"
         "print(json.dumps(out))\n"
     )
     try:
@@ -574,6 +606,8 @@ def infer_contract_from_signature(
             [python or sys.executable, "-c", code],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             cwd=str(base),
         )
@@ -581,6 +615,55 @@ def infer_contract_from_signature(
         return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
     except (OSError, ValueError, _sp.TimeoutExpired):
         return {}
+
+
+def baseline_from_contract(contract: dict[str, str]) -> dict[str, Any]:
+    """A well-formed payload for a contract, built from its own declared types.
+
+    ``--auto-target`` used to arm boundaries with ``baseline={}``. Since a fault
+    is the baseline with ONE field replaced, every generated call was then missing
+    every OTHER required parameter, so the consumer raised ``TypeError`` before
+    reaching a line of its own logic — and ``TypeError`` is in
+    ``_TYPED_REJECTIONS``, i.e. it was recorded as the consumer CORRECTLY refusing
+    the shape. The arithmetic is exact: a fault could only execute when the target
+    had exactly one required parameter and the fault happened to target it; with
+    two or more required parameters the whole sweep was 100% dead, silently, and
+    no question was raised on the agent channel either. That makes the oracle
+    anti-correlated with code quality — the wider a boundary's signature, the more
+    certainly it reported clean.
+
+    ``FaultBoundary.baseline`` documents faults as being applied ON TOP of a
+    well-formed payload, and this is where that payload comes from when nobody
+    declared one. Same construction as ``campaign._valid_kwargs_for``.
+
+    Only values that survive the JSON round trip UNCHANGED are emitted, because
+    the baseline travels to the worker through a plan file written with
+    ``default=str``. A ``set`` would arrive as the string ``"{1}"`` and a
+    ``tuple`` as a ``list``; feeding a consumer a differently-typed argument and
+    then blaming it for the crash is exactly the fabricated finding this whole
+    change is meant to remove. An omitted parameter costs a dead fault (the call
+    raises ``TypeError``, which is a typed rejection) — never a false one.
+
+    Limitation, deliberately not papered over: only ANNOTATED parameters appear in
+    a contract, so a target with an unannotated required parameter still gets an
+    incomplete payload. Values for annotations the harness cannot instantiate are
+    honest guesses (``resolved_value_for`` says so via its second element) — a
+    wrong guess costs a dead fault, never a fabricated finding, for the same
+    reason.
+    """
+    from .functions import resolved_value_for
+
+    out: dict[str, Any] = {}
+    for name, annotation in (contract or {}).items():
+        value = resolved_value_for(annotation, "valid")[0]
+        try:
+            restored = json.loads(json.dumps(value))
+        except (TypeError, ValueError):
+            continue
+        if type(restored) is not type(value) or restored != value:
+            continue
+        out[name] = value
+    return out
 
 
 def contract_question(target: str, known: dict[str, str]) -> Question:
@@ -698,9 +781,19 @@ def run_faults(
                 if channel is not None and not known:
                     channel.ask(contract_question(auto, known))
             if contract_map:
+                # Derive the well-formed payload from the contract, then let an
+                # agent-supplied baseline override field by field: the agent has
+                # seen the real boundary, the annotations have only seen its
+                # types. Without the derived half every fault on a target with
+                # two or more required parameters died as a TypeError that the
+                # classifier read as "handled correctly" — see
+                # `baseline_from_contract`.
                 boundaries.append(
                     FaultBoundary(
-                        name=auto, target=auto, contract=contract_map, baseline=baseline_map
+                        name=auto,
+                        target=auto,
+                        contract=contract_map,
+                        baseline={**baseline_from_contract(contract_map), **baseline_map},
                     )
                 )
     else:
@@ -775,6 +868,8 @@ def run_faults(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_s,
                 cwd=str(repo),
                 env=env,
@@ -831,12 +926,9 @@ def run_faults(
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if "--worker" in argv:
-        argv.remove("--worker")
-        return _worker_main(argv)
-    sys.stderr.write("exerciser.faults: use `exerciser faults <repo>`\n")
-    return 2
+    return worker_entrypoint(
+        argv, _worker_main, "exerciser.faults: use `exerciser faults <repo>`\n"
+    )
 
 
 if __name__ == "__main__":

@@ -182,3 +182,38 @@ def test_child_process_functions_land_in_the_merged_trace(tmp_path: Path) -> Non
         "the CHILD process's functions must appear in the merged trace — " f"got {sorted(names)}"
     )
     assert sidecar_paths(str(out)) == [], "sidecars are merged away, not left behind"
+
+
+def test_the_parent_output_handed_to_children_is_absolute(tmp_path: Path, monkeypatch) -> None:
+    """COR-20: a child resolves this against ITS OWN cwd.
+
+    With a relative `TRACELENS_OUTPUT` and a child that chdir's — routine in
+    CLIs and servers — the sidecar was written somewhere the parent never
+    looked. `sidecar_paths` globs only the parent-relative directory, so the
+    file was never found, merged or deleted, and `merge_sidecars` returned
+    `{"files": 0}`: indistinguishable from "no children ran". Every
+    default-configured test passed because `_default_output` is already
+    absolute.
+    """
+    # `install_child_bootstrap` mutates os.environ DIRECTLY, and monkeypatch only
+    # restores what it set itself — so both vars must be registered here or the
+    # bootstrap's sitecustomize leaks onto PYTHONPATH for every later test in
+    # this process and silently traces their subprocesses.
+    monkeypatch.delenv("TRACELENS_NO_CHILD_TRACING", raising=False)
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("TRACELENS_PARENT_OUTPUT", "")
+    monkeypatch.chdir(tmp_path)
+    boot = install_child_bootstrap("trace.jsonl")  # deliberately relative
+    assert boot is not None
+    handed = os.environ["TRACELENS_PARENT_OUTPUT"]
+    assert os.path.isabs(handed), f"children would resolve {handed!r} against their own cwd"
+    assert Path(handed).parent == tmp_path
+
+
+def test_an_absolute_parent_output_is_passed_through_unchanged(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("TRACELENS_NO_CHILD_TRACING", raising=False)
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("TRACELENS_PARENT_OUTPUT", "")
+    target = tmp_path / "trace.jsonl"
+    assert install_child_bootstrap(str(target)) is not None
+    assert Path(os.environ["TRACELENS_PARENT_OUTPUT"]) == target

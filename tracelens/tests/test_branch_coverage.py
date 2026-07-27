@@ -90,6 +90,41 @@ def test_first_hit_only_arms_never_repeat(tmp_path: Path) -> None:
     assert len(arms) == len(set(arms)), "an arm is recorded once, then DISABLEd"
 
 
+def test_both_arms_of_every_conditional_are_recorded(tmp_path: Path) -> None:
+    """Flipping a condition must earn coverage — the exploration gradient.
+
+    `classify` has two conditionals; the three calls decide each of them BOTH
+    ways, so four distinct (src, dst) arms exist. Returning sys.monitoring
+    DISABLE from on_branch used to retire the whole conditional after its first
+    arm, recording 2 of 4: an input that flipped a condition scored zero new
+    coverage and the bandit lost its reason to explore.
+
+    Before 3.14 both outcomes share one BRANCH event at one instruction, and
+    DISABLE is keyed by instruction — which is exactly why 3.14 split the event.
+    The sibling uniqueness test cannot catch this: it is trivially satisfied
+    when only one arm per branch is ever recorded.
+    """
+    rows = _run_target(tmp_path, calls=[-5, 0, 7])
+    hits = [h for r in rows for h in r["hits"]]
+    arms = {(h["src"], h["dst"]) for h in hits}
+    by_line: dict[int, set[int]] = {}
+    for h in hits:
+        by_line.setdefault(h["line"], set()).add(h["dst"])
+    assert len(arms) == 4, f"expected 4 distinct arms across 2 conditionals, got {sorted(arms)}"
+    for line in (2, 4):
+        assert (
+            len(by_line.get(line, set())) == 2
+        ), f"line {line} must record BOTH outcomes, got {by_line.get(line)}"
+
+
+def test_repeated_calls_do_not_duplicate_arms_without_disable(tmp_path: Path) -> None:
+    """Dedupe still holds when DISABLE is not used to enforce it."""
+    rows = _run_target(tmp_path, calls=[-5, 0, 7] * 20)
+    hits = [h for r in rows for h in r["hits"]]
+    arms = [(h["file"], h["src"], h["dst"]) for h in hits]
+    assert len(arms) == len(set(arms)) == 4
+
+
 def test_non_target_code_is_untouched(tmp_path: Path) -> None:
     other_dir = tmp_path / "roots"
     other_dir.mkdir()
@@ -110,3 +145,50 @@ def test_non_target_code_is_untouched(tmp_path: Path) -> None:
         mon.free_tool_id(tool_id)
     text = out.read_text(encoding="utf-8") if out.exists() else ""
     assert str(target) not in text, "code outside the target roots must not record"
+
+
+def test_the_targeting_cache_is_keyed_on_the_file_not_the_object_address(tmp_path: Path) -> None:
+    """COR-17: `id(code)` is reused after garbage collection.
+
+    Nothing held a reference to the code objects, so a recycled address
+    inherited the previous object's decision — instrumenting non-target code
+    (inflating the reward) or skipping target code, both silently and
+    nondeterministically. The decision depends only on the filename, so the
+    cache must be keyed there.
+    """
+    mon, tool_id = _acquire_tool_id()
+    recorder = _BranchRecorder(mon, tool_id, str(tmp_path / "t.jsonl"), (str(tmp_path),))
+    try:
+        inside = compile("x = 1", str(tmp_path / "a.py"), "exec")
+        outside = compile("x = 1", "/elsewhere/b.py", "exec")
+        assert recorder._wants(inside) is True
+        assert recorder._wants(outside) is False
+        # Keys are filenames, so the cache cannot be poisoned by address reuse.
+        assert set(recorder._decided) == {str(tmp_path / "a.py"), "/elsewhere/b.py"}
+        # A DIFFERENT code object from the same file reuses the same decision.
+        again = compile("y = 2", str(tmp_path / "a.py"), "exec")
+        assert recorder._wants(again) is True
+        assert len(recorder._decided) == 2, "one entry per file, not per code object"
+    finally:
+        mon.free_tool_id(tool_id)
+
+
+def test_line_lookup_is_keyed_on_stable_code_identity(tmp_path: Path) -> None:
+    """COR-17, the worse half: stale linestarts give WRONG line numbers.
+
+    A recycled address inheriting another function's line table produces
+    branch_hits pointing at the wrong source lines — nondeterministic coverage
+    that reads as a defect in the target.
+    """
+    mon, tool_id = _acquire_tool_id()
+    recorder = _BranchRecorder(mon, tool_id, str(tmp_path / "t.jsonl"), (str(tmp_path),))
+    try:
+        src = "def f(n):\n    if n:\n        return 1\n    return 0\n"
+        code = compile(src, str(tmp_path / "m.py"), "exec")
+        fn = next(c for c in code.co_consts if hasattr(c, "co_code"))
+        assert recorder._line_of(fn, 0) == fn.co_firstlineno
+        key = (fn.co_filename, fn.co_firstlineno, len(fn.co_code))
+        assert key in recorder._lines, "keyed on stable identity, never id()"
+        assert all(isinstance(k, tuple) for k in recorder._lines)
+    finally:
+        mon.free_tool_id(tool_id)

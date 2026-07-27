@@ -221,6 +221,11 @@ def _attempts(report: dict, qualname: str, kind: str) -> list[str]:
 
 
 def test_the_copy_skips_the_disposable_and_honours_gitignore(tmp_path: Path):
+    # UPDATED (FP-16): `honour_gitignore` is now OFF by default, so this test
+    # opts in explicitly. It used to rely on the default and therefore ENCODED
+    # the defect: a `.gitignore` entry means "not worth version-controlling",
+    # which for generated code (`_version.py`, `*_pb2.py`) is the opposite of
+    # "not needed to run". See `test_sandbox_gitignore.py` for the default.
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     (repo / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
@@ -235,7 +240,7 @@ def test_the_copy_skips_the_disposable_and_honours_gitignore(tmp_path: Path):
     assert gitignore_patterns(repo) == frozenset({"scratch"})
 
     dest = tmp_path / "copy"
-    report = copy_repo(repo, dest, SandboxPolicy(enabled=True))
+    report = copy_repo(repo, dest, SandboxPolicy(enabled=True, honour_gitignore=True))
 
     assert (dest / "pkg" / "mod.py").is_file(), "real source must survive the copy"
     assert not (dest / ".git").exists()

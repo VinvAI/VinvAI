@@ -19,12 +19,16 @@ handler symbol identification attributed to it — coverage joining is by handle
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # Endpoints that are never worth exercising as behavioural probes (they are the
 # spec/doc surface itself, not application behaviour).
@@ -44,6 +48,12 @@ class Endpoint:
     source: str = "apis"  # "openapi" | "apis"
     needs_semantics: bool = False
     requires_auth: bool = False
+    # How the body must be encoded on the wire: "form" for
+    # application/x-www-form-urlencoded, None for JSON (the default). Without
+    # this field the media type discovered by `_body_schema_and_type` had
+    # nowhere to live, so form-only endpoints were JSON-encoded and 422'd
+    # forever at zero coverage.
+    content_type: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -56,6 +66,7 @@ class Endpoint:
             "source": self.source,
             "needs_semantics": self.needs_semantics,
             "requires_auth": self.requires_auth,
+            "content_type": self.content_type,
         }
 
 
@@ -112,22 +123,48 @@ def _resolve_ref(node: Any, spec: dict[str, Any], seen: frozenset[str] = frozens
     return node
 
 
-def _body_schema_of(operation: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any] | None:
+#: Wire encoding `execute_probe` should use for a chosen media type. Anything
+#: absent here is sent as JSON, which is the correct default for OpenAPI.
+_FORM_MEDIA = "application/x-www-form-urlencoded"
+
+
+def _body_schema_and_type(
+    operation: dict[str, Any], spec: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The request body schema AND the media type it was selected from.
+
+    Returning the schema alone discarded the media type at the exact point it
+    was known, and `Endpoint` had nowhere to carry it — so a form-only operation
+    was JSON-encoded forever. FastAPI's OAuth2 password flow declares only
+    ``application/x-www-form-urlencoded``, so ``POST /login/access-token``
+    422'd on every probe. It never 5xx'd, so it produced no issue cluster: it
+    simply sat at 0% coverage, and with no token the whole authenticated pass
+    was skipped.
+    """
     body = operation.get("requestBody")
     if not isinstance(body, dict):
-        return None
+        return None, None
     content = body.get("content")
     if not isinstance(content, dict):
-        return None
-    for ctype in ("application/json", "application/x-www-form-urlencoded", "*/*"):
+        return None, None
+    for ctype in ("application/json", _FORM_MEDIA, "*/*"):
         media = content.get(ctype)
         if isinstance(media, dict) and isinstance(media.get("schema"), dict):
-            return _resolve_ref(media["schema"], spec)
+            return _resolve_ref(media["schema"], spec), ctype
     # Any first media type with a schema.
-    for media in content.values():
+    for ctype, media in content.items():
         if isinstance(media, dict) and isinstance(media.get("schema"), dict):
-            return _resolve_ref(media["schema"], spec)
-    return None
+            return _resolve_ref(media["schema"], spec), str(ctype)
+    return None, None
+
+
+def _body_schema_of(operation: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any] | None:
+    return _body_schema_and_type(operation, spec)[0]
+
+
+def content_kind(media_type: str | None) -> str | None:
+    """``execute_probe``'s ``content_type`` argument for a media type, or None."""
+    return "form" if media_type == _FORM_MEDIA else None
 
 
 def _params_of(operation: dict[str, Any], spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -144,9 +181,25 @@ def _params_of(operation: dict[str, Any], spec: dict[str, Any]) -> list[dict[str
     return out
 
 
-def _op_requires_auth(operation: dict[str, Any]) -> bool:
+def _op_requires_auth(operation: dict[str, Any], spec: dict[str, Any] | None = None) -> bool:
+    """Whether this operation is protected, honouring the document-level default.
+
+    OpenAPI 3.x defines a root ``security`` array as the default INHERITED by
+    every operation that does not override it — and that is the standard way to
+    protect a whole API. Modelling only the per-operation override made every
+    endpoint of such a document look public, which cascaded into three losses:
+    no anonymous-vs-authed permutation, no semantic prompt (so no login chain
+    was ever authored), and the auth sweep skipped entirely. The result was 100%
+    of endpoints 401ing at zero coverage, with no diagnostic.
+
+    An explicit empty ``security: []`` on the operation is a deliberate opt-out
+    and must win over the inherited default.
+    """
     sec = operation.get("security")
-    return isinstance(sec, list) and len(sec) > 0
+    if isinstance(sec, list):
+        return len(sec) > 0
+    root = (spec or {}).get("security")
+    return isinstance(root, list) and len(root) > 0
 
 
 def _path_suffix(path: str) -> str:
@@ -164,6 +217,45 @@ def _path_suffix(path: str) -> str:
 _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
 
 
+def _disambiguate(
+    api_id: str,
+    method: str,
+    path: str,
+    claimed: dict[str, tuple[str, str]],
+) -> str:
+    """Give a colliding endpoint its own id, keeping the first claimant's intact.
+
+    Two distinct routes reducing to one id is not a naming nit: the run loop
+    groups candidates by ``api_id`` and resolves an endpoint with
+    ``next(... if e["api_id"] == api_id)``, so the second route's inputs are
+    fired at the first route's path and the second is never exercised at all —
+    silently, because the exercised count is taken from the deduped map.
+
+    The suffix is derived from the full path, so it is stable across runs (an
+    ordinal counter would renumber whenever an unrelated route was added).
+    """
+    prior = claimed.get(api_id)
+    if prior is None:
+        claimed[api_id] = (method, path)
+        return api_id
+    if prior == (method, path):
+        return api_id
+    digest = hashlib.sha256(f"{method} {path}".encode()).hexdigest()[:8]
+    unique = f"{api_id}__{digest}"
+    claimed[unique] = (method, path)
+    _log.warning(
+        "endpoint id collision: %s %s and %s %s both key on %r; the second is "
+        "now %s (without this it would never be exercised)",
+        prior[0],
+        prior[1],
+        method,
+        path,
+        api_id,
+        unique,
+    )
+    return unique
+
+
 def endpoints_from_openapi(
     spec: dict[str, Any],
     apis: list[dict[str, Any]],
@@ -175,6 +267,9 @@ def endpoints_from_openapi(
         by_key[(a["method"].upper(), _path_suffix(a["path"]))] = a
 
     endpoints: list[Endpoint] = []
+    # api_id -> the (method, path) that claimed it first, so a second claimant
+    # can be detected and given its own id instead of silently shadowing.
+    claimed: dict[str, tuple[str, str]] = {}
     for path, item in spec.get("paths", {}).items():
         if not isinstance(item, dict):
             continue
@@ -191,9 +286,19 @@ def endpoints_from_openapi(
                 if match
                 else f"{m}_{_path_suffix(str(path)).replace('/', '_') or 'root'}"
             )
-            body = _body_schema_of(operation, spec)
+            # `_path_suffix` keeps only the last two segments so an op reconciles
+            # with its handler despite an unresolved mount prefix — but that same
+            # truncation makes the key non-unique. `/users/{id}/items/{item_id}`
+            # and `/teams/{id}/items/{item_id}` both reduce to `items/{p}`.
+            # Downstream, `next(e for e in endpoints if e["api_id"] == api_id)`
+            # resolves to the FIRST match, so one path was exercised twice and
+            # the other never — absent from coverage and from profile.json, with
+            # no diagnostic, and `endpoints_exercised` counts the deduped map so
+            # the number looked self-consistent. Disambiguate with the full path.
+            api_id = _disambiguate(str(api_id), m, str(path), claimed)
+            body, media_type = _body_schema_and_type(operation, spec)
             params = _params_of(operation, spec)
-            requires_auth = _op_requires_auth(operation)
+            requires_auth = _op_requires_auth(operation, spec)
             endpoints.append(
                 Endpoint(
                     api_id=str(api_id),
@@ -205,6 +310,7 @@ def endpoints_from_openapi(
                     source="openapi",
                     needs_semantics=_looks_semantic(m, str(path), body, requires_auth),
                     requires_auth=requires_auth,
+                    content_type=content_kind(media_type),
                 )
             )
     endpoints.sort(key=lambda e: (e.path, e.method))

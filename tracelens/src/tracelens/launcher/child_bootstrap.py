@@ -126,7 +126,15 @@ def install_child_bootstrap(output_path: str) -> str | None:
         return None
     # The child derives its own sidecar from this, never from TRACELENS_OUTPUT
     # (which each process overwrites with its own path).
-    os.environ[_ENV_PARENT_OUTPUT] = output_path
+    #
+    # ABSOLUTE, because the child resolves it against ITS OWN cwd. A relative
+    # `TRACELENS_OUTPUT` plus a child that chdir's (routine in CLIs and servers)
+    # put the sidecar somewhere the parent never looks: `sidecar_paths` globs
+    # only the parent-relative directory, so the file was never found, merged or
+    # deleted, and `merge_sidecars` returned `{"files": 0}` — indistinguishable
+    # from "no children ran". Every default-configured test passed because
+    # `_default_output` builds an absolute path.
+    os.environ[_ENV_PARENT_OUTPUT] = os.path.abspath(output_path)
     existing = os.environ.get("PYTHONPATH")
     os.environ["PYTHONPATH"] = boot_dir if not existing else boot_dir + os.pathsep + existing
     _log.info("tracelens child tracing armed via %s", boot_dir)

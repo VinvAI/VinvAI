@@ -357,7 +357,7 @@ def build_plan(
                 record.get("observed"),
                 coverage_gaps=gaps_by_id.get(ep.api_id),
             )
-            prompt_file = store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json"
+            prompt_file = store.prompt_path(repo, ep.api_id)
             # Preserve any reply the harness already authored — re-planning must
             # not clobber the dispatched scenario. An EXPIRED reply (run marked
             # it stale after its scenario failed against the live environment)
@@ -402,7 +402,7 @@ def build_plan(
         # Fold in a stored reply for ANY endpoint, not just needs-semantics
         # ones: the Journey view lets a user author input plans for ordinary
         # endpoints too, and they ride the same prompts/<api_id>.json channel.
-        reply = _read_semantic_reply(store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json")
+        reply = _read_semantic_reply(store.prompt_path(repo, ep.api_id))
         if reply:
             record["semantic_inputs"] = reply
         plans.append(record)
@@ -456,7 +456,3 @@ def _read_semantic_reply(prompt_file: Path) -> list[dict[str, Any]] | None:
     if isinstance(reply, dict) and isinstance(reply.get("plans"), list):
         return reply["plans"]
     return None
-
-
-def _safe(api_id: str) -> str:
-    return "".join(c if c.isalnum() or c in "._-" else "_" for c in api_id)

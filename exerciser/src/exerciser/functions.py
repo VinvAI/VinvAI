@@ -115,8 +115,10 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from ._worker import worker_entrypoint
+from .containment import ContainmentTier
 from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
-from .issues import FailureCluster, normalize_signature
+from .issues import FailureCluster, build_clusters
 from .sandbox import SandboxPolicy, run_sandboxed_targets
 
 # =========================================================================
@@ -688,6 +690,14 @@ _IMPURE_MODULE_ATTRS: dict[str, frozenset[str]] = {
 # a receiver that was only read, so it would refuse a large share of pure targets
 # for no safety gained — a closed handle changes nothing outside the process that
 # opening it did not already.
+#
+# This table is receiver-AGNOSTIC, which is what makes it a backstop and also what
+# made it wrong on its own: `xs.remove(3)` where `xs: list[int]` is a list
+# mutation, not `os.remove`, and refusing it dropped provably pure targets. The
+# one exception now recognised is a receiver whose type the SIGNATURE states and
+# which is a builtin container (see `_pure_container_params`). A receiver of
+# UNKNOWN type still lands here and is still refused — that is the whole point of
+# a backstop.
 _IMPURE_METHOD_NAMES = frozenset(
     {
         "commit",
@@ -802,6 +812,17 @@ _INERT_DECORATORS = frozenset(
 # How a receiver binding records what the name holds (see `receiver_bindings`).
 _MODULE_TAINT = "module:"
 _CLASS_TAINT = "class:"
+# A receiver whose type the SIGNATURE states, and which is a builtin container.
+# `_IMPURE_METHOD_NAMES` is receiver-agnostic by design — it is the backstop for
+# a receiver nothing else could resolve — but that made it refuse provably pure
+# targets: `xs.remove(3)` where `xs: list[int]` is a list mutation on an argument
+# the caller owns, `parts.truncate` never happens on a str, `d.flush()` is not a
+# dict method at all. Those refusals cost real coverage on exactly the small,
+# self-contained functions this harness is best at driving. A parameter
+# ANNOTATION is a fact the source states about the receiver, in the same class of
+# evidence as a module-level binding, so it belongs in `_resolve_receiver` beside
+# the other two.
+_PARAM_TAINT = "param:"
 
 # The conventional first parameter of a method. `self.sink.record(x)` is rooted
 # at a name no receiver map can ever contain, so it needs its OWN resolution
@@ -907,15 +928,56 @@ def _dotted_reason(dotted: str) -> str | None:
     return None
 
 
-def _is_write_open(call: ast.Call) -> bool:
+#: Modules shipped with the interpreter. A name resolving here and NOT matching
+#: `_dotted_reason` is a stdlib callable this guard already knows to be safe.
+_STDLIB_ROOTS = frozenset(sys.stdlib_module_names)
+
+
+def _unverified_cross_module_reason(dotted: str) -> str | None:
+    """A callee that resolved to a module whose BODY this guard never read.
+
+    `_dotted_reason` is an allowlist of *impurity*: it answers "is this a known
+    dangerous module?", and returning None meant "pure". For a stdlib name that
+    is sound — the impure ones are enumerated. For a FIRST-PARTY name it was a
+    fail-open, and the dangerous kind:
+
+        from mypkg.db import wipe_all
+        def process():            # innocuous name, no local impurity
+            wipe_all()            # judged pure → called IN-PROCESS
+
+    Resolving an import tells you where a name came from, not what it does.
+    The transitive analyser only walks defs in the SAME source string, so a
+    sibling module's body is unreadable by construction — which is exactly when
+    the guard must refuse rather than assume.
+
+    Refusing is cheap here: an impurity routes the target to containment, where
+    it still runs. The cost is a downgrade, not lost coverage; the alternative
+    is executing arbitrary destructive code on a developer's machine.
+    """
+    # A relative import (`from .db import wipe_all`) is first-party by definition.
+    if dotted.startswith("."):
+        return f"calls {dotted}() — cross-module call, body not verified"
+    root = dotted.split(".")[0]
+    if not root or root in _STDLIB_ROOTS:
+        return None
+    return f"calls {dotted}() — cross-module call, body not verified"
+
+
+def _is_write_open(call: ast.Call, *, mode_arg: int = 1) -> bool:
     """Whether an ``open(...)`` call opens the file for writing.
 
     An unreadable (non-literal) mode counts as a write: the guard refuses to
     assume a computed mode is ``"r"``.
+
+    ``mode_arg`` is the positional index of the mode, because the two spellings
+    disagree: the builtin is ``open(file, mode)`` but the method is
+    ``Path.open(mode)``. Reading index 1 for both meant ``p.open('w')`` had no
+    second argument, so the guard saw no mode and judged the write pure —
+    and ``pathlib`` is the idiom most modern code actually uses.
     """
     mode: ast.expr | None = None
-    if len(call.args) >= 2:
-        mode = call.args[1]
+    if len(call.args) > mode_arg:
+        mode = call.args[mode_arg]
     for kw in call.keywords:
         if kw.arg == "mode":
             mode = kw.value
@@ -1037,21 +1099,141 @@ def _wrapped_parameter(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]
     return {positional[0].arg} if positional else set()
 
 
+# Builtin container types whose ENTIRE method surface is confined to the object
+# itself. `list.remove`, `dict.pop`, `set.discard`, `str.replace`,
+# `bytearray.truncate` — none of them can reach the filesystem, the network, a
+# database or another process, so none of them can make a target impure in the
+# sense this guard means. Deliberately CONCRETE builtins only: the typing ABCs
+# (`Sequence`, `Mapping`, …) are protocols any user class may implement, so an
+# `xs: Sequence[Row]` says nothing at all about what `xs.commit()` runs — those
+# keep being refused.
+_PURE_CONTAINER_TYPES = frozenset(
+    {
+        "bytearray",
+        "bytes",
+        "dict",
+        "frozenset",
+        "list",
+        "set",
+        "str",
+        "tuple",
+    }
+)
+
+
+def _is_pure_container_annotation(annotation: str | None) -> str | None:
+    """The builtin container an annotation names, or ``None``.
+
+    Handles the spellings that actually occur — ``list``, ``list[int]``,
+    ``typing.List[int]``, ``builtins.dict``, ``dict[str, int] | None`` — and
+    refuses everything else, INCLUDING a union with a non-container member
+    (``list[int] | Path`` may hold a ``Path``, whose ``.unlink()`` is exactly
+    what the backstop exists for).
+    """
+    if annotation is None:
+        return None
+    text = str(annotation).strip()
+    if not text:
+        return None
+    if "|" in text:
+        members = [m for m in _split_top_level(text, "|") if m.strip().lower() not in ("none",)]
+        bases = {_is_pure_container_annotation(m) for m in members}
+        if not bases or None in bases or len(bases) != 1:
+            return None
+        return bases.pop()
+    head = text.partition("[")[0].split(".")[-1].strip().lower()
+    return head if head in _PURE_CONTAINER_TYPES else None
+
+
+def _pure_container_params(node: ast.AST) -> dict[str, str]:
+    """``parameter name -> builtin container type`` for a body's own signature.
+
+    Every ``def`` reachable from ``node`` contributes, because ``ast.walk``
+    inspects nested bodies too and a name there is the nested function's
+    parameter, not the outer one. A name annotated as a container in one
+    signature and as something else (or nothing) in another is DROPPED: the guard
+    then cannot say which binding a given call site saw, and "cannot say" means
+    refuse.
+    """
+    good: dict[str, str] = {}
+    conflicted: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        args = child.args
+        # `*args: str` / `**kw: str` annotate the ELEMENT, not the collected
+        # tuple/dict, so their annotation proves nothing about the receiver —
+        # they go straight into `conflicted`.
+        for star in (args.vararg, args.kwarg):
+            if star is not None:
+                conflicted.add(star.arg)
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs]:
+            if arg.arg in _SELF_NAMES:
+                continue
+            base = (
+                _is_pure_container_annotation(ast.unparse(arg.annotation))
+                if arg.annotation is not None
+                else None
+            )
+            if base is None:
+                conflicted.add(arg.arg)
+            elif good.get(arg.arg, base) != base:
+                conflicted.add(arg.arg)
+            else:
+                good[arg.arg] = base
+    return {k: v for k, v in good.items() if k not in conflicted}
+
+
+def _rebound_names(node: ast.AST) -> set[str]:
+    """Names a body ASSIGNS to, so a parameter's annotation no longer describes them.
+
+    ``def f(xs: list): xs = open(p); xs.write(...)`` must not be excused by the
+    annotation on ``xs``. Assignment (including ``for`` targets, ``with … as``,
+    walrus and augmented assignment) means the name may hold something else by
+    the time the call runs, and the guard cannot order the statements.
+    """
+    out: set[str] = set()
+
+    def _bind(target: ast.AST) -> None:
+        for sub in ast.walk(target):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                out.add(sub.id)
+
+    for child in ast.walk(node):
+        if isinstance(child, ast.Assign):
+            for target in child.targets:
+                _bind(target)
+        elif isinstance(child, ast.AnnAssign | ast.AugAssign | ast.For | ast.AsyncFor):
+            _bind(child.target)
+        elif isinstance(child, ast.NamedExpr):
+            _bind(child.target)
+        elif isinstance(child, ast.withitem):
+            if child.optional_vars is not None:
+                _bind(child.optional_vars)
+    return out
+
+
 def _resolve_receiver(
     root_id: str,
     attrs: list[str],
     receivers: dict[str, str],
     self_attrs: dict[str, str],
+    params: dict[str, str] | None = None,
 ) -> tuple[str | None, list[str], str]:
     """``(taint, remaining attributes, how to render the receiver)``.
 
-    Two ways a chain's receiver becomes knowable. A module-level binding
-    (``_session = requests.Session()`` → ``receivers``), and — inside a method
+    Three ways a chain's receiver becomes knowable. A module-level binding
+    (``_session = requests.Session()`` → ``receivers``), — inside a method
     body — an attribute the class assigned to ``self`` (``self.session =
-    requests.Session()`` → ``self_attrs``). The second is what made
+    requests.Session()`` → ``self_attrs``), and the target's OWN parameter
+    annotations (``xs: list[int]`` → ``params``). The second is what made
     ``self.sink.record(tag)`` verifiable at all: ``self`` is in no receiver map,
     so before this the chain fell through to the receiver-agnostic NAME backstop
     and a body that wrote a file outside the repo was judged pure.
+
+    The third runs LAST, so a name that is also a tainted module-level receiver
+    keeps its taint. That ordering is deliberately the pessimistic one: it can
+    only ever leave a target refused, never excuse one.
     """
     bound = receivers.get(root_id)
     if bound is not None:
@@ -1060,6 +1242,9 @@ def _resolve_receiver(
         bound = self_attrs.get(attrs[0])
         if bound is not None:
             return bound, attrs[1:], f"{root_id}.{attrs[0]}"
+    container = (params or {}).get(root_id)
+    if container is not None:
+        return _PARAM_TAINT + container, attrs, root_id
     return None, attrs, root_id
 
 
@@ -1093,7 +1278,27 @@ def _direct_impurities(
     known = (known or set()) | _nested_definitions(node)
     receivers = receivers or {}
     self_attrs = self_attrs or {}
+    # Parameters this body's own signature declares to be builtin containers, less
+    # any name the body reassigns (after `xs = open(p)` the annotation on `xs` no
+    # longer describes what `xs.write(...)` runs on).
+    pure_params = {
+        name: base
+        for name, base in _pure_container_params(node).items()
+        if name not in _rebound_names(node)
+    }
     reasons: list[str] = []
+    # Calls that CONSTRUCT the exception of a `raise`. Building an exception
+    # object is not a side effect, and `raise MyError(...)` where `MyError` came
+    # `from .errors import MyError` is one of the most common shapes in any
+    # codebase — the cross-module rule below would otherwise refuse every
+    # function that raises its package's own error type, which is a large and
+    # entirely wrong loss of coverage.
+    raised: set[int] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Raise):
+            for part in (child.exc, child.cause):
+                if isinstance(part, ast.Call):
+                    raised.add(id(part))
     for child in ast.walk(node):
         # --- decorators: `@deco`, `@deco(...)`, `@mod.deco` ------------------
         if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
@@ -1104,6 +1309,8 @@ def _direct_impurities(
             continue
         if not isinstance(child, ast.Call):
             continue
+        if id(child) in raised:
+            continue  # constructing the exception of a `raise` — see `raised`
         func = child.func
 
         # --- bare name: `f(...)` -------------------------------------------
@@ -1117,8 +1324,12 @@ def _direct_impurities(
                 reasons.append(f"calls {name}()")
             elif name in imports:
                 # `from os import remove` then a bare `remove(path)`: judged on
-                # the module it really came from.
-                reason = _dotted_reason(imports[name])
+                # the module it really came from. When that module is NOT one we
+                # know, fall through to the unverified rule rather than treating
+                # "not on the impure list" as proof of purity.
+                reason = _dotted_reason(imports[name]) or _unverified_cross_module_reason(
+                    imports[name]
+                )
                 if reason:
                     reasons.append(reason)
             elif name not in known and name not in _BUILTIN_NAMES:
@@ -1133,6 +1344,11 @@ def _direct_impurities(
                 reasons.append(_INDIRECT_REASON)
                 continue
             attr = attrs[-1]
+            # Set when the receiver is a parameter the signature annotates as a
+            # builtin container, and the chain is exactly one attribute deep
+            # (`xs.remove(3)`, not `xs.log.remove()` — a list has no `.log`, so
+            # the deeper chain is unresolvable and stays refused).
+            pure_container: str | None = None
             if isinstance(root, ast.Name):
                 # A receiver BUILT by an impure module (`_session =
                 # requests.Session()`) or by a same-module class (`_store =
@@ -1140,7 +1356,11 @@ def _direct_impurities(
                 # through `self.<attr>` inside a method body. Neither is an
                 # import binding, so neither was ever resolved here — and a
                 # client object held on `self` is the commonest shape of all.
-                bound, rest, label = _resolve_receiver(root.id, attrs, receivers, self_attrs)
+                bound, rest, label = _resolve_receiver(
+                    root.id, attrs, receivers, self_attrs, pure_params
+                )
+                if bound is not None and bound.startswith(_PARAM_TAINT) and len(attrs) == 1:
+                    pure_container = bound[len(_PARAM_TAINT) :]
                 if bound is not None and bound.startswith(_MODULE_TAINT):
                     origin = bound[len(_MODULE_TAINT) :]
                     reasons.append(f"calls .{attr}() on {label}, built by {origin}()")
@@ -1162,6 +1382,14 @@ def _direct_impurities(
                 if reason:
                     reasons.append(reason)
                     continue
+                # Same fail-open as the bare-name branch, reached differently:
+                # `import mypkg.db` then `mypkg.db.wipe_all()` resolves cleanly,
+                # matches no impure module, and used to fall through as pure.
+                if root.id in imports:
+                    unverified = _unverified_cross_module_reason(f"{imports[root.id]}.{tail}")
+                    if unverified:
+                        reasons.append(unverified)
+                        continue
                 # An attribute chain two deep or more, rooted at a name this
                 # guard cannot resolve to a module, a same-module definition, a
                 # tainted receiver or a builtin. `self.sink.record(tag)`,
@@ -1174,10 +1402,12 @@ def _direct_impurities(
                 if len(attrs) >= 2 and not _resolvable_root(root.id, imports, known):
                     reasons.append(_INDIRECT_REASON)
                     continue
-            if attr in _OPEN_NAMES and _is_write_open(child):
+            # `p.open('w')` — the METHOD spelling, where mode is the first
+            # positional argument rather than the second.
+            if attr in _OPEN_NAMES and _is_write_open(child, mode_arg=0):
                 reasons.append("opens a file for writing")
                 continue
-            if attr in _IMPURE_METHOD_NAMES:
+            if attr in _IMPURE_METHOD_NAMES and pure_container is None:
                 reasons.append(f"calls .{attr}()")
             continue
 
@@ -2145,25 +2375,29 @@ def _worker_main(argv: list[str]) -> int:
             fn = None
         if fn is None or not callable(fn):
             rows.append(
-                {
-                    "module": module_name,
-                    "target_id": f"{module_name}:{qual}",
-                    "phase": "resolve",
-                    "status": "skipped",
-                    "error": "not a module-level callable",
-                }
+                _emit_one(
+                    {
+                        "module": module_name,
+                        "target_id": f"{module_name}:{qual}",
+                        "phase": "resolve",
+                        "status": "skipped",
+                        "error": "not a module-level callable",
+                    }
+                )
             )
             continue
         params = _param_records(fn)
         if params is None:
             rows.append(
-                {
-                    "module": module_name,
-                    "target_id": f"{module_name}:{qual}",
-                    "phase": "signature",
-                    "status": "skipped",
-                    "error": "unannotated required parameter — refusing to guess",
-                }
+                _emit_one(
+                    {
+                        "module": module_name,
+                        "target_id": f"{module_name}:{qual}",
+                        "phase": "signature",
+                        "status": "skipped",
+                        "error": "unannotated required parameter — refusing to guess",
+                    }
+                )
             )
             continue
         unresolvable = unresolvable_required(params)
@@ -2171,23 +2405,24 @@ def _worker_main(argv: list[str]) -> int:
             # We could still send the string family and hope, but then the row
             # would have to claim the value conformed to a type we never built.
             rows.append(
-                {
-                    "module": module_name,
-                    "target_id": f"{module_name}:{qual}",
-                    "phase": "signature",
-                    "status": "skipped",
-                    "error": (
-                        f"unresolvable annotation on required parameter(s) "
-                        f"{', '.join(unresolvable)} — refusing to guess"
-                    ),
-                }
+                _emit_one(
+                    {
+                        "module": module_name,
+                        "target_id": f"{module_name}:{qual}",
+                        "phase": "signature",
+                        "status": "skipped",
+                        "error": (
+                            f"unresolvable annotation on required parameter(s) "
+                            f"{', '.join(unresolvable)} — refusing to guess"
+                        ),
+                    }
+                )
             )
             continue
         for arg_set in arg_sets_for(params):
             row = _call_once(module_name, qual, fn, arg_set)
             row["repo_packages"] = repo_packages
-            rows.append(row)
-    _emit(rows)
+            rows.append(_emit_one(row))
     return 0
 
 
@@ -2213,7 +2448,15 @@ def _call_once(module: str, qual: str, fn: Any, arg_set: dict[str, Any]) -> dict
 
             out = asyncio.run(_await(out))
         row.update(status="ok", result=_summarize(out), result_type=type(out).__name__)
-    except BaseException as exc:  # a target may raise SystemExit/KeyboardInterrupt
+    except KeyboardInterrupt:
+        # A USER signal, not target behaviour. Catching it here made the worker
+        # ignore Ctrl-C and carry on calling targets, so the only way to stop a
+        # run was to kill it — which then discarded the artifacts (see the
+        # `finally` in the driver). SystemExit stays caught below: a target
+        # calling `sys.exit()` IS something the target did, and is worth
+        # recording rather than mistaking for the user asking us to stop.
+        raise
+    except BaseException as exc:  # a target may raise SystemExit
         row.update(
             status="error",
             error_type=type(exc).__name__,
@@ -2244,6 +2487,22 @@ def _emit(rows: list[dict[str, Any]]) -> None:
     for r in rows:
         sys.stdout.write(json.dumps(r, default=str) + "\n")
     sys.stdout.flush()
+
+
+def _emit_one(row: dict[str, Any]) -> dict[str, Any]:
+    """Write ONE row immediately, and return it so callers can still collect it.
+
+    Emission used to happen once, after the last target. A module with 50
+    targets where #49 hung therefore lost all 48 completed results: the parent
+    killed the worker on the deadline and only a synthetic ModuleTimeout row
+    survived — the evidence was earned and then thrown away, and the same is
+    true of a segfault or an OOM. stdout is already line-delimited JSON and the
+    parent parses it line by line, so streaming costs nothing and every row that
+    was paid for is kept.
+    """
+    sys.stdout.write(json.dumps(row, default=str) + "\n")
+    sys.stdout.flush()
+    return row
 
 
 # =========================================================================
@@ -2457,37 +2716,24 @@ def cluster_function_failures(
     behaviour under redirected ``HOME``/``TMPDIR`` and a blocked network is not
     the same evidence as the first.
     """
-    clusters: dict[str, FailureCluster] = {}
-    for row in rows:
-        kind = classify_row(row, policy, total_targets=total_targets, rng=rng)
-        if kind is None:
-            continue
-        target = row.get("target_id", "?")
-        detail = f"{row.get('error_type', 'error')}: {row.get('error', '')}"
-        sig = normalize_signature(kind, f"{target} {detail}")
-        channel = "function-sandboxed" if row.get("sandboxed") else "function"
-        cluster = clusters.get(sig)
-        if cluster is None:
-            cluster = FailureCluster(
-                signature=sig,
-                kind=kind,
-                title=f"{target} — {detail}"[:300],
-                endpoint_id=target,
-                method="CALL",
-                path=target,
-                exemplar={
-                    "input": row.get("kwargs"),
-                    "strategy": f"{channel}/{row.get('input_class', 'import')}",
-                    "effects": row.get("effects"),
-                    "status": None,
-                    "error": row.get("error"),
-                    "detail": detail,
-                    "expected": _expected_for(row.get("input_class", "")),
-                },
-            )
-            clusters[sig] = cluster
-        cluster.count += 1
-    return sorted(clusters.values(), key=lambda c: (c.kind, c.path))
+
+    def _channel(row: dict[str, Any]) -> str:
+        return "function-sandboxed" if row.get("sandboxed") else "function"
+
+    return build_clusters(
+        rows,
+        verdict=lambda r: classify_row(r, policy, total_targets=total_targets, rng=rng),
+        describe=lambda r, _k: f"{r.get('error_type', 'error')}: {r.get('error', '')}",
+        target_of=lambda r: str(r.get("target_id", "?")),
+        method="CALL",
+        strategy=lambda r, _k: f"{_channel(r)}/{r.get('input_class', 'import')}",
+        expected=lambda r, _k: _expected_for(r.get("input_class", "")),
+        exemplar_extra=lambda r: {
+            "input": r.get("kwargs"),
+            "effects": r.get("effects"),
+            "error": r.get("error"),
+        },
+    )
 
 
 def run_functions(
@@ -2554,7 +2800,28 @@ def run_functions(
     # `sandbox is None` is the DEFAULT and means "contain them if we can", so the
     # only way to end up with no second pass is an explicit opt-out or a policy
     # that disables itself.
-    sbx = sandbox_policy or (None if sandbox is False else SandboxPolicy(enabled=True))
+    #
+    # The default DEMANDS A REAL OS WALL. The targets this pass recovers are
+    # exactly the ones the purity guard refused — code it believes may do
+    # destructive I/O — and the process shim is, by this module's own admission,
+    # "structurally blind to a C extension calling open(2)/connect(2)"
+    # (`sqlite3.connect()` really escapes it). `containment._candidates()`
+    # returns nothing on any platform that is not linux/darwin, so on Windows
+    # the shim IS the fallback: enabling this pass by default without requiring
+    # a tier meant previously-REFUSED destructive targets started EXECUTING
+    # behind a wall documented as unable to stop them. That was a net safety
+    # regression, and it is the only place in this PR where safety moved
+    # backwards.
+    #
+    # Requiring the tier restores the pre-existing behaviour where a host with
+    # no real wall simply leaves those targets refused — visibly, with a
+    # recorded reason, never silently. A caller who understands the tradeoff can
+    # still pass an explicit `sandbox_policy` with a lower `require_tier`.
+    sbx = sandbox_policy or (
+        None
+        if sandbox is False
+        else SandboxPolicy(enabled=True, require_tier=ContainmentTier.OS_SANDBOX)
+    )
     opted_out = sbx is None or not sbx.enabled
     if opted_out:
         sbx = None
@@ -2635,17 +2902,27 @@ def run_functions(
         env["PYTHONPATH"] = os.pathsep.join(
             [p for p in (env.get("PYTHONPATH"), *(str(Path(__file__).parents[1]),)) if p]
         )
+        # Force UTF-8 on the CHILD's stdio to match the parent's decoding above.
+        # The locale encoding is cp1252 on Windows across the whole supported
+        # range (<3.15, so PEP 686's default never applies): without this a
+        # target printing an emoji or any CJK text raised UnicodeEncodeError in
+        # the worker and cost that module all of its rows.
+        env["PYTHONIOENCODING"] = "utf-8"
         try:
             proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=module_timeout_s,
                 cwd=str(repo),
                 env=env,
             )
         except subprocess.TimeoutExpired:
             timeouts.append(module)
+            # PARENT side — collected, never written to stdout (stdout here is
+            # the CLI's own result channel, not the worker protocol).
             rows.append(
                 {
                     "module": module,
@@ -2660,16 +2937,43 @@ def run_functions(
                 }
             )
             continue
+        module_rows = 0
         for line in (proc.stdout or "").splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
                 rows.append(json.loads(line))
+                module_rows += 1
             except ValueError:
                 continue
-        if proc.returncode != 0 and not rows:
-            log.debug("functions: worker for %s exited %s", module, proc.returncode)
+        # `not rows` tested the GLOBAL accumulator, so once ANY module produced
+        # a row this could never fire again — and it was log.debug regardless,
+        # while proc.stderr was captured and then never read anywhere. A worker
+        # that segfaulted, OOMed or died on import therefore left no trace at
+        # all: its module simply contributed nothing, indistinguishable from a
+        # module with no targets.
+        if proc.returncode != 0 and module_rows == 0:
+            tail = (proc.stderr or "").strip().splitlines()[-8:]
+            log.warning(
+                "functions: worker for %s exited %s with no rows%s",
+                module,
+                proc.returncode,
+                (" — stderr: " + " | ".join(tail)) if tail else " and no stderr",
+            )
+            rows.append(
+                {
+                    "module": module,
+                    "target_id": module,
+                    "phase": "module",
+                    "status": "error",
+                    "error_type": "WorkerDied",
+                    "error": (
+                        f"worker exited {proc.returncode} without producing rows: "
+                        + (" | ".join(tail) if tail else "no stderr captured")
+                    ),
+                }
+            )
 
     # --- second pass: the refused, under containment -----------------------
     #
@@ -2721,6 +3025,16 @@ def run_functions(
                 )
                 log.warning("functions_sandbox_unobservable %s", classes)
     total_targets = len(targets) + len(refusals)
+
+    # Ctrl-C must not destroy the evidence. Every row below this point was
+    # already paid for — a subprocess was spawned, a target was called, an
+    # effect may have been left behind — and until this write happened, the
+    # only way to stop a long run also threw all of it away. `store.write_jsonl`
+    # is atomic (tmp + os.replace), so a partial write cannot corrupt the file.
+    try:
+        store.write_jsonl(store.exercise_dir(repo) / "function_results.jsonl", rows)
+    except OSError as exc:  # a failed checkpoint must not fail the run
+        log.warning("functions: could not checkpoint rows: %s", exc)
 
     # Learn from the WHOLE run before judging any of it: dispersion and
     # class-invariance are run-level properties, so a first-pass over every
@@ -2800,12 +3114,9 @@ def run_functions(
 
 def main(argv: list[str] | None = None) -> int:
     """``python -m exerciser.functions --worker …`` dispatch (worker only)."""
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if "--worker" in argv:
-        argv.remove("--worker")
-        return _worker_main(argv)
-    sys.stderr.write("exerciser.functions: use `exerciser functions <repo>`\n")
-    return 2
+    return worker_entrypoint(
+        argv, _worker_main, "exerciser.functions: use `exerciser functions <repo>`"
+    )
 
 
 if __name__ == "__main__":

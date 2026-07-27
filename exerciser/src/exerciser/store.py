@@ -23,6 +23,22 @@ def prompts_dir(repo: Path) -> Path:
     return exercise_dir(repo) / "prompts"
 
 
+def prompt_path(repo: Path, api_id: str) -> Path:
+    """The semantic-prompt file for an endpoint — sanitised, in ONE place.
+
+    `plan` wrote `_safe(api_id).json` while `run`'s expiry used the raw id, so
+    for an OpenAPI-synthesised id like `GET_items_{p}` the two named different
+    files (`GET_items__p_.json` vs `GET_items_{p}.json`, the latter not even
+    creatable on Windows). The expiry therefore never took effect: a scenario
+    that had become environment-invalid was replayed on every subsequent run
+    and the harness was never asked to re-author it — precisely what
+    `_mark_expired_scenarios` exists to prevent. It fires for parameterised
+    paths, which are also the ones most likely to need semantics.
+    """
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in api_id)
+    return prompts_dir(repo) / f"{safe}.json"
+
+
 def baselines_dir(repo: Path) -> Path:
     return exercise_dir(repo) / "baselines"
 
@@ -66,9 +82,40 @@ def read_invariants_by_endpoint(repo: Path) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
     if isinstance(doc, dict):
         for inv in doc.get("invariants") or []:
-            if isinstance(inv, dict) and isinstance(inv.get("endpoint"), str):
+            if isinstance(inv, dict) and isinstance(inv.get("endpoint"), str) and _enforceable(inv):
                 out.setdefault(inv["endpoint"], []).append(inv)
     return out
+
+
+def _enforceable(inv: dict[str, Any]) -> bool:
+    """Whether an invariant's params are the SHAPE the enforcer will index into.
+
+    Only ``endpoint`` was validated, so a well-formed JSON document carrying
+    drifted types reached the comparison and raised there: ``"5" <= 5`` is a
+    bare ``TypeError``, and the enforcement call in run's round loop is
+    unguarded, so one bad entry unwound the whole exercise and discarded every
+    execution recorded so far (artifacts are written only after the loop).
+
+    A subtler variant needs the same guard: ``str(v) not in values`` performs
+    SUBSTRING matching when ``values`` is a string rather than a list, which
+    fails silently instead of loudly.
+
+    A malformed invariant is dropped, not fatal — enforcement simply has
+    nothing to say about it.
+    """
+    params = inv.get("params")
+    if params is None:
+        return True
+    if not isinstance(params, dict):
+        return False
+    if "values" in params and not isinstance(params["values"], list):
+        return False
+    for key in ("min", "max"):
+        if key in params and (
+            isinstance(params[key], bool) or not isinstance(params[key], int | float)
+        ):
+            return False
+    return True
 
 
 def apis_json_path(repo: Path) -> Path:

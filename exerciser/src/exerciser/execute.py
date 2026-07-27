@@ -11,6 +11,7 @@ so a Python profile and a TypeScript baseline agree on shape).
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import time
 import urllib.error
@@ -172,7 +173,15 @@ def execute_probe(
         ctype = exc.headers.get("Content-Type") if exc.headers else None
         rid = exc.headers.get("X-Request-Id") if exc.headers else None
         return _result(exc.code, started, text, ctype, rid, None)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        # http.client.HTTPException is NOT an OSError, and urllib re-raises
+        # `h.getresponse()` failures unwrapped — so BadStatusLine, LineTooLong
+        # (an oversized status line or header) and friends escaped this clause
+        # entirely. `RemoteDisconnected` IS an OSError, which is why ordinary
+        # connection drops always tested clean and this hole stayed hidden.
+        # An escape here is not a local failure: the round loop is the one probe
+        # site with no guard of its own, and nothing is persisted until the loop
+        # ends, so a single malformed response discarded the whole run.
         latency = (time.monotonic() - started) * 1000.0
         return ProbeResult(None, round(latency, 3), None, "empty", str(exc), None, None)
 

@@ -50,7 +50,6 @@ them read per-arm posteriors.
 
 from __future__ import annotations
 
-import inspect
 import logging
 import random
 import time
@@ -327,15 +326,6 @@ class OracleConfig:
     # Cross-play state: HTTP issue clusters are cumulative in issues.json, so a
     # play's violations are the DELTA it caused.
     _http_clusters: int = 0
-    _functions_cache: dict[str, Any] | None = None
-
-
-def _accepts(fn: Callable[..., Any], name: str) -> bool:
-    """Does ``fn`` take a keyword called ``name``? (Feature detection.)"""
-    try:
-        return name in inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
 
 
 def _cluster_signature(cluster: dict[str, Any]) -> str:
@@ -354,7 +344,7 @@ def _cluster_signature(cluster: dict[str, Any]) -> str:
 
 def _findings(
     result: dict[str, Any],
-    count_key: str,
+    count_key: str = "issue_clusters",
     *,
     target: str | None = None,
 ) -> tuple[int, tuple[str, ...]]:
@@ -370,7 +360,10 @@ def _findings(
 
     ``count_key`` is the result's own total, used only when the document carries
     no ``clusters`` list at all — then there is nothing to dedupe on and the
-    total is the honest answer.
+    total is the honest answer. It defaults to ``issue_clusters``, which every
+    oracle now uses: this parameter existed ONLY because `differential` spelled
+    its total `mismatch_clusters`, so one divergent dict key had propagated all
+    the way into the orchestrator's signature.
     """
     clusters = result.get("clusters")
     if not isinstance(clusters, list):
@@ -386,30 +379,22 @@ def _findings(
 def _functions_runner(cfg: OracleConfig) -> OracleRunner:
     from .functions import run_functions
 
-    per_target = _accepts(run_functions, "only_targets")
-
     def run(action: Action) -> Play:
-        if per_target:
-            # The precise form: spend this unit of budget on THIS target.
-            result = run_functions(
-                cfg.repo,
-                only_targets=[action.target],
-                python=cfg.python,
-                logger=cfg.logger,
-            )
-            subprocesses = max(1, int(result.get("modules") or 1))
-        else:
-            # `run_functions` has no per-target selector yet, so the harness is
-            # run once per campaign and its findings are ATTRIBUTED per target.
-            # The bandit still allocates (it decides whether to spend budget on
-            # this oracle at all), but the first crash play pays for the whole
-            # sweep — which is exactly what the measured cost then records.
-            if cfg._functions_cache is None:
-                cfg._functions_cache = run_functions(cfg.repo, python=cfg.python, logger=cfg.logger)
-                subprocesses = max(1, int(cfg._functions_cache.get("modules") or 1))
-            else:
-                subprocesses = 0
-            result = cfg._functions_cache
+        # Spend this unit of budget on THIS target. There used to be a
+        # `_accepts(run_functions, "only_targets")` feature-detection here with
+        # a whole-sweep fallback branch — but `run_functions` is a sibling in
+        # this same package and declares `only_targets` unconditionally, so the
+        # probe was always True and the fallback was unreachable. Runtime
+        # feature-detection of your own module is defensive programming against
+        # yourself, and its dead branch carried a comment asserting something
+        # ("no per-target selector yet") that is no longer true.
+        result = run_functions(
+            cfg.repo,
+            only_targets=[action.target],
+            python=cfg.python,
+            logger=cfg.logger,
+        )
+        subprocesses = max(1, int(result.get("modules") or 1))
         # No self-supervised mass is posted here any more. Dispersion is a
         # COVARIATE (it enters the structural prior, from the sightings
         # `run_functions` has just persisted), and posting it as α/β made a
@@ -418,7 +403,7 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
         # arriving. `run_functions` explores instead: its Thompson draw
         # occasionally surfaces a thinly-labelled signature so the differential
         # oracle and the adjudication channel can put a real label on it.
-        violations, signatures = _findings(result, "issue_clusters", target=action.target)
+        violations, signatures = _findings(result, target=action.target)
         return Play(
             violations=violations,
             signatures=signatures,
@@ -447,7 +432,7 @@ def _differential_runner(cfg: OracleConfig) -> OracleRunner:
             _learn_from_differential(cfg, result)
         except Exception as exc:
             cfg.logger.warning("campaign: differential self-supervision skipped: %s", exc)
-        violations, signatures = _findings(result, "mismatch_clusters")
+        violations, signatures = _findings(result)
         return Play(
             violations=violations,
             signatures=signatures,
@@ -508,7 +493,7 @@ def _faults_runner(cfg: OracleConfig) -> OracleRunner:
             python=cfg.python,
             logger=cfg.logger,
         )
-        violations, signatures = _findings(result, "issue_clusters")
+        violations, signatures = _findings(result)
         return Play(
             violations=violations,
             signatures=signatures,
@@ -520,6 +505,30 @@ def _faults_runner(cfg: OracleConfig) -> OracleRunner:
     return run
 
 
+def _valid_kwargs_for(cfg: OracleConfig, target: str) -> dict[str, Any]:
+    """A well-formed argument map for a target, from its own annotations.
+
+    Without this the campaign called every concurrency target as ``fn()``. Any
+    function with a required parameter then raised ``TypeError`` in BOTH the
+    serial baseline and the concurrent batch — and because the two agreed, the
+    oracle did not merely miss the bug, it actively CERTIFIED the target as
+    concurrency-safe. ``functions`` already knows how to build these; the
+    signature is read out-of-process by the same helper the faults oracle uses.
+    """
+    from .faults import infer_contract_from_signature
+    from .functions import resolved_value_for
+
+    try:
+        contract = infer_contract_from_signature(target, cfg.python, cfg.repo)
+    except Exception:  # a signature we cannot read is not worth failing a play
+        return {}
+    kwargs: dict[str, Any] = {}
+    for name, annotation in contract.items():
+        value, _resolved = resolved_value_for(annotation, "valid")
+        kwargs[name] = value
+    return kwargs
+
+
 def _concurrency_runner(cfg: OracleConfig) -> OracleRunner:
     from .concurrency import run_concurrency
 
@@ -529,10 +538,11 @@ def _concurrency_runner(cfg: OracleConfig) -> OracleRunner:
             target=action.target,
             workers=cfg.workers,
             repeats=cfg.repeats,
+            kwargs=_valid_kwargs_for(cfg, action.target),
             python=cfg.python,
             logger=cfg.logger,
         )
-        violations, signatures = _findings(result, "issue_clusters")
+        violations, signatures = _findings(result)
         return Play(
             violations=violations,
             signatures=signatures,
@@ -585,7 +595,7 @@ def _environment_runner(cfg: OracleConfig) -> OracleRunner:
 
     def run(action: Action) -> Play:
         result = run_environment(cfg.repo, timeout_s=cfg.timeout_s, logger=cfg.logger)
-        violations, signatures = _findings(result, "issue_clusters")
+        violations, signatures = _findings(result)
         return Play(
             violations=violations,
             signatures=signatures,

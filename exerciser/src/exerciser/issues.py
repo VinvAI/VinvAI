@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,13 +24,22 @@ _DIGITS = re.compile(r"\d+")
 _WS = re.compile(r"\s+")
 
 
-def normalize_signature(kind: str, text: str) -> str:
+def normalize_signature(kind: str, text: str, discriminator: str = "") -> str:
     """Digit-normalised, whitespace-collapsed sha256 prefix (24 hex chars).
 
     Matches autoPilotMachine.failureSignature / insightRunner.issueSignature so a
     cluster id is stable across runs and comparable with the extension's own.
+
+    Digit-normalisation exists to erase ports, ids and durations from FREE TEXT
+    so the same failure clusters across runs. ``discriminator`` is for the case
+    that breaks: a detail whose entire information content IS a number. It joins
+    the hash verbatim, so callers can keep ``HTTP 500`` and ``HTTP 503`` apart
+    while still collapsing the ids inside a message. Empty by default, which
+    reproduces the original signature exactly.
     """
     normalized = f"{kind} " + _WS.sub(" ", _DIGITS.sub("#", text)).strip().lower()[:600]
+    if discriminator:
+        normalized = f"{normalized} |{discriminator}"
     return hashlib.sha256(normalized.encode()).hexdigest()[:24]
 
 
@@ -63,6 +73,66 @@ def _cluster_text(kind: str, method: str, path: str, detail: str) -> str:
     return f"{method} {path} {detail}"
 
 
+def build_clusters(
+    rows: Iterable[dict[str, Any]],
+    *,
+    verdict: Callable[[dict[str, Any]], str | None],
+    describe: Callable[[dict[str, Any], str], str],
+    method: str,
+    strategy: Callable[[dict[str, Any], str], str],
+    expected: Callable[[dict[str, Any], str], str],
+    target_of: Callable[[dict[str, Any]], str] = lambda r: str(r.get("target", "?")),
+    exemplar_extra: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> list[FailureCluster]:
+    """Group findings into clusters — the ONE implementation of this skeleton.
+
+    Five oracles each carried a private copy of the same twenty lines
+    (``functions``, ``differential``, ``faults``, ``concurrency``,
+    ``environment``): build a dict, derive a verdict, normalise a signature,
+    get-or-create a ``FailureCluster``, bump the count, sort. Only ``method``,
+    the strategy label, the ``expected`` prose and the detail string ever
+    differed — and the copies had already drifted, with ``differential`` sorting
+    by ``(path, title)`` while the rest sorted by ``(kind, path)`` for no stated
+    reason. Divergence in duplicated code is not hypothetical here; it had
+    already happened.
+
+    ``verdict`` returns the cluster kind, or ``None`` for a row that is not a
+    finding. Everything else is per-oracle vocabulary.
+    """
+    clusters: dict[str, FailureCluster] = {}
+    for row in rows:
+        kind = verdict(row)
+        if kind is None:
+            continue
+        target = target_of(row)
+        detail = describe(row, kind)
+        sig = normalize_signature(kind, f"{target} {detail}")
+        cluster = clusters.get(sig)
+        if cluster is None:
+            exemplar: dict[str, Any] = {
+                "input": None,
+                "strategy": strategy(row, kind),
+                "status": None,
+                "error": detail,
+                "detail": detail,
+                "expected": expected(row, kind),
+            }
+            if exemplar_extra is not None:
+                exemplar.update(exemplar_extra(row))
+            cluster = FailureCluster(
+                signature=sig,
+                kind=kind,
+                title=f"{target} — {detail}"[:300],
+                endpoint_id=target,
+                method=method,
+                path=target,
+                exemplar=exemplar,
+            )
+            clusters[sig] = cluster
+        cluster.count += 1
+    return sorted(clusters.values(), key=lambda c: (c.kind, c.path))
+
+
 def cluster_failures(executions: list[dict[str, Any]]) -> list[FailureCluster]:
     """Cluster the failing executions from a run's results.
 
@@ -77,17 +147,24 @@ def cluster_failures(executions: list[dict[str, Any]]) -> list[FailureCluster]:
         violation = ex.get("invariant_violation")
         kind: str | None = None
         detail = ""
+        # A 5xx detail is nothing BUT its number, so digit-normalisation would
+        # fold 500/502/503/504 on one path into a single cluster: the first
+        # status seen wins the title and exemplar, and one fix episode is
+        # dispatched against a mischaracterised failure. Carry the status as a
+        # verbatim discriminator so distinct server errors stay distinct.
+        discriminator = ""
         if violation:
             kind, detail = "invariant-violation", str(violation)
         elif error and status is None:
             kind, detail = "crash", error
         elif isinstance(status, int) and status >= 500:
             kind, detail = "server-error", f"HTTP {status}"
+            discriminator = str(status)
         if kind is None:
             continue
         method = ex.get("method", "?")
         path = ex.get("path", "?")
-        sig = normalize_signature(kind, _cluster_text(kind, method, path, detail))
+        sig = normalize_signature(kind, _cluster_text(kind, method, path, detail), discriminator)
         cluster = clusters.get(sig)
         if cluster is None:
             cluster = FailureCluster(

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,90 @@ from typing import Any
 # service-directory aware): both joins below MUST read the same capture file,
 # or "observed" and the coverage numbers would describe different runs.
 from identification.runner import _resolve_trace_file, map_trace_to_tree
+
+# One parsed scan per capture state; see _scan_trace.
+_SCAN_CACHE: dict[tuple[str, int, int], _TraceScan] = {}
+_SCAN_CACHE_MAX = 8
+
+
+@dataclass(frozen=True)
+class _TraceScan:
+    """The facts every coverage question needs, extracted in ONE pass.
+
+    ``handler_observed_in_trace`` and ``branch_ids_for_endpoint`` each opened
+    and re-read the whole trace, and both are called once per ENDPOINT per
+    ROUND — so a 23-endpoint run over 6 rounds re-parsed a growing file
+    hundreds of times, for a file that is identical for every endpoint in a
+    round. Parsing it once per (path, size, mtime) makes the cost per round
+    rather than per endpoint-round, and the key self-invalidates because the
+    capture grows as the run proceeds.
+    """
+
+    components: frozenset[str]  # every span component seen
+    enters: tuple[tuple[str, str], ...]  # (component, request_id) for enter events
+    branch_hits: tuple[tuple[str | None, str], ...]  # (request_id, branch id)
+
+
+def _scan_trace(trace_path: Path) -> _TraceScan:
+    key: tuple[str, int, int]
+    try:
+        st = trace_path.stat()
+        key = (str(trace_path), st.st_size, st.st_mtime_ns)
+    except OSError:
+        return _TraceScan(frozenset(), (), ())
+    cached = _SCAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    components: set[str] = set()
+    enters: list[tuple[str, str]] = []
+    hits: list[tuple[str | None, str]] = []
+    try:
+        with trace_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"branch_hits"' in line:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and isinstance(row.get("hits"), list):
+                        for hit in row["hits"]:
+                            if not isinstance(hit, dict):
+                                continue
+                            rid = hit.get("request_id")
+                            hits.append(
+                                (
+                                    rid if isinstance(rid, str) else None,
+                                    f"{hit.get('file')}:{hit.get('line')}:"
+                                    f"{hit.get('src')}->{hit.get('dst')}",
+                                )
+                            )
+                    continue
+                if '"component"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                comp = ev.get("component")
+                if not isinstance(comp, str):
+                    continue
+                components.add(comp)
+                rid = ev.get("request_id")
+                if ev.get("event") == "enter" and isinstance(rid, str):
+                    enters.append((comp, rid))
+    except OSError:
+        return _TraceScan(frozenset(), (), ())
+
+    scan = _TraceScan(frozenset(components), tuple(enters), tuple(hits))
+    # Bounded: one entry per distinct capture state, and a run only ever grows
+    # one file. Trimmed so a long-lived process cannot accumulate scans.
+    if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
+        _SCAN_CACHE.clear()
+    _SCAN_CACHE[key] = scan
+    return scan
 
 
 def handler_observed_in_trace(
@@ -68,21 +153,8 @@ def handler_observed_in_trace(
     except (FileNotFoundError, OSError):
         return False
     suffix = "." + handler
-    try:
-        with trace_path.open(encoding="utf-8") as fh:
-            for line in fh:
-                if handler not in line:
-                    continue  # cheap prefilter before JSON parsing
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                comp = ev.get("component") if isinstance(ev, dict) else None
-                if isinstance(comp, str) and (comp == handler or comp.endswith(suffix)):
-                    return True
-    except OSError:
-        return False
-    return False
+    scan = _scan_trace(trace_path)
+    return any(comp == handler or comp.endswith(suffix) for comp in scan.components)
 
 
 def _normalize_handler(handler: str | None) -> str | None:
@@ -118,44 +190,13 @@ def branch_ids_for_endpoint(
     except (FileNotFoundError, OSError):
         return set()
     suffix = "." + handler if handler else None
-    rids: set[str] = set()
-    branch_rows: list[dict[str, Any]] = []
-    try:
-        with trace_path.open(encoding="utf-8") as fh:
-            for line in fh:
-                if '"branch_hits"' in line:
-                    try:
-                        row = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(row, dict) and isinstance(row.get("hits"), list):
-                        branch_rows.append(row)
-                elif handler and handler in line and '"enter"' in line:
-                    try:
-                        ev = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(ev, dict) or ev.get("event") != "enter":
-                        continue
-                    comp = ev.get("component")
-                    rid = ev.get("request_id")
-                    if (
-                        isinstance(comp, str)
-                        and isinstance(rid, str)
-                        and (comp == handler or (suffix and comp.endswith(suffix)))
-                    ):
-                        rids.add(rid)
-    except OSError:
-        return set()
-    ids: set[str] = set()
-    for row in branch_rows:
-        for hit in row["hits"]:
-            if not isinstance(hit, dict):
-                continue
-            rid = hit.get("request_id")
-            if rid is None or rid in rids:
-                ids.add(f"{hit.get('file')}:{hit.get('line')}:{hit.get('src')}->{hit.get('dst')}")
-    return ids
+    scan = _scan_trace(trace_path)
+    rids = {
+        rid
+        for comp, rid in scan.enters
+        if handler and (comp == handler or (suffix and comp.endswith(suffix)))
+    }
+    return {bid for rid, bid in scan.branch_hits if rid is None or rid in rids}
 
 
 def _walk(node: dict[str, Any]):

@@ -30,6 +30,8 @@ from .coverage import endpoint_coverage
 from .execute import ProbeResult, execute_probe
 from .invariants import check_monotonic_sequence, check_observation
 from .issues import cluster_failures, clusters_from_baseline, issues_document
+from .probe import input_size, probe_id_of
+from .redact import is_id_shaped, redact
 from .scenario import run_scenario, substitute
 
 # Type of the injected probe executor (real one = execute.execute_probe), so the
@@ -209,6 +211,9 @@ def run_exercise(
         )
 
     executions: list[dict[str, Any]] = []
+    # How many of `executions` are already on disk (round checkpoints below), so
+    # the terminal write appends only the remainder instead of duplicating them.
+    persisted = 0
     spent = 0
     no_improve_rounds = 0
     round_no = 0
@@ -235,16 +240,31 @@ def run_exercise(
             candidate = cands[idx % len(cands)]
             cursor[(api_id, strategy)] = idx + 1
 
-            result = probe_fn(
-                base_url,
-                ep["method"],
-                ep["path"],
-                body=candidate.body,
-                path_params=candidate.path_params,
-                query=candidate.query,
-                headers=candidate.headers,
-                exercise_id=exercise_id,
-            )
+            try:
+                result = probe_fn(
+                    base_url,
+                    ep["method"],
+                    ep["path"],
+                    body=candidate.body,
+                    path_params=candidate.path_params,
+                    query=candidate.query,
+                    headers=candidate.headers,
+                    # The encoding the SPEC declared. Omitting it JSON-encoded
+                    # every form-only endpoint, so an OAuth2 password login
+                    # 422'd on every probe and the whole authenticated pass was
+                    # skipped for want of a token.
+                    content_type=ep.get("content_type"),
+                    exercise_id=exercise_id,
+                )
+            except Exception as exc:
+                # The canary, scenario and auth-sweep probe sites all guard;
+                # this one did not, and it is the one inside the round loop.
+                # Nothing is persisted until the loop ends, so an escape here
+                # cost every execution recorded so far. Record the probe as a
+                # transport failure and keep going — that is what the other
+                # three sites do, and it is what the evidence is worth.
+                log.debug("probe raised for %s: %s", ep.get("api_id"), exc)
+                result = ProbeResult(None, 0.0, None, "empty", str(exc), None, None)
             spent += 1
             row = _execution_row(
                 round_no,
@@ -276,6 +296,28 @@ def run_exercise(
             # endpoint. The objective is ORACLE VIOLATIONS per unit cost —
             # coverage is the exploration bonus, not the goal — so the round's
             # violations for this endpoint are counted alongside the new symbols.
+            # Retire an endpoint that produced only transport failures this
+            # round. `active_ids` was never mutated — the name and the defensive
+            # `list()` copies both implied retirement was implemented, but every
+            # endpoint stayed in the rotation for the whole run, so an
+            # unreachable one (a wrong verb, a collided id, a form-only login)
+            # burned one probe per round out of a default budget of 200. This is
+            # the multiplier that turned the coverage defects above into lost
+            # budget. Only a total absence of any HTTP response retires it; a
+            # 4xx/5xx is a real answer and stays in play.
+            round_rows = [
+                r for r in executions if r.get("api_id") == api_id and r.get("round") == round_no
+            ]
+            if round_rows and all(r.get("status") is None for r in round_rows):
+                active_ids.remove(api_id)
+                log.info(
+                    "retiring %s: no HTTP response in round %d (%d probes); "
+                    "it cannot be exercised and would otherwise consume budget "
+                    "every remaining round",
+                    api_id,
+                    round_no,
+                    len(round_rows),
+                )
             last_strategy = _last_strategy(executions, api_id, round_no)
             if last_strategy:
                 violations = _round_violations(executions, api_id, round_no)
@@ -289,7 +331,7 @@ def run_exercise(
         else:
             no_improve_rounds = 0
         log.info(
-            "round %d: %d probes spent, %d new symbols, %d oracle violations " "(no-improve %d/%d)",
+            "round %d: %d probes spent, %d new symbols, %d oracle violations (no-improve %d/%d)",
             round_no,
             spent,
             round_new_symbols,
@@ -297,6 +339,17 @@ def run_exercise(
             no_improve_rounds,
             rounds,
         )
+        # Checkpoint the round. Persistence used to be a terminal phase, so ANY
+        # mid-loop exit — a probe escape, the harness's 180s SIGKILL, Ctrl-C —
+        # threw away every execution of the run. Worse, the state those probes
+        # planted in the live service was never written to the ledger either, so
+        # it could never be torn down and silently poisoned later baselines.
+        # Rows are appended as they are earned; the terminal write below persists
+        # only what this checkpoint has not already taken.
+        if executions[persisted:]:
+            store.append_jsonl(store.results_path(repo), executions[persisted:])
+            state.append_ledger(repo, state.record_creations(executions[persisted:]))
+            persisted = len(executions)
 
     # Stateful sequential scenarios: any endpoint whose semantic plan carries
     # SETUP steps (authored by the harness) is a multi-step flow — execute it with
@@ -348,11 +401,13 @@ def run_exercise(
     )
     executions.extend(authed_rows)
 
-    # Persist executions (append-only durable record) + scenarios.
+    # Persist whatever the round checkpoints have not already written (scenario
+    # rows, canary rows and the auth sweep all land after the loop).
+    remaining = executions[persisted:]
     if store.results_path(repo).exists():
-        store.append_jsonl(store.results_path(repo), executions)
+        store.append_jsonl(store.results_path(repo), remaining)
     else:
-        store.write_jsonl(store.results_path(repo), executions)
+        store.write_jsonl(store.results_path(repo), remaining)
     if scenarios:
         store.write_json(
             store.exercise_dir(repo) / "scenarios.json", {"version": 1, "scenarios": scenarios}
@@ -412,7 +467,11 @@ def run_exercise(
         if creations
         else 0
     )
-    state.append_ledger(repo, creations)
+    # Teardown works over ALL creations (it runs once, at the end), but only the
+    # rows the round checkpoints have not already written are appended — the
+    # ledger is append-only, so re-adding them would double-count what the
+    # engine planted and inflate the scorecard's pollution numbers.
+    state.append_ledger(repo, state.record_creations(remaining))
 
     # Terminal credit pass: a DEGRADED baseline is an oracle violation, but it
     # is only knowable after the run (baselines are applied once, at the end),
@@ -620,7 +679,7 @@ def _auth_sweep(
     ordered = sorted(endpoints, key=lambda e: method_order.get(str(e.get("method")), 5))
     live_ids: list[str] = list(ledger_ids)
     rows: list[dict[str, Any]] = []
-    for hdrs in auth_headers:
+    for auth_index, hdrs in enumerate(auth_headers):
         for ep in ordered:
             valid = [i for i in ep.get("inputs", []) if i.get("class") == "valid"]
             if not valid:
@@ -631,7 +690,13 @@ def _auth_sweep(
             if pparams:
                 # Real ids we created beat generated ones for hitting rows;
                 # most recent first (this sweep's own creations).
-                for vid in list(reversed(live_ids))[:max_id_substitutions]:
+                #
+                # id-shaped ONLY: the ledger harvests every scalar a 2xx returned,
+                # which on an auth endpoint includes the bearer token. Splicing that
+                # into a path param issues DELETE /users/<jwt>, writing the credential
+                # into the request line and the service's access log.
+                usable = [v for v in reversed(live_ids) if is_id_shaped(v)]
+                for vid in usable[:max_id_substitutions]:
                     variants.append({**base, "path_params": {k: vid for k in pparams}})
             for inp in variants:
                 candidate = Candidate(
@@ -652,6 +717,7 @@ def _auth_sweep(
                         path_params=candidate.path_params,
                         query=candidate.query,
                         headers=candidate.headers,
+                        content_type=ep.get("content_type"),
                         exercise_id=exercise_id,
                     )
                 except Exception as exc:
@@ -659,6 +725,11 @@ def _auth_sweep(
                     continue
                 row = _execution_row(0, ep, candidate, result)
                 row["auth"] = True
+                # WHICH credential asked. Part of the probe id, so a superuser's
+                # 200 and a normal user's 403 keep separate goldens instead of
+                # overwriting each other; and regress replays each case under the
+                # credential that recorded it instead of always the first.
+                row["auth_index"] = auth_index
                 rows.append(row)
                 # Harvest ids minted by this sweep for later endpoints.
                 if (
@@ -737,7 +808,7 @@ def _expire_semantic_reply(
     api_id = scenario.get("api_id")
     if not api_id:
         return
-    prompt_file = store.prompts_dir(repo) / f"{api_id}.json"
+    prompt_file = store.prompt_path(repo, api_id)
     record = store.read_json(prompt_file)
     if not isinstance(record, dict) or record.get("reply") is None:
         return
@@ -817,6 +888,8 @@ def _execution_row(
         "method": ep["method"],
         "path": ep["path"],
         "handler": ep.get("handler"),
+        # Persisted so regress replays with the same encoding the run used.
+        "content_type": ep.get("content_type"),
         "strategy": candidate.strategy,
         "provenance": candidate.provenance,
         "input_class": candidate.input_class,
@@ -834,7 +907,12 @@ def _execution_row(
         "request_id": result.request_id,
         "output_size": _size_of(result.body),
         "input_size": _input_size(candidate),
-        "body": result.body if isinstance(result.body, dict | list) else None,
+        # Redacted: this row is persisted to .vinv/exercise/results.jsonl INSIDE
+        # the user's repo, and auth endpoints answer 2xx with bearer tokens and
+        # password hashes. Shape and types survive, so the invariant oracle that
+        # reads this field is unaffected; value_digest is computed upstream over
+        # the raw body and is a one-way hash, so drift detection is unaffected too.
+        "body": redact(result.body) if isinstance(result.body, dict | list) else None,
         "value_digest": result.value_digest,
     }
 
@@ -853,12 +931,19 @@ def _enforce_invariants(
     invs = inv_by_endpoint.get(f"{row.get('method')} {row.get('path')}")
     if not invs:
         return
-    violations = check_observation(
-        invs,
-        row.get("body"),
-        output_size=row.get("output_size", 0),
-        input_size=row.get("input_size", 0),
-    )
+    try:
+        violations = check_observation(
+            invs,
+            row.get("body"),
+            output_size=row.get("output_size", 0),
+            input_size=row.get("input_size", 0),
+        )
+    except Exception:
+        # Defence in depth behind store._enforceable. This call sits bare in the
+        # round loop, and artifacts are not written until the loop ends, so any
+        # exception here discards EVERY execution recorded so far. A judgement
+        # the oracle cannot make is never worth losing the run's evidence over.
+        return
     if violations:
         row["invariant_violation"] = "; ".join(violations)
 
@@ -907,22 +992,14 @@ def _strategy_for_probe(
 ) -> str | None:
     """The strategy whose probe produced a given baseline observation.
 
-    Baseline probe ids are derived from (endpoint, strategy, path_params), so
-    the newest execution matching this endpoint whose own derived id agrees is
-    the one to credit.
+    Derives each execution's id with the SHARED formula and credits the newest
+    match. Re-deriving it locally is what let run's and regress's id spaces
+    drift apart (see ``probe.py``).
     """
-    import hashlib
-    import json as _json
-
     for ex in reversed(executions):
         if ex.get("endpoint_id") != api_id:
             continue
-        key = _json.dumps(
-            [ex["endpoint_id"], ex["strategy"], ex.get("input", {}).get("path_params", {})],
-            sort_keys=True,
-            default=str,
-        )
-        if hashlib.sha256(key.encode()).hexdigest()[:16] == probe_id:
+        if probe_id_of(ex) == probe_id:
             return ex.get("strategy")
     return None
 
@@ -941,22 +1018,17 @@ def _size_of(value: Any) -> int:
 
 
 def _input_size(candidate: Candidate) -> int:
-    n = 0
-    if isinstance(candidate.body, dict | list | str):
-        n += len(candidate.body)
-    n += len(candidate.path_params) + len(candidate.query)
-    return n
+    """Learned-side ``size_relation`` input size — shared with the replay side."""
+    return input_size(candidate.body, candidate.path_params, candidate.query)
 
 
 def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One baseline observation per (endpoint, concrete request), newest wins.
 
-    A stable probeId over (endpoint, strategy, path_params) keeps the golden
-    entry aligned across runs the way probeBaseline keys on its probe id.
+    The shared ``probe_id`` keeps the golden entry aligned across runs the way
+    probeBaseline keys on its probe id — and, critically, aligned with the ids
+    ``regress`` derives, which is the join this store depends on.
     """
-    import hashlib
-    import json as _json
-
     seen: dict[str, dict[str, Any]] = {}
     digests: dict[str, list[str | None]] = {}
     for ex in executions:
@@ -964,12 +1036,7 @@ def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, A
         # baseline; negative probes intentionally provoke 4xx and must not.
         if ex["input_class"] in ("negative",):
             continue
-        key = _json.dumps(
-            [ex["endpoint_id"], ex["strategy"], ex.get("input", {}).get("path_params", {})],
-            sort_keys=True,
-            default=str,
-        )
-        probe_id = hashlib.sha256(key.encode()).hexdigest()[:16]
+        probe_id = probe_id_of(ex)
         digests.setdefault(probe_id, []).append(ex.get("value_digest"))
         seen[probe_id] = {
             "probeId": probe_id,

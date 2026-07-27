@@ -37,6 +37,10 @@ _log = logging.getLogger("tracelens.diag")
 # Drain cadence for the writer thread — fast enough that an exercise round's
 # settle window (~0.8 s) observes the branches its probes just took.
 _FLUSH_INTERVAL_S = 0.5
+# Cap on the recorded-arm set. Branch arms are bounded by the target's code
+# size, so this is a runaway guard, not a working limit. Past it, arms are still
+# emitted — only the dedupe stops, which costs duplicate lines, never coverage.
+_MAX_TRACKED_ARMS = 500_000
 
 
 class _BranchRecorder:
@@ -49,19 +53,40 @@ class _BranchRecorder:
         self._roots = tuple(os.path.abspath(r) for r in roots)
         self._lock = threading.Lock()
         self._pending: list[dict[str, Any]] = []
-        self._decided: dict[int, bool] = {}  # id(code) -> instrumented?
-        self._lines: dict[int, list[tuple[int, int]]] = {}  # id(code) -> linestarts
+        # Keyed on stable code identity, never id() — see `_wants`/`_line_of`.
+        self._decided: dict[str, bool] = {}  # co_filename -> instrumented?
+        self._lines: dict[tuple[str, int, int], list[tuple[int, int]]] = {}
         self._branch_events = 0
         self._fh: Any = None
         self._stopped = False
+        # Arms already recorded, keyed by STABLE code identity (never id()).
+        self._seen_arms: set[tuple[str, int, int, int]] = set()
+        # What on_branch returns. `DISABLE` is keyed by (tool, event, code,
+        # INSTRUCTION offset) — and before 3.14 both outcomes of a conditional
+        # are the same BRANCH event at the same instruction, so disabling the
+        # taken arm also disables the untaken one. That silently caps coverage
+        # at ONE arm per conditional: an input that flips a condition earns no
+        # reward, which removes the exploration gradient the feature exists to
+        # provide. 3.14 split BRANCH into BRANCH_LEFT/BRANCH_RIGHT precisely so
+        # this is safe, so we keep the fast path there and dedupe in-process
+        # below on older interpreters.
+        self._arm_disable: Any = None
 
     # ---- targeting -------------------------------------------------------
 
     def _wants(self, code: Any) -> bool:
-        cached = self._decided.get(id(code))
+        # Keyed on the code object's FILE, not id(code). A code object can be
+        # garbage-collected and its address reused, and nothing held a
+        # reference — so a recycled address inherited the previous object's
+        # decision: `want=True` instrumented non-target code and inflated the
+        # reward, `want=False` skipped target code. Both silent, both
+        # nondeterministic, and both easy to blame on the target. The decision
+        # depends only on the filename, so caching by filename is both correct
+        # and immune to reuse (and the dict stops growing per code object).
+        filename = code.co_filename or ""
+        cached = self._decided.get(filename)
         if cached is not None:
             return cached
-        filename = code.co_filename or ""
         want = False
         if filename and not filename.startswith("<"):
             norm = os.path.abspath(filename).replace("\\", "/")
@@ -72,14 +97,19 @@ class _BranchRecorder:
                     norm == r or norm.startswith(r.rstrip("/") + "/")
                     for r in (r.replace("\\", "/") for r in self._roots)
                 )
-        self._decided[id(code)] = want
+        self._decided[filename] = want
         return want
 
     def _line_of(self, code: Any, offset: int) -> int:
-        starts = self._lines.get(id(code))
+        # Same reuse hazard, worse consequence: stale linestarts inherited from
+        # a freed code object produce WRONG LINE NUMBERS in branch_hits, which
+        # is nondeterministic coverage that looks like a target defect. Keyed on
+        # (file, first line, code size) — stable, and distinct per function.
+        key = (code.co_filename, code.co_firstlineno, len(code.co_code))
+        starts = self._lines.get(key)
         if starts is None:
             starts = [(o, ln) for o, ln in dis.findlinestarts(code) if ln is not None]
-            self._lines[id(code)] = starts
+            self._lines[key] = starts
         line = code.co_firstlineno
         for o, ln in starts:
             if o > offset:
@@ -107,10 +137,19 @@ class _BranchRecorder:
                 "request_id": self._request_id(),
             }
             with self._lock:
+                # Dedupe HERE rather than via DISABLE (see below). Keyed on
+                # stable code identity, never `id(code)` — a code object can be
+                # freed and its address reused, which would silently drop a real
+                # arm or attribute one to the wrong function.
+                key = (code.co_filename, code.co_firstlineno, src, dst)
+                if key in self._seen_arms:
+                    return self._arm_disable
+                if len(self._seen_arms) < _MAX_TRACKED_ARMS:
+                    self._seen_arms.add(key)
                 self._pending.append(hit)
         except Exception:
             pass
-        return self._mon.DISABLE  # first hit per arm; coverage is monotone
+        return self._arm_disable
 
     @staticmethod
     def _request_id() -> str | None:
@@ -176,9 +215,15 @@ class _BranchRecorder:
             self._branch_events = ev.BRANCH_LEFT | ev.BRANCH_RIGHT
             mon.register_callback(self._tool_id, ev.BRANCH_LEFT, self.on_branch)
             mon.register_callback(self._tool_id, ev.BRANCH_RIGHT, self.on_branch)
+            # Each arm is its own event at its own instruction, so retiring one
+            # leaves the other live: DISABLE is both correct and free here.
+            self._arm_disable = mon.DISABLE
         else:
             self._branch_events = ev.BRANCH
             mon.register_callback(self._tool_id, ev.BRANCH, self.on_branch)
+            # One event for both outcomes — DISABLE would retire the conditional
+            # after its first arm. Stay subscribed and dedupe in `_seen_arms`.
+            self._arm_disable = None
         mon.register_callback(self._tool_id, ev.PY_START, self.on_py_start)
         mon.set_events(self._tool_id, ev.PY_START)
         writer = threading.Thread(

@@ -20,6 +20,7 @@ import { FindingsEditorProvider } from './views/findingsView';
 import { OptimizationReportEditorProvider } from './views/optimizationReportView';
 import { registerAutoTriggers } from './harness/autoTrigger';
 import { registerAutoPilotAutoStart } from './harness/autoPilot';
+import { abortExerciseEngine } from './harness/exerciseRunner';
 import { initStatusBar } from './views/statusBar';
 import {
 	registerFlowIssueWarnings,
@@ -34,6 +35,7 @@ import {
 	maybeOfferEmbedderWarmup,
 	registerEnginesCommands,
 } from './engines/install';
+import { maybeUpdateEngines, registerEngineUpdate } from './engines/update';
 import { stopEmbedderIfStarted } from './embedder/sidecar';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -93,6 +95,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// The one-click engines install (git clone + uv sync in a terminal).
 	registerEnginesCommands(context);
+	registerEngineUpdate(context);
+
+	// The engines live outside the vsix, so updating the extension does not move
+	// them. Once per extension version, compare the checkout against the engines
+	// ref this build was cut against and offer to close the gap. Fire-and-forget:
+	// it is a couple of git reads and never blocks activation.
+	void maybeUpdateEngines(context);
 
 	// Engines present? Offer the one-time embedding-model warmup so the first
 	// index build doesn't stall inside the sidecar. When they are missing, the
@@ -236,4 +245,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 export function deactivate(): void {
 	// Stop the embedding sidecar — only when this window was the one to start it.
 	stopEmbedderIfStarted();
+	// Tear down an in-flight exercise step. Without this, closing the window leaves
+	// the engine driving the user's service with no parent and no UI to stop it.
+	abortExerciseEngine();
 }

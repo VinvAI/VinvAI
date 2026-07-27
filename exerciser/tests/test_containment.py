@@ -112,6 +112,16 @@ def test_every_tier_states_what_it_guarantees_in_words_a_reader_can_check():
 # ---- profile / argv construction --------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "macos_profile emits SBPL, whose paths are POSIX by definition; a Windows "
+        "tmp_path is backslash-separated and the generator escapes those for SBPL, "
+        "so the assertion compares a path shape macOS can never produce. This skips "
+        "a macOS-ONLY code path — unlike the sandbox guards, it hides no "
+        "cross-platform behaviour."
+    ),
+)
 def test_the_macos_profile_denies_writes_then_readmits_only_the_root(tmp_path: Path):
     root = tmp_path / "root"
     root.mkdir()
@@ -143,6 +153,13 @@ def test_the_macos_profile_leaves_the_network_alone_when_the_policy_allows_it():
     assert "(deny network*)" not in macos_profile([Path("/r")], block_network=False)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows forbids '\"' in a filename, so the hostile path this test needs "
+        "cannot be created here. The escaping it verifies is macOS-only (SBPL)."
+    ),
+)
 def test_a_path_with_a_quote_cannot_break_out_of_the_profile_string(tmp_path: Path):
     nasty = tmp_path / 'we"ird'
     nasty.mkdir()

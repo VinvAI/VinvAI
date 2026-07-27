@@ -264,6 +264,14 @@ def _py_declarative_routes(text: str) -> list[tuple[str, str, int, str, str | No
 
     def _route_methods(call: ast.Call) -> list[str]:
         methods = _kw(call, "methods")
+        # A NAME is resolved through the module's assignments, exactly as
+        # `routes=table` already is. Without this, `Route(p, h, methods=VERBS)`
+        # fell through to the Starlette default and the endpoint was probed as
+        # GET — a 404 on a POST-only route, so the endpoint was simply missed.
+        # The fallback must mean "no methods declared", not "declared but
+        # unreadable".
+        if isinstance(methods, ast.Name):
+            methods = assigns.get(methods.id, methods)
         if isinstance(methods, ast.List | ast.Tuple | ast.Set):
             got = [_ast_const_str(e) for e in methods.elts]
             named = [m.upper() for m in got if m]
@@ -279,6 +287,18 @@ def _py_declarative_routes(text: str) -> list[tuple[str, str, int, str, str | No
     def _emit_route(call: ast.Call, prefix: str) -> None:
         path = _route_path(call)
         if path is None:
+            # An f-string or computed path (`Route(f"/{p}/x", ...)`) is a
+            # JoinedStr, so it cannot be resolved statically. One early `return`
+            # used to serve both "not a route" and "a route I cannot read",
+            # which meant unresolvable routes could not even be counted: they
+            # silently shrank the denominator, and plan.py's empty-plan
+            # diagnostic only fires at ZERO endpoints, so partial loss was
+            # invisible. Say so instead of vanishing.
+            logging.getLogger(__name__).warning(
+                "route at line %d has a non-literal path — it cannot be "
+                "discovered statically and will not be exercised",
+                call.lineno,
+            )
             return
         full = _join_route(prefix, path)
         handler = _route_handler(call)
@@ -329,16 +349,40 @@ def _py_declarative_routes(text: str) -> list[tuple[str, str, int, str, str | No
             if isinstance(app, ast.Call) and _ast_leaf_name(app.func) in _STARLETTE_APP_CTORS:
                 _walk_routes(_kw(app, "routes"), sub_prefix, depth + 1)
         elif leaf in _STARLETTE_APP_CTORS:
-            _walk_routes(_kw(call, "routes"), prefix, depth + 1)
+            # `APIRouter(prefix="/v1", routes=[...])` mounts its own routes under
+            # that prefix. Only `Mount` handled a prefix, so every declarative
+            # router published its paths unprefixed — and the regex path
+            # (`_router_prefixes`) DOES handle this, but only for the decorator
+            # style, so a grep for "APIRouter prefix" looked satisfied while the
+            # two discovery paths disagreed ~600 lines apart.
+            ctor_prefix = prefix
+            own = _ast_const_str(_kw(call, "prefix"))
+            if own and own != "/":
+                ctor_prefix = _join_route(prefix, own)
+            _walk_routes(_kw(call, "routes"), ctor_prefix, depth + 1)
 
     if has_starlette:
-        # Pass 1: app constructors and Mounts establish prefixes and consume
-        # their nested Route calls; ast.walk is documented pre-order, and the
-        # `consumed` set makes the sweep order-independent regardless.
+        # Pass 1a: MOUNTS first. Mounts are the only nodes that carry a prefix,
+        # so they must claim their sub-app's routes before anything else can.
+        #
+        # Previously both kinds were swept together at prefix "". `ast.walk` is
+        # pre-order, so for the natural writing order —
+        #     sub = Starlette(routes=[Route("/things", ...)])
+        #     app = Starlette(routes=[Mount("/api", app=sub)])
+        # — the bare `sub` constructor was reached FIRST, emitted "/things"
+        # unprefixed, and added it to `consumed`; the later Mount then found the
+        # route already consumed and returned. Writing the two lines in the
+        # other order produced the correct "/api/things". The `consumed` set
+        # added to prevent duplicates was what discarded the prefix, and the
+        # comment claiming the sweep is "order-independent regardless" had it
+        # exactly backwards.
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                leaf = _ast_leaf_name(node.func)
-                if leaf in _STARLETTE_APP_CTORS or leaf in _STARLETTE_MOUNT_CALLS:
+            if isinstance(node, ast.Call) and _ast_leaf_name(node.func) in _STARLETTE_MOUNT_CALLS:
+                _handle_call(node, "", 0)
+        # Pass 1b: app constructors whose routes no Mount already claimed.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and id(node) not in consumed:
+                if _ast_leaf_name(node.func) in _STARLETTE_APP_CTORS:
                     _handle_call(node, "", 0)
         # Pass 2: any Route not reached above (appended imperatively, or in a
         # table the ctor pass could not see) still counts, unprefixed.

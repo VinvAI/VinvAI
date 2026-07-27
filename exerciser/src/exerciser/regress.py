@@ -10,8 +10,6 @@ through the SAME degraded/same/improved semantics ``probeBaseline.ts`` uses
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import time
 from collections.abc import Callable
@@ -23,6 +21,7 @@ from .baseline import apply_baselines, status_class
 from .execute import ProbeResult, execute_probe
 from .invariants import check_observation
 from .optimize import bootstrap_median_ci
+from .probe import input_size_of, probe_id_of
 from .scenario import run_scenario
 from .throughput import percentile
 
@@ -47,12 +46,10 @@ def _suite_from_results(executions: list[dict[str, Any]]) -> list[dict[str, Any]
         # Scenario-derived rows carry no replayable request shape — skip them.
         if "path_params" not in inp and "body" not in inp:
             continue
-        key = json.dumps(
-            [ex["endpoint_id"], ex["strategy"], inp.get("path_params", {}), inp.get("query")],
-            sort_keys=True,
-            default=str,
-        )
-        probe_id = hashlib.sha256(key.encode()).hexdigest()[:16]
+        # SHARED formula. This module and `run` both write baselines/<api_id>.json;
+        # a locally-derived id lands in a disjoint space, so every replay compares
+        # against a golden that does not exist and `degraded` is structurally zero.
+        probe_id = probe_id_of(ex)
         seen[probe_id] = {
             "probeId": probe_id,
             "endpoint_id": ex["endpoint_id"],
@@ -67,6 +64,14 @@ def _suite_from_results(executions: list[dict[str, Any]]) -> list[dict[str, Any]
             # Authed rows replay only under freshly-captured credentials —
             # the recorded run's tokens are gone (never persisted) and expired.
             "auth": bool(ex.get("auth")),
+            # WHICH credential set recorded this expectation. Replaying every
+            # case as fresh_auth[0] made a superuser-only 200, re-issued as the
+            # normal user, come back 403 and be reported as a behavior
+            # regression on completely unchanged code.
+            "auth_index": ex.get("auth_index"),
+            # Replay with the encoding the run used, or a form endpoint's replay
+            # 422s and reads as a behaviour regression against its own golden.
+            "content_type": ex.get("content_type"),
         }
     return list(seen.values())
 
@@ -155,9 +160,22 @@ def replay_suite(
     diffs: list[dict[str, Any]] = []
     for case in suite:
         inp = case["input"]
-        if case.get("auth") and not fresh_auth:
-            auth_skipped += 1  # credentials not reproducible right now
-            continue
+        headers = None
+        if case.get("auth"):
+            if not fresh_auth:
+                auth_skipped += 1  # credentials not reproducible right now
+                continue
+            # Replay under the credential that RECORDED the expectation. Using
+            # index 0 for every case compared one identity's response against
+            # another identity's golden — a deterministic, permanent, wholly
+            # self-inflicted "regression" that never self-heals.
+            idx = case.get("auth_index")
+            if not isinstance(idx, int):
+                idx = 0  # pre-`auth_index` suites: one identity is the best guess
+            if idx >= len(fresh_auth):
+                auth_skipped += 1  # that identity did not re-capture this time
+                continue
+            headers = fresh_auth[idx]
         result = probe_fn(
             base_url,
             case["method"],
@@ -165,7 +183,8 @@ def replay_suite(
             body=inp.get("body"),
             path_params=inp.get("path_params") or {},
             query=inp.get("query") or {},
-            headers=fresh_auth[0] if case.get("auth") else None,
+            headers=headers,
+            content_type=case.get("content_type"),
             exercise_id=exercise_id,
         )
         observations.append(
@@ -190,7 +209,10 @@ def replay_suite(
                     invs,
                     result.body,
                     output_size=_size_of(result.body),
-                    input_size=len(case.get("input") or {}),
+                    # Same measurement `run` learned with. `len(case["input"])`
+                    # counts the {body, path_params, query} WRAPPER — always 3 —
+                    # so a relation learned as out<=in was violated on every replay.
+                    input_size=input_size_of(case.get("input")),
                 )
                 if violations:
                     diffs.append(
@@ -213,7 +235,12 @@ def replay_suite(
                 exercise_id,
                 headers=fresh_auth[0] if case.get("auth") else None,
             )
-        if diff and diff["kind"] == "behavior" and (state.input_values(inp) & planted):
+        if (
+            diff
+            and diff["kind"] == "behavior"
+            and _drift_can_explain(case["expected_status"], result.status)
+            and (state.input_values(inp) & planted)
+        ):
             # The replayed input contains data the exerciser planted in an
             # earlier run — the world changed, not the code. Report it as
             # drift; the next `run` re-goldens the baseline (newest wins).
@@ -307,6 +334,31 @@ def _confirm_perf_diff(
             ),
         }
     return None
+
+
+def _drift_can_explain(expected_status: Any, got_status: Any) -> bool:
+    """Whether planted state could plausibly account for this status change.
+
+    The value-intersection test alone is not a discriminator: the input
+    generators are DETERMINISTIC (``_rng(seed, salt)`` with a fixed default
+    seed), so a replay always sends exactly the strings the recording run sent,
+    and the intersection with ``planted`` is therefore guaranteed for every
+    mutating endpoint that ever 2xx'd. Every genuine behaviour regression on
+    those endpoints was being relabelled ``environment`` and silently dropped —
+    and since ``planted`` grows monotonically across runs, the exemption only
+    ever widened.
+
+    Direction is the real discriminator. Left-over state can make a service
+    REJECT what it used to accept (2xx→4xx, a uniqueness conflict) or ACCEPT
+    what it used to reject (4xx→2xx, the row now exists). It cannot make a
+    service CRASH: a 5xx on either side is a defect, never our residue, and is
+    always reported.
+    """
+    for status in (expected_status, got_status):
+        if isinstance(status, int) and status >= 500:
+            return False
+    # An absent status is a transport failure, not a state effect.
+    return isinstance(expected_status, int) and isinstance(got_status, int)
 
 
 def _case_diff(

@@ -493,6 +493,8 @@ def _run_probe(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=PROBE_TIMEOUT_S,
                 env=env,
             )
@@ -558,6 +560,8 @@ def _probe_sandbox_exec(python: str, block_network: bool) -> tuple[_ProbeOutcome
             [tool, "-p", probe_profile, "/usr/bin/true"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=PROBE_TIMEOUT_S,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -731,33 +735,111 @@ _DENIAL_ERRNOS = frozenset(
     }
 )
 
-# A C extension that swallows the errno and re-raises its own exception type is
-# the whole reason this table exists: `sqlite3.OperationalError: unable to open
-# database file` is not an OSError and carries no errno, but it is exactly what
-# a denied `open(2)` looks like from sqlite3. Kept short and literal — every
-# entry is a message a kernel refusal actually produces.
+# Messages a KERNEL refusal produces, for the case where the errno never made it
+# onto the row. Kept short and literal.
 _DENIAL_MARKERS = (
     "operation not permitted",
     "permission denied",
     "read-only file system",
-    "unable to open database file",
-    "attempt to write a readonly database",
     "network is unreachable",
     "no route to host",
 )
 
+# A C extension that swallows the errno and re-raises its own exception type is
+# the whole reason a message path exists at all: `sqlite3.OperationalError:
+# unable to open database file` is not an OSError and carries no errno, but it is
+# exactly what a denied `open(2)` looks like from sqlite3. These markers are
+# admissible ONLY on an exception that is itself DB-driver shaped (see
+# `_driver_shaped`) — a repo's own error quoting the phrase is not a kernel
+# denial no matter how it is worded.
+_DRIVER_DENIAL_MARKERS = (
+    "unable to open database file",
+    "attempt to write a readonly database",
+)
+
 _NETWORK_MARKERS = ("network is unreachable", "no route to host")
+
+# The exception classes a kernel refusal actually arrives as. `error_mro` is the
+# authoritative test; `error_type` is the fallback for a row that carries no MRO
+# (older result files, and workers that could not introspect the class).
+_OS_ERROR_TYPES = frozenset(
+    {
+        "OSError",
+        "IOError",
+        "EnvironmentError",
+        "PermissionError",
+        "BlockingIOError",
+        "ConnectionError",
+        "ConnectionAbortedError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "BrokenPipeError",
+        "TimeoutError",
+    }
+)
+
+# PEP 249 §8 names these, and a DB driver written as a C extension is the one
+# family that turns a kernel refusal into a non-OSError. `Error` alone is NOT
+# accepted: it is far too common a name for a repo's own base exception.
+_DBAPI_DENIAL_BASES = frozenset(
+    {
+        "DatabaseError",
+        "OperationalError",
+        "InterfaceError",
+        "InternalError",
+    }
+)
+
+# Modules whose exceptions are, by construction, a driver reporting what the OS
+# told it. Accepted as an alternative to the MRO test.
+_DRIVER_MODULES = frozenset(
+    {
+        "sqlite3",
+        "_sqlite3",
+        "sqlite3.dbapi2",
+        "psycopg2",
+        "psycopg",
+        "MySQLdb",
+        "pymysql",
+    }
+)
+
+
+def _os_error_shaped(row: dict[str, Any]) -> bool:
+    """Whether this row's exception really is an OS-level error CLASS."""
+    mro = [str(c) for c in (row.get("error_mro") or [])]
+    if mro:
+        return any(name in _OS_ERROR_TYPES for name in mro)
+    return str(row.get("error_type") or "") in _OS_ERROR_TYPES
+
+
+def _driver_shaped(row: dict[str, Any]) -> bool:
+    """Whether this row's exception is a DB driver's own error class."""
+    mro = [str(c) for c in (row.get("error_mro") or [])]
+    if any(name in _DBAPI_DENIAL_BASES for name in mro):
+        return True
+    return str(row.get("error_module") or "") in _DRIVER_MODULES
 
 
 def os_denial(row: dict[str, Any]) -> tuple[str, str] | None:
     """``(kind, detail)`` when this row's error is an OS containment refusal.
 
     Only meaningful for a row produced under ``OS_SANDBOX``; the caller checks
-    the tier. Deliberately GENEROUS: under an OS wall a denial-shaped exception
-    is attributed to the wall, so a target whose own ``PermissionError`` happens
-    to look identical is counted ``contained`` rather than reported as a defect.
-    That direction is the one the whole module is built on — containment must
-    never be able to fabricate a finding.
+    the tier. Within that class of exception it stays GENEROUS: an ambiguous
+    ``PermissionError`` under a kernel wall is attributed to the wall, because
+    containment must never be able to fabricate a finding.
+
+    What it is NO LONGER is a bare substring test on the message. `mark_contained`
+    promises judgement "by defining module and by MRO, both facts about the
+    class", and every other apparatus in it keeps that promise; the OS branch did
+    not. A message-only rule swallowed an app's own authorization
+    ``PermissionError``, a ``ValueError`` that merely QUOTED "permission denied",
+    and a config-driven "Network is unreachable" — silently, as `contained`. It
+    also made verdicts TIER-DEPENDENT and therefore non-portable: the identical
+    row was a reported defect on a Linux box without bwrap and contained on a Mac,
+    which is not a property a defect finder may have. So the message may now only
+    CORROBORATE a class that is already OS-level (or a DB driver's, the one family
+    that provably discards the errno).
     """
     if row.get("status") != "error":
         return None
@@ -767,6 +849,9 @@ def os_denial(row: dict[str, Any]) -> tuple[str, str] | None:
     kind = "network-denied" if any(m in message for m in _NETWORK_MARKERS) else "filesystem-denied"
     if isinstance(number, int) and number in _DENIAL_ERRNOS and "OSError" in mro:
         return kind, f"errno {number}: {str(row.get('error') or '')[:200]}"
-    if any(marker in message for marker in _DENIAL_MARKERS):
-        return kind, f"{row.get('error_type', 'error')}: {str(row.get('error') or '')[:200]}"
+    detail = f"{row.get('error_type', 'error')}: {str(row.get('error') or '')[:200]}"
+    if _os_error_shaped(row) and any(marker in message for marker in _DENIAL_MARKERS):
+        return kind, detail
+    if _driver_shaped(row) and any(marker in message for marker in _DRIVER_DENIAL_MARKERS):
+        return kind, detail
     return None

@@ -83,15 +83,17 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._worker import worker_entrypoint
 from .containment import (
     SHIM_MECHANISM,
     ContainmentMechanism,
@@ -169,6 +171,25 @@ C_EXTENSION_IO = "c-extension-io"
 # Module roots whose I/O is done in C and is therefore invisible to the shim.
 # Every one of these is also in `functions._IMPURE_MODULE_ROOTS`, so they are
 # precisely the targets the sandbox exists to promote.
+#: The PEP 249 exception hierarchy. A driver MUST define these in its own
+#: module, so the service substitute's copies are indistinguishable from a
+#: fidelity gap by module name alone — but they mean the opposite: the database
+#: answered, and the repo's data-layer bug is real. Never contained.
+#: `SubstitutionGap` is deliberately absent: that one IS the substitute giving up.
+_DBAPI_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        "Error",
+        "DatabaseError",
+        "OperationalError",
+        "IntegrityError",
+        "ProgrammingError",
+        "DataError",
+        "InternalError",
+        "NotSupportedError",
+        "InterfaceError",
+    }
+)
+
 _UNOBSERVABLE_ROOTS: dict[str, str] = {
     "asyncpg": C_EXTENSION_IO,
     "ctypes": C_EXTENSION_IO,
@@ -205,6 +226,10 @@ def unobservable_effect_classes(reasons: Iterable[str]) -> list[str]:
 MAX_EFFECTS_PER_ROW = 20
 MAX_EFFECT_ROWS = 200
 MAX_TREE_ENTRIES = 200
+# Names the copy report lists when `.gitignore` rules pruned entries. Bounded for
+# the same reason as the ledger: enough to diagnose a missing module, not a
+# transcript of a 5000-entry ignore file (the untruncated count is reported too).
+MAX_REPORTED_PRUNES = 50
 
 DEFAULT_MAX_COPY_MB = 256.0
 
@@ -241,7 +266,17 @@ class SandboxPolicy:
     block_network: bool = True
     block_subprocess: bool = True
     block_escaping_writes: bool = True
-    honour_gitignore: bool = True
+    # OFF by default. A `.gitignore` entry means "not worth version-controlling",
+    # which is NOT the same claim as "not needed to run" — for generated code the
+    # two are exact opposites. A repo that ignores `_version.py`, `*_pb2.py`,
+    # `config.py`, `local_settings.py` or `data/` had those files pruned out of
+    # the sandbox copy, and the damage was SILENT: the resulting ImportError is
+    # exempted at import phase by `functions.py`, so every target in the module
+    # was dropped with a diagnostic indistinguishable from "this machine lacks a
+    # dependency". A pruned file that does not break the import instead surfaces
+    # later as a FileNotFoundError, which IS eligible to be reported as a repo
+    # defect — a fabricated finding. Cheaper copies are not worth either.
+    honour_gitignore: bool = False
     keep_root: bool = False
     # Substitute the services the repo expects to already be running (Postgres,
     # Redis, S3) INSIDE the jail. Default on, because the alternative to a
@@ -298,6 +333,13 @@ class CopyReport:
     ms: float
     cap_bytes: int
     skipped_dirs: int = 0
+    # WHAT was pruned, and by which rule. A count alone cannot answer the only
+    # question that matters when a module vanishes from the run — "did the
+    # sandbox delete something the import needed?" — so a dropped module used to
+    # be undiagnosable from the report. Names are relative to the repo root and
+    # bounded, because a large `.gitignore` can prune thousands of entries.
+    gitignore_pruned: tuple[str, ...] = ()
+    gitignore_pruned_total: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -308,6 +350,8 @@ class CopyReport:
             "cap_bytes": self.cap_bytes,
             "cap_mb": round(self.cap_bytes / (1024 * 1024), 3),
             "excluded_dirs": self.skipped_dirs,
+            "gitignore_pruned": list(self.gitignore_pruned),
+            "gitignore_pruned_total": self.gitignore_pruned_total,
         }
 
 
@@ -333,11 +377,37 @@ class Sandbox:
     def tier(self) -> ContainmentTier:
         return self.mechanism.tier
 
-    def dispose(self) -> None:
-        """Discard the whole tree — every effect the target had lands here."""
+    def dispose(self) -> bool:
+        """Discard the whole tree — every effect the target had lands here.
+
+        Returns whether the root is actually gone, because the caller records
+        that in the run report and used to assert it unconditionally.
+
+        `ignore_errors=True` alone was silently insufficient: `copy_repo` uses
+        `shutil.copy2`, which PRESERVES the read-only attribute, so any
+        read-only file in the source repo produced a read-only copy that
+        `os.unlink` refuses to remove on Windows. The error was swallowed and
+        the entire tree — including everything the target wrote — was left in
+        `%TEMP%`, run after run, while the report claimed `root_removed: true`.
+        Clear the attribute and retry before giving up.
+        """
         if self.policy.keep_root:
-            return
-        shutil.rmtree(self.root, ignore_errors=True)
+            return False
+
+        def _force_writable(func: Any, path: str, _exc: Any) -> None:
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except OSError:
+                pass  # genuinely stuck (a lock, a long path) — reported below
+
+        try:
+            shutil.rmtree(self.root, onexc=_force_writable)
+        except TypeError:  # onexc is 3.12+; onerror is the older spelling
+            shutil.rmtree(self.root, onerror=lambda f, p, e: _force_writable(f, p, e))
+        except OSError:
+            pass
+        return not self.root.exists()
 
 
 # =========================================================================
@@ -381,17 +451,25 @@ def copy_repo(repo: Path, dest: Path, policy: SandboxPolicy) -> CopyReport:
     the copy exists to prevent. Exceeding ``policy.max_copy_bytes`` raises
     ``IsolationUnavailable`` mid-copy — the caller must then leave every
     candidate refused rather than fall back to running unsandboxed.
+
+    When ``policy.honour_gitignore`` is on (it is off by default — see
+    ``SandboxPolicy``), everything the ``.gitignore`` rules pruned is RECORDED on
+    the report. Pruning a file the repo needs at runtime is otherwise invisible:
+    the module simply fails to import inside the copy and its targets are dropped
+    with a message that reads exactly like a missing third-party dependency.
     """
     started = time.monotonic()
     patterns = set(policy.exclude_patterns)
-    if policy.honour_gitignore:
-        patterns |= set(gitignore_patterns(repo))
+    ignored = frozenset(gitignore_patterns(repo)) if policy.honour_gitignore else frozenset()
+    patterns |= set(ignored)
     frozen = frozenset(patterns)
     cap = policy.max_copy_bytes
 
     files = 0
     total = 0
     pruned = 0
+    ignore_pruned: list[str] = []
+    ignore_pruned_total = 0
     dest.mkdir(parents=True, exist_ok=True)
     stack: list[tuple[Path, Path]] = [(repo, dest)]
     while stack:
@@ -403,6 +481,19 @@ def copy_repo(repo: Path, dest: Path, policy: SandboxPolicy) -> CopyReport:
         for entry in entries:
             if _excluded(entry.name, frozen):
                 pruned += 1
+                # Attribute the prune. Only the gitignore-derived rules are
+                # reported: `DEFAULT_EXCLUDES` (`.git`, `node_modules`, …) are
+                # this harness's own fixed policy and can never surprise anyone,
+                # whereas a rule that came out of the repo's own `.gitignore` is
+                # exactly what a reader needs to see when a module goes missing.
+                if ignored and _excluded(entry.name, ignored):
+                    ignore_pruned_total += 1
+                    if len(ignore_pruned) < MAX_REPORTED_PRUNES:
+                        try:
+                            rel = str(Path(entry.path).relative_to(repo))
+                        except ValueError:  # pragma: no cover - defensive
+                            rel = entry.name
+                        ignore_pruned.append(rel)
                 continue
             if entry.is_symlink():
                 continue
@@ -441,6 +532,8 @@ def copy_repo(repo: Path, dest: Path, policy: SandboxPolicy) -> CopyReport:
         ms=(time.monotonic() - started) * 1000.0,
         cap_bytes=cap,
         skipped_dirs=pruned,
+        gitignore_pruned=tuple(ignore_pruned),
+        gitignore_pruned_total=ignore_pruned_total,
     )
 
 
@@ -477,7 +570,15 @@ import json
 import os
 import sys
 
-_ROOT = os.path.realpath(os.environ.get("VINV_SANDBOX_ROOT") or "") or ""
+# NOT `os.path.realpath(... or "")`: realpath("") returns the CURRENT WORKING
+# DIRECTORY, never "". So the trailing `or ""` was unreachable, `_ROOT` was
+# always truthy, and the `if not _ROOT: return False` fail-closed guard below
+# was dead code — with the env var unset, cwd silently became the sandbox root
+# and every write under it was permitted. That is precisely the fail-OPEN the
+# guard exists to prevent, and it bites exactly when the shim is on PYTHONPATH
+# outside a sandboxed run.
+_ROOT_RAW = os.environ.get("VINV_SANDBOX_ROOT") or ""
+_ROOT = os.path.realpath(_ROOT_RAW) if _ROOT_RAW else ""
 _LEDGER_PATH = os.environ.get("VINV_SANDBOX_LEDGER") or ""
 _BLOCK_NET = os.environ.get("VINV_SANDBOX_BLOCK_NETWORK", "1") == "1"
 _BLOCK_PROC = os.environ.get("VINV_SANDBOX_BLOCK_SUBPROCESS", "1") == "1"
@@ -875,6 +976,15 @@ def prepare_sandbox(
     except OSError as exc:
         shutil.rmtree(root, ignore_errors=True)
         raise IsolationUnavailable(f"cannot establish isolation: {exc}") from exc
+    except BaseException:
+        # Anything else still orphans a FULLY POPULATED tree (the repo copy
+        # happens above). Only IsolationUnavailable/OSError were caught, but
+        # `plan_services`/`answered_fixtures` run after the copy and read
+        # user-editable JSON: a hand-edited `agent_fixture.json` whose
+        # `questions` is a list raises AttributeError, which escaped both
+        # handlers and leaked the whole tree. Clean up, then re-raise unchanged.
+        shutil.rmtree(root, ignore_errors=True)
+        raise
     return Sandbox(
         root=root,
         repo_copy=dest,
@@ -912,6 +1022,19 @@ def sandbox_env(
         env[var] = str(sandbox.tmp)
     env["HOME"] = str(sandbox.home)
     env["USERPROFILE"] = str(sandbox.home)
+    # Match the parent's UTF-8 decoding of this worker's pipes. The locale
+    # encoding is cp1252 on Windows for every supported interpreter, so without
+    # this a target printing non-cp1252 text dies with UnicodeEncodeError and
+    # takes the whole module's rows with it.
+    env["PYTHONIOENCODING"] = "utf-8"
+    # `%APPDATA%`/`%LOCALAPPDATA%` are the Windows-native equivalents of the
+    # XDG vars below; leaving them alone let `platformdirs`, the pip cache, and
+    # HF/matplotlib caches write to the developer's REAL AppData from inside
+    # what is supposed to be a disposable tree.
+    env["APPDATA"] = str(sandbox.home / "AppData" / "Roaming")
+    env["LOCALAPPDATA"] = str(sandbox.home / "AppData" / "Local")
+    env["HOMEDRIVE"] = ""
+    env["HOMEPATH"] = str(sandbox.home)
     env["XDG_CACHE_HOME"] = str(sandbox.home / ".cache")
     env["XDG_CONFIG_HOME"] = str(sandbox.home / ".config")
     env["XDG_DATA_HOME"] = str(sandbox.home / ".local" / "share")
@@ -1041,9 +1164,16 @@ def mark_contained(row: dict[str, Any], tier: ContainmentTier | None = None) -> 
     is still judged on its own error. For an OS SANDBOX, the shape of a kernel
     refusal (a denial errno, or the message a C extension turns one into), which
     is the only trace ``sqlite3`` leaves when the kernel refuses its ``open(2)``.
-    The OS test is deliberately generous — under a kernel wall an ambiguous
-    ``PermissionError`` is attributed to the wall — because containment must
-    never be able to fabricate a finding.
+    The OS test is deliberately generous WITHIN that class — under a kernel wall
+    an ambiguous ``PermissionError`` is attributed to the wall — because
+    containment must never be able to fabricate a finding.
+
+    It is not, however, generous ACROSS classes: ``os_denial`` requires the
+    exception to be OS-level (or a DB driver's, the one family that discards the
+    errno) before a message may corroborate it. The message-only rule it replaced
+    contained an app's own authorization ``PermissionError`` and a ``ValueError``
+    quoting the phrase, and — because only this branch is tier-gated — made the
+    same row a defect on a host without an OS sandbox and contained on one with.
     """
     if (
         row.get("status") == "error"
@@ -1059,9 +1189,25 @@ def mark_contained(row: dict[str, Any], tier: ContainmentTier | None = None) -> 
     # promises is NEVER a defect in the repo. Judged by defining module and by
     # MRO, both facts about the class, so a repo exception that merely quotes
     # the message is still judged on its own.
-    if row.get("status") == "error" and (
-        row.get("error_module") in ("_vinv_service_doubles", "exerciser.service_doubles")
-        or "SubstitutionGap" in (row.get("error_mro") or ())
+    # ...but NOT the DB-API exception hierarchy. PEP 249 §8 REQUIRES a driver to
+    # define its own `IntegrityError`/`OperationalError`/… in the driver module,
+    # so the substitute's do live here — and `service_doubles` raises them
+    # deliberately, as THE DATABASE ANSWERING. Keying containment on the
+    # defining module therefore made "the substitute cannot honour this" and
+    # "the repo violated a UNIQUE constraint" indistinguishable, and every
+    # unique / NOT NULL / check-constraint violation — the canonical data-layer
+    # bug class this oracle exists to surface — was silently suppressed.
+    #
+    # This is why round 2's check passed while the bug was live: on the
+    # SQLAlchemy path the class is `sqlalchemy.exc.IntegrityError`, a different
+    # module, so the one path where the bug is absent was the one verified.
+    if (
+        row.get("status") == "error"
+        and row.get("error_type") not in _DBAPI_EXCEPTIONS
+        and (
+            row.get("error_module") in ("_vinv_service_doubles", "exerciser.service_doubles")
+            or "SubstitutionGap" in (row.get("error_mro") or ())
+        )
     ):
         row["contained"] = True
         row["contained_by"] = "service-substitute"
@@ -1094,7 +1240,18 @@ def snapshot_tree(root: Path, *, skip: Iterable[Path] = ()) -> dict[str, tuple[i
     unlike the patched builtins it cannot be bypassed by a C extension writing
     through a raw descriptor.
     """
-    skips = {p.resolve() for p in skip}
+    # Resolve the skip set ONCE and compare against already-normalised strings.
+    # This used to call `path.resolve()` on EVERY entry — a realpath syscall per
+    # file (an open+query+close on Windows), before the is_dir check so
+    # directories paid it too, and the whole walk runs twice per module. On a
+    # 20k-file repo across 40 modules that is 1.6M syscalls of pure overhead,
+    # invisible in the report because its `ms` field only covers the copy.
+    # Both the literal and the resolved spelling, so a symlinked root still
+    # matches without paying realpath per entry.
+    skips: set[str] = set()
+    for p in skip:
+        skips.add(os.path.normcase(os.path.abspath(p)))
+        skips.add(os.path.normcase(os.path.realpath(p)))
     out: dict[str, tuple[int, int]] = {}
     stack = [root]
     while stack:
@@ -1105,7 +1262,7 @@ def snapshot_tree(root: Path, *, skip: Iterable[Path] = ()) -> dict[str, tuple[i
             continue
         for entry in entries:
             path = Path(entry.path)
-            if path.resolve() in skips:
+            if skips and os.path.normcase(entry.path) in skips:
                 continue
             try:
                 if entry.is_dir(follow_symlinks=False):
@@ -1197,8 +1354,15 @@ def run_sandboxed_targets(
     if not refusals:
         # The ladder is still reported: "nothing to contain" and "we could not
         # have contained it" are very different facts about a run.
+        #
+        # `require_tier` is deliberately NOT enforced here. It exists to stop a
+        # refused target being DRIVEN behind an insufficient wall — with nothing
+        # to drive there is nothing to protect, and refusing would report "we
+        # could not contain it" about a run that had nothing to contain,
+        # collapsing exactly the two facts this branch exists to keep apart.
+        idle_policy = replace(policy, require_tier=None) if policy.require_tier else policy
         try:
-            idle = resolve_mechanism(policy, python=python, logger=log)
+            idle = resolve_mechanism(idle_policy, python=python, logger=log)
         except IsolationUnavailable as exc:
             report["reason"] = str(exc)
             return {"status": "ok", "rows": [], "report": report}
@@ -1239,6 +1403,20 @@ def run_sandboxed_targets(
         sandbox.copy.ms,
         sandbox.root,
     )
+    if sandbox.copy.gitignore_pruned_total:
+        # Loud, because this is the one exclusion rule that can remove a file the
+        # repo needs at RUNTIME (generated `_version.py`, `*_pb2.py`, a checked-out
+        # `config.py`). The resulting import failure is exempted downstream and
+        # reads exactly like a missing dependency, so without this line a whole
+        # module's targets vanish with nothing pointing at the cause.
+        log.warning(
+            "sandbox: .gitignore rules pruned %d entr%s from the copy (%s) — a "
+            "module that fails to import inside the sandbox may have lost a file "
+            "it needs at runtime; set honour_gitignore=False to copy everything",
+            sandbox.copy.gitignore_pruned_total,
+            "y" if sandbox.copy.gitignore_pruned_total == 1 else "ies",
+            ", ".join(sandbox.copy.gitignore_pruned[:10]),
+        )
 
     by_module: dict[str, list[Refusal]] = {}
     for refusal in refusals:
@@ -1295,6 +1473,8 @@ def run_sandboxed_targets(
                     cmd,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=module_timeout_s,
                     cwd=str(sandbox.repo_copy),
                     env=env,
@@ -1392,8 +1572,14 @@ def run_sandboxed_targets(
             except (OSError, ValueError):
                 service_plan_doc = None
     finally:
-        sandbox.dispose()
-        report["root_removed"] = not policy.keep_root
+        # Derived from the FILESYSTEM, not from policy intent. Asserting
+        # `not policy.keep_root` made the report claim a cleanup that had
+        # silently failed — the one field a user would check to find the leak.
+        report["root_removed"] = sandbox.dispose()
+        if not report["root_removed"] and not policy.keep_root:
+            report.setdefault("diagnostics", []).append(
+                f"sandbox root could not be removed and is still on disk: {sandbox.root}"
+            )
 
     if policy.synthesize_services:
         from .services import fixture_questions, summarise
@@ -1697,12 +1883,9 @@ def _worker_main(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     """``python -m exerciser.sandbox --worker …`` dispatch (worker only)."""
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if "--worker" in argv:
-        argv.remove("--worker")
-        return _worker_main(argv)
-    sys.stderr.write("exerciser.sandbox: use `exerciser functions <repo> --sandbox`\n")
-    return 2
+    return worker_entrypoint(
+        argv, _worker_main, "exerciser.sandbox: use `exerciser functions <repo> --sandbox`"
+    )
 
 
 if __name__ == "__main__":

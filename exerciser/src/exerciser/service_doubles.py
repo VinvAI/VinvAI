@@ -1574,14 +1574,35 @@ PEP249_DRIVERS: tuple[str, ...] = (
     "pymysql",
     "MySQLdb",
     "mysql.connector",
-    "asyncpg",
     "pg8000",
     "cx_Oracle",
     "oracledb",
     "pyodbc",
     "snowflake.connector",
-    "clickhouse_driver",
 )
+
+#: Database clients this module deliberately does NOT substitute, and why.
+#:
+#: The list above works because PEP 249 SPECIFIES the interface, so substituting
+#: a conforming driver is never a new code path. These two do not conform, and
+#: including them was actively harmful: the substitute installs a SYNCHRONOUS
+#: `connect()`, so a repo doing `await asyncpg.connect(...)` got
+#: `TypeError: object Connection can't be used in 'await' expression`, and
+#: `clickhouse_driver.Client(...)` got `AttributeError`. Both are builtins
+#: raised in the REPO's own frame, so containment does not match them and
+#: neither message is a malformed-call marker — they reached `policy.is_defect`
+#: and were reportable as defects in the repo. Worse, the stub is synthesized
+#: when the package is ABSENT, so this fired on machines that never had the
+#: driver — every CI runner.
+#:
+#: Leaving them out means the target fails to connect and lands `contained`,
+#: which is correct and honest.
+NON_PEP249_CLIENTS: dict[str, str] = {
+    # async-native, no PEP 249 surface at all
+    "asyncpg": "async-native API (await connect/fetch); no DB-API 2.0 surface",
+    # its DB-API lives in a submodule; the top level is a Client class
+    "clickhouse_driver": "top-level API is Client(...); DB-API is in .dbapi",
+}
 
 KV_MODULES: tuple[str, ...] = ("redis", "valkey")
 OBJECTSTORE_MODULES: tuple[str, ...] = ("boto3",)

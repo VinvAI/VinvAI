@@ -198,6 +198,30 @@ def compact_state_ledger(
     return kept, len(rows) - len(kept)
 
 
+def state_totals_path(repo: Path) -> Path:
+    return store.exercise_dir(repo) / "state_totals.json"
+
+
+def roll_up_state_totals(repo: Path, rows: list[dict[str, Any]]) -> None:
+    """Fold rows about to be compacted away into a monotone cumulative record.
+
+    The ledger serves two incompatible roles: a WORK QUEUE of what still needs
+    unwinding (for which cleaned rows are dead weight, correctly dropped) and a
+    HISTORICAL RECORD of what the engine planted (for which cleaned rows are the
+    entire numerator). Dropping them made the scorecard's numbers reset: a run
+    that created 3 and cleaned 2 reported "created 1, cleaned 0" after the next
+    compaction — i.e. it reported the teardown machinery doing nothing precisely
+    while it was working, and under-reported what had been planted. The run
+    summary uses live in-memory creations and stayed correct, so the two
+    disagreed and the scorecard is the one humans read.
+    """
+    doc = store.read_json(state_totals_path(repo))
+    totals = doc if isinstance(doc, dict) else {}
+    created = int(totals.get("created_total") or 0) + len(rows)
+    cleaned = int(totals.get("cleaned_total") or 0) + sum(1 for r in rows if r.get("cleaned"))
+    store.write_json(state_totals_path(repo), {"created_total": created, "cleaned_total": cleaned})
+
+
 def compaction_summary_path(repo: Path) -> Path:
     return store.exercise_dir(repo) / "compaction_summary.txt"
 
@@ -240,6 +264,11 @@ def compact_artifacts(
             continue
         kept, n_dropped = compactor(rows)
         if n_dropped > 0:
+            # Preserve the ledger's historical half before the queue half is
+            # pruned, so the scorecard's cumulative numbers survive compaction.
+            if path == ledger_path(repo):
+                kept_ids = {id(r) for r in kept}
+                roll_up_state_totals(repo, [r for r in rows if id(r) not in kept_ids])
             store.write_jsonl(path, kept)
         dropped[path.name] = {"before": len(rows), "after": len(kept), "dropped": n_dropped}
         parts.append(f"{path.name} {len(rows)}->{len(kept)} (-{n_dropped})")

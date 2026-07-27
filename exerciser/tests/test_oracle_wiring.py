@@ -30,14 +30,22 @@ def _learned(bodies: list[dict]) -> list[dict]:
 
 
 def test_learned_invariants_carry_enforceable_params():
-    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(6)])
+    # 20 observations: enough for `stable_enum`/`numeric_bound` to clear the
+    # statistical-justification gate (see invariants.MAX_CHANCE_PROBABILITY).
+    # At the old n=6 the chance of coincidence is 33%, which is why a range
+    # learned that thinly used to mint false failures on boundary probes.
+    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(20)])
     by_kind = {i["kind"]: i for i in invs}
     assert by_kind["stable_enum"]["params"]["values"] == ["done", "ok"]
-    assert by_kind["numeric_bound"]["params"] == {"min": 0, "max": 5}
+    assert by_kind["numeric_bound"]["params"] == {"min": 0, "max": 19}
 
 
 def test_check_observation_flags_null_enum_and_bound_violations():
-    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(6)])
+    # 20 observations: enough for `stable_enum`/`numeric_bound` to clear the
+    # statistical-justification gate (see invariants.MAX_CHANCE_PROBABILITY).
+    # At the old n=6 the chance of coincidence is 33%, which is why a range
+    # learned that thinly used to mint false failures on boundary probes.
+    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(20)])
     violations = check_observation(invs, {"status": "EXPLODED", "score": 99})
     kinds = {v.split(" ")[0] for v in violations}
     assert kinds == {"stable_enum", "numeric_bound"}
@@ -48,7 +56,11 @@ def test_check_observation_flags_null_enum_and_bound_violations():
 
 
 def test_conforming_response_raises_nothing():
-    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(6)])
+    # 20 observations: enough for `stable_enum`/`numeric_bound` to clear the
+    # statistical-justification gate (see invariants.MAX_CHANCE_PROBABILITY).
+    # At the old n=6 the chance of coincidence is 33%, which is why a range
+    # learned that thinly used to mint false failures on boundary probes.
+    invs = _learned([{"status": "ok" if i % 2 else "done", "score": i} for i in range(20)])
     assert check_observation(invs, {"status": "ok", "score": 3}) == []
 
 
@@ -175,7 +187,9 @@ class WrongValueService:
         path_params=None,
         query=None,
         headers=None,
+        content_type=None,
         exercise_id="x",
+        **_kw,
     ):
         if path == "/health":
             return ProbeResult(
@@ -200,8 +214,11 @@ def test_run_enforces_learned_invariants_as_issue_clusters(tmp_path):
                     "kind": "stable_enum",
                     "field": "status",
                     "description": "'status' only ever took values {done, ok}",
-                    "support": 6,
-                    "confidence": 0.875,
+                    # 20 observations of 2 values: a 10% chance of coincidence,
+                    # which is what the justification gate requires before a
+                    # learned enum may fail a run.
+                    "support": 20,
+                    "confidence": 0.955,
                     "params": {"values": ["done", "ok"]},
                 }
             ],

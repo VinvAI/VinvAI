@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .redact import PLACEHOLDER, redact
 
 # Scalars shorter than this are too common to attribute (ids like "1", flags,
 # enum words) — attributing them would classify every diff as drift.
@@ -75,8 +76,11 @@ def record_creations(executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         if not (isinstance(status, int) and 200 <= status < 300):
             continue
-        planted = sorted(scalar_values(ex.get("input")))
-        response = sorted(scalar_values(ex.get("body")))
+        # redact() first: the ledger is persisted to state_ledger.jsonl inside the
+        # user's repo, and these scalars are later spliced into teardown URLs. A
+        # credential is never a resource id, so dropping it costs teardown nothing.
+        planted = sorted(v for v in scalar_values(redact(ex.get("input"))) if v != PLACEHOLDER)
+        response = sorted(v for v in scalar_values(redact(ex.get("body"))) if v != PLACEHOLDER)
         if not planted and not response:
             continue
         rows.append(

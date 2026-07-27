@@ -107,7 +107,18 @@ def diff_signature(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     if not before.get("ok"):
         return []  # no baseline to compare against
     if not after.get("ok"):
-        return [f"symbol became unusable: {after.get('reason')}"]
+        reason = str(after.get("reason") or "")
+        # An IMPORT that failed is an environment fact, not API drift. The
+        # symbol may be perfectly present on a machine with the native library,
+        # the env var, or the GPU — `signature_of` catches BaseException and
+        # stringifies it, so a missing `libcudart.so`, an unset key, an OOM and
+        # a SystemExit all arrived here indistinguishable from "the symbol was
+        # deleted upstream". Reporting that as breaking drift is a false finding
+        # with `from_version: null, to_version: null` attached: the harness has
+        # the evidence that nothing changed and was not using it.
+        if reason.startswith("import failed"):
+            return []
+        return [f"symbol became unusable: {reason}"]
 
     before_params = {p["name"]: p for p in before.get("params", [])}
     after_params = {p["name"]: p for p in after.get("params", [])}
@@ -154,8 +165,17 @@ def check_signature_drift(
     findings: list[dict[str, Any]] = []
     for target in sorted(set(targets)):
         sig = signature_of(target)
-        current[target] = sig
         prior = baseline.get(target)
+        # An UNUSABLE reading must never replace a good baseline. `current` is
+        # merged over `baseline` below, so a run on a machine that could not
+        # import the module overwrote the real signature with the failure — and
+        # the NEXT run then hit `not before.ok` and returned no findings at all.
+        # The finding self-erased AND destroyed the evidence needed to detect
+        # genuine drift later.
+        if sig.get("ok") or prior is None:
+            current[target] = sig
+        else:
+            current[target] = prior
         if prior is None:
             continue  # first sighting: record, do not report
         drift = diff_signature(prior, sig)
@@ -244,6 +264,8 @@ def resolve_matrix(
                     ["uv", "lock", "--resolution", mode],
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout_s,
                     cwd=str(work),
                     env={**os.environ, "UV_NO_SYNC": "1"},

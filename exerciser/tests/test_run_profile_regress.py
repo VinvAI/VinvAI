@@ -83,7 +83,9 @@ class FakeService:
         path_params=None,
         query=None,
         headers=None,
+        content_type=None,
         exercise_id="x",
+        **_kw,
     ):
         if path == "/health":
             self.counter += 1

@@ -1051,11 +1051,28 @@ export async function runHarnessPrompt(
 	running = true;
 	return new Promise<HarnessRunResult>((resolve) => {
 		const log = openTrajectoryLog(workspaceRoot, name, commandLine);
-		const child = spawn(commandLine, hiddenBackgroundOptions({
-			cwd: workspaceRoot,
-			env: childEnv,
-			shell: true,
-		}));
+		let child: ReturnType<typeof spawn>;
+		try {
+			child = spawn(commandLine, hiddenBackgroundOptions({
+				cwd: workspaceRoot,
+				env: childEnv,
+				shell: true,
+			}));
+		} catch (e) {
+			// spawn can throw SYNCHRONOUSLY (bad cwd, EMFILE, a disconnected network
+			// drive). `running` is set above and is only cleared in settle(), so an
+			// unguarded throw here wedges isHarnessBusy() true for the whole session
+			// and every later episode reports "another harness run is in progress".
+			running = false;
+			log?.end();
+			resolve({
+				ok: false,
+				exitCode: null,
+				stdout: '',
+				detail: `failed to spawn harness: ${e instanceof Error ? e.message : String(e)}`,
+			});
+			return;
+		}
 		child.stdin?.on('error', () => {});
 		child.stdin?.write(prompt);
 		child.stdin?.end();
@@ -1240,7 +1257,11 @@ export async function runHarnessPrompt(
 			maxGapMs = Math.max(maxGapMs, now - lastOutputMs);
 			lastOutputMs = now;
 			log?.write(chunk);
-			out += chunk;
+			// Bounded like the sibling reader in dispatchAgentPrompt: this is fed by
+			// BOTH stdout and stderr, and a long `--verbose stream-json` run otherwise
+			// grows one unbounded V8 string until the extension host OOMs. The full
+			// transcript is already on disk in the trajectory log.
+			out = (out + chunk).slice(-400_000);
 			pending += chunk;
 			const lines = pending.split('\n');
 			// The tail is whatever follows the last newline — an incomplete line

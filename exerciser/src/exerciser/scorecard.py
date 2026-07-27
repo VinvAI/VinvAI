@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import state, store
+from . import compaction, state, store
 
 
 def _traffic_only_baseline(repo: Path) -> dict[str, Any]:
@@ -118,9 +118,17 @@ def _state_pollution(repo: Path) -> dict[str, Any]:
     """What the engine planted in the service and could not unwind."""
     rows = store.read_jsonl(state.ledger_path(repo))
     uncleaned = [r for r in rows if not r.get("cleaned")]
+    # Compaction prunes cleaned rows from the ledger (they are no longer work to
+    # do), so counting the live file alone made these totals shrink over time
+    # and report the teardown machinery doing nothing while it worked. The
+    # rolled-up totals carry what compaction removed.
+    doc = store.read_json(compaction.state_totals_path(repo))
+    totals = doc if isinstance(doc, dict) else {}
+    prior_created = int(totals.get("created_total") or 0)
+    prior_cleaned = int(totals.get("cleaned_total") or 0)
     return {
-        "created": len(rows),
-        "cleaned": sum(1 for r in rows if r.get("cleaned")),
+        "created": prior_created + len(rows),
+        "cleaned": prior_cleaned + sum(1 for r in rows if r.get("cleaned")),
         "uncleaned": len(uncleaned),
         "uncleaned_endpoints": sorted({f"{r.get('method')} {r.get('path')}" for r in uncleaned}),
     }

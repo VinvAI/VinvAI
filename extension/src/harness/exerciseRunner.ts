@@ -24,6 +24,7 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getBinPath, isBinAvailable } from '../tracelens/bin';
+import { hiddenBackgroundOptions, killProcessTree } from '../proc';
 import { getHandbookEnv } from '../config/settings';
 import { readServices, readStartCommands, serviceSlug } from '../bringup/bringup';
 import { isServiceRunning, runningServiceNames } from '../bringup/serviceRunner';
@@ -178,7 +179,27 @@ function stepTimeoutMs(): number {
 	return (Number.isFinite(raw) && raw > 0 ? raw : 180) * 1000;
 }
 
-function runEngine(
+/**
+ * The engine child of the in-flight step, so `deactivate()` can tear down a pass
+ * that outlives the window. Only one step runs at a time (runExercisePass is
+ * serialized), so a single handle is enough.
+ */
+let liveEngineChild: cp.ChildProcess | null = null;
+
+/**
+ * Kills any in-flight engine step and its subtree. Called from `deactivate()`:
+ * without it, closing the window leaves the engine driving the user's service
+ * with no parent and no UI — Task Manager becomes the only way to stop it.
+ */
+export function abortExerciseEngine(): void {
+	if (liveEngineChild) {
+		killProcessTree(liveEngineChild, 'SIGKILL');
+		liveEngineChild = null;
+	}
+}
+
+/** Exported for the stdout-drain regression test, which spawns a real child. */
+export function runEngine(
 	bin: string,
 	args: string[],
 	cwd: string,
@@ -189,21 +210,37 @@ function runEngine(
 		const done = (ok: boolean, error?: string): void => {
 			if (!settled) {
 				settled = true;
+				liveEngineChild = null;
 				resolve({ ok, error });
 			}
 		};
 		let child: cp.ChildProcess;
 		try {
-			child = cp.spawn(bin, args, { cwd, env });
+			// hiddenBackgroundOptions: windowsHide stops a console flashing per step
+			// (four steps per Auto-Pilot cycle), and detached on POSIX gives the child
+			// its own process group so killProcessTree can signal the whole subtree.
+			child = cp.spawn(bin, args, hiddenBackgroundOptions({ cwd, env }));
 		} catch (e) {
 			done(false, e instanceof Error ? e.message : String(e));
 			return;
 		}
+		liveEngineChild = child;
 		let err = '';
 		child.stderr?.setEncoding('utf8');
 		child.stderr?.on('data', (c: string) => (err = (err + c).slice(-8000)));
+		// stdout MUST be drained. The CLI writes its whole result document there
+		// (cli.py `_emit`), and `plan` alone exceeds the 64 KB pipe buffer on any
+		// real service once $refs are inlined. An unread pipe blocks the engine in
+		// write(), it never exits, and the step below kills it as a timeout — a
+		// failure that only ever reproduces on repos big enough to matter.
+		let outTail = '';
+		child.stdout?.setEncoding('utf8');
+		child.stdout?.on('data', (c: string) => (outTail = (outTail + c).slice(-8000)));
 		const timer = setTimeout(() => {
-			child.kill('SIGKILL');
+			// Not child.kill: the bundled `exerciser` is a uv trampoline that execs a
+			// separate python.exe, and each engine step spawns its own workers. Killing
+			// only the trampoline orphans everything it started, still driving the service.
+			killProcessTree(child, 'SIGKILL');
 			done(false, `exerciser timed out after ${Math.round(stepTimeoutMs() / 1000)}s`);
 		}, stepTimeoutMs());
 		child.on('error', (e) => {
@@ -212,7 +249,9 @@ function runEngine(
 		});
 		child.on('exit', (code) => {
 			clearTimeout(timer);
-			done(code === 0, code === 0 ? undefined : err || `exit ${code}`);
+			// The CLI reports structured failures as {"status":"error"} on stdout, so
+			// prefer stderr but fall back to the stdout tail before a bare exit code.
+			done(code === 0, code === 0 ? undefined : err || outTail || `exit ${code}`);
 		});
 	});
 }
@@ -300,8 +339,20 @@ async function exercisePassOnce(
 	}
 
 	publishExerciseState(exerciseStateFromArtifacts(null, null, 'running', 'profiling behavior…'));
-	await runEngine(bin, ['profile', workspaceRoot, '--service', slug], workspaceRoot, env);
-	await runEngine(bin, ['scorecard', workspaceRoot, '--service', slug], workspaceRoot, env);
+	// These two MUST be checked like plan/run above. Unchecked, a crashed profile
+	// is indistinguishable from a clean run: the reads below silently fall back to
+	// the PREVIOUS pass's artifacts and the pass reports 'done' with stale numbers.
+	step = await runEngine(bin, ['profile', workspaceRoot, '--service', slug], workspaceRoot, env);
+	if (!step.ok) {
+		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'profile failed'));
+		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
+	}
+
+	step = await runEngine(bin, ['scorecard', workspaceRoot, '--service', slug], workspaceRoot, env);
+	if (!step.ok) {
+		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'scorecard failed'));
+		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
+	}
 
 	const profile = readExerciseJson<ExerciseProfile>(workspaceRoot, 'profile.json');
 	const issues = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');

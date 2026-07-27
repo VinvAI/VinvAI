@@ -36,8 +36,9 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from ._worker import worker_entrypoint
 from .functions import detect_src_roots
-from .issues import FailureCluster, normalize_signature
+from .issues import FailureCluster, build_clusters
 
 DEFAULT_WORKERS = 4
 DEFAULT_REPEATS = 3
@@ -112,6 +113,17 @@ def _worker_main(argv: list[str]) -> int:
     # ordinary call-to-call variation in a stateful target.
     serial = [_one() for _ in range(workers)]
     rows.append({"target": target, "phase": "serial", "results": serial})
+    # A SECOND serial batch, purely as a control. The divergence verdict below
+    # compares distinct-result counts, which silently assumes the count is a
+    # property of the target rather than of timing. It is not: a function
+    # returning anything clock- or entropy-derived produces N distinct results
+    # serially (calls straddle a tick) and 1 concurrently (they land in the same
+    # instant) — reported as "updates were LOST" on a target with no shared
+    # state at all, deterministically on every repeat, so it looks like a
+    # solidly reproduced bug. If two SERIAL batches already disagree, the spread
+    # is timing, not state, and the comparison does not apply.
+    serial_control = [_one() for _ in range(workers)]
+    rows.append({"target": target, "phase": "serial-control", "results": serial_control})
 
     # Deterministic schedule: a fixed number of workers released together,
     # repeated so a rare interleaving still gets several chances. The repeat
@@ -199,6 +211,17 @@ def classify(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         return out
     serial = _profile(serial_row.get("results") or [])
 
+    # Is the distinct-count a property of the TARGET, or of timing? Two serial
+    # batches that disagree mean the return values are clock/entropy-derived, so
+    # a lower concurrent count proves nothing — concurrency compresses a spread
+    # that serial execution creates. Without this control, every such target was
+    # reported as having "unguarded shared state".
+    control_row = next((r for r in rows if r.get("phase") == "serial-control"), None)
+    count_is_stable = (
+        control_row is None  # older worker output: keep the previous behaviour
+        or _profile(control_row.get("results") or [])["distinct"] == serial["distinct"]
+    )
+
     for row in rows:
         if row.get("phase") != "concurrent":
             continue
@@ -218,7 +241,7 @@ def classify(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         concurrent = _profile(row.get("results") or [])
         # Only a batch that actually SUCCEEDED can have lost an update; when
         # every call failed, the failures below are the honest report.
-        if concurrent["ok"] and concurrent["distinct"] < serial["distinct"]:
+        if count_is_stable and concurrent["ok"] and concurrent["distinct"] < serial["distinct"]:
             out.append(
                 {
                     "kind": "concurrency-divergence",
@@ -258,31 +281,14 @@ def classify(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 def cluster_concurrency_findings(findings: list[dict[str, str]]) -> list[FailureCluster]:
-    clusters: dict[str, FailureCluster] = {}
-    for f in findings:
-        target = f.get("target", "?")
-        sig = normalize_signature(f["kind"], f"{target} {f['detail']}")
-        cluster = clusters.get(sig)
-        if cluster is None:
-            cluster = FailureCluster(
-                signature=sig,
-                kind=f["kind"],
-                title=f"{target} — {f['detail']}"[:300],
-                endpoint_id=target,
-                method="CONC",
-                path=target,
-                exemplar={
-                    "input": None,
-                    "strategy": "concurrency/schedule",
-                    "status": None,
-                    "error": f["detail"],
-                    "detail": f["detail"],
-                    "expected": ("concurrent calls agree with the serial baseline and all return"),
-                },
-            )
-            clusters[sig] = cluster
-        cluster.count += 1
-    return sorted(clusters.values(), key=lambda c: (c.kind, c.path))
+    return build_clusters(
+        findings,
+        verdict=lambda f: f.get("kind"),
+        describe=lambda f, _k: str(f.get("detail", "")),
+        method="CONC",
+        strategy=lambda _f, _k: "concurrency/schedule",
+        expected=lambda _f, _k: "concurrent calls agree with the serial baseline and all return",
+    )
 
 
 # =========================================================================
@@ -340,6 +346,8 @@ def run_concurrency(
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=worker_timeout_s,
             cwd=str(repo),
             env=env,
@@ -392,12 +400,9 @@ def run_concurrency(
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if "--worker" in argv:
-        argv.remove("--worker")
-        return _worker_main(argv)
-    sys.stderr.write("exerciser.concurrency: use `exerciser concurrency <repo> --target …`\n")
-    return 2
+    return worker_entrypoint(
+        argv, _worker_main, "exerciser.concurrency: use `exerciser concurrency <repo> --target …`\n"
+    )
 
 
 if __name__ == "__main__":

@@ -219,3 +219,152 @@ def test_http_empty_but_entrypoints_present_points_at_the_harness(
     (msg,) = result["diagnostics"]
     assert "0 HTTP endpoints discovered" in msg
     assert "script_main" in msg
+
+
+# ---------------------------------------------------------------------------
+# Audit COR-6/7/8/9 — prefixes, resolvable methods, and unreadable paths.
+# ---------------------------------------------------------------------------
+
+
+def _routes(text: str) -> set[tuple[str, str]]:
+    return {(m, p) for m, p, _, _, _ in _py_declarative_routes(text)}
+
+
+_MOUNT_SUB_FIRST = """\
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+
+
+async def things(request): ...
+
+
+sub = Starlette(routes=[Route("/things", things, methods=["POST"])])
+app = Starlette(routes=[Mount("/api", app=sub)])
+"""
+
+_MOUNT_SUB_AFTER = """\
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+
+
+async def things(request): ...
+
+
+app = Starlette(routes=[Mount("/api", app=sub)])
+sub = Starlette(routes=[Route("/things", things, methods=["POST"])])
+"""
+
+_MOUNT_INLINE = """\
+from starlette.applications import Starlette
+from starlette.routing import Mount, Route
+
+
+async def things(request): ...
+
+
+app = Starlette(
+    routes=[Mount("/api", app=Starlette(routes=[Route("/things", things, methods=["POST"])]))]
+)
+"""
+
+
+def test_a_mount_prefix_survives_however_the_sub_app_is_written():
+    """COR-6: the sub-app assigned BEFORE the app used to lose its prefix.
+
+    `ast.walk` is pre-order, so the bare `sub = Starlette(...)` constructor was
+    reached first, emitted "/things" unprefixed, and added it to `consumed`;
+    the later Mount then found the route consumed and returned. Writing the two
+    lines in the other order produced the correct path — and assigning the
+    sub-app first is the natural way to write it.
+    """
+    for label, src in (
+        ("sub-app first", _MOUNT_SUB_FIRST),
+        ("sub-app after", _MOUNT_SUB_AFTER),
+        ("inline", _MOUNT_INLINE),
+    ):
+        assert _routes(src) == {("POST", "/api/things")}, label
+
+
+def test_a_route_is_never_emitted_both_prefixed_and_bare():
+    """The dedupe the `consumed` set exists for must still hold."""
+    found = [(m, p) for m, p, _, _, _ in _py_declarative_routes(_MOUNT_SUB_FIRST)]
+    assert len(found) == len(set(found)) == 1
+
+
+_METHODS_VIA_NAME = """\
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+
+async def chat(request): ...
+
+
+VERBS = ["POST", "PUT"]
+app = Starlette(routes=[Route("/chat", chat, methods=VERBS)])
+"""
+
+
+def test_a_methods_list_held_in_a_variable_is_resolved():
+    """COR-7: an unresolved `methods=` fell back to GET, so a POST-only route
+    was probed with the wrong verb and simply 404'd — the endpoint was missed."""
+    assert _routes(_METHODS_VIA_NAME) == {("POST", "/chat"), ("PUT", "/chat")}
+
+
+_METHODS_UNRESOLVABLE = """\
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+
+async def chat(request): ...
+
+
+app = Starlette(routes=[Route("/chat", chat, methods=compute_verbs())])
+"""
+
+
+def test_a_genuinely_unreadable_methods_expression_still_defaults_to_get():
+    """Starlette's own default — the fallback must survive for the real case."""
+    assert _routes(_METHODS_UNRESOLVABLE) == {("GET", "/chat")}
+
+
+_ROUTER_PREFIX = """\
+from fastapi import APIRouter
+from starlette.routing import Route
+
+
+async def listing(request): ...
+
+
+router = APIRouter(prefix="/v1/swarms", routes=[Route("/list", listing)])
+"""
+
+
+def test_an_api_router_prefix_is_applied():
+    """COR-8: only Mount handled a prefix, so declarative routers published
+    their paths unprefixed — while the regex path DID handle the decorator
+    style, so a grep looked satisfied and the two paths disagreed."""
+    assert _routes(_ROUTER_PREFIX) == {("GET", "/v1/swarms/list")}
+
+
+_FSTRING_PATH = """\
+from starlette.applications import Starlette
+from starlette.routing import Route
+
+
+async def h(request): ...
+
+
+prefix = "v1"
+app = Starlette(routes=[Route(f"/{prefix}/x", h)])
+"""
+
+
+def test_a_non_literal_path_is_reported_not_silently_dropped(caplog):
+    """COR-9: one early `return` served both 'not a route' and 'a route I
+    cannot read', so unresolvable routes shrank the denominator invisibly —
+    and plan.py's empty-plan diagnostic only fires at ZERO endpoints."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        assert _routes(_FSTRING_PATH) == set()
+    assert any("non-literal path" in r.message for r in caplog.records)

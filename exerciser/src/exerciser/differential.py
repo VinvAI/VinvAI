@@ -64,14 +64,16 @@ import inspect
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 from . import store
+from ._worker import worker_entrypoint
 from .functions import annotation_base, detect_src_roots, discover_targets
-from .issues import FailureCluster, normalize_signature
+from .issues import FailureCluster, build_clusters
 from .semantics_corpus import RAISING_CORPUS, SEMANTIC_CORPUS
 
 DEFAULT_TIMEOUT_S = 60.0
@@ -155,43 +157,6 @@ def _snippet_identifiers(snippet: str) -> set[str]:
         elif isinstance(node, _ast.Attribute):
             out.add(node.attr.lower())
     return out
-
-
-def _ubiquity() -> dict[str, float]:
-    """How often each ast node type appears across the corpus.
-
-    A node type present in almost every snippet (``Name``, ``Assign``,
-    ``Expr``, ``Load``) carries no information: matching it means matching
-    ordinary prose. Which types those are is DERIVED from the corpus rather
-    than listed, so it stays correct as the corpus grows.
-    """
-    corpus = (*AST_CORPUS, *AST_CORPUS_RAISING)
-    counts: dict[str, int] = {}
-    for snippet in corpus:
-        for node in _snippet_constructs(snippet):
-            counts[node] = counts.get(node, 0) + 1
-    total = max(1, len(corpus))
-    return {k: v / total for k, v in counts.items()}
-
-
-# Node types appearing in more than this fraction of the corpus are treated as
-# uninformative — matching one proves nothing about the refusal.
-_UBIQUITY_CAP = 0.25
-
-
-def _discriminative_constructs(snippet: str) -> set[str]:
-    """Constructs in ``snippet`` that are rare enough to be evidence."""
-    ubiquity = _UBIQUITY
-    return {c for c in _snippet_constructs(snippet) if ubiquity.get(c, 0.0) <= _UBIQUITY_CAP}
-
-
-def _names_word(haystack: str, needle: str) -> bool:
-    """Word-bounded containment — 'name' must not match 'undefined_name_xyz'."""
-    import re as _re
-
-    return (
-        _re.search(rf"(?<![A-Za-z0-9_]){_re.escape(needle)}(?![A-Za-z0-9_])", haystack) is not None
-    )
 
 
 def policy_signal(message: str, snippet: str | None) -> tuple[str, str]:
@@ -318,19 +283,6 @@ def _names_word(haystack: str, needle: str) -> bool:
     return (
         _re.search(rf"(?<![A-Za-z0-9_]){_re.escape(needle)}(?![A-Za-z0-9_])", haystack) is not None
     )
-
-
-# =========================================================================
-# The ast-corpus: deterministic snippets spanning node types
-# =========================================================================
-#
-# Every snippet is self-contained, import-free, dunder-light, and ends with a
-# bare `result` expression. Kept deliberately inside what a restrictive
-# evaluator SHOULD support — disagreement on these is a defect, not a policy.
-
-
-# Snippets that must RAISE under CPython — an evaluator that accepts them has
-# widened the language.
 
 
 # =========================================================================
@@ -626,6 +578,47 @@ def _emit(rows: list[dict[str, Any]]) -> None:
 # =========================================================================
 
 
+# `<mypkg.model.Config object at 0x7f3a1c0d9e50>` — the default `object.__repr__`,
+# whose hex tail is the id() of the instance in ONE process. The reference run and
+# the target run are separate calls (and, for a `module:qualname` reference, may be
+# separate processes), so two identical objects reliably render at two different
+# addresses. Comparing those reprs by string equality is a GUARANTEED
+# `wrong-value` finding on the first corpus snippet that binds `result` to an
+# object without a `__repr__` — a defect the target does not have.
+#
+# This comparator survived only because the 378 corpus snippets were hand-audited
+# to return primitives. That is a property of the corpus, not of the comparator,
+# and the module's own docstring courts cross-implementation targets
+# (RustPython/PyPy/Brython) whose reprs legitimately differ in other ways too.
+#
+# The `` at 0x`` prefix is required rather than a bare ``0x…``: a snippet whose
+# result is the STRING ``"0xdeadbeef"`` must still compare by value, and erasing
+# every hex-looking run would hide a genuine disagreement between two of them.
+_OBJECT_ADDRESS_RE = re.compile(r" at 0x[0-9a-fA-F]+")
+
+
+def normalize_repr(text: Any) -> str:
+    """Canonical form of a ``repr`` string for cross-run comparison.
+
+    Only object ADDRESSES are erased. Deliberately nothing else: normalising
+    float formatting or container ordering would start hiding the very
+    differences the oracle exists to report, whereas an address is the one
+    component that is provably meaningless — it identifies a memory slot in a
+    process that has usually already exited.
+    """
+    if text is None:
+        return ""
+    # The placeholder carries no hex digits on purpose: `0xADDR` would itself
+    # match the pattern (`ADD` is hex), so normalising twice kept appending an
+    # `R` and the function was not idempotent.
+    return _OBJECT_ADDRESS_RE.sub(" at <addr>", str(text))
+
+
+def values_agree(reference: Any, got: Any) -> bool:
+    """Whether two successful ``repr`` renderings say the same thing."""
+    return normalize_repr(reference) == normalize_repr(got)
+
+
 def judge_row(
     row: dict[str, Any],
     *,
@@ -658,7 +651,9 @@ def judge_row(
         return "unresolved", reason
 
     if ref.get("ok") and got.get("ok"):
-        if ref.get("value") != got.get("value"):
+        # Normalised, not raw: see `normalize_repr`. Raw string equality made a
+        # default-repr return value an automatic false `wrong-value`.
+        if not values_agree(ref.get("value"), got.get("value")):
             return {
                 "kind": "wrong-value",
                 "detail": (
@@ -851,37 +846,25 @@ def cluster_mismatches(
     policy_patterns: tuple[str, ...] = (),
     adjudications: dict[str, str] | None = None,
 ) -> list[FailureCluster]:
-    clusters: dict[str, FailureCluster] = {}
+    # Resolve each row's verdict once, then hand the shared builder rows that
+    # already carry it. `policy-limit` is a stated limit and `unadjudicated` is
+    # awaiting layer 2 — neither is a defect, and both are surfaced separately.
+    enriched: list[dict[str, Any]] = []
     for row in rows:
         verdict = judge_row(row, policy_patterns=policy_patterns, adjudications=adjudications)
-        # policy-limit is a stated limit; unadjudicated is awaiting layer 2.
-        # Neither is reported as a defect, and both are surfaced separately.
         if verdict is None or verdict["kind"] in ("policy-limit", "unadjudicated"):
             continue
-        target = row.get("target", "?")
-        detail = f"{verdict['kind']}: {verdict['detail']}"
-        sig = normalize_signature("differential-mismatch", f"{target} {detail}")
-        cluster = clusters.get(sig)
-        if cluster is None:
-            cluster = FailureCluster(
-                signature=sig,
-                kind="differential-mismatch",
-                title=f"{target} — {detail}"[:300],
-                endpoint_id=target,
-                method="DIFF",
-                path=target,
-                exemplar={
-                    "input": row.get("snippet"),
-                    "strategy": f"differential/{verdict['kind']}",
-                    "status": None,
-                    "error": None,
-                    "detail": detail,
-                    "expected": "agreement with the reference implementation",
-                },
-            )
-            clusters[sig] = cluster
-        cluster.count += 1
-    return sorted(clusters.values(), key=lambda c: (c.path, c.title))
+        enriched.append({**row, "_verdict": verdict})
+
+    return build_clusters(
+        enriched,
+        verdict=lambda _r: "differential-mismatch",
+        describe=lambda r, _k: f"{r['_verdict']['kind']}: {r['_verdict']['detail']}",
+        method="DIFF",
+        strategy=lambda r, _k: f"differential/{r['_verdict']['kind']}",
+        expected=lambda _r, _k: "agreement with the reference implementation",
+        exemplar_extra=lambda r: {"input": r.get("snippet"), "error": None},
+    )
 
 
 # =========================================================================
@@ -981,11 +964,21 @@ def run_differential(
         env["PYTHONPATH"] = os.pathsep.join(
             p for p in (env.get("PYTHONPATH"), str(Path(__file__).parents[1])) if p
         )
+        # Pin the hash seed. This oracle's whole output is `repr()` strings, and
+        # the iteration order of a `set` (or of anything derived from one) is a
+        # function of PYTHONHASHSEED, which CPython randomises per process by
+        # default. Unpinned, `fault`/`differential` result files differ run to run
+        # for reasons that have nothing to do with the target — which makes the
+        # regression comparison that diffs them report phantom changes, and makes
+        # a reported mismatch impossible to reproduce by re-running.
+        env["PYTHONHASHSEED"] = "0"
         try:
             proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_s,
                 cwd=str(repo),
                 env=env,
@@ -1075,6 +1068,13 @@ def run_differential(
         "pairs": len(refs),
         "corpus_size": len(corpus),
         "comparisons": compared,
+        # `issue_clusters` is the name EVERY oracle uses. This one called its
+        # total `mismatch_clusters`, and that single inconsistency is the entire
+        # reason `campaign._findings` carried a `count_key` parameter — one
+        # divergent dict key propagated into the orchestrator's signature.
+        # `mismatch_clusters` is retained as an alias so a campaign.json or a
+        # report written by an older build still reads.
+        "issue_clusters": len(clusters),
         "mismatch_clusters": len(clusters),
         # Informational: what the sandbox deliberately refuses. NOT defects —
         # reporting a documented limit as a bug is how an oracle gets ignored.
@@ -1137,12 +1137,9 @@ def run_differential(
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if "--worker" in argv:
-        argv.remove("--worker")
-        return _worker_main(argv)
-    sys.stderr.write("exerciser.differential: use `exerciser differential <repo>`\n")
-    return 2
+    return worker_entrypoint(
+        argv, _worker_main, "exerciser.differential: use `exerciser differential <repo>`\n"
+    )
 
 
 if __name__ == "__main__":
