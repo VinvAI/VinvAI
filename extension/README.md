@@ -2,9 +2,15 @@
 
 <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv wordmark and tagline" width="700" />
 
-### The RL loop that makes your coding agents smarter and their written code production-ready.
+### Vinv runs, benchmarks and optimizes your agent-written Python code until it's production-ready.
+
+Coding agents know your code. They have never understood how it behaves when it runs. Vinv's **context bandits** build one context graph — your code, your traces, and the metrics derived from them — and serve it to your agent.
 
 <sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
+
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn" width="820" />
+
+<sub>One command starts it. Vinv drives the other eight stages.</sub>
 
 **Zero-edit Python tracing · Code Graph · Behavior exerciser · Answers with citations · Fix &amp; verify loop · Two MCP servers · Auto-Pilot · Entirely local**
 
@@ -28,11 +34,11 @@
 
 ## What is Vinv?
 
-Vinv is a free, open-source extension — the RL loop that makes your coding agents smarter and their written code production-ready. It builds the context, runs the harness, and produces the evidence: it runs your service under tracing, builds context from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
+Vinv is a free, open-source extension that runs, benchmarks and optimizes your agent-written Python code until it's production-ready. It runs your service under tracing, builds one context graph from what actually executed, exercises every endpoint itself, then grades your agent's fix against acceptance tests written before the fix that the agent never sees.
 
 ### Context beats model size — on a repo you know
 
-One local run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★) took it from **0 of 23 endpoints executed to 23 of 23**, symbol coverage **18 → 37 of 44**, and banked **125 replayable regression cases**. It surfaced **four bugs and one performance problem** — all behind auth, which is why ordinary traffic never reached them.
+One local run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (44k★) took it from **0 of 23 endpoints executed to 23 of 23**, symbol coverage **18 → 37 of 44**, and banked **125 replayable regression cases**. It surfaced **four bugs and one performance problem** — all behind auth, which is why ordinary traffic never reached them.
 
 Handed those same five issues to each setup, same prompts, Vinv grading every run:
 
@@ -157,7 +163,7 @@ Vinv **never calls a model provider itself**. All of its thinking runs through a
 
 ### 🧨 Exercises your API — no traffic needed *(new)*
 
-Traffic only covers what users happen to hit. The **behavior exerciser** drives every endpoint itself: schema-derived valid/boundary/negative inputs, values mined from real traces, and multi-step auth scenarios — strategy picked per endpoint by a Thompson-sampling bandit rewarded by newly covered code. Every response becomes a permanent regression case; a state ledger tears down what the tests created and separates *your code regressed* from *test residue changed the world*.
+Traffic only covers what users happen to hit. The **behavior exerciser** drives every endpoint itself: schema-derived valid/boundary/negative inputs, values mined from real traces, and multi-step auth scenarios — strategy picked per endpoint by a Thompson-sampling bandit rewarded by oracle violations, with new coverage worth only a 0.25 bonus so exploring never outranks finding. Every response becomes a permanent regression case; a state ledger tears down what the tests created and separates *your code regressed* from *test residue changed the world*.
 
 ### 🧭 Journey & Findings — walk everything, see what got fixed *(new)*
 
