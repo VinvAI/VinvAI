@@ -79,7 +79,7 @@ verify every endpoint of a service.
   2. exerciser run <repo> --base-url http://127.0.0.1:PORT
        Execute the plan against the live traced service, coverage-guided.
        Writes results.jsonl, bandit.json, issues.json, baselines/*.
-  3. exerciser functions <repo> [--no-sandbox] [--require-tier TIER]
+  3. exerciser functions <repo> [--no-sandbox] [--require-tier TIER] [--no-services]
        Drive catalogued entry points and exported functions. Verified-pure
        targets run IN PROCESS (isolated workers, per-module deadline); every
        target the purity guard could NOT verify is routed through containment
@@ -226,6 +226,28 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
     is_flag=True,
     help="Leave the sandbox tree on disk for inspection instead of discarding it.",
 )
+@click.option(
+    "--services/--no-services",
+    default=True,
+    show_default=True,
+    help=(
+        "Substitute the services the repo expects to already be running "
+        "(Postgres, Redis, S3) INSIDE the jail, so a target that needs one runs "
+        "instead of failing to connect. Containment is unchanged either way — "
+        "the network stays blocked; --no-services just leaves those targets "
+        "unexercised. Substitution is reported, and a statement the stand-in "
+        "cannot honour is recorded as the HARNESS's gap, never as a defect."
+    ),
+)
+@click.option(
+    "--seed-rows",
+    default=1,
+    show_default=True,
+    help=(
+        "Rows seeded into a table whose schema had to be induced, so a read path "
+        "has something to read. 0 leaves induced tables empty."
+    ),
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def functions_cmd(
     repo_path,
@@ -238,6 +260,8 @@ def functions_cmd(
     max_tier,
     sandbox_max_copy_mb,
     sandbox_keep_root,
+    services,
+    seed_rows,
     verbose,
 ):
     _configure_logging(verbose)
@@ -248,6 +272,8 @@ def functions_cmd(
             keep_root=sandbox_keep_root,
             require_tier=parse_tier(require_tier),
             max_tier=parse_tier(max_tier),
+            synthesize_services=services,
+            seed_rows=max(0, seed_rows),
         )
         if sandbox
         else None

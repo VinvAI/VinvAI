@@ -18,6 +18,9 @@ dependencies = [
 dev = [
     "pytest>=8.0.0,<10.0.0",
     "ruff>=0.6.0,<0.9.0",
+    # Exercises the SQLAlchemy cut point of the service doubles (the tests
+    # skip without it, and a skipped honesty guarantee is no guarantee).
+    "sqlalchemy>=2.0,<3.0",
 ]
 
 [project.scripts]

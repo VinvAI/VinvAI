@@ -139,7 +139,14 @@ DEFAULT_EXCLUDES = frozenset(
 # Effect kinds the ledger records. `filesystem-escape` is a write that pointed
 # outside the sandbox root and was therefore refused BY THE SHIM; `os-denied` is
 # one the kernel refused, which is the only kind a C extension can produce.
-EFFECT_KINDS = ("filesystem", "filesystem-escape", "network", "subprocess", "os-denied")
+EFFECT_KINDS = (
+    "filesystem",
+    "filesystem-escape",
+    "network",
+    "subprocess",
+    "os-denied",
+    "substitution-gap",
+)
 
 # =========================================================================
 # What the shim CANNOT see — and must therefore not report as "no effect"
@@ -236,6 +243,14 @@ class SandboxPolicy:
     block_escaping_writes: bool = True
     honour_gitignore: bool = True
     keep_root: bool = False
+    # Substitute the services the repo expects to already be running (Postgres,
+    # Redis, S3) INSIDE the jail. Default on, because the alternative to a
+    # stand-in is not "the real service" — the network is blocked either way —
+    # it is the target never running at all.
+    synthesize_services: bool = True
+    # Rows seeded into a table whose schema had to be induced, so a read path
+    # has something to read. Zero leaves induced tables empty.
+    seed_rows: int = 1
     # Where the disposable tree is created. ``None`` means the system temp
     # directory. A caller that also sets ``keep_root`` should set this, because
     # "keep the tree for inspection" without saying WHERE leaves one orphaned
@@ -267,6 +282,8 @@ class SandboxPolicy:
             "block_subprocess": self.block_subprocess,
             "block_escaping_writes": self.block_escaping_writes,
             "honour_gitignore": self.honour_gitignore,
+            "synthesize_services": self.synthesize_services,
+            "seed_rows": self.seed_rows,
             "require_tier": self.require_tier.value if self.require_tier else None,
             "max_tier": self.max_tier.value if self.max_tier else None,
         }
@@ -306,6 +323,9 @@ class Sandbox:
     plans: Path
     ledger: Path
     copy: CopyReport
+    services: Path | None = None
+    service_plan: Path | None = None
+    service_ledger: Path | None = None
     policy: SandboxPolicy = field(default_factory=SandboxPolicy)
     mechanism: ContainmentMechanism = SHIM_MECHANISM
 
@@ -701,14 +721,64 @@ if _BLOCK_PROC:
     ):
         if hasattr(os, _name):
             setattr(os, _name, _blocker("subprocess", "os." + _name, _PROC_MSG))
+
+# --------------------------------------------------------------------------
+# Service doubles — the stand-ins that make blocked network survivable
+# --------------------------------------------------------------------------
+# Blocking the network is only half an answer: a target that needs Postgres now
+# fails to connect instead of running. The doubles substitute the service INSIDE
+# the jail, so the guarantee is untouched and the code path still executes. They
+# install here, before any repo module is imported, because a client library
+# imported first would already hold a reference to the real connect().
+_SERVICE_PLAN = os.environ.get("VINV_SERVICE_PLAN") or ""
+if _SERVICE_PLAN:
+    _service_error = ""
+    try:
+        with open(_SERVICE_PLAN, "r") as _fh:
+            _spec = json.load(_fh)
+    except Exception as _exc:
+        _spec = {}
+        _service_error = "unreadable service plan: %s" % (_exc,)
+    if _spec.get("enabled") and _spec.get("requirements"):
+        try:
+            import _vinv_service_doubles as _doubles
+
+            _doubles.install(
+                directory=os.environ.get("VINV_SERVICE_DIR") or os.path.join(_ROOT, "services"),
+                ledger=os.environ.get("VINV_SERVICE_LEDGER") or "",
+                seed_rows=int(_spec.get("seed_rows", 1) or 0),
+                schema_sources=_spec.get("schema_sources") or [],
+                fixtures=_spec.get("fixtures") or [],
+            )
+            sys.__vinv_service_doubles__ = _doubles
+        except Exception as _exc:
+            _service_error = "service doubles failed to install: %s" % (_exc,)
+    if _service_error:
+        # Never swallowed: a run whose doubles did not install would otherwise
+        # look like a repo that cannot connect, which is the parent's bug
+        # wearing the repo's face.
+        try:
+            with open(os.environ.get("VINV_SERVICE_LEDGER") or os.devnull, "a") as _fh:
+                _fh.write(json.dumps({"kind": "install-error", "detail": _service_error}) + chr(10))
+        except Exception:
+            pass
 '''
 
 
 def write_shim(directory: Path) -> Path:
-    """Write the generated ``sitecustomize.py`` and return its path."""
+    """Write the generated ``sitecustomize.py`` and return its path.
+
+    The service doubles ship alongside it as ``_vinv_service_doubles`` — a COPY
+    of :mod:`exerciser.service_doubles`, not an import of it, because the worker
+    has only the standard library and the repo on its path. The module is
+    dependency-free precisely so this copy is a copy and nothing more.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "sitecustomize.py"
     path.write_text(_SITECUSTOMIZE_SOURCE, encoding="utf-8")
+    doubles = Path(__file__).with_name("service_doubles.py")
+    if doubles.is_file():
+        shutil.copy2(doubles, directory / "_vinv_service_doubles.py")
     return path
 
 
@@ -782,8 +852,23 @@ def prepare_sandbox(
         ):
             path.mkdir(parents=True, exist_ok=True)
         write_shim(shim)
+        services = root / "services"
+        services.mkdir(parents=True, exist_ok=True)
         dest = root / "repo" / (repo.name or "repo")
         report = copy_repo(repo, dest, policy)
+        service_plan: Path | None = None
+        service_ledger: Path | None = None
+        if policy.synthesize_services:
+            from .services import answered_fixtures, plan_services
+
+            plan_doc = plan_services(repo, seed_rows=policy.seed_rows).to_json()
+            # Fixtures the agent channel has already answered ride along, so a
+            # table induced last run is populated with representative data
+            # this run instead of placeholders.
+            plan_doc["fixtures"] = answered_fixtures(repo)
+            service_plan = root / "service_plan.json"
+            service_plan.write_text(json.dumps(plan_doc, indent=2), encoding="utf-8")
+            service_ledger = root / "service_ledger.json"
     except IsolationUnavailable:
         shutil.rmtree(root, ignore_errors=True)
         raise
@@ -799,6 +884,9 @@ def prepare_sandbox(
         plans=plans,
         ledger=root / "ledger.json",
         copy=report,
+        services=services,
+        service_plan=service_plan,
+        service_ledger=service_ledger,
         policy=policy,
         mechanism=mechanism,
     )
@@ -841,6 +929,12 @@ def sandbox_env(
     # the worker. A missing/unknown value reads as the weakest rung, which is the
     # fail-closed direction: it can only ever make the report more cautious.
     env["VINV_CONTAINMENT_TIER"] = sandbox.mechanism.tier.value
+    if sandbox.service_plan is not None:
+        env["VINV_SERVICE_PLAN"] = str(sandbox.service_plan)
+        env["VINV_SERVICE_DIR"] = str(sandbox.services or (sandbox.root / "services"))
+        env["VINV_SERVICE_LEDGER"] = str(
+            sandbox.service_ledger or (sandbox.root / "service_ledger.json")
+        )
     env["VINV_CONTAINMENT_MECHANISM"] = sandbox.mechanism.name
     if sandbox.mechanism.name == "unshare":
         env.update(unshare_env([sandbox.root], base=env))
@@ -958,6 +1052,25 @@ def mark_contained(row: dict[str, Any], tier: ContainmentTier | None = None) -> 
     ):
         row["contained"] = True
         row["contained_by"] = "process-shim"
+        return row
+    # Third apparatus: the SERVICE SUBSTITUTE. A ``SubstitutionGap`` (or any
+    # exception defined by the doubles module) is the stand-in saying "I cannot
+    # honour this" — the harness's own fidelity limit, which the doubles module
+    # promises is NEVER a defect in the repo. Judged by defining module and by
+    # MRO, both facts about the class, so a repo exception that merely quotes
+    # the message is still judged on its own.
+    if row.get("status") == "error" and (
+        row.get("error_module") in ("_vinv_service_doubles", "exerciser.service_doubles")
+        or "SubstitutionGap" in (row.get("error_mro") or ())
+    ):
+        row["contained"] = True
+        row["contained_by"] = "service-substitute"
+        effects = row.setdefault("effects", {})
+        if isinstance(effects, dict):
+            bucket = effects.setdefault("substitution-gap", [])
+            detail = f"{row.get('error_type')}: {str(row.get('error'))[:160]}"
+            if isinstance(bucket, list) and detail not in bucket:
+                bucket.append(detail)
         return row
     if tier is ContainmentTier.OS_SANDBOX:
         denial = os_denial(row)
@@ -1104,6 +1217,11 @@ def run_sandboxed_targets(
     except IsolationUnavailable as exc:
         report["status"] = "unavailable"
         report["reason"] = str(exc)
+        if policy.synthesize_services:
+            # Legible even when nothing ran: "no services were synthesised
+            # because the sandbox never came up" is a different fact from
+            # "this repo needs none".
+            report["services"] = {"enabled": True, "status": "sandbox-unavailable"}
         report["refused"] = [
             {"id": r.target.id, "reason": f"sandbox-unavailable: {exc}"} for r in refusals
         ]
@@ -1127,6 +1245,7 @@ def run_sandboxed_targets(
         by_module.setdefault(refusal.target.module, []).append(refusal)
     report["targets"] = len(refusals)
     report["modules"] = len(by_module)
+    service_summary: dict[str, Any] | None = None
 
     rows: list[dict[str, Any]] = []
     timeouts: list[str] = []
@@ -1265,9 +1384,34 @@ def run_sandboxed_targets(
                             }
                         )
                 rows.append(row)
+        service_summary = _read_service_ledger(sandbox.service_ledger)
+        service_plan_doc = None
+        if sandbox.service_plan is not None and sandbox.service_plan.exists():
+            try:
+                service_plan_doc = json.loads(sandbox.service_plan.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                service_plan_doc = None
     finally:
         sandbox.dispose()
         report["root_removed"] = not policy.keep_root
+
+    if policy.synthesize_services:
+        from .services import fixture_questions, summarise
+
+        # The plan the worker actually saw — read back rather than re-derived,
+        # so the report describes THIS run and the repo is not scanned twice.
+        report["services"] = summarise(service_plan_doc or {}, service_summary)
+        induced = [
+            e
+            for e in (service_summary or {}).get("events", [])
+            if isinstance(e, dict) and e.get("kind") == "induced-schema"
+        ]
+        if induced:
+            # Induction got the code running; representative DATA is a question
+            # about intent, so each induced table becomes one cached question on
+            # the agent channel. Answers land as fixtures on the next run.
+            channel, _answered = fixture_questions(repo, induced)
+            report["services"]["fixture_channel"] = channel.save(log)
 
     report["calls"] = sum(1 for r in rows if r.get("phase") == "call")
     report["effects"] = effects
@@ -1289,6 +1433,55 @@ def run_sandboxed_targets(
     return {"status": "ok", "rows": rows, "report": report}
 
 
+def _read_service_ledger(path: Path | None) -> dict[str, Any] | None:
+    """Fold the in-jail doubles' ledger into the shape the report wants.
+
+    Read INSIDE the ``try`` that disposes the tree, because the ledger lives in
+    the tree — a summary computed after disposal would silently be empty, which
+    would read as "the doubles did nothing" rather than "nobody looked".
+
+    The ledger is JSONL, appended by every module worker in the run: a
+    whole-document format was reproduced letting the last worker erase every
+    earlier worker's recorded gaps.
+    """
+    if path is None or not path.exists():
+        return None
+    events: list[dict[str, Any]] = []
+    error = ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("kind") == "install-error":
+                error = str(event.get("detail") or "install failed")
+                continue
+            events.append(event)
+    except OSError:
+        return None
+    by_kind: dict[str, int] = {}
+    for event in events:
+        by_kind[str(event.get("kind"))] = by_kind.get(str(event.get("kind")), 0) + 1
+    out = {
+        "substituted": by_kind.get("substituted", 0),
+        "induced_schema": by_kind.get("induced-schema", 0),
+        "seeded_rows": by_kind.get("seeded-row", 0),
+        "fixture_rows": by_kind.get("fixture-row", 0),
+        "declared_schema": by_kind.get("declared-schema", 0),
+        "substitution_gaps": by_kind.get("substitution-gap", 0),
+        "events": events[:200],
+    }
+    if error:
+        out["error"] = error
+    return out
+
+
 def _read_ledger(path: Path) -> list[dict[str, Any]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -1300,6 +1493,27 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
 # =========================================================================
 # Worker — runs INSIDE the contained subprocess, importing target code
 # =========================================================================
+
+
+def _service_event_count() -> int:
+    doubles = getattr(sys, "__vinv_service_doubles__", None)
+    try:
+        return len(doubles.events()) if doubles is not None else 0
+    except Exception:  # pragma: no cover
+        return 0
+
+
+def _service_events_since(mark: int) -> list[dict[str, Any]]:
+    doubles = getattr(sys, "__vinv_service_doubles__", None)
+    if doubles is None:
+        return []
+    try:
+        return [
+            {k: e[k] for k in ("kind", "service", "detail", "table") if k in e}
+            for e in doubles.events()[mark:]
+        ]
+    except Exception:  # pragma: no cover
+        return []
 
 
 def _worker_main(argv: list[str]) -> int:
@@ -1460,9 +1674,22 @@ def _worker_main(argv: list[str]) -> int:
             continue
         for arg_set in fn.arg_sets_for(params):
             mark = len(ledger.attempts)
+            service_mark = _service_event_count()
             row = fn._call_once(module_name, qual, candidate, arg_set)
             row.update(base)
             row["effects"] = drain(mark)
+            service_events = _service_events_since(service_mark)
+            if service_events:
+                # The substitutions, inductions and seedings THIS call caused —
+                # drained per call exactly like the effect ledger. A verdict
+                # that stood on invented rows carries the evidence it stood on,
+                # so downstream consumers can down-weight it.
+                row["service_events"] = service_events[:12]
+                if any(
+                    e.get("kind") in ("seeded-row", "induced-schema", "fixture-row")
+                    for e in service_events
+                ):
+                    row["seed_dependent"] = True
             rows.append(mark_contained(row, tier))
     fn._emit(rows)
     return 0
