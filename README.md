@@ -3,14 +3,22 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — runtime context bandits for coding agents. Commodity models out-fix frontier ones." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — runs, benchmarks and optimizes your agent-written Python code until it's production-ready." width="880">
 </picture>
 
 <br><br>
 
-**Vinv is the RL loop that makes your coding agents smarter and their written code production-ready.** It builds the context, runs the harness, and produces the evidence — a real run traced to the exact line that served each request, every endpoint exercised, and acceptance tests written before the fix that the agent never sees.
+**Vinv runs, benchmarks and optimizes your agent-written Python code until it's production-ready.**
+
+Coding agents know your code. They have never understood how it behaves when it runs. Vinv's **context bandits** build one context graph — your code, your traces, and the metrics derived from them — and serve it to your agent.
 
 <sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
+
+<br><br>
+
+<img src="https://images.vinv.ai/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
+
+<sub>One command starts it. Vinv drives the other eight stages — every arrow is evidence, not a guess.</sub>
 
 <br><br>
 
@@ -58,7 +66,7 @@ Both failures have one root cause: **the agent has never watched your code run.*
 
 ## Case study: commodity models out-fix frontier ones
 
-Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (35k★). We handed all five to each setup — same issues, same prompts, one trial per condition, Vinv grading every run:
+Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (44k★). We handed all five to each setup — same issues, same prompts, one trial per condition, Vinv grading every run:
 
 | Setup | Fixed |
 |---|---|
@@ -99,7 +107,7 @@ Give your coding agent runtime context — ten capabilities, one loop:
 - **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
-- **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by newly covered code, and turns every response into a permanent regression case.
+- **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by oracle violations first and new coverage only as a bonus, and turns every response into a permanent regression case.
 - **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
 - **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph. The budget is yours: set attempts per service in **Configure**, and when a run exhausts them Vinv asks whether to grant more instead of quietly giving up.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
@@ -227,8 +235,8 @@ Vinv's release gate is Vinv — these numbers come from running the loop on this
 | Search | file hit@10 **0.90** · symbol MRR 0.51 · p50 81ms |
 | Crash recovery | indexer, embedder, and traced service all kill-tested mid-run |
 | Self-found waste | 83% duplicate compute found → now cached |
-| Retrieval tuning | new configs ship only when they beat the old one on replayed past queries — last promotion **+17% retrieval reward**, 95% CI [+8%, +32%] |
-| Test suite | 941 tests green |
+| Retrieval tuning | off-policy evaluation (doubly-robust, BCa bootstrap) runs continuously over logged queries and **promotes nothing that can't clear a 95% lower bound above zero** — to date it has declined every candidate |
+| Test suite | 1,738 tests green (1,186 Python · 552 extension) |
 
 ## How it works
 
@@ -249,7 +257,7 @@ No black boxes — every decision Vinv makes has a published method behind it, a
 
 | Decision | Algorithm | Why |
 |---|---|---|
-| Which input strategy to try next, per endpoint | **Thompson sampling** over Beta posteriors; reward = newly covered symbols; posteriors persist across runs with **50% evidence decay** | explores boundary/negative/auth inputs where they pay, without a hand-tuned schedule — and old lessons expire instead of ossifying |
+| Which input strategy to try next, per endpoint | **Thompson sampling** over Beta posteriors; reward = oracle violations, with new coverage worth a **0.25 bonus** so exploring stays subordinate to finding; posteriors persist across runs with **50% evidence decay** | explores boundary/negative/auth inputs where they pay, without a hand-tuned schedule — the loop can't be captured by a cheap coverage treadmill, and old lessons expire instead of ossifying |
 | Accept or revert an optimization | **Paired bootstrap** 95% CI on relative improvement **and** byte-identical behavior replay | "faster" must be statistically real and observably harmless |
 | Behavioral invariants | **Daikon-style** dynamic invariants, support ≥ 5, zero counterexamples, **Laplace** `(s+1)/(n+2)` confidence | properties earn their confidence from evidence, not assertion |
 | Memory-leak suspects | **Theil–Sen** slope over per-session retention (robust to 29% outliers) | one noisy session can't fabricate or hide a leak |
@@ -264,7 +272,7 @@ The whole test ontology — what exists, where it lives on disk, and the walk or
 
 <details><summary><b>Deeper: the context graph, Auto-Pilot, and repo layout</b></summary>
 
-Vinv indexes **the code** and generates — from your own run — **the traces**, **the logs**, and **the metrics**, then ties all four to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → probe → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
+Vinv indexes **the code** and generates — from your own run — **the traces** and **the metrics derived from them**, then ties all three to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → probe → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
 </details>
 
 ## After install: the five things to try
