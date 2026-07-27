@@ -207,15 +207,34 @@ def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbo
 @click.option(
     "--timeout", default=60.0, show_default=True, help="Seconds per (target, reference) pair."
 )
+@click.option(
+    "--python",
+    default=None,
+    help="Interpreter for the workers — use the TARGET's venv (default: this one).",
+)
+@click.option(
+    "--call-kwargs",
+    default=None,
+    help=(
+        'JSON kwargs for every target call, e.g. \'{"static_tools": '
+        '"@pkg.mod:BASE_TOOLS"}\'. An "@module:SYMBOL" value is resolved by '
+        "import — configure the target the way production does."
+    ),
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
-def differential_cmd(repo_path, target, reference, timeout, verbose):
+def differential_cmd(repo_path, target, reference, timeout, python, call_kwargs, verbose):
     _configure_logging(verbose)
     try:
+        parsed_kwargs = json.loads(call_kwargs) if call_kwargs else None
+        if parsed_kwargs is not None and not isinstance(parsed_kwargs, dict):
+            raise ValueError("--call-kwargs must be a JSON object")
         result = run_differential(
             Path(repo_path),
             target=target,
             reference=reference,
+            call_kwargs=parsed_kwargs,
             timeout_s=timeout,
+            python=python,
             logger=logging.getLogger("exerciser.differential"),
         )
     except Exception as exc:

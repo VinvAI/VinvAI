@@ -27,9 +27,21 @@ from exerciser.differential import (
 _BUGGY_EVALUATOR = """\
 def evaluate_code(code: str):
     if "lambda" in code:
-        raise ValueError("lambda is not supported.")
+        # An UNEXPLAINED refusal: no stated policy, so it reads as a defect.
+        raise ValueError("internal error while evaluating")
     ns = {}
     exec(code.replace("//", "/"), ns)
+    return (ns.get("result"), False)
+"""
+
+# Same refusal, but STATING a deliberate limit — the sandbox is allowed to
+# say no, and saying so must not be reported as a bug.
+_POLICY_EVALUATOR = """\
+def evaluate_code(code: str):
+    if "lambda" in code:
+        raise ValueError("Lambda is not supported.")
+    ns = {}
+    exec(code, ns)
     return (ns.get("result"), False)
 """
 
@@ -176,8 +188,62 @@ def test_buggy_evaluator_is_caught_against_cpython(tmp_path: Path):
     assert result["comparisons"] == len(AST_CORPUS) + len(AST_CORPUS_RAISING)
     assert result["mismatch_clusters"] >= 2, "both planted bugs must surface"
     details = " ".join(c["title"] for c in result["clusters"])
-    assert "rejects-valid" in details, "the lambda refusal (valid Python rejected)"
+    assert "rejects-valid" in details, "the unexplained lambda refusal"
     assert "wrong-value" in details, "the // rewrite (silently wrong arithmetic)"
+
+
+def test_stated_policy_limits_are_reported_but_never_clustered(tmp_path: Path):
+    # A sandbox that says "Lambda is not supported" is enforcing a documented
+    # limit. Reporting that as a defect is noise, and noise gets oracles
+    # switched off — so it lands in policy_limits, not in the clusters.
+    repo = _make_repo(tmp_path, _POLICY_EVALUATOR)
+
+    result = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
+
+    assert result["mismatch_clusters"] == 0, "a stated limit is not a defect"
+    assert result["policy_limit_count"] >= 1
+    assert any("not supported" in p["detail"] for p in result["policy_limits"])
+
+
+def test_call_kwargs_configure_the_target_as_production_does(tmp_path: Path):
+    # An evaluator that needs its toolset passed in looks catastrophically
+    # broken when driven with the default (empty) config — every builtin is
+    # "forbidden". call_kwargs is how the oracle avoids that false-positive
+    # storm; an "@module:SYMBOL" value is resolved by import in the worker.
+    source = """\
+ALLOWED = {"len": len, "sum": sum, "range": range, "list": list}
+
+
+def evaluate_code(code: str, tools=None):
+    if tools is None:
+        raise ValueError("no tools configured")
+    ns = dict(tools)
+    exec(code, {"__builtins__": {}}, ns)
+    return (ns.get("result"), False)
+"""
+    repo = _make_repo(tmp_path, source)
+
+    unconfigured = run_differential(
+        repo, target="engine.sandbox:evaluate_code", reference="cpython-exec"
+    )
+    assert any(
+        "no tools configured" in c["exemplar"]["detail"] for c in unconfigured["clusters"]
+    ), "unconfigured, the target refuses everything"
+
+    configured = run_differential(
+        repo,
+        target="engine.sandbox:evaluate_code",
+        reference="cpython-exec",
+        call_kwargs={"tools": "@engine.sandbox:ALLOWED"},
+    )
+    assert not any(
+        "no tools configured" in c["exemplar"]["detail"] for c in configured["clusters"]
+    ), "the @module:SYMBOL value resolved and reached the call"
+
+    # And the entry persists its config, so a later bare run stays configured.
+    saved = store.read_json(store.exercise_dir(repo) / "references.json")
+    entry = next(e for e in saved["references"] if e["target"] == "engine.sandbox:evaluate_code")
+    assert entry["call_kwargs"] == {"tools": "@engine.sandbox:ALLOWED"}
 
 
 def test_faithful_evaluator_produces_no_mismatches(tmp_path: Path):

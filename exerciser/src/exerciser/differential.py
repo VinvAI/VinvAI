@@ -33,6 +33,20 @@ agree on WHAT is compared):
   type (a sandbox is allowed to WRAP, e.g. ``InterpreterError: … TypeError …``);
 * one raises, one succeeds → mismatch (the two shapes of evaluator bugs:
   "rejected valid Python" and "accepted what CPython rejects").
+
+**Policy is not a defect.** A sandbox that refuses ``nonlocal``, or refuses a
+builtin it was never given, is enforcing a documented limit — reporting that as
+a bug is noise, and noise is how an oracle gets switched off. Refusals whose
+message matches ``POLICY_PATTERNS`` are bucketed as ``policy_limits``
+(informational: exactly what the sandbox will not do) and never clustered as
+issues. Only *unexplained* disagreement becomes an issue.
+
+**Configure the target as production does.** An entry's ``call_kwargs`` are
+passed to every target call, and a ``"@module:SYMBOL"`` value is resolved by
+import in the worker — so
+``{"static_tools": "@pkg.executor:BASE_PYTHON_TOOLS"}`` drives the evaluator
+with the toolset it actually ships with. Without this the oracle compares
+against a crippled configuration and every builtin looks "forbidden".
 """
 
 from __future__ import annotations
@@ -41,6 +55,7 @@ import argparse
 import importlib
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +70,28 @@ DEFAULT_TIMEOUT_S = 60.0
 _CODE_PARAM_NAMES = frozenset(
     {"code", "source", "src", "expression", "expr", "snippet", "program", "code_action"}
 )
+
+# Refusal messages that mean "this sandbox deliberately does not do that" —
+# a documented limit, not a defect. Matched case-insensitively against the
+# target's error message. Extend per-entry via `policy_patterns`.
+POLICY_PATTERNS: tuple[str, ...] = (
+    "is not supported",
+    "are not supported",
+    "not among the explicitly allowed",
+    "forbidden function evaluation",
+    "forbidden access",
+    "is not allowed",
+    "not permitted",
+    "unauthorized",
+    "unsafe",
+    "disabled for security",
+)
+
+
+def is_policy_refusal(message: str, extra_patterns: tuple[str, ...] = ()) -> bool:
+    """Whether a refusal message states a deliberate sandbox limit."""
+    low = (message or "").lower()
+    return any(p in low for p in (*POLICY_PATTERNS, *extra_patterns))
 
 
 # =========================================================================
@@ -101,6 +138,11 @@ AST_CORPUS: tuple[str, ...] = (
     # control flow
     "result = 0\nfor i in range(4):\n    result += i\nelse:\n    result += 100\nresult",
     "result = 0\nwhile result < 5:\n    result += 2\nresult",
+    # while-else is a SEPARATE code path from for-else: an interpreter can
+    # implement one and silently drop the other, and dropping it returns a
+    # plausible number rather than raising.
+    "result = 0\nwhile result < 3:\n    result += 1\nelse:\n    result += 100\nresult",
+    "result = 0\nfor i in range(4):\n    if i == 2:\n        break\nelse:\n    result = 100\nresult",
     "result = []\nfor i in range(6):\n    if i == 2:\n        continue\n    if i == 4:\n        break\n    result.append(i)\nresult",
     "result = 'big' if 10 > 5 else 'small'\nresult",
     # exceptions
@@ -274,9 +316,27 @@ def _worker_main(argv: list[str]) -> int:
             _emit(rows)
             return 0
 
+    try:
+        call_kwargs = _resolve_kwargs(plan.get("call_kwargs") or {})
+    except BaseException as exc:
+        rows.append(
+            {
+                "target": plan["target"],
+                "phase": "call-kwargs",
+                "status": "error",
+                "error": f"could not resolve call_kwargs: {exc}"[:400],
+            }
+        )
+        _emit(rows)
+        return 0
+
     for snippet in plan["corpus"]:
-        ref = _outcome_ref(snippet) if ref_fn is None else _outcome_target(ref_fn, snippet, extract)
-        got = _outcome_target(fn, snippet, extract)
+        ref = (
+            _outcome_ref(snippet)
+            if ref_fn is None
+            else _outcome_target(ref_fn, snippet, extract, call_kwargs)
+        )
+        got = _outcome_target(fn, snippet, extract, call_kwargs)
         rows.append(
             {
                 "target": plan["target"],
@@ -290,9 +350,28 @@ def _worker_main(argv: list[str]) -> int:
     return 0
 
 
-def _outcome_target(fn: Any, snippet: str, extract: str) -> dict[str, Any]:
+def _resolve_kwargs(raw: dict[str, Any]) -> dict[str, Any]:
+    """Resolve ``"@module:SYMBOL"`` values by import; pass everything else through.
+
+    Lets an entry configure the target the way production does — e.g.
+    ``{"static_tools": "@pkg.executor:BASE_PYTHON_TOOLS"}`` — without the plan
+    file having to embed a callable.
+    """
+    out: dict[str, Any] = {}
+    for key, value in (raw or {}).items():
+        if isinstance(value, str) and value.startswith("@") and ":" in value:
+            mod_name, _, sym = value[1:].partition(":")
+            out[key] = getattr(importlib.import_module(mod_name), sym)
+        else:
+            out[key] = value
+    return out
+
+
+def _outcome_target(
+    fn: Any, snippet: str, extract: str, kwargs: dict[str, Any] | None = None
+) -> dict[str, Any]:
     try:
-        out = fn(snippet)
+        out = fn(snippet, **(kwargs or {}))
         return {"ok": True, "value": repr(_extract_value(out, extract))}
     except BaseException as exc:
         return {
@@ -313,16 +392,20 @@ def _emit(rows: list[dict[str, Any]]) -> None:
 # =========================================================================
 
 
-def judge_row(row: dict[str, Any]) -> dict[str, str] | None:
-    """Mismatch verdict for one compare row, or None on agreement.
+def judge_row(
+    row: dict[str, Any], *, policy_patterns: tuple[str, ...] = ()
+) -> dict[str, str] | None:
+    """Verdict for one compare row, or None on agreement.
 
     Wrapping is allowed on the error path: a sandbox that re-raises
     ``InterpreterError: … due to: TypeError: …`` NAMES the reference type and
-    therefore agrees.
+    therefore agrees. A refusal that states a deliberate limit is returned with
+    kind ``policy-limit`` — informational, never clustered as a defect.
     """
     if row.get("phase") != "compare":
         return None
     ref, got = row.get("reference") or {}, row.get("got") or {}
+    got_msg = str(got.get("message") or "")
     if ref.get("ok") and got.get("ok"):
         if ref.get("value") != got.get("value"):
             return {
@@ -334,9 +417,17 @@ def judge_row(row: dict[str, Any]) -> dict[str, str] | None:
             }
         return None
     if ref.get("ok") and not got.get("ok"):
+        if is_policy_refusal(got_msg, policy_patterns):
+            return {
+                "kind": "policy-limit",
+                "detail": f"deliberately refused: {got_msg[:200]}",
+            }
         return {
             "kind": "rejects-valid",
-            "detail": (f"valid Python rejected: target raised {got.get('exception')}"),
+            "detail": (
+                f"valid Python rejected with no stated policy reason: "
+                f"target raised {got.get('exception')}: {got_msg[:160]}"
+            ),
         }
     if not ref.get("ok") and got.get("ok"):
         return {
@@ -348,23 +439,56 @@ def judge_row(row: dict[str, Any]) -> dict[str, str] | None:
         }
     # both raised: the target must at least NAME the reference exception type.
     ref_exc = str(ref.get("exception") or "")
-    blob = f"{got.get('exception', '')} {got.get('message', '')}"
+    blob = f"{got.get('exception', '')} {got_msg}"
     if ref_exc and ref_exc not in blob:
+        if is_policy_refusal(got_msg, policy_patterns):
+            # Both refuse; the target refuses for its own stated reason. That
+            # is a policy difference, not a wrong answer.
+            return {
+                "kind": "policy-limit",
+                "detail": f"deliberately refused: {got_msg[:200]}",
+            }
         return {
             "kind": "wrong-exception",
             "detail": (
                 f"reference raises {ref_exc} but the target raised "
-                f"{got.get('exception')} without naming it"
+                f"{got.get('exception')} without naming it: {got_msg[:160]}"
             ),
         }
     return None
 
 
-def cluster_mismatches(rows: list[dict[str, Any]]) -> list[FailureCluster]:
+def policy_limits(
+    rows: list[dict[str, Any]], *, policy_patterns: tuple[str, ...] = ()
+) -> list[dict[str, str]]:
+    """Deliberate refusals, deduped — what this sandbox will not do.
+
+    Informational output: an accurate map of a sandbox's documented limits is
+    useful (it is the difference between "cannot" and "broken"), but it is not
+    a defect list and never becomes an issue cluster.
+    """
+    seen: dict[str, dict[str, str]] = {}
+    for row in rows:
+        verdict = judge_row(row, policy_patterns=policy_patterns)
+        if verdict is None or verdict["kind"] != "policy-limit":
+            continue
+        key = verdict["detail"][:120]
+        if key not in seen:
+            seen[key] = {
+                "target": row.get("target", "?"),
+                "snippet": row.get("snippet", ""),
+                "detail": verdict["detail"],
+            }
+    return sorted(seen.values(), key=lambda e: e["detail"])
+
+
+def cluster_mismatches(
+    rows: list[dict[str, Any]], *, policy_patterns: tuple[str, ...] = ()
+) -> list[FailureCluster]:
     clusters: dict[str, FailureCluster] = {}
     for row in rows:
-        verdict = judge_row(row)
-        if verdict is None:
+        verdict = judge_row(row, policy_patterns=policy_patterns)
+        if verdict is None or verdict["kind"] == "policy-limit":
             continue
         target = row.get("target", "?")
         detail = f"{verdict['kind']}: {verdict['detail']}"
@@ -402,6 +526,7 @@ def run_differential(
     *,
     target: str | None = None,
     reference: str | None = None,
+    call_kwargs: dict[str, Any] | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     python: str | None = None,
     logger: logging.Logger | None = None,
@@ -410,6 +535,8 @@ def run_differential(
 
     With ``target``/``reference`` given, runs exactly that pair (and records it
     in ``references.json``); otherwise runs the reference-finder's proposals.
+    ``call_kwargs`` configures the target call (see the module docstring) and is
+    persisted with the entry so later runs reuse it.
     """
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
@@ -421,6 +548,7 @@ def run_differential(
                 "reference": reference or "cpython-exec",
                 "corpus": "ast",
                 "extract": "auto",
+                "call_kwargs": call_kwargs or {},
                 "proposed_by": "cli",
             }
         ]
@@ -460,6 +588,7 @@ def run_differential(
                 "target": tid,
                 "reference": entry.get("reference", "cpython-exec"),
                 "extract": entry.get("extract", "auto"),
+                "call_kwargs": entry.get("call_kwargs") or {},
                 "corpus": corpus,
                 "src_roots": src_roots,
             },
@@ -474,9 +603,20 @@ def run_differential(
             "--repo",
             str(repo),
         ]
+        env = dict(os.environ)
+        # The worker imports TARGET code, so it usually runs under the TARGET's
+        # interpreter (--python). Keep our own package importable there.
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (env.get("PYTHONPATH"), str(Path(__file__).parents[1])) if p
+        )
         try:
             proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
-                cmd, capture_output=True, text=True, timeout=timeout_s, cwd=str(repo)
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(repo),
+                env=env,
             )
         except subprocess.TimeoutExpired:
             timeouts.append(tid)
@@ -490,7 +630,12 @@ def run_differential(
             except ValueError:
                 continue
 
-    clusters = cluster_mismatches(rows)
+    # Per-entry policy patterns widen the "deliberate refusal" vocabulary.
+    extra_policy = tuple(
+        p for e in refs for p in (e.get("policy_patterns") or []) if isinstance(p, str)
+    )
+    clusters = cluster_mismatches(rows, policy_patterns=extra_policy)
+    limits = policy_limits(rows, policy_patterns=extra_policy)
     store.write_jsonl(store.exercise_dir(repo) / "differential_results.jsonl", rows)
     compared = sum(1 for r in rows if r.get("phase") == "compare")
     result: dict[str, Any] = {
@@ -501,16 +646,21 @@ def run_differential(
         "corpus_size": len(corpus),
         "comparisons": compared,
         "mismatch_clusters": len(clusters),
+        # Informational: what the sandbox deliberately refuses. NOT defects —
+        # reporting a documented limit as a bug is how an oracle gets ignored.
+        "policy_limits": limits,
+        "policy_limit_count": len(limits),
         "timeouts": timeouts,
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "differential_results.jsonl"),
     }
     store.write_json(store.exercise_dir(repo) / "differential.json", result)
     log.info(
-        "differential: %d pairs, %d comparisons, %d mismatch clusters",
+        "differential: %d pairs, %d comparisons, %d mismatch clusters, %d policy limits",
         len(refs),
         compared,
         len(clusters),
+        len(limits),
     )
     return result
 
