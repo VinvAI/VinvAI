@@ -8,18 +8,17 @@ rejection vocabulary from dispersion, and downstream feedback moves it.
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 
 from exerciser import store
 from exerciser.exception_policy import (
     DIFFERENTIAL_EVIDENCE_CAP,
-    DISPERSION_EVIDENCE_CAP,
     GLOBAL_FEEDBACK_CAP,
     MIN_EVIDENCE,
     REPORT_THRESHOLD,
     ExceptionPolicy,
     Feedback,
-    apply_dispersion_evidence,
     apply_feedback,
     family_of,
     feedback_from_adjudications,
@@ -30,6 +29,20 @@ from exerciser.exception_policy import (
     site_key,
     structural_prior,
 )
+
+
+def _surfacing_rate(policy: ExceptionPolicy, key: str, *, epochs: int = 200, **kwargs) -> float:
+    """Share of DECISION EPOCHS (runs) in which the draw reports this signature.
+
+    One draw per signature per epoch, which is what a real run takes.
+    """
+    seen = 0
+    rng = random.Random("epochs")
+    for _ in range(epochs):
+        policy.new_epoch()
+        seen += bool(policy.is_defect(key, rng=rng, **kwargs))
+    return seen / epochs
+
 
 # ---- structural features ---------------------------------------------------
 
@@ -45,14 +58,25 @@ def test_family_reads_the_class_hierarchy_not_the_name():
     assert family_of(["Whatever", "Exception", "BaseException"]) == "Exception"
 
 
-def test_family_order_is_derived_not_hand_maintained():
+def test_the_most_specific_priced_family_wins_over_its_base():
     # A hand-ordered tuple silently mis-scored ZeroDivisionError as its base
-    # ArithmeticError. The order now comes from the real MRO depth, so every
-    # family with a prior is reachable.
-    from exerciser.exception_policy import _FAMILY_ORDER, _FAMILY_PRIOR
-
-    assert set(_FAMILY_ORDER) == set(_FAMILY_PRIOR)
-    assert family_of(["ZeroDivisionError", "ArithmeticError", "Exception"]) == ("ZeroDivisionError")
+    # ArithmeticError. Asserting the two private tables agree pins the fix's
+    # IMPLEMENTATION; what actually went wrong was a VERDICT, so assert that:
+    # dividing by zero on a value the annotation invited is the code's doing,
+    # and at ArithmeticError's base rate it would be reported as a refusal.
+    mro = [c.__name__ for c in ZeroDivisionError.__mro__]
+    assert family_of(mro) == "ZeroDivisionError"
+    policy = ExceptionPolicy()
+    key = signature("ZeroDivisionError", "stdlib")
+    scored = dict(provenance="stdlib", total_targets=5, conformant=True)
+    assert policy.is_defect(key, family=family_of(mro), **scored)
+    assert not policy.is_defect(key, family="ArithmeticError", **scored)
+    # The same specificity rule on a different branch of the hierarchy.
+    unbound = [c.__name__ for c in UnboundLocalError.__mro__]
+    assert family_of(unbound) == "UnboundLocalError"
+    assert structural_prior("stdlib", 0.0, 0.0, "UnboundLocalError", conformant=True) > (
+        structural_prior("stdlib", 0.0, 0.0, "NameError", conformant=True)
+    )
 
 
 def test_provenance_is_structural():
@@ -258,44 +282,116 @@ def test_unlabelled_sightings_alone_move_nothing_and_say_so():
     assert not confident
 
 
-def test_dispersion_self_supervision_moves_the_posterior_for_real():
-    # M-critical: dispersion used to be only a prior penalty, so the posterior
-    # never moved and MIN_EVIDENCE was unreachable without a human. It is now
-    # posted as real beta mass.
+def test_self_supervision_alone_can_never_make_the_policy_confident():
+    # THE bug this design exists to prevent. Dispersion used to be posted as up
+    # to 4.0 of beta mass — more than MIN_EVIDENCE — so an exception that merely
+    # happened to be common became suppressed AND "confident" on zero labels.
+    # Suppression then prevented it from ever being reported, so no label could
+    # ever arrive: censored feedback, permanent. Unlabelled structure is now a
+    # covariate and buys no mass at all.
+    policy = ExceptionPolicy()
+    key = signature("HouseStyle", "repo")
+    for i in range(200):
+        policy.observe(key, target=f"pkg:f{i}", input_class="valid")
+        policy.observe(key, target=f"pkg:f{i}", input_class="negative")
+
+    ev = policy.evidence[key]
+    assert (ev.alpha, ev.beta) == (1.0, 1.0), "a covariate is not an observation"
+    assert policy.label_mass(key) == 0.0
+    probability, confident = policy.defect_probability(
+        key, provenance="repo", total_targets=200, conformant=True
+    )
+    assert not confident, "no label, no confidence — however much structure there is"
+    # It is still SUPPRESSED (that part was never wrong): the prior does it.
+    assert probability < REPORT_THRESHOLD
+
+
+def test_a_suppressed_signature_is_still_surfaced_for_adjudication():
+    # The anti-absorbing-state property, and the reason reporting is a draw.
+    # The mean is below the threshold, so a greedy rule would suppress this
+    # signature on every run for ever and it could never earn the label that
+    # would settle it. A wide posterior gets drawn high now and then.
     policy = ExceptionPolicy()
     key = signature("HouseStyle", "repo")
     for i in range(30):
         policy.observe(key, target=f"pkg:f{i}", input_class="valid")
+    kwargs = dict(provenance="repo", total_targets=30, conformant=True)
 
-    before = policy.evidence[key].beta
-    posted = apply_dispersion_evidence(policy)
-    after = policy.evidence[key].beta
-    assert after > before, "the strongest self-supervised signal must be evidence"
-    assert posted[key] > 0
-    _, confident = policy.defect_probability(key, provenance="repo", total_targets=30)
-    assert confident, "the policy can now become confident with no human at all"
+    assert not policy.is_defect(key, **kwargs), "the greedy rule suppresses it"
+    rate = _surfacing_rate(policy, key, epochs=200, **kwargs)
+    assert rate > 0.0, "a suppressed signature must remain reachable"
+    # Bounded, seeded, and not flaky: within this many runs it is surfaced.
+    rng = random.Random("bounded")
+    surfaced_within = None
+    for run in range(1, 101):
+        policy.new_epoch()
+        if policy.is_defect(key, rng=rng, **kwargs):
+            surfaced_within = run
+            break
+    assert surfaced_within is not None, "never surfaced in 100 runs is an absorbing state"
 
 
-def test_dispersion_self_supervision_is_capped_and_cannot_run_away():
+def test_labels_are_what_actually_silence_a_signature():
+    # The exploration must not make the oracle noisy again: real adjudications
+    # sharpen the posterior, and a signature repeatedly called a refusal is
+    # drawn high far more rarely than one nobody has ever checked.
+    key = signature("HouseStyle", "repo")
+    kwargs = dict(provenance="repo", total_targets=30, conformant=True)
+
+    unlabelled = ExceptionPolicy()
+    labelled = ExceptionPolicy()
+    for i in range(30):
+        unlabelled.observe(key, target=f"pkg:f{i}", input_class="valid")
+        labelled.observe(key, target=f"pkg:f{i}", input_class="valid")
+    for _ in range(12):
+        labelled.observe(key, target="pkg:f0", input_class="valid", is_defect=False)
+
+    unlabelled_rate = _surfacing_rate(unlabelled, key, epochs=200, **kwargs)
+    labelled_rate = _surfacing_rate(labelled, key, epochs=200, **kwargs)
+    assert (
+        labelled_rate * 4 < unlabelled_rate
+    ), f"adjudicated refusals must quieten the draw: {labelled_rate} vs {unlabelled_rate}"
+    _, confident = labelled.defect_probability(key, **kwargs)
+    assert confident, "and that suppression is now backed by labels"
+
+
+def test_the_deterministic_mode_is_exactly_the_old_threshold():
+    # Callers that need stable output (the run summary, any direct call to
+    # call_verdict) pass no rng and get mean-vs-threshold, unchanged.
     policy = ExceptionPolicy()
-    key = signature("Everywhere", "repo")
-    for i in range(200):
-        policy.observe(key, target=f"pkg:f{i}", input_class="valid")
-    for _ in range(20):  # every run re-derives it; it must TOP UP, not compound
-        apply_dispersion_evidence(policy)
-    assert policy.evidence[key].dispersion_beta <= DISPERSION_EVIDENCE_CAP
-    assert policy.evidence[key].beta <= 1.0 + DISPERSION_EVIDENCE_CAP
+    for key, family in (
+        (signature("A", "stdlib"), "UnboundLocalError"),
+        (signature("B", "stdlib"), "ValueError"),
+    ):
+        probability, _ = policy.defect_probability(
+            key, provenance="stdlib", total_targets=5, family=family, conformant=True
+        )
+        reported = policy.is_defect(
+            key, provenance="stdlib", total_targets=5, family=family, conformant=True
+        )
+        assert reported == (probability >= REPORT_THRESHOLD)
 
 
-def test_a_single_target_is_not_dispersion():
-    # One function raising is a value-specific failure — the interesting case —
-    # not a rejection vocabulary, so nothing is posted.
-    policy = ExceptionPolicy()
-    key = signature("OnlyHere", "repo")
-    for _ in range(20):
-        policy.observe(key, target="pkg:f", input_class="valid")
-    apply_dispersion_evidence(policy)
-    assert policy.evidence[key].dispersion_beta == 0.0
+def test_legacy_self_supervised_mass_is_purged_on_load(tmp_path: Path):
+    # A repo that ran the old version has a policy file whose beta contains
+    # dispersion mass. Loading it as if it were labels would leave that repo in
+    # the absorbing state this version refuses to enter.
+    key = signature("Old", "repo")
+    store.exercise_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+    store.write_json(
+        store.exercise_dir(tmp_path) / "exception_policy.json",
+        {
+            "version": 1,
+            "signatures": {
+                key: {"alpha": 1.0, "beta": 4.6, "dispersion_beta": 3.6, "occurrences": 40}
+            },
+        },
+    )
+    policy = ExceptionPolicy.load(tmp_path, decay=1.0)
+    assert policy.evidence[key].beta == 1.0
+    assert policy.label_mass(key) == 0.0
+    _, confident = policy.defect_probability(key, provenance="repo", total_targets=40)
+    assert not confident
 
 
 def test_differential_agreement_labels_a_defect_without_a_human():

@@ -55,9 +55,21 @@ def test_non_optional_fields_are_not_handed_none():
 
 
 def test_catalogue_is_deterministic():
-    contract = {"b": "int", "a": "str | None"}
-    first = [f.to_json() for f in catalogue_faults(contract)]
-    assert first == [f.to_json() for f in catalogue_faults(contract)]
+    # `first == catalogue_faults(same)` alone reduces to [] == [] and passes
+    # against a cataloguer that returns nothing. Determinism is only worth
+    # asserting over a catalogue with contents, and the ordering claim is that
+    # it is a function of the CONTRACT, not of dict insertion order.
+    first = [f.to_json() for f in catalogue_faults({"b": "int", "a": "str | None"})]
+    assert [(f["field"], f["label"]) for f in first] == [
+        ("a", "none"),
+        ("a", "empty"),
+        ("a", "lone-surrogate"),
+        ("a", "whitespace-only"),
+        ("b", "zero"),
+        ("b", "negative"),
+    ]
+    assert first == [f.to_json() for f in catalogue_faults({"b": "int", "a": "str | None"})]
+    assert first == [f.to_json() for f in catalogue_faults({"a": "str | None", "b": "int"})]
 
 
 # ---- the chunk sweep -------------------------------------------------------
@@ -120,15 +132,31 @@ def test_the_digest_normalises_default_repr_addresses():
 
 
 def test_the_digest_survives_cycles_and_unrenderable_values():
-    cyclic: list = [1]
-    cyclic.append(cyclic)
-    assert value_digest(cyclic)
+    # Surviving is not the property that matters — `return "x"` survives
+    # everything and makes every split of every stream look convergent. The
+    # digest has to keep DISCRIMINATING on the awkward values too.
+    def cycle(head: int) -> list:
+        out: list = [head]
+        out.append(out)
+        return out
+
+    assert value_digest(cycle(1)) == value_digest(cycle(1)), "stable across instances"
+    assert value_digest(cycle(1)) != value_digest(cycle(2)), "the cycle is not the whole value"
+    assert value_digest(cycle(1)) != value_digest([1]), "a cycle is not its acyclic prefix"
 
     class Hostile:
         def __repr__(self):
             raise RuntimeError("no")
 
-    assert value_digest(Hostile())
+    class AlsoHostile:
+        def __repr__(self):
+            raise RuntimeError("no")
+
+    assert value_digest(Hostile()) == value_digest(Hostile())
+    assert value_digest(Hostile()) != value_digest(
+        AlsoHostile()
+    ), "an unrenderable value still has a type, and two types are not equal"
+    assert value_digest(Hostile()) != value_digest(cycle(1))
 
 
 # ---- verdicts --------------------------------------------------------------

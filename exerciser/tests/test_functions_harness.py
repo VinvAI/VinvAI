@@ -860,3 +860,57 @@ def test_a_librarys_own_exception_is_a_refusal_not_a_crash():
         )
         == "defect"
     )
+
+
+# ---- the suppression must not censor its own feedback -----------------------
+
+_REFUSING_PKG = {
+    "__init__.py": "",
+    "errors.py": "class HouseError(Exception):\n    pass\n",
+    "api.py": """\
+from .errors import HouseError
+
+
+def load(name: str) -> str:
+    raise HouseError(f"cannot load {name}")
+
+
+def store_it(name: str) -> str:
+    raise HouseError(f"cannot store {name}")
+
+
+def fetch(name: str) -> str:
+    raise HouseError(f"cannot fetch {name}")
+""",
+}
+
+
+def test_a_suppressed_signature_is_re_examinable_from_a_real_run(tmp_path: Path):
+    # The absorbing state, end to end. A repo-defined exception raised by every
+    # target is scored as refusal vocabulary and reported by nothing — and a
+    # finding is the only thing that ever gets adjudicated, so without the
+    # Thompson draw the verdict could never be revised, however wrong it was.
+    repo = _make_repo(tmp_path, pkg=_REFUSING_PKG)
+
+    greedy = run_functions(repo, module_timeout_s=60.0, explore=False)
+    assert greedy["verdicts"].get("rejected"), "the exception must really be raised"
+    assert greedy["issue_clusters"] == 0, "the deterministic rule suppresses it"
+    assert greedy["surfaced_by_exploration"] == []
+    key = "HouseError@repo"
+    assert (
+        greedy["exception_policy"][key]["confident"] is False
+    ), "suppressed on structure alone, and the run document says so"
+    assert greedy["exception_policy"][key]["label_mass"] == 0.0
+
+    # The same run, exploring: within a bounded number of seeded runs the draw
+    # surfaces it, and surfacing it means REPORTING it, which is what gets it
+    # adjudicated and finally labelled.
+    explored = None
+    for seed in range(12):
+        result = run_functions(repo, module_timeout_s=60.0, seed=seed)
+        if key in result["surfaced_by_exploration"]:
+            explored = result
+            break
+    assert explored is not None, "a suppressed signature must be re-examinable"
+    assert explored["issue_clusters"] > 0, "and reported, so it can be labelled"
+    assert any(c["kind"] == "function-crash" for c in explored["clusters"])

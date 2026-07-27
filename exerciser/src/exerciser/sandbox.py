@@ -1,0 +1,1256 @@
+"""The EXECUTION SANDBOX — testflow Phase 5, and the answer to a permanent refusal.
+
+``functions.discover_targets`` refuses to call anything whose body touches the
+filesystem, the network, a subprocess or a database, and records why. That guard
+is correct — the harness imports third-party code and calls it in a process on a
+developer's machine — but taken alone it caps the coverage ceiling at "whatever
+happens to be pure", and the impure functions are usually the interesting ones.
+
+This module makes the refusal RECOVERABLE rather than terminal: a target refused
+only for impurity can be driven again inside containment, where its effects land
+somewhere disposable and are RECORDED rather than merely prevented. The worker
+keeps the same ``python -m ... --worker`` discipline as ``functions.py``, so a
+hang or a hard exit still costs one module's rows and never the run.
+
+What containment actually is
+----------------------------
+
+* **Filesystem** — the target runs against a COPY of the repo inside a fresh
+  temp tree, with ``cwd`` on the copy and ``TMPDIR``/``TEMP``/``TMP``, ``HOME``
+  and the ``XDG_*`` directories redirected into that tree. A write to a
+  repo-relative path hits the copy; a write to ``$HOME`` or ``$TMPDIR`` hits the
+  tree; the whole tree is discarded afterwards. A write to an ABSOLUTE path
+  outside the tree is refused outright (see the shim below). The copy is
+  measured, and a repo too large to copy under the configured cap makes the
+  sandbox UNAVAILABLE — the target stays refused rather than being run loose.
+* **Network** — a generated ``sitecustomize.py`` on the child's ``PYTHONPATH``
+  replaces ``socket.socket``/``create_connection``/``getaddrinfo`` (and
+  ``ssl.wrap_socket`` where it still exists) with functions that record the
+  attempt and raise.
+* **Processes** — the same shim replaces ``subprocess.Popen``, ``os.system``,
+  ``os.popen``, the ``os.exec*``/``os.spawn*`` family and ``os.fork`` so a target
+  that shells out is REPORTED as "attempted subprocess" instead of spawning one.
+* **Resources** — the existing wall-clock module deadline, plus
+  ``resource.setrlimit`` for ``RLIMIT_AS``/``RLIMIT_NOFILE``/``RLIMIT_NPROC``
+  applied in a POSIX ``preexec_fn``. Every cap is guarded and only ever LOWERS a
+  limit, so a platform that lacks one simply skips it.
+
+The honest limit
+----------------
+
+The network/process/write guards are Python-level monkeypatches. They stop a
+well-behaved Python client — ``requests``, ``httpx``, ``subprocess.run``, an
+``open(path, "w")``, an ``os.open(path, O_CREAT)`` — which is what an ordinary
+function in an ordinary repo does by accident. They do NOT stop a determined
+caller: ``ctypes``, a C extension calling ``open(2)``/``connect(2)`` directly, or
+code that re-execs a fresh interpreter all bypass them. Containment here is
+about ACCIDENTS, not adversaries. The durable guarantee is the disposable tree
+and the copied repo: whatever a target manages to write, it writes to a copy
+that is deleted, under a ``HOME`` and ``TMPDIR`` that are deleted with it.
+
+Failure is CLOSED. If the temp tree cannot be made, the shim cannot be written,
+or the repo exceeds the copy cap, ``prepare_sandbox`` raises and every candidate
+stays refused with a recorded reason. The worker itself re-checks that the shim
+loaded and refuses to import a single target if it did not — "run anyway" is
+never a branch in this module.
+
+Docker/podman are deliberately NOT required. If one is present a future caller
+may use it opportunistically, but the default path is stdlib only, so the
+sandbox works on a laptop with nothing installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import importlib
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
+    from .functions import Refusal
+
+# Directory/file names never worth copying into the sandbox tree: version
+# control, virtualenvs, dependency trees, caches and build metadata. Keeping the
+# copy cheap is what makes "copy the repo" a viable default rather than a
+# minutes-long tax. Deliberately conservative — `build`/`dist`/`target` are NOT
+# here, because excluding a directory that turns out to hold real source would
+# turn a drivable target into a false import-error.
+DEFAULT_EXCLUDES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".bzr",
+        ".vinv",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        ".idea",
+        ".vscode",
+        ".terraform",
+        "*.egg-info",
+        "*.pyc",
+        "*.pyo",
+    }
+)
+
+# Effect kinds the ledger records. `filesystem-escape` is a write that pointed
+# outside the sandbox root and was therefore refused.
+EFFECT_KINDS = ("filesystem", "filesystem-escape", "network", "subprocess")
+
+# How many recorded attempts one row may carry, and how many rows the report
+# keeps. A pathological target can attempt thousands of writes; the ledger is
+# evidence, not a transcript.
+MAX_EFFECTS_PER_ROW = 20
+MAX_EFFECT_ROWS = 200
+MAX_TREE_ENTRIES = 200
+
+DEFAULT_MAX_COPY_MB = 256.0
+
+
+class IsolationUnavailable(RuntimeError):
+    """Containment could not be established, so nothing may be run.
+
+    Raised — never swallowed into a "run anyway" path — when the temp tree
+    cannot be created, the shim cannot be written, or the repo is too large to
+    copy under the configured cap.
+    """
+
+
+@dataclass(frozen=True)
+class SandboxPolicy:
+    """How much containment to establish, and what to refuse when it cannot be.
+
+    Defaults are the ones that hold on an unprivileged developer laptop with
+    nothing installed. ``address_space_mb`` is applied on Linux only: on macOS
+    CPython reserves a very large virtual address space at startup, so an
+    ``RLIMIT_AS`` low enough to be meaningful kills the interpreter before it
+    runs a line of target code. ``max_processes`` is off by default because
+    ``RLIMIT_NPROC`` is per-USER on Linux, not per-process, so lowering it can
+    starve unrelated processes the developer owns; process spawning is already
+    blocked at the Python level.
+    """
+
+    enabled: bool = False
+    max_copy_mb: float = DEFAULT_MAX_COPY_MB
+    address_space_mb: int | None = 2048
+    max_open_files: int | None = 512
+    max_processes: int | None = None
+    block_network: bool = True
+    block_subprocess: bool = True
+    block_escaping_writes: bool = True
+    honour_gitignore: bool = True
+    keep_root: bool = False
+    exclude_patterns: frozenset[str] = DEFAULT_EXCLUDES
+
+    @property
+    def max_copy_bytes(self) -> int:
+        return int(max(0.0, self.max_copy_mb) * 1024 * 1024)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "max_copy_mb": self.max_copy_mb,
+            "address_space_mb": self.address_space_mb,
+            "max_open_files": self.max_open_files,
+            "max_processes": self.max_processes,
+            "block_network": self.block_network,
+            "block_subprocess": self.block_subprocess,
+            "block_escaping_writes": self.block_escaping_writes,
+            "honour_gitignore": self.honour_gitignore,
+        }
+
+
+@dataclass
+class CopyReport:
+    """What copying the repo into the sandbox actually cost."""
+
+    files: int
+    bytes: int
+    ms: float
+    cap_bytes: int
+    skipped_dirs: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "files": self.files,
+            "bytes": self.bytes,
+            "mb": round(self.bytes / (1024 * 1024), 3),
+            "ms": round(self.ms, 1),
+            "cap_bytes": self.cap_bytes,
+            "cap_mb": round(self.cap_bytes / (1024 * 1024), 3),
+            "excluded_dirs": self.skipped_dirs,
+        }
+
+
+@dataclass
+class Sandbox:
+    """A prepared, disposable containment tree."""
+
+    root: Path
+    repo_copy: Path
+    tmp: Path
+    home: Path
+    shim: Path
+    plans: Path
+    ledger: Path
+    copy: CopyReport
+    policy: SandboxPolicy = field(default_factory=SandboxPolicy)
+
+    def dispose(self) -> None:
+        """Discard the whole tree — every effect the target had lands here."""
+        if self.policy.keep_root:
+            return
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+# =========================================================================
+# The repo copy — the containment guarantee that does not depend on patching
+# =========================================================================
+
+
+def gitignore_patterns(repo: Path) -> frozenset[str]:
+    """NAME patterns from the repo's own ``.gitignore``.
+
+    Deliberately "gitignore-ish", not gitignore: only unanchored name patterns
+    are honoured (a rule containing ``/`` is path-anchored and matching it by
+    name would exclude the wrong thing), and negations are ignored. The point is
+    to keep the copy cheap by skipping what the repo itself calls disposable,
+    not to reimplement git's matcher.
+    """
+    try:
+        text = (repo / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    out: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        line = line.rstrip("/")
+        if "/" in line or not line:
+            continue
+        out.add(line)
+    return frozenset(out)
+
+
+def _excluded(name: str, patterns: frozenset[str]) -> bool:
+    return any(fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+def copy_repo(repo: Path, dest: Path, policy: SandboxPolicy) -> CopyReport:
+    """Copy ``repo`` into ``dest``, measuring the cost and honouring the cap.
+
+    Symlinks are never followed: a link out of the tree is exactly the escape
+    the copy exists to prevent. Exceeding ``policy.max_copy_bytes`` raises
+    ``IsolationUnavailable`` mid-copy — the caller must then leave every
+    candidate refused rather than fall back to running unsandboxed.
+    """
+    started = time.monotonic()
+    patterns = set(policy.exclude_patterns)
+    if policy.honour_gitignore:
+        patterns |= set(gitignore_patterns(repo))
+    frozen = frozenset(patterns)
+    cap = policy.max_copy_bytes
+
+    files = 0
+    total = 0
+    pruned = 0
+    dest.mkdir(parents=True, exist_ok=True)
+    stack: list[tuple[Path, Path]] = [(repo, dest)]
+    while stack:
+        src_dir, dst_dir = stack.pop()
+        try:
+            entries = sorted(os.scandir(src_dir), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            if _excluded(entry.name, frozen):
+                pruned += 1
+                continue
+            if entry.is_symlink():
+                continue
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                child = dst_dir / entry.name
+                try:
+                    child.mkdir(exist_ok=True)
+                except OSError:
+                    continue
+                stack.append((Path(entry.path), child))
+                continue
+            try:
+                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+            total += size
+            files += 1
+            if cap and total > cap:
+                raise IsolationUnavailable(
+                    f"repo copy exceeds the {policy.max_copy_mb:g} MB cap "
+                    f"({total / (1024 * 1024):.1f} MB after {files} files) — "
+                    "raise --sandbox-max-copy-mb or leave the target refused"
+                )
+            try:
+                shutil.copy2(entry.path, dst_dir / entry.name)
+            except OSError:
+                files -= 1
+                total -= size
+    return CopyReport(
+        files=files,
+        bytes=total,
+        ms=(time.monotonic() - started) * 1000.0,
+        cap_bytes=cap,
+        skipped_dirs=pruned,
+    )
+
+
+# =========================================================================
+# The shim — generated sitecustomize, imported before any target code
+# =========================================================================
+
+# Written into the sandbox tree and put FIRST on the child's PYTHONPATH, so
+# `site` imports it at interpreter start, before the worker and long before any
+# target module. It is deliberately stdlib-only and defensive: a shim that
+# raised on import would take the worker with it, and the worker's own
+# fail-closed check would then be the thing that reports it.
+_SITECUSTOMIZE_SOURCE = '''\
+"""Vinv execution-sandbox containment shim (generated — do not edit).
+
+Imported by ``site`` at interpreter start because this directory is first on
+PYTHONPATH. It records, and where configured refuses, the effects a target
+reaches for: sockets, process spawning, and writes that would leave the sandbox
+root. Attempts land on ``sys.__vinv_sandbox_ledger__`` so the parent can report
+what the target TRIED to do, which is a behavioural fact worth having even when
+the call succeeds.
+
+This stops a well-behaved Python client, and (through ``os.open``) the common
+low-level write too. It does not stop ``ctypes``, a C extension calling
+``open(2)`` directly, or a target that re-execs a fresh interpreter. Containment
+here is about accidents, not adversaries; the durable guarantee is the
+disposable tree this process runs in.
+"""
+
+import atexit
+import builtins
+import io
+import json
+import os
+import sys
+
+_ROOT = os.path.realpath(os.environ.get("VINV_SANDBOX_ROOT") or "") or ""
+_LEDGER_PATH = os.environ.get("VINV_SANDBOX_LEDGER") or ""
+_BLOCK_NET = os.environ.get("VINV_SANDBOX_BLOCK_NETWORK", "1") == "1"
+_BLOCK_PROC = os.environ.get("VINV_SANDBOX_BLOCK_SUBPROCESS", "1") == "1"
+_BLOCK_ESCAPE = os.environ.get("VINV_SANDBOX_BLOCK_ESCAPING_WRITES", "1") == "1"
+
+_MAX_ATTEMPTS = 4000
+_WRITE_MODE_CHARS = ("w", "a", "x", "+")
+# Character devices a contained process may legitimately write to: they hold no
+# state, so a write to one leaves nothing behind to discard.
+_ALLOWED_DEVICES = frozenset(
+    {"/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/dev/tty", "nul", "NUL"}
+)
+
+_real_open = builtins.open
+
+
+class SandboxBlocked(RuntimeError):
+    """An effect the Vinv execution sandbox refused."""
+
+
+class _Ledger:
+    """In-memory record of every effect attempted in this process."""
+
+    def __init__(self):
+        self.attempts = []
+
+    def record(self, kind, detail, blocked):
+        if len(self.attempts) >= _MAX_ATTEMPTS:
+            return
+        try:
+            rendered = str(detail)[:300]
+        except Exception:
+            rendered = "<unrenderable>"
+        self.attempts.append({"kind": kind, "detail": rendered, "blocked": bool(blocked)})
+
+
+_ledger = _Ledger()
+sys.__vinv_sandbox_ledger__ = _ledger
+
+
+def _flush():
+    """Persist the ledger so a worker that dies still reports what it tried."""
+    if not _LEDGER_PATH:
+        return
+    try:
+        with _real_open(_LEDGER_PATH, "w", encoding="utf-8") as fh:
+            json.dump(_ledger.attempts, fh, default=str)
+    except Exception:
+        pass
+
+
+atexit.register(_flush)
+
+
+def _inside_root(path):
+    if not _ROOT:
+        return False
+    try:
+        real = os.path.realpath(path)
+    except (TypeError, ValueError, OSError):
+        return False
+    return real == _ROOT or real.startswith(_ROOT + os.sep)
+
+
+def _permitted(path):
+    try:
+        text = os.fspath(path)
+    except TypeError:
+        return True  # an already-open descriptor or file object
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", "replace")
+    if text in _ALLOWED_DEVICES:
+        return True
+    return _inside_root(text)
+
+
+def _guard_write(op, path):
+    detail = "%s(%s)" % (op, path)
+    if _permitted(path) or not _BLOCK_ESCAPE:
+        _ledger.record("filesystem", detail, False)
+        return
+    _ledger.record("filesystem-escape", detail, True)
+    raise SandboxBlocked(detail + " would write outside the Vinv sandbox root")
+
+
+def _sandbox_open(file, mode="r", *args, **kwargs):
+    text_mode = mode if isinstance(mode, str) else "r"
+    if any(ch in text_mode for ch in _WRITE_MODE_CHARS):
+        _guard_write("open", file)
+    return _real_open(file, mode, *args, **kwargs)
+
+
+builtins.open = _sandbox_open
+io.open = _sandbox_open
+
+# The low-level descriptor open, which `builtins.open` does NOT go through (it
+# reaches the syscall from C). `tempfile` and `shutil` do use it, and both stay
+# inside the redirected tree, so guarding it costs nothing and closes the most
+# plausible accidental bypass. `importlib` writes bytecode through the `posix`
+# module object rather than through `os`, so imports are unaffected either way.
+_real_os_open = os.open
+_WRITE_FLAGS = 0
+for _flag in ("O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC"):
+    _WRITE_FLAGS |= getattr(os, _flag, 0)
+
+
+def _sandbox_os_open(path, flags, *args, **kwargs):
+    try:
+        writing = bool(int(flags) & _WRITE_FLAGS)
+    except (TypeError, ValueError):
+        writing = True  # an unreadable flag word is not assumed read-only
+    if writing:
+        _guard_write("os.open", path)
+    return _real_os_open(path, flags, *args, **kwargs)
+
+
+os.open = _sandbox_os_open
+
+
+def _wrap_one_path(name):
+    real = getattr(os, name, None)
+    if real is None:
+        return
+
+    def patched(path, *args, **kwargs):
+        _guard_write("os." + name, path)
+        return real(path, *args, **kwargs)
+
+    patched.__name__ = name
+    setattr(os, name, patched)
+
+
+def _wrap_two_paths(name):
+    real = getattr(os, name, None)
+    if real is None:
+        return
+
+    def patched(src, dst, *args, **kwargs):
+        _guard_write("os." + name, src)
+        _guard_write("os." + name, dst)
+        return real(src, dst, *args, **kwargs)
+
+    patched.__name__ = name
+    setattr(os, name, patched)
+
+
+# `makedirs`/`removedirs` are deliberately absent: they call the wrapped
+# `os.mkdir`/`os.rmdir` through the module globals, so wrapping them too would
+# double-record the same effect.
+for _name in ("remove", "unlink", "rmdir", "mkdir", "truncate", "chmod", "chown"):
+    _wrap_one_path(_name)
+for _name in ("rename", "replace", "link", "symlink"):
+    _wrap_two_paths(_name)
+
+
+def _blocker(kind, what, message):
+    def patched(*args, **kwargs):
+        detail = what
+        if args:
+            try:
+                detail = "%s %s" % (what, repr(args[0])[:160])
+            except Exception:
+                pass
+        _ledger.record(kind, detail, True)
+        raise SandboxBlocked(message)
+
+    patched.__name__ = what.replace(".", "_")
+    return patched
+
+
+if _BLOCK_NET:
+    # `ssl` subclasses `socket.socket`, so it must be imported BEFORE the class
+    # is replaced or its module body raises at class-creation time.
+    try:
+        import ssl as _ssl
+    except Exception:
+        _ssl = None
+    try:
+        import socket as _socket
+    except Exception:
+        _socket = None
+    if _socket is not None:
+        for _name in (
+            "socket",
+            "create_connection",
+            "create_server",
+            "socketpair",
+            "getaddrinfo",
+            "gethostbyname",
+        ):
+            if hasattr(_socket, _name):
+                setattr(
+                    _socket,
+                    _name,
+                    _blocker(
+                        "network",
+                        "socket." + _name + "()",
+                        "network access is blocked by the Vinv execution sandbox",
+                    ),
+                )
+    if _ssl is not None and hasattr(_ssl, "wrap_socket"):
+        _ssl.wrap_socket = _blocker(
+            "network",
+            "ssl.wrap_socket()",
+            "network access is blocked by the Vinv execution sandbox",
+        )
+
+if _BLOCK_PROC:
+    _PROC_MSG = "process spawning is blocked by the Vinv execution sandbox"
+    try:
+        import subprocess as _subprocess
+    except Exception:
+        _subprocess = None
+    if _subprocess is not None:
+        # `run`/`call`/`check_call`/`check_output` all construct a Popen through
+        # the module global, so replacing that one name covers the family.
+        _subprocess.Popen = _blocker("subprocess", "subprocess.Popen", _PROC_MSG)
+    for _name in (
+        "system",
+        "popen",
+        "fork",
+        "forkpty",
+        "posix_spawn",
+        "posix_spawnp",
+        "execv",
+        "execve",
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execvp",
+        "execvpe",
+        "spawnl",
+        "spawnle",
+        "spawnlp",
+        "spawnlpe",
+        "spawnv",
+        "spawnve",
+        "spawnvp",
+        "spawnvpe",
+    ):
+        if hasattr(os, _name):
+            setattr(os, _name, _blocker("subprocess", "os." + _name, _PROC_MSG))
+'''
+
+
+def write_shim(directory: Path) -> Path:
+    """Write the generated ``sitecustomize.py`` and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "sitecustomize.py"
+    path.write_text(_SITECUSTOMIZE_SOURCE, encoding="utf-8")
+    return path
+
+
+# =========================================================================
+# Preparing / configuring the containment
+# =========================================================================
+
+
+def prepare_sandbox(
+    repo: Path,
+    policy: SandboxPolicy,
+    *,
+    parent_dir: Path | None = None,
+) -> Sandbox:
+    """Build a disposable containment tree for ``repo``, or refuse.
+
+    Raises ``IsolationUnavailable`` when the tree cannot be made, the shim
+    cannot be written, or the repo exceeds the copy cap. There is no partial
+    success: a caller that catches this must leave every candidate refused.
+    """
+    repo = repo.resolve()
+    try:
+        root = Path(tempfile.mkdtemp(prefix="vinv-sandbox-", dir=str(parent_dir or "") or None))
+    except OSError as exc:
+        raise IsolationUnavailable(f"cannot create a sandbox temp tree: {exc}") from exc
+    try:
+        tmp = root / "tmp"
+        home = root / "home"
+        shim = root / "shim"
+        plans = root / "plans"
+        for path in (
+            tmp,
+            home,
+            home / ".cache",
+            home / ".config",
+            home / ".local" / "share",
+            home / ".local" / "state",
+            plans,
+        ):
+            path.mkdir(parents=True, exist_ok=True)
+        write_shim(shim)
+        dest = root / "repo" / (repo.name or "repo")
+        report = copy_repo(repo, dest, policy)
+    except IsolationUnavailable:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    except OSError as exc:
+        shutil.rmtree(root, ignore_errors=True)
+        raise IsolationUnavailable(f"cannot establish isolation: {exc}") from exc
+    return Sandbox(
+        root=root,
+        repo_copy=dest,
+        tmp=tmp,
+        home=home,
+        shim=shim,
+        plans=plans,
+        ledger=root / "ledger.json",
+        copy=report,
+        policy=policy,
+    )
+
+
+def sandbox_env(
+    sandbox: Sandbox,
+    *,
+    base_env: dict[str, str] | None = None,
+    extra_pythonpath: Sequence[str] = (),
+) -> dict[str, str]:
+    """Environment for a sandbox worker: every disposable path redirected inside.
+
+    ``HOME``/``TMPDIR``/``XDG_*`` all point into the tree, so a target that
+    writes "to the user's home" writes to a directory that is about to be
+    deleted. ``PYTHONDONTWRITEBYTECODE`` is set because bytecode written beside
+    an importable module OUTSIDE the tree would otherwise be a (blocked) escape
+    on every single import.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    policy = sandbox.policy
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        env[var] = str(sandbox.tmp)
+    env["HOME"] = str(sandbox.home)
+    env["USERPROFILE"] = str(sandbox.home)
+    env["XDG_CACHE_HOME"] = str(sandbox.home / ".cache")
+    env["XDG_CONFIG_HOME"] = str(sandbox.home / ".config")
+    env["XDG_DATA_HOME"] = str(sandbox.home / ".local" / "share")
+    env["XDG_STATE_HOME"] = str(sandbox.home / ".local" / "state")
+    env["XDG_RUNTIME_DIR"] = str(sandbox.tmp)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.pop("PYTHONSTARTUP", None)
+    env["VINV_SANDBOX"] = "1"
+    env["VINV_SANDBOX_ROOT"] = str(sandbox.root)
+    env["VINV_SANDBOX_LEDGER"] = str(sandbox.ledger)
+    env["VINV_SANDBOX_BLOCK_NETWORK"] = "1" if policy.block_network else "0"
+    env["VINV_SANDBOX_BLOCK_SUBPROCESS"] = "1" if policy.block_subprocess else "0"
+    env["VINV_SANDBOX_BLOCK_ESCAPING_WRITES"] = "1" if policy.block_escaping_writes else "0"
+    parts = [str(sandbox.shim), *(str(p) for p in extra_pythonpath)]
+    inherited = env.get("PYTHONPATH")
+    if inherited:
+        parts.append(inherited)
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
+    return env
+
+
+def planned_rlimits(policy: SandboxPolicy) -> list[tuple[str, int]]:
+    """The ``(RLIMIT_*, value)`` caps this policy asks for on this platform.
+
+    Separated from application so it can be inspected (and tested) without
+    mutating the current process's limits.
+    """
+    caps: list[tuple[str, int]] = []
+    if policy.max_open_files:
+        caps.append(("RLIMIT_NOFILE", int(policy.max_open_files)))
+    if policy.address_space_mb and sys.platform.startswith("linux"):
+        # macOS/BSD CPython reserves a very large virtual address space at
+        # startup, so a meaningful RLIMIT_AS kills the interpreter before it
+        # reaches target code. Skipped there rather than set uselessly high.
+        caps.append(("RLIMIT_AS", int(policy.address_space_mb) * 1024 * 1024))
+    if policy.max_processes:
+        caps.append(("RLIMIT_NPROC", int(policy.max_processes)))
+    return caps
+
+
+def rlimit_preexec(policy: SandboxPolicy) -> Callable[[], None] | None:
+    """A ``preexec_fn`` applying this policy's caps, or None where unavailable.
+
+    Never RAISES a limit and never fails the spawn: a platform missing a
+    particular ``RLIMIT_*``, or a hard limit below what we asked for, simply
+    yields a smaller set of caps. The wall-clock deadline in the driver is the
+    containment that holds everywhere.
+    """
+    if os.name != "posix":
+        return None
+    try:
+        import resource  # noqa: F401  (probe: the module may not exist)
+    except ImportError:
+        return None
+    caps = planned_rlimits(policy)
+    if not caps:
+        return None
+
+    def _apply() -> None:  # pragma: no cover - runs in the forked child
+        import resource as _resource
+
+        for name, value in caps:
+            which = getattr(_resource, name, None)
+            if which is None:
+                continue
+            try:
+                soft, hard = _resource.getrlimit(which)
+            except (ValueError, OSError):
+                continue
+            target = value
+            if hard != _resource.RLIM_INFINITY:
+                target = min(target, hard)
+            if soft != _resource.RLIM_INFINITY and soft <= target:
+                continue  # already at least this strict — never loosen
+            try:
+                _resource.setrlimit(which, (target, hard))
+            except (ValueError, OSError):
+                continue
+
+    return _apply
+
+
+# =========================================================================
+# Effect accounting
+# =========================================================================
+
+
+def group_attempts(attempts: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
+    """Ledger entries grouped by kind, bounded, for one row."""
+    out: dict[str, list[str]] = {}
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        kind = str(attempt.get("kind") or "unknown")
+        detail = str(attempt.get("detail") or "")
+        bucket = out.setdefault(kind, [])
+        if len(bucket) < MAX_EFFECTS_PER_ROW and detail not in bucket:
+            bucket.append(detail)
+    return out
+
+
+def mark_contained(row: dict[str, Any]) -> dict[str, Any]:
+    """Tag a row whose exception came from the containment shim, not the target.
+
+    An exception the SHIM raised is our apparatus working, not the target
+    failing: "this function opens a socket" is already reported, honestly, as an
+    effect-ledger entry. Without this tag the verdict path would manufacture one
+    ``function-crash`` per contained target — a defect per blocked socket — which
+    is precisely the false signal that makes a harness ignorable.
+
+    The test is the exception's DEFINING MODULE (``sitecustomize``), which is a
+    fact about the class rather than a guess from its message, so a target that
+    catches ``SandboxBlocked`` and raises its own error is still judged on its
+    own error.
+    """
+    if (
+        row.get("status") == "error"
+        and row.get("error_type") == "SandboxBlocked"
+        and row.get("error_module") == "sitecustomize"
+    ):
+        row["contained"] = True
+    return row
+
+
+def snapshot_tree(root: Path, *, skip: Iterable[Path] = ()) -> dict[str, tuple[int, int]]:
+    """``relative path -> (size, mtime_ns)`` for every file under ``root``.
+
+    The before/after pair is the GROUND TRUTH of what a worker left behind:
+    unlike the patched builtins it cannot be bypassed by a C extension writing
+    through a raw descriptor.
+    """
+    skips = {p.resolve() for p in skip}
+    out: dict[str, tuple[int, int]] = {}
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            if path.resolve() in skips:
+                continue
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(path)
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            try:
+                rel = str(path.relative_to(root))
+            except ValueError:
+                continue
+            out[rel] = (stat.st_size, stat.st_mtime_ns)
+    return out
+
+
+def tree_delta(
+    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+) -> dict[str, list[str]]:
+    """Files created / modified / removed between two snapshots."""
+    created = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    modified = sorted(k for k in set(before) & set(after) if before[k] != after[k])
+    return {
+        "created": created[:MAX_TREE_ENTRIES],
+        "modified": modified[:MAX_TREE_ENTRIES],
+        "removed": removed[:MAX_TREE_ENTRIES],
+    }
+
+
+def _empty_report(policy: SandboxPolicy, candidates: int) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "status": "ok",
+        "reason": None,
+        "policy": policy.to_json(),
+        "candidates": candidates,
+        "targets": 0,
+        "modules": 0,
+        "calls": 0,
+        "verdicts": {},
+        "copy": None,
+        "root": None,
+        "root_removed": False,
+        "effects": [],
+        "effect_totals": dict.fromkeys(EFFECT_KINDS, 0),
+        "filesystem_delta": [],
+        "module_timeouts": [],
+        "refused": [],
+    }
+
+
+# =========================================================================
+# Driver — the parent side
+# =========================================================================
+
+
+def run_sandboxed_targets(
+    repo: Path,
+    refusals: Sequence[Refusal],
+    *,
+    policy: SandboxPolicy,
+    src_roots: Sequence[str],
+    repo_packages: Sequence[str],
+    module_timeout_s: float,
+    python: str | None = None,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Drive impurity-refused targets inside containment.
+
+    Returns ``{"status", "rows", "report"}``. ``status`` is ``"unavailable"``
+    when isolation could not be established, in which case ``rows`` is empty and
+    every candidate is listed in ``report["refused"]`` with the reason — the
+    caller must keep them refused. There is no third outcome.
+    """
+    log = logger or logging.getLogger(__name__)
+    report = _empty_report(policy, len(refusals))
+    if not refusals:
+        report["reason"] = "no impurity-only refusals to drive"
+        return {"status": "ok", "rows": [], "report": report}
+
+    try:
+        sandbox = prepare_sandbox(repo, policy)
+    except IsolationUnavailable as exc:
+        report["status"] = "unavailable"
+        report["reason"] = str(exc)
+        report["refused"] = [
+            {"id": r.target.id, "reason": f"sandbox-unavailable: {exc}"} for r in refusals
+        ]
+        log.warning("sandbox unavailable — %d targets stay refused: %s", len(refusals), exc)
+        return {"status": "unavailable", "rows": [], "report": report}
+
+    report["copy"] = sandbox.copy.to_json()
+    report["root"] = str(sandbox.root)
+    log.info(
+        "sandbox: copied %d files (%.1f MB) in %.0f ms into %s",
+        sandbox.copy.files,
+        sandbox.copy.bytes / (1024 * 1024),
+        sandbox.copy.ms,
+        sandbox.root,
+    )
+
+    by_module: dict[str, list[Refusal]] = {}
+    for refusal in refusals:
+        by_module.setdefault(refusal.target.module, []).append(refusal)
+    report["targets"] = len(refusals)
+    report["modules"] = len(by_module)
+
+    rows: list[dict[str, Any]] = []
+    timeouts: list[str] = []
+    effects: list[dict[str, Any]] = []
+    deltas: list[dict[str, Any]] = []
+    totals = dict.fromkeys(EFFECT_KINDS, 0)
+
+    env = sandbox_env(sandbox, extra_pythonpath=[str(Path(__file__).resolve().parents[1])])
+    preexec = rlimit_preexec(policy)
+    ignore = (sandbox.plans, sandbox.shim, sandbox.ledger)
+
+    try:
+        for module, module_refusals in sorted(by_module.items()):
+            plan_file = sandbox.plans / f"{module.replace('.', '_')}.plan.json"
+            plan_file.write_text(
+                json.dumps(
+                    {
+                        "module": module,
+                        "src_roots": list(src_roots),
+                        "repo_packages": list(repo_packages),
+                        "targets": [r.target.to_json() for r in module_refusals],
+                        "impurities": {r.target.id: list(r.reasons) for r in module_refusals},
+                    },
+                    default=str,
+                ),
+                encoding="utf-8",
+            )
+            cmd = [
+                python or sys.executable,
+                "-m",
+                "exerciser.sandbox",
+                "--worker",
+                "--plan",
+                str(plan_file),
+                "--repo",
+                str(sandbox.repo_copy),
+            ]
+            before = snapshot_tree(sandbox.root, skip=ignore)
+            try:
+                proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=module_timeout_s,
+                    cwd=str(sandbox.repo_copy),
+                    env=env,
+                    preexec_fn=preexec,  # noqa: PLW1509 (POSIX rlimits, guarded)
+                )
+                stdout = proc.stdout or ""
+            except subprocess.TimeoutExpired as exc:
+                timeouts.append(module)
+                stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+                rows.append(
+                    {
+                        "module": module,
+                        "target_id": module,
+                        "phase": "module",
+                        "status": "error",
+                        "sandboxed": True,
+                        "error_type": "ModuleTimeout",
+                        "error": (
+                            f"sandboxed module exceeded {module_timeout_s}s — a call hung "
+                            "(candidate deadlock/infinite loop)"
+                        ),
+                    }
+                )
+            except OSError as exc:
+                # A spawn that never happened is an isolation failure for this
+                # module: report it, never retry without containment.
+                rows.append(
+                    {
+                        "module": module,
+                        "target_id": module,
+                        "phase": "sandbox",
+                        "status": "skipped",
+                        "sandboxed": True,
+                        "error": f"sandbox worker could not be spawned: {exc}",
+                    }
+                )
+                stdout = ""
+            after = snapshot_tree(sandbox.root, skip=ignore)
+            delta = tree_delta(before, after)
+            if any(delta.values()):
+                deltas.append({"module": module, **delta})
+
+            module_rows: list[dict[str, Any]] = []
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(parsed, dict):
+                    module_rows.append(parsed)
+            if not module_rows and module in timeouts:
+                # The worker died before emitting; the shim's atexit flush is
+                # the only surviving evidence of what it attempted.
+                for kind, details in group_attempts(_read_ledger(sandbox.ledger)).items():
+                    if details:
+                        effects.append(
+                            {
+                                "target_id": module,
+                                "input_class": None,
+                                "phase": "module",
+                                "kind": kind,
+                                "attempts": details,
+                            }
+                        )
+                        totals[kind] = totals.get(kind, 0) + len(details)
+            for row in module_rows:
+                row["sandboxed"] = True
+                row.setdefault("repo_packages", list(repo_packages))
+                for kind, details in (row.get("effects") or {}).items():
+                    totals[kind] = totals.get(kind, 0) + len(details)
+                    if len(effects) < MAX_EFFECT_ROWS:
+                        effects.append(
+                            {
+                                "target_id": row.get("target_id"),
+                                "input_class": row.get("input_class"),
+                                "phase": row.get("phase"),
+                                "kind": kind,
+                                "attempts": details,
+                            }
+                        )
+                rows.append(row)
+    finally:
+        sandbox.dispose()
+        report["root_removed"] = not policy.keep_root
+
+    report["calls"] = sum(1 for r in rows if r.get("phase") == "call")
+    report["effects"] = effects
+    report["effect_totals"] = totals
+    report["filesystem_delta"] = deltas
+    report["module_timeouts"] = timeouts
+    log.info(
+        "sandbox: %d targets in %d modules, %d calls, effects=%s",
+        len(refusals),
+        len(by_module),
+        report["calls"],
+        totals,
+    )
+    return {"status": "ok", "rows": rows, "report": report}
+
+
+def _read_ledger(path: Path) -> list[dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+
+# =========================================================================
+# Worker — runs INSIDE the contained subprocess, importing target code
+# =========================================================================
+
+
+def _worker_main(argv: list[str]) -> int:
+    """Drive one module's refused targets under containment. Emits JSONL rows.
+
+    The FIRST thing it does is verify the shim loaded. If it did not, the
+    process has no containment and the worker refuses to import a single
+    target — the fail-closed rule, enforced on the inside as well as the out.
+    """
+    ap = argparse.ArgumentParser(prog="exerciser-sandbox-worker")
+    ap.add_argument("--plan", required=True, help="path to the per-module plan JSON")
+    ap.add_argument("--repo", required=True, help="path to the COPIED repo inside the sandbox")
+    args = ap.parse_args(argv)
+
+    from . import functions as fn
+
+    plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
+    module_name = str(plan["module"])
+    repo_packages = plan.get("repo_packages") or []
+
+    ledger = getattr(sys, "__vinv_sandbox_ledger__", None)
+    if ledger is None or not hasattr(ledger, "attempts"):
+        fn._emit(
+            [
+                {
+                    "module": module_name,
+                    "target_id": module_name,
+                    "phase": "sandbox",
+                    "status": "skipped",
+                    "sandboxed": True,
+                    "repo_packages": repo_packages,
+                    "error": (
+                        "containment shim did not load — refusing to import or call "
+                        "anything (fail closed)"
+                    ),
+                }
+            ]
+        )
+        return 0
+
+    repo = Path(args.repo)
+    for root in plan.get("src_roots", ["."]):
+        candidate = str((repo / root).resolve())
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+
+    def drain(mark: int) -> dict[str, list[str]]:
+        return group_attempts(ledger.attempts[mark:])
+
+    rows: list[dict[str, Any]] = []
+    impurities = plan.get("impurities") or {}
+    mark = len(ledger.attempts)
+    try:
+        mod = importlib.import_module(module_name)
+    except BaseException as exc:  # target import can raise anything, incl. SystemExit
+        fn._emit(
+            [
+                mark_contained(
+                    {
+                        "module": module_name,
+                        "target_id": module_name,
+                        "phase": "import",
+                        "status": "error",
+                        "sandboxed": True,
+                        "error_type": type(exc).__name__,
+                        "error_module": getattr(type(exc), "__module__", "") or "",
+                        "error_mro": [c.__name__ for c in type(exc).__mro__],
+                        "repo_packages": repo_packages,
+                        "effects": drain(mark),
+                        "error": str(exc)[:400],
+                    }
+                )
+            ]
+        )
+        return 0
+    import_effects = drain(mark)
+    if import_effects:
+        rows.append(
+            {
+                "module": module_name,
+                "target_id": module_name,
+                "phase": "import",
+                "status": "ok",
+                "sandboxed": True,
+                "repo_packages": repo_packages,
+                "effects": import_effects,
+            }
+        )
+
+    for target in plan["targets"]:
+        qual = str(target["qualname"])
+        target_id = f"{module_name}:{qual}"
+        base: dict[str, Any] = {
+            "module": module_name,
+            "target_id": target_id,
+            "sandboxed": True,
+            "repo_packages": repo_packages,
+            "refused_for": list(impurities.get(target_id) or [])[:4],
+        }
+        try:
+            candidate = getattr(mod, qual, None)
+        except Exception:
+            candidate = None
+        if candidate is None or not callable(candidate):
+            rows.append(
+                {**base, "phase": "resolve", "status": "skipped", "error": "not a callable"}
+            )
+            continue
+        params = fn._param_records(candidate)
+        if params is None:
+            rows.append(
+                {
+                    **base,
+                    "phase": "signature",
+                    "status": "skipped",
+                    "error": "unannotated required parameter — refusing to guess",
+                }
+            )
+            continue
+        unresolvable = fn.unresolvable_required(params)
+        if unresolvable:
+            rows.append(
+                {
+                    **base,
+                    "phase": "signature",
+                    "status": "skipped",
+                    "error": (
+                        f"unresolvable annotation on required parameter(s) "
+                        f"{', '.join(unresolvable)} — refusing to guess"
+                    ),
+                }
+            )
+            continue
+        for arg_set in fn.arg_sets_for(params):
+            mark = len(ledger.attempts)
+            row = fn._call_once(module_name, qual, candidate, arg_set)
+            row.update(base)
+            row["effects"] = drain(mark)
+            rows.append(mark_contained(row))
+    fn._emit(rows)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``python -m exerciser.sandbox --worker …`` dispatch (worker only)."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--worker" in argv:
+        argv.remove("--worker")
+        return _worker_main(argv)
+    sys.stderr.write("exerciser.sandbox: use `exerciser functions <repo> --sandbox`\n")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

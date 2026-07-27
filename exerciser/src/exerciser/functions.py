@@ -57,6 +57,27 @@ Refusing to call
 3. **Scaffolding rules.** Test modules, ``conftest``, ``setup``, migrations and
    ``__main__`` are never importable targets: importing them runs fixtures and
    migrations against real state.
+
+A refusal is not a dead end
+---------------------------
+
+The purity guard is right to refuse, but if refusal were the END of it the
+harness's coverage ceiling would be "whatever happens to be pure" — and the
+functions that touch the filesystem, the network or a subprocess are usually the
+ones worth exercising. ``run_functions(sandbox=True)`` runs a SECOND pass over
+the targets refused ONLY for impurity, inside ``sandbox``'s containment: a
+disposable copy of the repo, ``cwd``/``HOME``/``TMPDIR``/``XDG_*`` redirected
+into a temp tree, network and process spawning refused by a generated
+``sitecustomize`` shim, POSIX ``setrlimit`` caps, and the existing wall-clock
+deadline. What each target ATTEMPTED is recorded as an effect ledger, which is
+useful output in its own right: "this function writes 3 files and opens a
+socket" is a behavioural fact even when the call returns cleanly.
+
+Two invariants hold there. Destructive NAMES and test scaffolding are never
+promoted — containment changes what a call costs, not whether calling
+``drop_database`` was ever sensible. And isolation fails CLOSED: if the tree
+cannot be made or the repo is too big to copy, the targets stay refused with the
+reason recorded, and nothing runs unsandboxed.
 """
 
 from __future__ import annotations
@@ -69,6 +90,7 @@ import inspect
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -82,6 +104,7 @@ from typing import Any
 from . import store
 from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
 from .issues import FailureCluster, normalize_signature
+from .sandbox import SandboxPolicy, run_sandboxed_targets
 
 # =========================================================================
 # The destructive-name vocabulary (backstop; the AST purity check is primary)
@@ -1029,6 +1052,33 @@ def _param_records(fn: Any) -> list[dict[str, Any]] | None:
     return out
 
 
+@dataclass
+class Refusal:
+    """A candidate the purity guard refused, kept drivable for the SANDBOX.
+
+    A refusal that carries no target is a dead end; one that carries the target
+    and the reasons is a recoverable decision. Only impurity refusals become
+    these — a destructive NAME and test scaffolding stay terminal, because no
+    amount of containment makes calling ``drop_database`` a good idea and a
+    ``test_*`` function belongs to a test runner, not to us.
+    """
+
+    target: FunctionTarget
+    reasons: list[str]
+
+    @property
+    def id(self) -> str:
+        return self.target.id
+
+    def to_json(self) -> dict[str, Any]:
+        return {"id": self.id, "target": self.target.to_json(), "reasons": list(self.reasons)}
+
+
+# Prefix of the ``skipped`` reason that marks an impurity-only refusal — the one
+# kind the execution sandbox can take over.
+IMPURE_SKIP_PREFIX = "impure-body: "
+
+
 def discover_targets(
     repo: Path,
     *,
@@ -1037,6 +1087,28 @@ def discover_targets(
     allow_impurities: frozenset[str] = frozenset(),
 ) -> tuple[list[FunctionTarget], list[dict[str, str]]]:
     """Callables to drive, plus the skipped ones with reasons.
+
+    The stable two-value view of ``discover_with_refusals`` — every existing
+    caller keeps its signature; the sandbox driver is the one consumer that
+    needs the third value.
+    """
+    targets, skipped, _refused = discover_with_refusals(
+        repo,
+        max_targets=max_targets,
+        logger=logger,
+        allow_impurities=allow_impurities,
+    )
+    return targets, skipped
+
+
+def discover_with_refusals(
+    repo: Path,
+    *,
+    max_targets: int = 200,
+    logger: logging.Logger | None = None,
+    allow_impurities: frozenset[str] = frozenset(),
+) -> tuple[list[FunctionTarget], list[dict[str, str]], list[Refusal]]:
+    """Callables to drive, the skipped ones with reasons, and the RECOVERABLE ones.
 
     Two sources, in priority order: identification's catalogued NON-HTTP entry
     points (CLI commands, tasks, script mains — inventory that has never had a
@@ -1056,6 +1128,12 @@ def discover_targets(
     machine, so an unverified target is a target not worth the coverage. Every
     refusal is in ``skipped`` with its reason, so the loss is auditable rather
     than silent.
+
+    The THIRD return value is what keeps that tradeoff from being permanent: the
+    subset refused only for impurity, carried with its coordinates and reasons so
+    ``sandbox.run_sandboxed_targets`` can drive it under containment. Nothing
+    here decides to run it — discovery still refuses; the sandbox is a separate,
+    opt-in control.
     """
     log = logger or logging.getLogger(__name__)
     apis_doc = store.read_json(store.apis_json_path(repo))
@@ -1064,6 +1142,7 @@ def discover_targets(
 
     targets: list[FunctionTarget] = []
     skipped: list[dict[str, str]] = []
+    refused: list[Refusal] = []
     seen: set[str] = set()
 
     def _add(module: str, qualname: str, rel: str, kind: str) -> None:
@@ -1093,7 +1172,20 @@ def discover_targets(
             return
         blocking = [r for r in fact["impurities"] if impurity_class(r) not in allow_impurities]
         if blocking:
-            skipped.append({"id": tid, "reason": "impure-body: " + "; ".join(blocking[:4])})
+            skipped.append({"id": tid, "reason": IMPURE_SKIP_PREFIX + "; ".join(blocking[:4])})
+            if len(refused) < max_targets:
+                refused.append(
+                    Refusal(
+                        target=FunctionTarget(
+                            module=module,
+                            qualname=qualname,
+                            file=rel,
+                            kind=kind,
+                            params=list(fact["params"]),
+                        ),
+                        reasons=list(blocking),
+                    )
+                )
             return
         targets.append(
             FunctionTarget(
@@ -1135,12 +1227,13 @@ def discover_targets(
             _add(module, name, rel, "exported")
 
     log.info(
-        "functions: %d targets, %d skipped (roots=%s)",
+        "functions: %d targets, %d skipped (%d sandboxable) (roots=%s)",
         len(targets),
         len(skipped),
+        len(refused),
         src_roots,
     )
-    return targets, skipped
+    return targets, skipped, refused
 
 
 def _index_functions_by_file(repo: Path) -> dict[str, list[str]]:
@@ -1521,20 +1614,36 @@ def call_verdict(
     policy: ExceptionPolicy | None = None,
     *,
     total_targets: int = 0,
+    rng: random.Random | None = None,
 ) -> str:
     """Classify one call outcome, using the LEARNED exception policy.
 
     ``ok`` | ``rejected`` (the target refused our guessed value) |
-    ``malformed-call`` (our own fault) | ``defect``.
+    ``malformed-call`` (our own fault) | ``contained`` (the sandbox refused the
+    effect, not the target refusing the input) | ``defect``.
+
+    ``contained`` is the second NON-learned rule, and it exists for the same
+    reason as ``malformed-call``: the exception was raised by OUR apparatus, so
+    it is not evidence about the target. "This function opens a socket" is a
+    behavioural fact, and it is already reported — as an effect ledger entry.
+    Turning it into a crash report would manufacture one defect per contained
+    target, which is exactly the false signal that makes a harness ignorable.
 
     There is deliberately no built-in list of exception names: which exceptions
     mean "no" is a property of the repository under test, and is learned from
     dispersion, input-class invariance and provenance (see
     ``exception_policy``). Without a policy the structural priors alone decide,
     which is still repo-agnostic.
+
+    ``rng`` makes the verdict a THOMPSON DRAW rather than a threshold on the
+    posterior mean, which is what keeps a suppressed signature reachable — see
+    ``exception_policy``'s module docstring. ``run_functions`` passes one;
+    calling this directly without one keeps the deterministic mean behaviour.
     """
     if row.get("status") != "error":
         return "ok"
+    if row.get("contained"):
+        return "contained"
     etype = str(row.get("error_type", ""))
     message = str(row.get("error", ""))
     if etype == "TypeError" and any(m in message for m in _MALFORMED_CALL_MARKERS):
@@ -1561,6 +1670,7 @@ def call_verdict(
             total_targets=total_targets,
             family=fam,
             conformant=conformant,
+            rng=rng,
         )
         else "rejected"
     )
@@ -1571,6 +1681,7 @@ def classify_row(
     policy: ExceptionPolicy | None = None,
     *,
     total_targets: int = 0,
+    rng: random.Random | None = None,
 ) -> str | None:
     """Failure kind for one row, or None when it is not a reportable defect.
 
@@ -1579,6 +1690,10 @@ def classify_row(
     policy makes that call from evidence across the whole run, and everything
     it declines is still COUNTED in the verdict tally — never silently dropped.
     """
+    if row.get("contained"):
+        # The sandbox refused an effect. Nothing about the target's own
+        # correctness follows from that, at import or at call time.
+        return None
     if row.get("phase") == "import" and row.get("status") == "error":
         # Import supplies NO input, so nothing the harness did can explain the
         # failure. Two structural exemptions, and everything else is the
@@ -1600,7 +1715,7 @@ def classify_row(
         return None
     return (
         "function-crash"
-        if call_verdict(row, policy, total_targets=total_targets) == "defect"
+        if call_verdict(row, policy, total_targets=total_targets, rng=rng) == "defect"
         else None
     )
 
@@ -1612,12 +1727,18 @@ def learn_exception_policy(
 
     Order matters: dispersion and class-invariance are properties of the whole
     run, so every sighting must be recorded before the first verdict is taken.
-    Sightings carry no defect label — they are unlabelled evidence that shapes
-    the structural features; only downstream feedback (``record_feedback``)
-    supplies labels.
+    Sightings carry no defect label and move no posterior mass at all — they are
+    COVARIATES, and they reach a verdict only through the structural prior.
+    Labels come from adjudications and downstream feedback
+    (``record_feedback``), and from the differential oracle's agreement rows.
     """
     for row in rows:
         if row.get("status") != "error":
+            continue
+        if row.get("contained"):
+            # The sandbox's own refusal is evidence about our apparatus, not
+            # about this repo's exception vocabulary. Feeding it in would let a
+            # containment artefact shape every later verdict.
             continue
         prov = provenance_of(
             str(row.get("error_module", "")),
@@ -1632,7 +1753,13 @@ def learn_exception_policy(
 
 
 def _policy_report(policy: ExceptionPolicy, total_targets: int) -> dict[str, Any]:
-    """Per-signature decision probabilities, for the run summary."""
+    """Per-signature decision probabilities, for the run summary.
+
+    Deliberately the DETERMINISTIC view (posterior mean, no draw): a summary a
+    human reads must not change because a draw went the other way. Which
+    signatures the draw actually surfaced is reported separately, as
+    ``surfaced_by_exploration``.
+    """
     out: dict[str, Any] = {}
     for key, ev in sorted(policy.evidence.items()):
         _, provenance = key.rsplit("@", 1) if "@" in key else (key, "unknown")
@@ -1641,7 +1768,11 @@ def _policy_report(policy: ExceptionPolicy, total_targets: int) -> dict[str, Any
         )
         out[key] = {
             "defect_probability": round(probability, 4),
+            # True only when LABELS have accumulated. Unlabelled structure —
+            # however much of it there is — leaves this False, so a reader can
+            # tell "we have never checked" from "we checked, it is a refusal".
             "confident": confident,
+            "label_mass": round(policy.label_mass(key), 4),
             "targets": len(ev.targets),
             "occurrences": ev.occurrences,
         }
@@ -1653,16 +1784,26 @@ def cluster_function_failures(
     policy: ExceptionPolicy | None = None,
     *,
     total_targets: int = 0,
+    rng: random.Random | None = None,
 ) -> list[FailureCluster]:
-    """Cluster failing function calls the same way HTTP failures cluster."""
+    """Cluster failing function calls the same way HTTP failures cluster.
+
+    A sandboxed row travels the SAME verdict path as any other, but its exemplar
+    strategy says ``function-sandboxed/…`` so a reader can tell a defect found by
+    calling a pure function from one found by calling a contained impure one —
+    the second was reached only because containment made it callable, and its
+    behaviour under redirected ``HOME``/``TMPDIR`` and a blocked network is not
+    the same evidence as the first.
+    """
     clusters: dict[str, FailureCluster] = {}
     for row in rows:
-        kind = classify_row(row, policy, total_targets=total_targets)
+        kind = classify_row(row, policy, total_targets=total_targets, rng=rng)
         if kind is None:
             continue
         target = row.get("target_id", "?")
         detail = f"{row.get('error_type', 'error')}: {row.get('error', '')}"
         sig = normalize_signature(kind, f"{target} {detail}")
+        channel = "function-sandboxed" if row.get("sandboxed") else "function"
         cluster = clusters.get(sig)
         if cluster is None:
             cluster = FailureCluster(
@@ -1674,7 +1815,8 @@ def cluster_function_failures(
                 path=target,
                 exemplar={
                     "input": row.get("kwargs"),
-                    "strategy": f"function/{row.get('input_class', 'import')}",
+                    "strategy": f"{channel}/{row.get('input_class', 'import')}",
+                    "effects": row.get("effects"),
                     "status": None,
                     "error": row.get("error"),
                     "detail": detail,
@@ -1694,6 +1836,10 @@ def run_functions(
     module_timeout_s: float = DEFAULT_MODULE_TIMEOUT_S,
     python: str | None = None,
     only_targets: list[str] | None = None,
+    seed: int | None = None,
+    explore: bool = True,
+    sandbox: bool = False,
+    sandbox_policy: SandboxPolicy | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Drive every discovered function target in isolated workers. Persists all
@@ -1702,10 +1848,41 @@ def run_functions(
     Each module gets one worker with a wall-clock deadline; a hang or hard exit
     costs that module's rows and is reported as a ``module-timeout`` — never a
     silent gap, and never the run.
+
+    ``seed`` fixes the exception policy's Thompson draws, making a run
+    reproducible. Left unset the draws are entropy-seeded, which is what makes
+    the exploration span RUNS: a thinly-labelled signature suppressed today is
+    drawn high on some later run, reported, and finally adjudicated. The draw
+    can only ever ADD a finding, so a genuine crash is reported either way.
+
+    ``explore=False`` turns the draw off entirely (verdicts revert to the
+    deterministic posterior-mean threshold). The CLI and the campaign leave it
+    ON — they are the paths whose findings get adjudicated, so they are the
+    paths that must not censor their own feedback. Callers that need
+    byte-identical output for identical inputs (regression fixtures, tests
+    pinning an exact cluster set) turn it off.
+
+    ``sandbox`` (default OFF, so nothing about an existing run changes) turns the
+    purity guard's refusals from a coverage CEILING into a second pass: targets
+    refused ONLY for impurity are driven again inside ``sandbox``'s containment
+    — a disposable copy of the repo, redirected ``HOME``/``TMPDIR``, a blocked
+    network, blocked process spawning — and their outcomes join the same rows,
+    tagged ``sandboxed``. Targets refused for a destructive NAME or as test
+    scaffolding are NEVER promoted: containment changes what a call costs, not
+    whether calling ``drop_database`` was ever a sensible thing to do.
+
+    If containment cannot be established the pass reports ``unavailable``, every
+    candidate stays refused with the reason recorded on its ``skipped`` entry,
+    and a diagnostic is raised. There is no path in which a refused target runs
+    unsandboxed.
     """
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
-    targets, skipped = discover_targets(repo, max_targets=max_targets, logger=log)
+    targets, skipped, refusals = discover_with_refusals(repo, max_targets=max_targets, logger=log)
+    sbx = sandbox_policy or (SandboxPolicy(enabled=True) if sandbox else None)
+    if sbx is None or not sbx.enabled:
+        sbx = None
+        refusals = []
     if only_targets is not None:
         # Per-target selection: the campaign bandit allocates budget to ONE
         # action, so it must be able to drive one function rather than sweeping
@@ -1713,9 +1890,10 @@ def run_functions(
         # and the discovery cost shared across plays.
         wanted = set(only_targets)
         targets = [t for t in targets if t.id in wanted]
+        refusals = [r for r in refusals if r.id in wanted]
 
     diagnostics: list[str] = []
-    if not targets:
+    if not targets and not refusals:
         diagnostics.append(
             "0 function targets discovered — nothing to drive in-process. "
             "Either the code index is missing (run `index index`) or every "
@@ -1727,8 +1905,13 @@ def run_functions(
     for t in targets:
         by_module.setdefault(t.module, []).append(t)
     # Every top-level package this repo owns — an exception defined in any of
-    # them is the repo's own deliberate signal, whichever module raised it.
-    repo_packages = sorted({t.module.partition(".")[0] for t in targets})
+    # them is the repo's own deliberate signal, whichever module raised it. The
+    # sandbox's targets are the repo's too, so their packages count: provenance
+    # must not flip just because a call happened under containment.
+    repo_packages = sorted(
+        {t.module.partition(".")[0] for t in targets}
+        | {r.target.module.partition(".")[0] for r in refusals}
+    )
 
     src_roots = detect_src_roots(repo)
     tmp_dir = store.exercise_dir(repo) / "functions"
@@ -1798,22 +1981,70 @@ def run_functions(
         if proc.returncode != 0 and not rows:
             log.debug("functions: worker for %s exited %s", module, proc.returncode)
 
+    # --- second pass: the refused, under containment -----------------------
+    #
+    # Deliberately AFTER the ordinary pass, so a sandbox that cannot be
+    # established costs nothing that already worked. `run_sandboxed_targets`
+    # either returns contained rows or reports `unavailable`; there is no third
+    # outcome, and no branch that runs a refused target loose.
+    sandbox_report: dict[str, Any] = {"enabled": False}
+    if sbx is not None:
+        outcome = run_sandboxed_targets(
+            repo,
+            refusals,
+            policy=sbx,
+            src_roots=src_roots,
+            repo_packages=repo_packages,
+            module_timeout_s=module_timeout_s,
+            python=python,
+            logger=log,
+        )
+        rows.extend(outcome["rows"])
+        sandbox_report = outcome["report"]
+        driven = {r.id for r in refusals}
+        if outcome["status"] == "unavailable":
+            reason = str(sandbox_report.get("reason") or "isolation could not be established")
+            for entry in skipped:
+                if entry["id"] in driven:
+                    entry["sandbox"] = f"unavailable: {reason}"
+            diagnostics.append(
+                f"execution sandbox unavailable — {len(refusals)} impurity-refused "
+                f"target(s) stay refused (never run unsandboxed): {reason}"
+            )
+            log.warning("functions_sandbox_unavailable %s", reason)
+        else:
+            for entry in skipped:
+                if entry["id"] in driven:
+                    entry["sandbox"] = "driven-under-containment"
+    total_targets = len(targets) + len(refusals)
+
     # Learn from the WHOLE run before judging any of it: dispersion and
     # class-invariance are run-level properties, so a first-pass over every
     # sighting has to happen before the first verdict.
     policy = ExceptionPolicy.load(repo)
-    learn_exception_policy(rows, policy, len(targets))
+    learn_exception_policy(rows, policy, total_targets)
     policy.save(repo, logger=log)
 
-    clusters = cluster_function_failures(rows, policy, total_targets=len(targets))
+    # One rng for the whole run: the policy memoises its draw per signature, so
+    # clustering and the verdict tally below cannot disagree about a row.
+    rng = random.Random(seed) if explore else None
+    clusters = cluster_function_failures(rows, policy, total_targets=total_targets, rng=rng)
     store.write_jsonl(store.exercise_dir(repo) / "function_results.jsonl", rows)
 
     called = sum(1 for r in rows if r.get("phase") == "call")
     verdicts: dict[str, int] = {}
+    sandbox_verdicts: dict[str, int] = {}
     for r in rows:
         if r.get("phase") == "call":
-            v = call_verdict(r, policy, total_targets=len(targets))
+            # The SAME verdict path for both channels — a sandboxed call is not
+            # judged by a softer rule — with a separate tally so a reader can see
+            # what containment bought.
+            v = call_verdict(r, policy, total_targets=total_targets, rng=rng)
             verdicts[v] = verdicts.get(v, 0) + 1
+            if r.get("sandboxed"):
+                sandbox_verdicts[v] = sandbox_verdicts.get(v, 0) + 1
+    if sandbox_report.get("enabled"):
+        sandbox_report["verdicts"] = dict(sorted(sandbox_verdicts.items()))
     result: dict[str, Any] = {
         "status": "ok",
         "diagnostics": diagnostics,
@@ -1823,26 +2054,38 @@ def run_functions(
         "modules": len(by_module),
         "calls": called,
         "errors": sum(1 for r in rows if r.get("status") == "error"),
-        # Honest accounting of every call outcome. `rejected` and `environment`
-        # are NOT defects — the harness guesses inputs, so a refusal is usually
-        # the function working — but they are counted, never hidden.
+        # Honest accounting of every call outcome. `rejected`, `environment` and
+        # `contained` are NOT defects — the harness guesses inputs, so a refusal
+        # is usually the function working, and a `contained` outcome is the
+        # sandbox working — but they are counted, never hidden.
         "verdicts": dict(sorted(verdicts.items())),
         # What the LEARNED policy currently believes — the DECISION probability
         # (structural priors blended with accumulated evidence), not the raw
         # posterior, so a run is auditable rather than an oracle handing down
         # opinions.
-        "exception_policy": _policy_report(policy, len(targets)),
+        "exception_policy": _policy_report(policy, total_targets),
+        # Signatures whose posterior MEAN was below the reporting threshold but
+        # whose Thompson draw was above it — surfaced to be adjudicated rather
+        # than left suppressed forever on evidence nobody ever labelled. Stated
+        # explicitly so a reader can see why a "known refusal" reappeared.
+        "surfaced_by_exploration": sorted(policy.exploration_surfaced),
         "module_timeouts": timeouts,
         "skipped": skipped[:100],
         "skipped_count": len(skipped),
+        # The execution sandbox: what it copied and what that cost, what the
+        # contained targets ATTEMPTED (files, sockets, subprocesses), and — when
+        # isolation could not be established — every target that therefore
+        # stayed refused. Never a silent degradation.
+        "sandbox": sandbox_report,
         "issue_clusters": len(clusters),
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "function_results.jsonl"),
     }
     store.write_json(store.exercise_dir(repo) / "functions.json", result)
     log.info(
-        "functions: %d targets in %d modules, %d calls, %d clusters, %d timeouts",
+        "functions: %d targets (+%d sandboxed) in %d modules, %d calls, %d clusters, %d timeouts",
         len(targets),
+        len(refusals),
         len(by_module),
         called,
         len(clusters),

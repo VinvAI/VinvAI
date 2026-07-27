@@ -386,16 +386,14 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
             else:
                 subprocesses = 0
             result = cfg._functions_cache
-        # Dispersion self-supervision: the run has just produced a fresh set of
-        # sightings, so turn them into real posterior movement.
-        try:
-            policy = exception_policy.ExceptionPolicy.load(cfg.repo, decay=1.0)
-            exception_policy.apply_dispersion_evidence(
-                policy, total_targets=int(result.get("targets") or 0)
-            )
-            policy.save(cfg.repo, logger=cfg.logger)
-        except Exception as exc:
-            cfg.logger.warning("campaign: dispersion self-supervision skipped: %s", exc)
+        # No self-supervised mass is posted here any more. Dispersion is a
+        # COVARIATE (it enters the structural prior, from the sightings
+        # `run_functions` has just persisted), and posting it as α/β made a
+        # never-labelled signature both suppressed and "confident" — an
+        # absorbing state, because suppression is what prevents the label ever
+        # arriving. `run_functions` explores instead: its Thompson draw
+        # occasionally surfaces a thinly-labelled signature so the differential
+        # oracle and the adjudication channel can put a real label on it.
         violations, signatures = _findings(result, "issue_clusters", target=action.target)
         return Play(
             violations=violations,

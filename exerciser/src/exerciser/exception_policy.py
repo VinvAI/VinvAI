@@ -17,28 +17,52 @@ makes is narrower than "learned from scratch": the priors are over PYTHON'S OWN
 class hierarchy rather than over one project's vocabulary (so they transfer),
 and evidence overrides them as it accumulates.
 
-**Where evidence comes from.** Three sources, of which only the last needs a
-human:
+**Two kinds of information, kept apart — this is the design.** The module is a
+hierarchical (empirical-Bayes) model, and the split is what keeps it honest:
 
-* ``observe_differential_rows`` — SELF-SUPERVISED agreement with an independent
-  oracle. When the differential oracle proves the target raised ``E`` on an
-  input CPython accepted, that is a labelled defect for ``E``; when both refuse
-  and the target names the reference's exception type, that is a labelled
-  refusal. Bounded by ``DIFFERENTIAL_EVIDENCE_CAP``.
-* ``apply_dispersion_evidence`` — SELF-SUPERVISED dispersion. A signature raised
-  by many distinct targets is that repo's way of saying no, and that belief is
-  posted as real β mass, not merely as a prior penalty. Bounded by
-  ``DISPERSION_EVIDENCE_CAP`` and re-derived (topped up, never accumulated) each
-  run, so it cannot run away.
-* ``apply_feedback`` / ``record_feedback`` — downstream verdicts: a differential
-  adjudication, an episode that fixed a reported crash, a human dismissal.
-  Bounded by ``GLOBAL_FEEDBACK_CAP`` per signature and
-  ``SITE_FEEDBACK_CAP`` per call site.
+* COVARIATES — dispersion, class-invariance, provenance, family, conformance.
+  Nobody adjudicated anything to produce them; they are properties of the run.
+  They enter the PRIOR MEAN, through ``structural_prior``, carrying
+  ``_PRIOR_STRENGTH`` pseudo-observations and not one more. They are *never*
+  posted as α/β, because a covariate is not an observation and pretending
+  otherwise makes ``mass()`` — and therefore ``MIN_EVIDENCE`` and
+  ``confident`` — mean nothing. (An earlier version posted dispersion as up to
+  4.0 of β mass, which exceeded ``MIN_EVIDENCE``: a common exception reached
+  "confident, not a defect" on ZERO labels, was then never reported, and so
+  could never acquire a label. That is a censored-feedback absorbing state, and
+  it is the bug this split exists to prevent.)
+* LABELS — the likelihood. Only these move α/β:
 
-Unlabelled sightings (``observe`` with no ``is_defect``) move NO α/β. They
-populate the structural features only. That is deliberate — a sighting is not a
-verdict — but it means a run that produces nothing but sightings leaves the
-posterior untouched, which is why the two self-supervised sources above exist.
+  * ``observe_differential_rows`` — agreement with an INDEPENDENT oracle. When
+    the differential oracle proves the target raised ``E`` on an input CPython
+    accepted, that is a labelled defect for ``E``; when both refuse and the
+    target names the reference's exception type, that is a labelled refusal.
+    Self-supervised but genuinely observed, per row. Bounded by
+    ``DIFFERENTIAL_EVIDENCE_CAP``.
+  * ``apply_feedback`` / ``record_feedback`` — downstream verdicts: a
+    differential adjudication, an episode that fixed a reported crash, a human
+    dismissal. Bounded by ``GLOBAL_FEEDBACK_CAP`` per signature and
+    ``SITE_FEEDBACK_CAP`` per call site.
+
+Unlabelled sightings (``observe`` with no ``is_defect``) therefore move NO α/β;
+they only populate the covariates. ``mass()`` counts labels, and ``confident``
+means "labels have been seen", not "the harness has an opinion".
+
+**Reporting is a Thompson draw, not a threshold.** ``is_defect`` draws
+``θ ~ Beta(α, β)`` and reports when ``θ >= REPORT_THRESHOLD``. A greedy
+threshold on the posterior MEAN is what makes suppression self-sealing under
+partial feedback: a signature is only ever labelled if it is reported, so one
+below-threshold verdict removes the only path by which it could be corrected.
+The draw dissolves that without any re-examination schedule to maintain — a
+signature with few labels has a WIDE posterior, is occasionally drawn high, gets
+surfaced, gets adjudicated, and sharpens on a real label; a signature with many
+refutations has a tight posterior near zero and is drawn high essentially never.
+The exploration falls out of the posterior width, exactly as it does for the
+bandit arms in ``bandit.py``. The draw only ever ADDS a report — a mean already
+above the threshold is reported regardless — because the censoring is
+one-directional and randomly dropping a genuine crash would be a worse bug than
+the one being fixed. ``rng=None`` keeps the old deterministic mean-vs-threshold
+behaviour for callers that need stable output.
 
 **The features are structural, not lexical.** Nothing here knows what
 "ValueError" means:
@@ -82,6 +106,7 @@ learned against a codebase that has since changed must not dominate forever.
 from __future__ import annotations
 
 import logging
+import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,21 +114,29 @@ from typing import Any
 
 from . import store
 
-# Posterior mean at or above which an exception is REPORTED as a defect.
-# Deliberately above 0.5: a false finding costs more than a missed one, because
-# a noisy oracle gets switched off entirely.
+# Draw at or above which an exception is REPORTED as a defect. Deliberately
+# above 0.5: a false finding costs more than a missed one, because a noisy
+# oracle gets switched off entirely.
 REPORT_THRESHOLD = 0.6
 
-# Evidence below this much total mass is "not yet known"; the structural priors
-# carry the decision and the verdict is marked low-confidence.
+# LABEL mass below this much is "never actually checked"; the structural priors
+# carry the decision and the verdict is marked low-confidence. Only labels count
+# toward it — covariates enter the prior, so this number cannot be reached
+# without an adjudication, a downstream verdict or an independent oracle.
 MIN_EVIDENCE = 3.0
 
 # How much accumulated evidence survives to the next run.
 DECAY = 0.5
 
 # Strength of the structural priors, in pseudo-observations. Small: they are a
-# STARTING POINT that a handful of real observations overrides.
+# STARTING POINT that a handful of real observations overrides. Since the
+# covariates enter only here, this is ALL the mass unlabelled information ever
+# has — which is why an unlabelled posterior stays wide and gets explored.
 _PRIOR_STRENGTH = 2.0
+
+# Floor on each Beta parameter. ``random.betavariate`` needs both strictly
+# positive, and a near-zero concentration is meaningless anyway.
+_MIN_CONCENTRATION = 1e-3
 
 # The VALUE input classes. "import" and "differential" are provenances of a
 # sighting, not classes of value, so they must not count toward invariance —
@@ -125,12 +158,16 @@ DISPERSION_SMOOTHING = 3.0
 GLOBAL_FEEDBACK_CAP = 6.0
 SITE_FEEDBACK_CAP = 8.0
 DIFFERENTIAL_EVIDENCE_CAP = 4.0
-DISPERSION_EVIDENCE_CAP = 4.0
 
 
 @dataclass
 class ExceptionEvidence:
-    """Accumulated evidence about one exception signature."""
+    """Accumulated LABELS about one exception signature.
+
+    α/β hold observations only. Dispersion and class-invariance are covariates
+    and live in the prior instead, so ``mass()`` is a count of times somebody
+    (or an independent oracle) actually said which this was.
+    """
 
     key: str
     alpha: float = 1.0  # pseudo-count of "was a defect"
@@ -140,16 +177,16 @@ class ExceptionEvidence:
     occurrences: int = 0
     confirmed: int = 0  # downstream said: real defect
     refuted: int = 0  # downstream said: not a defect
-    # Mass posted by each source, tracked separately so each can be capped
-    # independently and so an audit can tell learned belief from self-belief.
+    # Mass posted by each LABEL source, tracked separately so each can be capped
+    # independently and so an audit can tell one source's belief from another's.
     feedback_mass: float = 0.0  # labelled downstream verdicts
     agreement_mass: float = 0.0  # differential agreement/disagreement
-    dispersion_beta: float = 0.0  # dispersion self-supervision (topped up)
 
     def mean(self) -> float:
         return self.alpha / (self.alpha + self.beta)
 
     def mass(self) -> float:
+        """Total LABEL mass — what ``MIN_EVIDENCE`` is measured against."""
         return self.alpha + self.beta - 2.0
 
     def post(self, credit: float, *, defect: bool, budget: float) -> float:
@@ -180,16 +217,24 @@ class ExceptionEvidence:
             "refuted": self.refuted,
             "feedback_mass": round(self.feedback_mass, 4),
             "agreement_mass": round(self.agreement_mass, 4),
-            "dispersion_beta": round(self.dispersion_beta, 4),
+            "label_mass": round(self.mass(), 4),
             "defect_probability": round(self.mean(), 4),
         }
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> ExceptionEvidence:
+        beta = float(data.get("beta", 1.0))
+        # MIGRATION: files written before dispersion became a covariate carry
+        # its β mass inside `beta`. Leaving it there would keep an old repo in
+        # the very state this module now refuses to enter — suppressed and
+        # "confident" on no labels — so it is subtracted back out on load.
+        legacy_dispersion = float(data.get("dispersion_beta", 0.0) or 0.0)
+        if legacy_dispersion > 0.0:
+            beta = max(1.0, beta - legacy_dispersion)
         return cls(
             key=str(data.get("key", "")),
             alpha=float(data.get("alpha", 1.0)),
-            beta=float(data.get("beta", 1.0)),
+            beta=beta,
             targets=set(data.get("targets") or []),
             input_classes=set(data.get("input_classes") or []),
             occurrences=int(data.get("occurrences", 0)),
@@ -197,7 +242,6 @@ class ExceptionEvidence:
             refuted=int(data.get("refuted", 0)),
             feedback_mass=float(data.get("feedback_mass", 0.0)),
             agreement_mass=float(data.get("agreement_mass", 0.0)),
-            dispersion_beta=float(data.get("dispersion_beta", 0.0)),
         )
 
 
@@ -368,6 +412,30 @@ def structural_prior(
     return max(0.02, min(0.98, base - penalty))
 
 
+@dataclass(frozen=True)
+class ReportDecision:
+    """One reporting decision, with the draw that produced it kept visible."""
+
+    key: str
+    target: str
+    probability: float  # posterior MEAN
+    theta: float  # what the threshold was actually applied to
+    reported: bool
+    confident: bool  # enough LABEL mass to call this learned
+    exploration: bool  # reported by the draw despite a below-threshold mean
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "target": self.target,
+            "defect_probability": round(self.probability, 4),
+            "theta": round(self.theta, 4),
+            "reported": self.reported,
+            "confident": self.confident,
+            "exploration": self.exploration,
+        }
+
+
 class ExceptionPolicy:
     """Learned defect-probability per exception signature, for one repo."""
 
@@ -381,6 +449,24 @@ class ExceptionPolicy:
         # never pollutes dispersion (a site entry has exactly one target) or the
         # per-signature report.
         self.sites: dict[str, ExceptionEvidence] = sites or {}
+        # ONE draw per (signature, site) per policy instance. The decision epoch
+        # is the run: a signature judged twice in the same run (clustering, then
+        # the verdict tally) must get the same answer both times, or half its
+        # rows are reported and the count contradicts the clusters.
+        self._draws: dict[tuple[str, str], float] = {}
+        # Signatures this instance surfaced BY EXPLORATION — mean below the
+        # threshold, draw above it. Reported in the run document so the
+        # behaviour is visible rather than mysterious.
+        self.exploration_surfaced: set[str] = set()
+
+    def new_epoch(self) -> None:
+        """Start a new decision epoch: forget this instance's memoised draws.
+
+        A run is normally one epoch and one ``ExceptionPolicy``, so this exists
+        for a long-lived process (and for tests) that reuses an instance across
+        what are conceptually separate runs.
+        """
+        self._draws.clear()
 
     # ---- observation -----------------------------------------------------
 
@@ -492,7 +578,7 @@ class ExceptionPolicy:
 
     # ---- decision --------------------------------------------------------
 
-    def defect_probability(
+    def posterior(
         self,
         key: str,
         *,
@@ -501,14 +587,12 @@ class ExceptionPolicy:
         family: str = "Exception",
         conformant: bool = False,
         target: str = "",
-    ) -> tuple[float, bool]:
-        """``(probability, confident)`` that this exception signals a defect.
+    ) -> tuple[float, float]:
+        """``(α, β)`` of the posterior this signature is judged on.
 
-        Combines the structural prior (as ``_PRIOR_STRENGTH``
-        pseudo-observations) with whatever real evidence has accumulated. With
-        NO evidence this reduces exactly to the structural prior and
-        ``confident`` is False — that is the honest state of a first run, not a
-        learned verdict.
+        The structural prior enters as ``_PRIOR_STRENGTH`` pseudo-observations
+        and the COVARIATES enter through it — that is the whole of their
+        influence. Everything added on top is a label.
 
         When ``target`` names a call site with its own adjudicated evidence,
         that site DOMINATES: the repo-wide signature is shrunk by
@@ -531,10 +615,101 @@ class ExceptionPolicy:
         shrink = 1.0 / (1.0 + site_mass)
         alpha = _PRIOR_STRENGTH * prior + (ev.alpha - 1.0 if ev else 0.0) * shrink + site_alpha
         beta = _PRIOR_STRENGTH * (1.0 - prior) + (ev.beta - 1.0 if ev else 0.0) * shrink + site_beta
-        total = alpha + beta
-        probability = alpha / total if total > 0 else prior
-        confident = ((ev.mass() if ev else 0.0) + site_mass) >= MIN_EVIDENCE
-        return probability, confident
+        return max(_MIN_CONCENTRATION, alpha), max(_MIN_CONCENTRATION, beta)
+
+    def label_mass(self, key: str, target: str = "") -> float:
+        """How much of an actual LABEL this signature (at this site) rests on."""
+        ev = self.evidence.get(key)
+        site = self.sites.get(site_key(key, target)) if target else None
+        return (ev.mass() if ev else 0.0) + (site.mass() if site else 0.0)
+
+    def defect_probability(
+        self,
+        key: str,
+        *,
+        provenance: str,
+        total_targets: int,
+        family: str = "Exception",
+        conformant: bool = False,
+        target: str = "",
+    ) -> tuple[float, bool]:
+        """``(posterior mean, confident)`` that this exception signals a defect.
+
+        With NO labels this reduces exactly to the structural prior and
+        ``confident`` is False — the honest state of a first run. ``confident``
+        counts LABEL mass only, so no amount of self-supervised structure can
+        manufacture it.
+        """
+        alpha, beta = self.posterior(
+            key,
+            provenance=provenance,
+            total_targets=total_targets,
+            family=family,
+            conformant=conformant,
+            target=target,
+        )
+        return alpha / (alpha + beta), self.label_mass(key, target) >= MIN_EVIDENCE
+
+    def decide(
+        self,
+        key: str,
+        *,
+        provenance: str,
+        total_targets: int,
+        family: str = "Exception",
+        conformant: bool = False,
+        target: str = "",
+        rng: random.Random | None = None,
+    ) -> ReportDecision:
+        """Decide whether to REPORT this exception, by a Thompson draw.
+
+        ``rng`` given (what ``run_functions`` does, and through it the campaign):
+        draw ``θ ~ Beta(α, β)`` and report on ``θ >= REPORT_THRESHOLD``. The
+        draw is memoised per ``(key, target)`` for the life of this instance, so
+        one run is one decision epoch.
+
+        ``rng=None`` (the default, what ``call_verdict``'s direct callers and
+        every summary path use): ``θ`` is the posterior MEAN, which is the old
+        deterministic threshold exactly — stable output for anything that needs
+        to be reproducible without carrying a seed.
+
+        The draw is applied in ONE DIRECTION: it can only ADD a report, never
+        remove one (``reported = mean >= t or θ >= t``). The pathology being
+        fixed is one-directional — suppression censors its own feedback, while
+        a report earns a label either way — so the correction is too. A
+        symmetric draw would also silence a signature whose mean is safely above
+        the threshold, i.e. drop a genuine crash at random, which is a worse
+        failure than the one being repaired.
+        """
+        alpha, beta = self.posterior(
+            key,
+            provenance=provenance,
+            total_targets=total_targets,
+            family=family,
+            conformant=conformant,
+            target=target,
+        )
+        probability = alpha / (alpha + beta)
+        if rng is None:
+            theta = probability
+        else:
+            slot = (key, target)
+            if slot not in self._draws:
+                self._draws[slot] = rng.betavariate(alpha, beta)
+            theta = self._draws[slot]
+        reported = probability >= REPORT_THRESHOLD or theta >= REPORT_THRESHOLD
+        exploration = reported and probability < REPORT_THRESHOLD
+        if exploration:
+            self.exploration_surfaced.add(key)
+        return ReportDecision(
+            key=key,
+            target=target,
+            probability=probability,
+            theta=theta,
+            reported=reported,
+            confident=self.label_mass(key, target) >= MIN_EVIDENCE,
+            exploration=exploration,
+        )
 
     def is_defect(
         self,
@@ -545,16 +720,17 @@ class ExceptionPolicy:
         family: str = "Exception",
         conformant: bool = False,
         target: str = "",
+        rng: random.Random | None = None,
     ) -> bool:
-        probability, _ = self.defect_probability(
+        return self.decide(
             key,
             provenance=provenance,
             total_targets=total_targets,
             family=family,
             conformant=conformant,
             target=target,
-        )
-        return probability >= REPORT_THRESHOLD
+            rng=rng,
+        ).reported
 
     # ---- persistence -----------------------------------------------------
 
@@ -564,18 +740,22 @@ class ExceptionPolicy:
             "report_threshold": REPORT_THRESHOLD,
             "learning": (
                 "Beta posterior per exception signature (type@provenance), plus "
-                "per call site (type@provenance#target). Structural priors over "
-                "Python's own class hierarchy decide until evidence arrives — "
-                "with no evidence the probability IS the prior and confident is "
-                "false. Evidence comes from differential agreement, dispersion "
-                "self-supervision, and downstream verdicts; each source is "
-                "capped so none can drive a signature to an absorbing state."
+                "per call site (type@provenance#target). Alpha/beta hold LABELS "
+                "only (differential agreement, adjudications, downstream "
+                "verdicts), each source capped so none can drive a signature to "
+                "an absorbing state. Unlabelled structure (dispersion, "
+                "class-invariance, provenance, family, conformance) is a "
+                "covariate and enters the PRIOR MEAN instead, so `confident` "
+                "means labels were seen. Reporting is a Thompson draw against "
+                "the threshold, not a greedy cut on the mean: a thinly labelled "
+                "signature has a wide posterior and is periodically surfaced "
+                "for adjudication, which is what stops suppression from "
+                "censoring its own feedback."
             ),
             "caps": {
                 "global_feedback": GLOBAL_FEEDBACK_CAP,
                 "site_feedback": SITE_FEEDBACK_CAP,
                 "differential_agreement": DIFFERENTIAL_EVIDENCE_CAP,
-                "dispersion": DISPERSION_EVIDENCE_CAP,
             },
             "signatures": {k: ev.to_json() for k, ev in sorted(self.evidence.items())},
             "sites": {k: ev.to_json() for k, ev in sorted(self.sites.items())},
@@ -600,7 +780,6 @@ class ExceptionPolicy:
                 # observations rather than being locked out by a spent cap.
                 ev.feedback_mass *= decay
                 ev.agreement_mass *= decay
-                ev.dispersion_beta *= decay
                 out[key] = ev
             return out
 
@@ -848,35 +1027,12 @@ def observe_differential_rows(
     return counts
 
 
-def apply_dispersion_evidence(
-    policy: ExceptionPolicy, *, total_targets: int = 0
-) -> dict[str, float]:
-    """Post dispersion as real β mass. Self-supervised, bounded, idempotent.
-
-    Dispersion was only ever a penalty subtracted from the structural prior,
-    which meant the posterior itself never moved and ``confident`` could never
-    become true from it. It is the strongest self-supervised signal available,
-    so it is posted as evidence: a signature raised by many DISTINCT targets is
-    that repository's way of saying no, and that belief is worth up to
-    ``DISPERSION_EVIDENCE_CAP`` pseudo-observations of "not a defect".
-
-    Two guards keep it from running away. A signature seen at fewer than two
-    distinct targets posts nothing — one target is a value-specific failure,
-    which is the interesting case, not a vocabulary. And the posting TOPS UP to
-    ``cap × dispersion`` rather than adding: calling this every run re-derives
-    the same bounded mass from that run's observations instead of compounding.
-
-    Returns the β mass now standing per signature.
-    """
-    posted: dict[str, float] = {}
-    for key, ev in policy.evidence.items():
-        if len(ev.targets) < 2:
-            continue
-        desired = DISPERSION_EVIDENCE_CAP * policy.dispersion(key, total_targets)
-        delta = desired - ev.dispersion_beta
-        if delta > 0.0:
-            ev.beta += delta
-            ev.dispersion_beta = desired
-        if ev.dispersion_beta > 0.0:
-            posted[key] = round(ev.dispersion_beta, 4)
-    return posted
+# NOTE. There used to be an ``apply_dispersion_evidence`` here, posting
+# dispersion as up to 4.0 of β mass "so the posterior can move without a human".
+# It is gone, and deliberately not replaced. Dispersion is a covariate, not an
+# observation: as evidence it exceeded ``MIN_EVIDENCE`` on its own, so a common
+# exception became suppressed AND "confident" with zero labels, and — because
+# suppression is what stops a finding being reported and reporting is what earns
+# a label — nothing could ever revise it. Dispersion still does its job, in
+# ``structural_prior``, where a covariate belongs; the run-level sightings that
+# feed it persist in ``ExceptionEvidence.targets``.

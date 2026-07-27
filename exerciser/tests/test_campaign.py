@@ -281,9 +281,12 @@ def test_a_differential_play_feeds_the_exception_policy(tmp_path: Path):
     assert f"{signature('Refused', 'repo')}#pkg.mod:evaluate" in policy.sites
 
 
-def test_a_crash_play_posts_dispersion_evidence(tmp_path: Path):
-    # The functions runner tops up dispersion self-supervision after each play,
-    # which is what makes the policy able to become confident with no human.
+def test_a_crash_play_posts_no_unlabelled_mass(tmp_path: Path):
+    # The crash runner used to "top up dispersion self-supervision" after every
+    # play, posting beta mass past MIN_EVIDENCE for a signature nobody had ever
+    # adjudicated — suppressed and "confident" at once, and unreportable
+    # thereafter, so the label could never arrive. Dispersion is a covariate
+    # now: the sightings persist and shape the prior, and nothing else moves.
     from exerciser.exception_policy import ExceptionPolicy, signature
 
     key = signature("HouseStyle", "repo")
@@ -314,8 +317,13 @@ def test_a_crash_play_posts_dispersion_evidence(tmp_path: Path):
 
     assert calls["n"] == 1, "the play must really invoke the oracle"
     reloaded = ExceptionPolicy.load(tmp_path, decay=1.0)
-    assert reloaded.evidence[key].beta > 1.0, "dispersion must become real posterior movement"
-    assert reloaded.evidence[key].dispersion_beta > 0
+    ev = reloaded.evidence[key]
+    assert (ev.alpha, ev.beta) == (1.0, 1.0), "a play may not manufacture labels"
+    assert reloaded.label_mass(key) == 0.0
+    _, confident = reloaded.defect_probability(key, provenance="repo", total_targets=10)
+    assert not confident, "never adjudicated is never confident"
+    # The sightings themselves survive — that is what feeds the prior.
+    assert len(ev.targets) == 10
 
 
 def test_every_default_oracle_has_a_runner(tmp_path: Path):

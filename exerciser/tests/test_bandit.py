@@ -103,6 +103,27 @@ def test_selection_favours_the_rewarding_arm():
     assert b.preferred() == "a"
 
 
+def test_exploration_shrinks_as_the_posteriors_sharpen():
+    # What "thompson" actually buys, asserted as behaviour rather than as the
+    # word appearing in the summary. The exploration rate is a CONSEQUENCE of
+    # posterior width: at unchanged win rates, more evidence means the losing
+    # arm is sampled less and less. An epsilon-greedy rule — which the prose
+    # assertion would not have noticed — holds that rate flat at epsilon.
+    def losing_share(evidence: int, draws: int = 4000) -> float:
+        b = EndpointBandit(strategies=("a", "b"))
+        for _ in range(evidence):
+            b.arms["a"].update(Outcome(violations=1))
+            b.arms["b"].update(Outcome())
+        rng = random.Random("thompson")
+        return [b.select(rng) for _ in range(draws)].count("b") / draws
+
+    none, some, plenty = losing_share(0), losing_share(1), losing_share(4)
+    assert none > 0.4, "with no evidence at all the two arms are interchangeable"
+    assert some < none / 2, "one observation already concentrates the draw"
+    assert plenty < some / 10, "and the exploration keeps shrinking with evidence"
+    assert plenty > 0.0, "but never becomes a hard argmax"
+
+
 def test_only_available_strategies_are_used():
     b = EndpointBandit(strategies=("schema_valid", "observed"))
     rng = random.Random("z")
@@ -119,8 +140,23 @@ def test_summary_structure_and_pooling():
     assert summary["pooled"]["schema_valid"]["reward_sum"] == 1.0
     assert summary["pooled"]["schema_valid"]["violations"] == 2
     assert summary["pooled"]["schema_valid"]["plays"] == 1
-    assert "thompson" in summary["selection"]
-    assert "violations per unit cost" in summary["objective"]
+    # The pooled numbers must be the POSTERIORS, not decoration: the arm that
+    # broke an oracle outranks the one that found nothing, and an untouched arm
+    # sits at the uninformative prior. (Asserting the prose in
+    # summary["selection"]/["objective"] pinned nothing — the strings survive
+    # any change of algorithm or objective.)
+    assert (
+        summary["pooled"]["schema_valid"]["posterior_mean"]
+        > summary["pooled"]["schema_negative"]["posterior_mean"]
+    )
+    assert summary["pooled"]["observed"] == {
+        "plays": 0,
+        "reward_sum": 0.0,
+        "violations": 0,
+        "coverage_sum": 0,
+        "posterior_mean": 0.5,
+    }
+    assert summary["per_endpoint"]["EP_x"]["schema_valid"]["alpha"] == 2.0
 
 
 # ---- the enriched action space ---------------------------------------------
@@ -152,7 +188,13 @@ def test_action_bandit_learns_which_technique_pays():
     assert bandit.preferred() == differential
 
     doc = bandit.to_json()
-    assert doc["action_space"] == "target x technique x oracle"
+    # The action space is the TRIPLE — assert the arms are actually keyed by it,
+    # not that a description string says so.
+    assert set(doc["arms"]) == {
+        "GET_health|schema_valid|status",
+        "pkg:evaluate|ast-corpus|differential",
+    }
+    assert doc["preferred"] == differential.to_json()
     # The loop can answer "which technique pays here", which is the question a
     # human actually asks of it.
     assert doc["by_technique"]["ast-corpus"]["violations"] == 30
@@ -233,14 +275,29 @@ def test_bernoulli_updates_post_whole_counts():
 
 
 def test_the_campaign_bandit_bernoulli_ises_by_default():
-    bandit = ActionBandit(actions=(Action("t", "tech", "oracle"),))
-    assert bandit.bernoulli is True
-    assert "bernoulli" in bandit.to_json()["update"]
-    # Without an rng it falls back to the relaxation, so the legacy per-endpoint
-    # callers keep their exact arithmetic.
-    plain = ActionBandit(actions=(Action("t", "tech", "oracle"),))
-    plain.update(Action("t", "tech", "oracle"), Outcome(new_coverage=1))
-    assert plain.arms["t|tech|oracle"].alpha == 1.0 + COVERAGE_BONUS
+    # Asserting "bernoulli" appears in the doc's `update` prose would pass with
+    # the flag ignored. The consequence is arithmetic: with an rng the posterior
+    # moves in WHOLE observations, and only some of the plays score.
+    a = Action("t", "tech", "oracle")
+    bandit = ActionBandit(actions=(a,))
+    rng = random.Random("bits")
+    plays = 30  # deliberately not a multiple of 1/COVERAGE_BONUS: the fractional
+    # rule would land on 1 + 7.5, so integrality alone would not tell them apart.
+    for _ in range(plays):
+        bandit.update(a, Outcome(new_coverage=1), rng=rng)
+    arm = bandit.arms[a.key]
+    assert arm.alpha == int(arm.alpha), "the credit is a bit, not a fraction"
+    assert arm.alpha != 1.0 + plays * COVERAGE_BONUS, "not the fractional relaxation"
+    assert 0.0 < arm.alpha - 1.0 < plays, "and only a share of the plays paid"
+
+    # Opting out keeps the fractional relaxation even when an rng is supplied.
+    opted_out = ActionBandit(actions=(a,), bernoulli=False)
+    opted_out.update(a, Outcome(new_coverage=1), rng=random.Random("bits"))
+    assert opted_out.arms[a.key].alpha == 1.0 + COVERAGE_BONUS
+    # …as does the legacy per-endpoint path, which passes no rng at all.
+    plain = ActionBandit(actions=(a,))
+    plain.update(a, Outcome(new_coverage=1))
+    assert plain.arms[a.key].alpha == 1.0 + COVERAGE_BONUS
 
 
 # ---- the coverage bonus is a learnable prior, not a magic constant -----------

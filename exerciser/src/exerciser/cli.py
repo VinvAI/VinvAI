@@ -30,6 +30,7 @@ from .plan import build_plan
 from .profile import build_profile
 from .regress import replay_suite
 from .run import run_exercise
+from .sandbox import DEFAULT_MAX_COPY_MB, SandboxPolicy
 from .scorecard import build_scorecard
 from .throughput import pick_sweep_endpoint, run_sweep, sweep_path
 from .usl import fit_usl
@@ -77,10 +78,13 @@ verify every endpoint of a service.
   2. exerciser run <repo> --base-url http://127.0.0.1:PORT
        Execute the plan against the live traced service, coverage-guided.
        Writes results.jsonl, bandit.json, issues.json, baselines/*.
-  3. exerciser functions <repo>
+  3. exerciser functions <repo> [--sandbox]
        Drive catalogued entry points and exported functions IN PROCESS
        (isolated workers, per-module deadline). Writes functions.json,
        function_results.jsonl. Needs no running service.
+       --sandbox additionally drives the targets the purity guard refused,
+       inside containment (disposable repo copy, redirected HOME/TMPDIR,
+       network + subprocess blocked), and reports what each one attempted.
   4. exerciser campaign <repo> [--base-url URL] [--budget N]
        Allocate ONE budget across every armed oracle by Thompson sampling over
        (target x technique x oracle) — instead of driving each oracle
@@ -182,9 +186,49 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
     help="Wall-clock seconds per module worker (a hang costs one module).",
 )
 @click.option("--python", default=None, help="Interpreter for the workers (default: this one).")
+@click.option(
+    "--sandbox",
+    is_flag=True,
+    help=(
+        "Also drive the targets the purity guard refused, under containment: a "
+        "disposable copy of the repo, redirected HOME/TMPDIR/XDG_*, network and "
+        "subprocess spawning blocked, POSIX rlimits. Reports what each target "
+        "ATTEMPTED. If isolation cannot be established the targets stay refused."
+    ),
+)
+@click.option(
+    "--sandbox-max-copy-mb",
+    default=DEFAULT_MAX_COPY_MB,
+    show_default=True,
+    help="Refuse to sandbox a repo whose copy would exceed this size.",
+)
+@click.option(
+    "--sandbox-keep-root",
+    is_flag=True,
+    help="Leave the sandbox tree on disk for inspection instead of discarding it.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
-def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbose):
+def functions_cmd(
+    repo_path,
+    service,
+    max_targets,
+    module_timeout,
+    python,
+    sandbox,
+    sandbox_max_copy_mb,
+    sandbox_keep_root,
+    verbose,
+):
     _configure_logging(verbose)
+    policy = (
+        SandboxPolicy(
+            enabled=True,
+            max_copy_mb=sandbox_max_copy_mb,
+            keep_root=sandbox_keep_root,
+        )
+        if sandbox
+        else None
+    )
     try:
         result = run_functions(
             Path(repo_path),
@@ -192,6 +236,8 @@ def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbo
             max_targets=max_targets,
             module_timeout_s=module_timeout,
             python=python,
+            sandbox=sandbox,
+            sandbox_policy=policy,
             logger=logging.getLogger("exerciser.functions"),
         )
     except Exception as exc:
