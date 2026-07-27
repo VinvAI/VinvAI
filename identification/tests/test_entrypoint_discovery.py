@@ -17,7 +17,7 @@ from identification.runner import list_service_apis
 # Mirrors the embedder's shape: ThreadingHTTPServer + BaseHTTPRequestHandler
 # with do_* verb methods dispatching on self.path (literal ==, startswith,
 # and membership in a module-level tuple constant).
-_STDLIB_SERVER = '''\
+_STDLIB_SERVER = """\
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 EMBED_PATHS = ("/v1/embeddings", "/embeddings")
@@ -40,7 +40,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_server(port, engine):
     return ThreadingHTTPServer(("127.0.0.1", port), Handler)
-'''
+"""
 
 
 def _stdlib_repo(tmp_path: Path) -> None:
@@ -65,11 +65,11 @@ def test_stdlib_http_handler_verbs_and_paths_are_discovered(tmp_path: Path) -> N
 
     routes = {(a["method"], a["path"]): a for a in result["apis"]}
     assert set(routes) == {
-        ("GET", "/health"),        # self.path == "/health"
-        ("GET", "/static"),        # self.path.startswith("/static")
+        ("GET", "/health"),  # self.path == "/health"
+        ("GET", "/static"),  # self.path.startswith("/static")
         ("POST", "/v1/embeddings"),  # self.path not in EMBED_PATHS (constant)
         ("POST", "/embeddings"),
-        ("DELETE", "/"),           # no dispatch → root path, not dropped
+        ("DELETE", "/"),  # no dispatch → root path, not dropped
     }
     for (method, _), api in routes.items():
         assert api["framework"] == "http.server"
@@ -92,9 +92,11 @@ def test_stdlib_server_construction_marks_a_service_root(tmp_path: Path) -> None
     assert root["handler"] == "make_server"
     assert root["id"] == "SVC_server"
     # do_* routes also appear in the unified entry-point view as http_api.
-    assert {
-        e["trigger"] for e in result["entrypoints"] if e["kind"] == "http_api"
-    } >= {"GET /health", "POST /v1/embeddings", "DELETE /"}
+    assert {e["trigger"] for e in result["entrypoints"] if e["kind"] == "http_api"} >= {
+        "GET /health",
+        "POST /v1/embeddings",
+        "DELETE /",
+    }
 
 
 def test_wsgiref_and_socketserver_services_are_discovered(tmp_path: Path) -> None:
@@ -147,9 +149,7 @@ def test_plain_class_without_handler_base_is_not_a_service(tmp_path: Path) -> No
     # Abstain-not-guess: a do_GET-looking method on a non-handler class, and a
     # class merely named like a server, must not be reported.
     (tmp_path / "notaserver.py").write_text(
-        "class Client:\n"
-        "    def do_GET(self):\n"
-        "        pass\n",
+        "class Client:\n" "    def do_GET(self):\n" "        pass\n",
         encoding="utf-8",
     )
     _write_index(
@@ -161,37 +161,42 @@ def test_plain_class_without_handler_base_is_not_a_service(tmp_path: Path) -> No
     result = list_service_apis(tmp_path)
 
     assert result["apis"] == []
-    assert all(e["kind"] not in ("service_root", "socket_handler")
-               for e in result["entrypoints"])
+    assert all(e["kind"] not in ("service_root", "socket_handler") for e in result["entrypoints"])
 
 
 def test_fixture_routes_are_flagged_and_sorted_after_production(tmp_path: Path) -> None:
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "api.py").write_text(
-        '@app.get("/real")\ndef real():\n    pass\n', encoding="utf-8",
+        '@app.get("/real")\ndef real():\n    pass\n',
+        encoding="utf-8",
     )
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_api.py").write_text(
-        '@app.get("/from_a_test")\ndef fixture_route():\n    pass\n', encoding="utf-8",
+        '@app.get("/from_a_test")\ndef fixture_route():\n    pass\n',
+        encoding="utf-8",
     )
     (tmp_path / "demo_app").mkdir()
     (tmp_path / "demo_app" / "main.py").write_text(
-        '@app.get("/demo")\ndef demo():\n    pass\n', encoding="utf-8",
+        '@app.get("/demo")\ndef demo():\n    pass\n',
+        encoding="utf-8",
     )
     # A directory only known to be tests via pytest testpaths config.
     (tmp_path / "pyproject.toml").write_text(
-        '[tool.pytest.ini_options]\ntestpaths = ["checks"]\n', encoding="utf-8",
+        '[tool.pytest.ini_options]\ntestpaths = ["checks"]\n',
+        encoding="utf-8",
     )
     (tmp_path / "checks").mkdir()
     (tmp_path / "checks" / "routes.py").write_text(
-        '@app.get("/checked")\ndef checked():\n    pass\n', encoding="utf-8",
+        '@app.get("/checked")\ndef checked():\n    pass\n',
+        encoding="utf-8",
     )
     _write_index(
         tmp_path,
         [
             _chunk("app/api.py:2-3:real", "app/api.py", "real", 2, 3),
-            _chunk("tests/test_api.py:2-3:fixture_route", "tests/test_api.py",
-                   "fixture_route", 2, 3),
+            _chunk(
+                "tests/test_api.py:2-3:fixture_route", "tests/test_api.py", "fixture_route", 2, 3
+            ),
             _chunk("demo_app/main.py:2-3:demo", "demo_app/main.py", "demo", 2, 3),
             _chunk("checks/routes.py:2-3:checked", "checks/routes.py", "checked", 2, 3),
         ],
@@ -202,9 +207,9 @@ def test_fixture_routes_are_flagged_and_sorted_after_production(tmp_path: Path) 
 
     flags = [(a["path"], a["is_test"]) for a in result["apis"]]
     assert flags == [
-        ("/real", False),        # the one production route leads
-        ("/checked", True),      # via pytest testpaths
-        ("/demo", True),         # demo_app segment
+        ("/real", False),  # the one production route leads
+        ("/checked", True),  # via pytest testpaths
+        ("/demo", True),  # demo_app segment
         ("/from_a_test", True),  # tests/ segment + test_ filename
     ]
     assert result["summary"] == {"apis": 4, "test_apis": 3}
@@ -290,9 +295,7 @@ def test_handrolled_stdio_jsonrpc_loops_are_discovered(tmp_path: Path) -> None:
     )
     # Reads stdin but speaks no jsonrpc: NOT a stdio server (conjunction gate).
     (tmp_path / "filter.py").write_text(
-        "import sys\n"
-        "for line in sys.stdin:\n"
-        "    print(line.upper())\n",
+        "import sys\n" "for line in sys.stdin:\n" "    print(line.upper())\n",
         encoding="utf-8",
     )
     _write_index(
@@ -317,7 +320,8 @@ def test_handrolled_stdio_jsonrpc_loops_are_discovered(tmp_path: Path) -> None:
 
 def test_service_kind_taxonomy_covers_every_entry_kind(tmp_path: Path) -> None:
     (tmp_path / "api.py").write_text(
-        '@app.get("/x")\ndef x():\n    pass\n', encoding="utf-8",
+        '@app.get("/x")\ndef x():\n    pass\n',
+        encoding="utf-8",
     )
     (tmp_path / "jobs.py").write_text(
         "@shared_task\ndef crunch():\n    pass\n"
@@ -397,11 +401,13 @@ def test_production_declaration_wins_route_attribution_over_fixture(
     # declaration of the same route must still take over the attribution.
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "fixture.py").write_text(
-        '@app.get("/dup")\ndef fake():\n    pass\n', encoding="utf-8",
+        '@app.get("/dup")\ndef fake():\n    pass\n',
+        encoding="utf-8",
     )
     (tmp_path / "zapp").mkdir()
     (tmp_path / "zapp" / "api.py").write_text(
-        '@app.get("/dup")\ndef dup():\n    pass\n', encoding="utf-8",
+        '@app.get("/dup")\ndef dup():\n    pass\n',
+        encoding="utf-8",
     )
     _write_index(
         tmp_path,
@@ -421,7 +427,7 @@ def test_production_declaration_wins_route_attribution_over_fixture(
     assert result["summary"] == {"apis": 1, "test_apis": 0}
 
 
-_SCRIPT_MAIN = '''\
+_SCRIPT_MAIN = """\
 import logging
 
 logger = logging.getLogger(__name__)
@@ -435,16 +441,16 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-'''
+"""
 
-_SCRIPT_MAIN_EXTERNAL_ONLY = '''\
+_SCRIPT_MAIN_EXTERNAL_ONLY = """\
 import uvicorn
 
 if __name__ == "__main__":
     uvicorn.run("app:app", port=8000)
-'''
+"""
 
-_SCRIPT_MAIN_RUNNER_REF = '''\
+_SCRIPT_MAIN_RUNNER_REF = """\
 import typer
 
 def cli() -> None:
@@ -452,7 +458,7 @@ def cli() -> None:
 
 if __name__ == "__main__":
     typer.run(cli)
-'''
+"""
 
 
 def test_script_main_resolves_guard_called_handler(tmp_path: Path) -> None:
@@ -484,8 +490,8 @@ def test_external_only_guard_has_no_handler() -> None:
     """A guard that only calls library code resolves no handler — the call
     tree builder returns a degraded document for these instead of raising."""
     from identification.runner import _main_guard_handler
-    guard_line = _SCRIPT_MAIN_EXTERNAL_ONLY.splitlines().index(
-        'if __name__ == "__main__":') + 1
-    assert _main_guard_handler(
-        _SCRIPT_MAIN_EXTERNAL_ONLY, guard_line, [{"name": "unrelated"}]
-    ) is None
+
+    guard_line = _SCRIPT_MAIN_EXTERNAL_ONLY.splitlines().index('if __name__ == "__main__":') + 1
+    assert (
+        _main_guard_handler(_SCRIPT_MAIN_EXTERNAL_ONLY, guard_line, [{"name": "unrelated"}]) is None
+    )

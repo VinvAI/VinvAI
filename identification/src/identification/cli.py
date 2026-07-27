@@ -120,19 +120,23 @@ def main() -> None:
 
 @main.command("consolidate", help=_CONSOLIDATE_HELP)
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
-@click.option("--service", default=None,
-              help="Optional service label woven into the output.")
-@click.option("--store-dir", default=None,
-              help="Code index dir (default: <repo>/.vinv/index).")
+@click.option("--service", default=None, help="Optional service label woven into the output.")
+@click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def consolidate_cmd(
-    repo_path: str, service: str | None, store_dir: str | None, verbose: bool,
+    repo_path: str,
+    service: str | None,
+    store_dir: str | None,
+    verbose: bool,
 ) -> None:
     _configure_logging(verbose)
     log = logging.getLogger("identification.consolidate")
     try:
         result = list_service_apis(
-            Path(repo_path), service=service, store_dir=store_dir, logger=log,
+            Path(repo_path),
+            service=service,
+            store_dir=store_dir,
+            logger=log,
         )
     except Exception as exc:  # surface failures as error JSON
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
@@ -142,16 +146,21 @@ def consolidate_cmd(
 
 @main.command("calltree", help=_CALLTREE_HELP)
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
-@click.option("--api-id", required=True,
-              help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).")
-@click.option("--service", default=None,
-              help="Optional service label passed through to consolidation.")
-@click.option("--store-dir", default=None,
-              help="Code index dir (default: <repo>/.vinv/index).")
-@click.option("--max-depth", default=12, show_default=True,
-              help="Maximum recursion depth for the call tree.")
-@click.option("--json", "as_json", is_flag=True,
-              help="Emit the raw JSON result instead of the indented tree.")
+@click.option(
+    "--api-id",
+    required=True,
+    help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).",
+)
+@click.option(
+    "--service", default=None, help="Optional service label passed through to consolidation."
+)
+@click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
+@click.option(
+    "--max-depth", default=12, show_default=True, help="Maximum recursion depth for the call tree."
+)
+@click.option(
+    "--json", "as_json", is_flag=True, help="Emit the raw JSON result instead of the indented tree."
+)
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def calltree_cmd(
     repo_path: str,
@@ -187,21 +196,36 @@ def calltree_cmd(
 
 @main.command("tracemap", help=_TRACEMAP_HELP)
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
-@click.option("--api-id", required=True,
-              help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).")
-@click.option("--trace", default=None,
-              help="tracelens trace.jsonl to overlay (default: probe "
-                   "<repo>/.vinv/captures/vinv-bringup/<service>/trace.jsonl).")
-@click.option("--service", default=None,
-              help="Optional service label; also picks the capture subdir to probe.")
-@click.option("--store-dir", default=None,
-              help="Code index dir (default: <repo>/.vinv/index).")
-@click.option("--max-depth", default=12, show_default=True,
-              help="Maximum recursion depth for the underlying static call tree.")
-@click.option("--request-id", default=None,
-              help="Scope the overlay to a single trace request_id.")
-@click.option("--json", "as_json", is_flag=True,
-              help="Emit the raw JSON result instead of the annotated tree.")
+@click.option(
+    "--api-id",
+    required=True,
+    help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).",
+)
+@click.option(
+    "--trace",
+    default=None,
+    help="tracelens trace.jsonl to overlay (default: probe "
+    "<repo>/.vinv/captures/vinv-bringup/<service>/trace.jsonl).",
+)
+@click.option(
+    "--service",
+    default=None,
+    help="Optional service label; also picks the capture subdir to probe.",
+)
+@click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
+@click.option(
+    "--max-depth",
+    default=12,
+    show_default=True,
+    help="Maximum recursion depth for the underlying static call tree.",
+)
+@click.option("--request-id", default=None, help="Scope the overlay to a single trace request_id.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit the raw JSON result instead of the annotated tree.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def tracemap_cmd(
     repo_path: str,
@@ -241,15 +265,21 @@ def tracemap_cmd(
 
 @main.command("tracesummary", help=_TRACESUMMARY_HELP)
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
-@click.option("--trace", default=None,
-              help="tracelens trace.jsonl to count (default: probe "
-                   "<repo>/.vinv/captures/vinv-bringup/<service>/trace.jsonl).")
-@click.option("--service", default=None,
-              help="Optional service label; also picks the capture subdir to probe.")
-@click.option("--store-dir", default=None,
-              help="Code index dir (default: <repo>/.vinv/index).")
-@click.option("--json", "as_json", is_flag=True,
-              help="Emit the raw JSON result instead of the ranked table.")
+@click.option(
+    "--trace",
+    default=None,
+    help="tracelens trace.jsonl to count (default: probe "
+    "<repo>/.vinv/captures/vinv-bringup/<service>/trace.jsonl).",
+)
+@click.option(
+    "--service",
+    default=None,
+    help="Optional service label; also picks the capture subdir to probe.",
+)
+@click.option("--store-dir", default=None, help="Code index dir (default: <repo>/.vinv/index).")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Emit the raw JSON result instead of the ranked table."
+)
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def tracesummary_cmd(
     repo_path: str,

@@ -46,9 +46,7 @@ class EventReader(Protocol):
 
 
 def _load_schema() -> dict[str, Any]:
-    schema_path = resources.files("lens_contracts.schemas").joinpath(
-        "span_event.schema.json"
-    )
+    schema_path = resources.files("lens_contracts.schemas").joinpath("span_event.schema.json")
     raw = schema_path.read_text(encoding="utf-8")
     return cast(dict[str, Any], json.loads(raw))
 

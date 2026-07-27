@@ -59,9 +59,7 @@ def _benjamini_hochberg(p_values: list[float]) -> list[float]:
     ordered = sorted(enumerate(p_values), key=lambda item: item[1])
     adjusted = [1.0] * count
     running = 1.0
-    for rank, (original_index, p_value) in reversed(
-        list(enumerate(ordered, start=1))
-    ):
+    for rank, (original_index, p_value) in reversed(list(enumerate(ordered, start=1))):
         running = min(running, p_value * count / rank)
         adjusted[original_index] = min(1.0, running)
     return adjusted
@@ -147,9 +145,7 @@ def run_circa(
         row["p_adjusted_bh"] = adjusted_p
     ranked.sort(key=lambda r: (r["p_value"], r["component"]))
     significant = [
-        r
-        for r in ranked
-        if r["p_adjusted_bh"] <= _FDR_Q and r["ks_statistic"] >= _MIN_KS_EFFECT
+        r for r in ranked if r["p_adjusted_bh"] <= _FDR_Q and r["ks_statistic"] >= _MIN_KS_EFFECT
     ]
     payload = {
         "path": "linear_ks",

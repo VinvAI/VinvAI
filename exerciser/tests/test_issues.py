@@ -7,9 +7,14 @@ from exerciser.issues import cluster_failures, issues_document, normalize_signat
 
 def _ex(status=None, error=None, method="POST", path="/x", violation=None, **kw):
     row = {
-        "status": status, "error": error, "method": method, "path": path,
-        "endpoint_id": kw.get("endpoint_id", "EP_x"), "strategy": "schema_valid",
-        "input": {"body": {}}, "input_class": "valid",
+        "status": status,
+        "error": error,
+        "method": method,
+        "path": path,
+        "endpoint_id": kw.get("endpoint_id", "EP_x"),
+        "strategy": "schema_valid",
+        "input": {"body": {}},
+        "input_class": "valid",
     }
     if violation:
         row["invariant_violation"] = violation

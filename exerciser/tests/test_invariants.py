@@ -6,7 +6,7 @@ from exerciser.invariants import MIN_SUPPORT, Observation, learn_invariants
 
 
 def _obs(body, *, out=None, inp=10, idx=1):
-    size = out if out is not None else (len(body) if isinstance(body, (dict, list, str)) else 0)
+    size = out if out is not None else (len(body) if isinstance(body, dict | list | str) else 0)
     return Observation(body=body, output_size=size, input_size=inp, call_index=idx)
 
 
@@ -66,8 +66,12 @@ def test_size_relation_learned_and_rejected():
 def test_laplace_confidence_increases_with_evidence():
     small = [_obs({"email": "a@b.c"}) for _ in range(MIN_SUPPORT)]
     large = [_obs({"email": "a@b.c"}) for _ in range(MIN_SUPPORT * 4)]
-    c_small = next(i for i in learn_invariants(small) if i.field == "email" and i.kind == "never_null").confidence
-    c_large = next(i for i in learn_invariants(large) if i.field == "email" and i.kind == "never_null").confidence
+    c_small = next(
+        i for i in learn_invariants(small) if i.field == "email" and i.kind == "never_null"
+    ).confidence
+    c_large = next(
+        i for i in learn_invariants(large) if i.field == "email" and i.kind == "never_null"
+    ).confidence
     # (s+1)/(n+2): more observations → confidence closer to 1.
     assert c_large > c_small
     assert 0.0 < c_small < c_large < 1.0
@@ -81,7 +85,9 @@ def test_null_bodies_ignored():
 
 
 def test_list_bodied_response_uses_first_record():
-    obs = [_obs([{"id": i, "email": "a@b.c"}, {"id": i + 1, "email": "c@d.e"}], out=2)
-           for i in range(1, MIN_SUPPORT + 2)]
+    obs = [
+        _obs([{"id": i, "email": "a@b.c"}, {"id": i + 1, "email": "c@d.e"}], out=2)
+        for i in range(1, MIN_SUPPORT + 2)
+    ]
     kinds = {(i.kind, i.field) for i in learn_invariants(obs)}
     assert ("never_null", "email") in kinds

@@ -237,6 +237,7 @@ def test_display_form_handler_normalizes_to_trace_symbol(tmp_path):
     """'items-read_items()' (identification's display form) must match the
     trace component '…routes.items.read_items'."""
     import json as _json
+
     from exerciser.coverage import handler_observed_in_trace
 
     cap = tmp_path / ".vinv" / "captures" / "s0" / "app"

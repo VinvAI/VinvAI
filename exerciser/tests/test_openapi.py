@@ -14,23 +14,34 @@ SPEC = {
             "post": {
                 "operationId": "test_email",
                 "requestBody": {
-                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Email"}}}
+                    "content": {
+                        "application/json": {"schema": {"$ref": "#/components/schemas/Email"}}
+                    }
                 },
                 "security": [{"OAuth2": []}],
             }
         },
         "/api/v1/items/{id}": {
-            "get": {"parameters": [
-                {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}
-            ]},
+            "get": {
+                "parameters": [
+                    {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}
+                ]
+            },
         },
         "/api/v1/openapi.json": {"get": {}},  # skipped
     },
-    "components": {"schemas": {"Email": {"type": "object", "properties": {"email_to": {"type": "string"}}}}},
+    "components": {
+        "schemas": {"Email": {"type": "object", "properties": {"email_to": {"type": "string"}}}}
+    },
 }
 
 APIS = [
-    {"id": "POST_utils_test_email", "method": "POST", "path": "/utils/test-email/", "handler": "test_email"},
+    {
+        "id": "POST_utils_test_email",
+        "method": "POST",
+        "path": "/utils/test-email/",
+        "handler": "test_email",
+    },
     {"id": "GET_items_id", "method": "GET", "path": "/items/{id}", "handler": "read_item"},
 ]
 

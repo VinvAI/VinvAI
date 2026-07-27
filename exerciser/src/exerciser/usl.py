@@ -41,8 +41,9 @@ honestly low ``R^2``; the emission gate in ``optimize`` (policy key
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 # Grid-search shape: coarse points per axis, zoom rounds, shrink per round.
 # These control only the optimizer's resolution (~(1/32) * (1/5)^4 ≈ 1e-4 on
@@ -101,8 +102,8 @@ def _sse_and_lambda(
     gg = sum(gi * gi for gi in g)
     if gg <= 0:
         return math.inf, 0.0
-    lam = sum(y * gi for (_, y), gi in zip(pts, g)) / gg
-    sse = sum((y - lam * gi) ** 2 for (_, y), gi in zip(pts, g))
+    lam = sum(y * gi for (_, y), gi in zip(pts, g, strict=False)) / gg
+    sse = sum((y - lam * gi) ** 2 for (_, y), gi in zip(pts, g, strict=False))
     return sse, lam
 
 

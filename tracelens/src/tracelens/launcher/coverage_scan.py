@@ -128,9 +128,7 @@ def _fullname_from_ancestry(f: Path) -> str | None:
     return ".".join(parts) if parts else None
 
 
-def scan_targets(
-    target_packages: Iterable[str], *, roots: Iterable[str] = ()
-) -> dict[str, object]:
+def scan_targets(target_packages: Iterable[str], *, roots: Iterable[str] = ()) -> dict[str, object]:
     """Count public functions per module under each ``--target-package``.
 
     ``roots`` are source-root directories (see ``launcher.targets.split_targets``):

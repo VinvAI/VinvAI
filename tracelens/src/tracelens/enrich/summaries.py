@@ -77,9 +77,7 @@ def summarize(
             keys = sorted(str(k) for k in value.keys())
             out = {
                 "len": len(value),
-                "keys_head": [
-                    "<redacted>" if _sensitive_name(key) else key for key in keys[:5]
-                ],
+                "keys_head": ["<redacted>" if _sensitive_name(key) else key for key in keys[:5]],
             }
         elif isinstance(value, bytes | bytearray):
             out = {"len": len(value)}

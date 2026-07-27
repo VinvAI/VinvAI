@@ -9,6 +9,7 @@ import random
 from click.testing import CliRunner
 
 from exerciser import cli, store
+from exerciser.execute import ProbeResult
 from exerciser.optimize import DEFAULT_USL_MIN_R2, detect_opportunities, policy_path
 from exerciser.throughput import (
     ThroughputResult,
@@ -16,7 +17,6 @@ from exerciser.throughput import (
     run_sweep,
     sweep_path,
 )
-from exerciser.execute import ProbeResult
 from exerciser.usl import fit_usl
 
 

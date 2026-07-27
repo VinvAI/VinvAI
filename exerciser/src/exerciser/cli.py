@@ -20,6 +20,7 @@ from pathlib import Path
 import click
 
 from . import store
+from .concurrency import run_concurrency
 from .differential import run_differential
 from .environment import run_environment
 from .faults import run_faults
@@ -309,6 +310,36 @@ def environment_cmd(repo_path, signature_targets, skip_matrix, timeout, verbose)
             skip_matrix=skip_matrix,
             timeout_s=timeout,
             logger=logging.getLogger("exerciser.environment"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("concurrency")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--target", required=True, help="Callable to probe as module:qualname.")
+@click.option("--kwargs", "kwargs_json", default=None, help="JSON kwargs for each call.")
+@click.option("--workers", default=4, show_default=True, help="Concurrent callers.")
+@click.option("--repeats", default=3, show_default=True, help="Schedule repetitions.")
+@click.option("--call-timeout", default=5.0, show_default=True, help="Per-call deadline (seconds).")
+@click.option("--python", default=None, help="Interpreter for the worker (TARGET's venv).")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def concurrency_cmd(
+    repo_path, target, kwargs_json, workers, repeats, call_timeout, python, verbose
+):
+    _configure_logging(verbose)
+    try:
+        result = run_concurrency(
+            Path(repo_path),
+            target=target,
+            kwargs=json.loads(kwargs_json) if kwargs_json else None,
+            workers=workers,
+            repeats=repeats,
+            call_timeout_s=call_timeout,
+            python=python,
+            logger=logging.getLogger("exerciser.concurrency"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})

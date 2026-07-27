@@ -7,8 +7,13 @@ from exerciser.baseline import apply_baselines, compare_observation, read_baseli
 
 def _obs(pid, status, shape="json:aaa", ep="EP_x"):
     return {
-        "probeId": pid, "endpointId": ep, "method": "GET", "path": "/x",
-        "httpStatus": status, "handler": "h", "shapeHash": shape,
+        "probeId": pid,
+        "endpointId": ep,
+        "method": "GET",
+        "path": "/x",
+        "httpStatus": status,
+        "handler": "h",
+        "shapeHash": shape,
     }
 
 
@@ -22,7 +27,10 @@ def test_status_class_boundaries():
 def test_only_healthy_first_seen_is_recorded(tmp_path):
     v = apply_baselines(tmp_path, [_obs("p1", 500)])
     assert "p1" not in v  # a failing first obs is NOT baselined
-    assert read_baseline(tmp_path, "EP_x") is None or "p1" not in read_baseline(tmp_path, "EP_x")["entries"]
+    assert (
+        read_baseline(tmp_path, "EP_x") is None
+        or "p1" not in read_baseline(tmp_path, "EP_x")["entries"]
+    )
 
     v2 = apply_baselines(tmp_path, [_obs("p2", 200)])
     assert v2["p2"]["verdict"] == "recorded"
@@ -58,5 +66,10 @@ def test_improved_ratchets_baseline(tmp_path):
 
 def test_compare_observation_pure():
     entry = {"statusClass": "2xx-3xx", "httpStatus": 200, "shapeHash": "json:a"}
-    assert compare_observation(entry, {"httpStatus": 500, "shapeHash": "json:a"})["verdict"] == "degraded"
-    assert compare_observation(entry, {"httpStatus": 200, "shapeHash": "json:a"})["verdict"] == "same"
+    assert (
+        compare_observation(entry, {"httpStatus": 500, "shapeHash": "json:a"})["verdict"]
+        == "degraded"
+    )
+    assert (
+        compare_observation(entry, {"httpStatus": 200, "shapeHash": "json:a"})["verdict"] == "same"
+    )

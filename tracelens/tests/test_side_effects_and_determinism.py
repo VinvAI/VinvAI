@@ -44,9 +44,7 @@ def test_schema_accepts_new_optional_fields(tmp_path: Path) -> None:
     import jsonschema
 
     schema = json.loads(
-        resources.files("lens_contracts.schemas")
-        .joinpath("span_event.schema.json")
-        .read_text()
+        resources.files("lens_contracts.schemas").joinpath("span_event.schema.json").read_text()
     )
 
     # Without new fields — still valid.
@@ -71,9 +69,7 @@ def test_side_effect_kind_constrained() -> None:
     import jsonschema
 
     schema = json.loads(
-        resources.files("lens_contracts.schemas")
-        .joinpath("span_event.schema.json")
-        .read_text()
+        resources.files("lens_contracts.schemas").joinpath("span_event.schema.json").read_text()
     )
     bad = _exit_line(side_effects=[{"kind": "made_up", "hash": "f" * 16}])
     with pytest.raises(jsonschema.ValidationError):

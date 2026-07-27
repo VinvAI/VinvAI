@@ -32,9 +32,7 @@ def test_uuid_return_value_does_not_crash(_captured: list[dict]) -> None:
     out = wrapped()  # previously raised TypeError: 'str' object is not callable
     assert out is fixed  # real value passes through unchanged
     assert "payload" not in _captured[0]
-    assert _captured[0]["payload_sha256"] == hashlib.sha256(
-        fixed.hex.encode()
-    ).hexdigest()
+    assert _captured[0]["payload_sha256"] == hashlib.sha256(fixed.hex.encode()).hexdigest()
 
 
 def test_bytes_return_value_hex_encoded(_captured: list[dict]) -> None:
@@ -64,9 +62,7 @@ def test_clock_values_are_hashed_by_default(_captured: list[dict]) -> None:
     assert wrapped() == 1752561000.123456  # real value passes through unchanged
     record = _captured[0]
     assert "value" not in record
-    assert record["payload_sha256"] == hashlib.sha256(
-        repr(1752561000.123456).encode()
-    ).hexdigest()
+    assert record["payload_sha256"] == hashlib.sha256(repr(1752561000.123456).encode()).hexdigest()
 
 
 def test_clock_raw_value_requires_explicit_opt_in(

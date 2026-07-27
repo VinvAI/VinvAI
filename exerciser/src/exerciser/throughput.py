@@ -17,9 +17,10 @@ from __future__ import annotations
 import concurrent.futures
 import time
 from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 from . import store
 from .execute import ProbeResult, execute_probe

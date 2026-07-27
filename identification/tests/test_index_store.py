@@ -126,8 +126,7 @@ def test_delegation_to_a_same_named_function_is_not_mistaken_for_recursion(
     # The FastAPI shape: the route handler and the controller function it
     # delegates to share a name, and only the receiver tells them apart.
     (tmp_path / "routes.py").write_text(
-        '@app.get("/b/{i}")\ndef get_binary(i):\n'
-        "    return binary_controller.get_binary(i)\n",
+        '@app.get("/b/{i}")\ndef get_binary(i):\n' "    return binary_controller.get_binary(i)\n",
         encoding="utf-8",
     )
     (tmp_path / "binary_controller.py").write_text(
@@ -218,9 +217,7 @@ def test_a_ubiquitous_method_call_is_shown_but_never_bound_by_uniqueness(
 
 def test_a_pre_receiver_index_is_refused(tmp_path: Path) -> None:
     (tmp_path / "api.py").write_text("def health():\n    pass\n", encoding="utf-8")
-    store = _write_index(
-        tmp_path, [_chunk("api.py:1-2:health", "api.py", "health", 1, 2)], []
-    )
+    store = _write_index(tmp_path, [_chunk("api.py:1-2:health", "api.py", "health", 1, 2)], [])
     meta = json.loads((store / "meta.json").read_text(encoding="utf-8"))
     meta["version"] = 4
     (store / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
@@ -253,9 +250,7 @@ def test_corrupt_edges_are_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("malicious_path", ["../outside.py", "/tmp/outside.py"])
-def test_index_source_paths_cannot_escape_project(
-    tmp_path: Path, malicious_path: str
-) -> None:
+def test_index_source_paths_cannot_escape_project(tmp_path: Path, malicious_path: str) -> None:
     _write_index(
         tmp_path,
         [_chunk("malicious:1-2:steal", malicious_path, "steal", 1, 2)],
@@ -273,9 +268,7 @@ def test_store_dir_override_is_honoured(tmp_path: Path) -> None:
     )
     custom = tmp_path / "elsewhere" / "index"
     custom.mkdir(parents=True)
-    (custom / "meta.json").write_text(
-        json.dumps({"version": 5, "count": 1}), encoding="utf-8"
-    )
+    (custom / "meta.json").write_text(json.dumps({"version": 5, "count": 1}), encoding="utf-8")
     (custom / "chunks.jsonl").write_text(
         json.dumps(_chunk("api.py:2-3:custom", "api.py", "custom", 2, 3)) + "\n",
         encoding="utf-8",

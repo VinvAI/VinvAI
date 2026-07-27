@@ -329,16 +329,14 @@ def test_fork_child_spans_are_isolated_then_merged_back(tmp_path: Path) -> None:
     # …and by the end those sidecars are MERGED BACK into the trace, because
     # every reader in the repo resolves a capture by globbing `trace.jsonl`
     # exactly: an unmerged sidecar is a capture that never happened.
-    assert not sorted(out.parent.glob(out.name + ".fork-*")), (
-        "fork sidecars must be folded into the main trace, not left on disk"
-    )
+    assert not sorted(
+        out.parent.glob(out.name + ".fork-*")
+    ), "fork sidecars must be folded into the main trace, not left on disk"
     # Three work() calls happened across two processes: 'parent-pre' and
     # 'parent-post' in the parent, 'child' in the fork. Without the merge the
     # trace would carry only the parent's two.
     work_enters = [
-        e
-        for e in events
-        if e.get("event") == "enter" and e.get("component") == "demopkg.main.work"
+        e for e in events if e.get("event") == "enter" and e.get("component") == "demopkg.main.work"
     ]
     assert len(work_enters) == 3, (
         "the forked child's span must appear in the merged trace; got "

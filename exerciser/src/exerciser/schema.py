@@ -42,6 +42,7 @@ def _rng(seed: int, salt: str) -> random.Random:
 
 # ---- format-aware string values --------------------------------------------
 
+
 def _format_value(fmt: str, rng: random.Random, *, valid: bool) -> str:
     """A string honouring (valid) or violating (not valid) a named format."""
     if fmt == "email":
@@ -70,6 +71,7 @@ def _plain_string(rng: random.Random, length: int) -> str:
 
 # ---- per-type scalar generation --------------------------------------------
 
+
 def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str) -> Any:
     enum = schema.get("enum")
     if isinstance(enum, list) and enum:
@@ -83,7 +85,7 @@ def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str) -> Any:
     fmt = schema.get("format")
     min_len = int(schema.get("minLength", 0) or 0)
     max_len = schema.get("maxLength")
-    max_len = int(max_len) if isinstance(max_len, (int, float)) else None
+    max_len = int(max_len) if isinstance(max_len, int | float) else None
     if fmt:
         return _format_value(str(fmt), rng, valid=cls != "negative")
     if cls == "valid":
@@ -109,8 +111,8 @@ def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str) -> Any:
 def _num_bounds(schema: dict[str, Any]) -> tuple[float | None, float | None]:
     lo = schema.get("minimum", schema.get("exclusiveMinimum"))
     hi = schema.get("maximum", schema.get("exclusiveMaximum"))
-    lo = float(lo) if isinstance(lo, (int, float)) and not isinstance(lo, bool) else None
-    hi = float(hi) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else None
+    lo = float(lo) if isinstance(lo, int | float) and not isinstance(lo, bool) else None
+    hi = float(hi) if isinstance(hi, int | float) and not isinstance(hi, bool) else None
     return lo, hi
 
 
@@ -180,7 +182,11 @@ def generate_value(schema: dict[str, Any], seed: int, cls: str, path: str = "$")
         props = schema.get("properties")
         props = props if isinstance(props, dict) else {}
         required = schema.get("required")
-        required = [r for r in required if isinstance(r, str)] if isinstance(required, list) else list(props)
+        required = (
+            [r for r in required if isinstance(r, str)]
+            if isinstance(required, list)
+            else list(props)
+        )
         out: dict[str, Any] = {}
         # negative class drops ONE required field (the first) to test rejection.
         drop = required[0] if cls == "negative" and required else None
@@ -192,7 +198,9 @@ def generate_value(schema: dict[str, Any], seed: int, cls: str, path: str = "$")
             if cls != "negative" and required and name not in required:
                 continue
             child_cls = "valid" if cls == "negative" else cls
-            out[name] = generate_value(sub if isinstance(sub, dict) else {}, seed, child_cls, f"{path}.{name}")
+            out[name] = generate_value(
+                sub if isinstance(sub, dict) else {}, seed, child_cls, f"{path}.{name}"
+            )
         return out
 
     if jtype == "array":

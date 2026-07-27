@@ -34,7 +34,9 @@ def _traffic_only_baseline(repo: Path) -> dict[str, Any]:
 
 
 def build_scorecard(
-    repo: Path, *, service: str | None = None,
+    repo: Path,
+    *,
+    service: str | None = None,
 ) -> dict[str, Any]:
     """Assemble and persist the scorecard from on-disk artifacts."""
     repo = repo.resolve()
@@ -51,16 +53,18 @@ def build_scorecard(
     per_endpoint = []
     for e in endpoints:
         cov = e.get("coverage", {})
-        per_endpoint.append({
-            "endpoint": f"{e['method']} {e['path']}",
-            "coverage": f"{cov.get('covered', 0)}/{cov.get('total', 0)}",
-            "pct": cov.get("pct", 0.0),
-            "handler_observed": cov.get("handler_observed", False),
-            "p50_ms": e.get("latency", {}).get("p50_ms", 0.0),
-            "p95_ms": e.get("latency", {}).get("p95_ms", 0.0),
-            "invariants": len(e.get("invariants", [])),
-            "statuses": e.get("status_distribution", {}),
-        })
+        per_endpoint.append(
+            {
+                "endpoint": f"{e['method']} {e['path']}",
+                "coverage": f"{cov.get('covered', 0)}/{cov.get('total', 0)}",
+                "pct": cov.get("pct", 0.0),
+                "handler_observed": cov.get("handler_observed", False),
+                "p50_ms": e.get("latency", {}).get("p50_ms", 0.0),
+                "p95_ms": e.get("latency", {}).get("p95_ms", 0.0),
+                "invariants": len(e.get("invariants", [])),
+                "statuses": e.get("status_distribution", {}),
+            }
+        )
 
     scorecard: dict[str, Any] = {
         "version": 1,
@@ -104,7 +108,8 @@ def _scenario_health(repo: Path) -> dict[str, Any]:
         "completed": sum(1 for s in scenarios if s.get("completed")),
         "expired": [
             {"name": s.get("name"), "reason": s.get("expired_reason")}
-            for s in scenarios if s.get("expired")
+            for s in scenarios
+            if s.get("expired")
         ],
     }
 
@@ -117,9 +122,7 @@ def _state_pollution(repo: Path) -> dict[str, Any]:
         "created": len(rows),
         "cleaned": sum(1 for r in rows if r.get("cleaned")),
         "uncleaned": len(uncleaned),
-        "uncleaned_endpoints": sorted({
-            f"{r.get('method')} {r.get('path')}" for r in uncleaned
-        }),
+        "uncleaned_endpoints": sorted({f"{r.get('method')} {r.get('path')}" for r in uncleaned}),
     }
 
 
@@ -168,7 +171,8 @@ def render_scorecard_md(sc: dict[str, Any]) -> str:
         f"- Traffic-only baseline (identification tracesummary): "
         f"**{before.get('exercised', 0)}/{before.get('total', 0)}** endpoints exercised",
         f"- After exercising: **{after['endpoints_with_coverage']}/{after['endpoints_total']}** "
-        f"endpoints with coverage · **{after['symbols_covered']}/{after['symbols_total']}** symbols",
+        f"endpoints with coverage · "
+        f"**{after['symbols_covered']}/{after['symbols_total']}** symbols",
         f"- Invariants learned: **{sc['invariants_learned']}** · "
         f"Issue clusters: **{sc['issue_clusters']}**",
         "",

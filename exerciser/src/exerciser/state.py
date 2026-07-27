@@ -26,8 +26,9 @@ Three organs, all generic (no key names, no endpoint knowledge baked in):
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import store
 
@@ -59,7 +60,7 @@ def scalar_values(obj: Any) -> set[str]:
     elif isinstance(obj, dict):
         for v in obj.values():
             out |= scalar_values(v)
-    elif isinstance(obj, (list, tuple)):
+    elif isinstance(obj, list | tuple):
         for v in obj:
             out |= scalar_values(v)
     return out

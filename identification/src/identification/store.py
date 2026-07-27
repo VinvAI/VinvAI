@@ -194,7 +194,8 @@ class RustIndexStore:
 
 
 def open_identification_store(
-    root: Path, override: str | None = None,
+    root: Path,
+    override: str | None = None,
 ) -> IdentificationStore:
     """Open the Rust index store for a repository (``<repo>/.vinv/index``)."""
     root = root.resolve()
@@ -239,8 +240,7 @@ def _read_jsonl(path: Path) -> list[Any]:
             rows.append(json.loads(line))
         except json.JSONDecodeError as exc:
             raise ValueError(
-                f"Corrupt Rust index at {path.parent}: parse {path.name} "
-                f"line {line_no}: {exc}"
+                f"Corrupt Rust index at {path.parent}: parse {path.name} " f"line {line_no}: {exc}"
             ) from exc
     return rows
 

@@ -12,8 +12,10 @@ def test_substitute_whole_string_preserves_type():
 
 
 def test_substitute_recurses():
-    out = substitute({"headers": {"Authorization": "Bearer ${t}"}, "path_params": {"id": "${id}"}},
-                     {"t": "xyz", "id": 7})
+    out = substitute(
+        {"headers": {"Authorization": "Bearer ${t}"}, "path_params": {"id": "${id}"}},
+        {"t": "xyz", "id": 7},
+    )
     assert out["headers"]["Authorization"] == "Bearer xyz"
     assert out["path_params"]["id"] == 7
 
@@ -29,10 +31,26 @@ def test_json_pointer_paths():
 def test_scenario_threads_captured_variables():
     calls: list[dict] = []
 
-    def fake_probe(base, method, path, *, body=None, path_params=None, query=None,
-                   headers=None, content_type=None, exercise_id="x"):
-        calls.append({"method": method, "path": path, "headers": headers or {},
-                      "path_params": path_params or {}})
+    def fake_probe(
+        base,
+        method,
+        path,
+        *,
+        body=None,
+        path_params=None,
+        query=None,
+        headers=None,
+        content_type=None,
+        exercise_id="x",
+    ):
+        calls.append(
+            {
+                "method": method,
+                "path": path,
+                "headers": headers or {},
+                "path_params": path_params or {},
+            }
+        )
         if path == "/login":
             return ProbeResult(200, 1.0, {"access_token": "TOK"}, "json:a", None, None, "json")
         if path == "/items":
@@ -41,12 +59,20 @@ def test_scenario_threads_captured_variables():
 
     steps = [
         {"method": "POST", "path": "/login", "inputs": {}, "capture": {"token": "/access_token"}},
-        {"method": "POST", "path": "/items",
-         "inputs": {"headers": {"Authorization": "Bearer ${token}"}, "body": {"title": "t"}},
-         "capture": {"item_id": "/id"}},
-        {"method": "GET", "path": "/items/${item_id}",
-         "inputs": {"headers": {"Authorization": "Bearer ${token}"},
-                    "path_params": {"item_id": "${item_id}"}}},
+        {
+            "method": "POST",
+            "path": "/items",
+            "inputs": {"headers": {"Authorization": "Bearer ${token}"}, "body": {"title": "t"}},
+            "capture": {"item_id": "/id"},
+        },
+        {
+            "method": "GET",
+            "path": "/items/${item_id}",
+            "inputs": {
+                "headers": {"Authorization": "Bearer ${token}"},
+                "path_params": {"item_id": "${item_id}"},
+            },
+        },
     ]
     res = run_scenario("http://x", "flow", steps, probe_fn=fake_probe)
     assert res.completed

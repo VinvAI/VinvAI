@@ -20,8 +20,9 @@ credentials.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .execute import ProbeResult, execute_probe
 
@@ -145,9 +146,15 @@ def run_scenario(
         content_type = inputs.get("content_type")
 
         res = probe_fn(
-            base_url, method, path,
-            body=body, path_params=path_params, query=query,
-            headers=headers, content_type=content_type, exercise_id=exercise_id,
+            base_url,
+            method,
+            path,
+            body=body,
+            path_params=path_params,
+            query=query,
+            headers=headers,
+            content_type=content_type,
+            exercise_id=exercise_id,
         )
         ok = _step_ok(res.status, step.get("expect"))
         captured: dict[str, Any] = {}
@@ -156,15 +163,17 @@ def run_scenario(
             if val is not None:
                 variables[var] = val
                 captured[var] = val
-        result.steps.append(StepResult(
-            endpoint=f"{method} {path}",
-            status=res.status,
-            ok=ok,
-            captured=captured,
-            error=res.error,
-            shape_hash=res.shape_hash,
-            latency_ms=res.latency_ms,
-        ))
+        result.steps.append(
+            StepResult(
+                endpoint=f"{method} {path}",
+                status=res.status,
+                ok=ok,
+                captured=captured,
+                error=res.error,
+                shape_hash=res.shape_hash,
+                latency_ms=res.latency_ms,
+            )
+        )
         if not ok and stop_on_failure:
             return result
     result.completed = True

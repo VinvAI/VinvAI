@@ -7,36 +7,59 @@ regression diffing, invariant learning — is exercised without a live server.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
-
+from exerciser import store
 from exerciser.execute import ProbeResult
 from exerciser.profile import build_profile
 from exerciser.regress import replay_suite
 from exerciser.run import run_exercise
-from exerciser import store
 
 
 def _write_plan(repo: Path):
     plan = {
-        "status": "ok", "endpoint_count": 2, "input_source": "apis.json",
+        "status": "ok",
+        "endpoint_count": 2,
+        "input_source": "apis.json",
         "endpoints": [
             {
-                "api_id": "GET_health", "method": "GET", "path": "/health",
-                "handler": "health", "inputs": [
-                    {"strategy": "schema_valid", "provenance": "schema", "class": "valid",
-                     "body": None, "path_params": {}, "query": {}},
-                    {"strategy": "schema_negative", "provenance": "schema", "class": "negative",
-                     "body": None, "path_params": {}, "query": {}},
+                "api_id": "GET_health",
+                "method": "GET",
+                "path": "/health",
+                "handler": "health",
+                "inputs": [
+                    {
+                        "strategy": "schema_valid",
+                        "provenance": "schema",
+                        "class": "valid",
+                        "body": None,
+                        "path_params": {},
+                        "query": {},
+                    },
+                    {
+                        "strategy": "schema_negative",
+                        "provenance": "schema",
+                        "class": "negative",
+                        "body": None,
+                        "path_params": {},
+                        "query": {},
+                    },
                 ],
             },
             {
-                "api_id": "POST_items", "method": "POST", "path": "/items",
-                "handler": "create_item", "inputs": [
-                    {"strategy": "schema_valid", "provenance": "schema", "class": "valid",
-                     "body": {"title": "x"}, "path_params": {}, "query": {}},
+                "api_id": "POST_items",
+                "method": "POST",
+                "path": "/items",
+                "handler": "create_item",
+                "inputs": [
+                    {
+                        "strategy": "schema_valid",
+                        "provenance": "schema",
+                        "class": "valid",
+                        "body": {"title": "x"},
+                        "path_params": {},
+                        "query": {},
+                    },
                 ],
             },
         ],
@@ -50,12 +73,23 @@ class FakeService:
     def __init__(self):
         self.counter = 0
 
-    def __call__(self, base, method, path, *, body=None, path_params=None,
-                 query=None, headers=None, exercise_id="x"):
+    def __call__(
+        self,
+        base,
+        method,
+        path,
+        *,
+        body=None,
+        path_params=None,
+        query=None,
+        headers=None,
+        exercise_id="x",
+    ):
         if path == "/health":
             self.counter += 1
-            return ProbeResult(200, 5.0, {"id": self.counter, "status": "ok"},
-                               "json:health", None, None, "json")
+            return ProbeResult(
+                200, 5.0, {"id": self.counter, "status": "ok"}, "json:health", None, None, "json"
+            )
         # /items always crashes (a DB-free endpoint 500ing — the demo's shape).
         return ProbeResult(500, 3.0, {"detail": "no database"}, "json:err", None, None, "json")
 
@@ -68,10 +102,24 @@ def _fake_coverage_factory():
         if api_id == "GET_health":
             seen[api_id] = min(4, seen[api_id] + 1)
             covered = {f"h{i}" for i in range(seen[api_id])}
-            return {"api_id": api_id, "covered_ids": covered, "covered": len(covered),
-                    "total": 4, "pct": 25.0 * len(covered), "uncovered": [], "handler_observed": True}
-        return {"api_id": api_id, "covered_ids": set(), "covered": 0, "total": 4,
-                "pct": 0.0, "uncovered": ["a", "b"], "handler_observed": False}
+            return {
+                "api_id": api_id,
+                "covered_ids": covered,
+                "covered": len(covered),
+                "total": 4,
+                "pct": 25.0 * len(covered),
+                "uncovered": [],
+                "handler_observed": True,
+            }
+        return {
+            "api_id": api_id,
+            "covered_ids": set(),
+            "covered": 0,
+            "total": 4,
+            "pct": 0.0,
+            "uncovered": ["a", "b"],
+            "handler_observed": False,
+        }
 
     return cov
 
@@ -82,8 +130,13 @@ def test_full_loop(tmp_path):
     _write_plan(repo)
 
     result = run_exercise(
-        repo, "http://fake", budget=40, rounds=2, settle_s=0.0,
-        probe_fn=FakeService(), coverage_fn=_fake_coverage_factory(),
+        repo,
+        "http://fake",
+        budget=40,
+        rounds=2,
+        settle_s=0.0,
+        probe_fn=FakeService(),
+        coverage_fn=_fake_coverage_factory(),
     )
     assert result["status"] == "ok"
     assert result["probes_spent"] > 0
@@ -106,8 +159,9 @@ def test_full_loop(tmp_path):
 
 def test_run_without_plan_errors(tmp_path):
     (tmp_path / ".vinv" / "exercise").mkdir(parents=True)
-    result = run_exercise(tmp_path, "http://fake", probe_fn=FakeService(),
-                          coverage_fn=_fake_coverage_factory())
+    result = run_exercise(
+        tmp_path, "http://fake", probe_fn=FakeService(), coverage_fn=_fake_coverage_factory()
+    )
     assert result["status"] == "error"
 
 
@@ -117,16 +171,30 @@ def test_profile_and_regress_over_recorded_results(tmp_path):
     # Hand-write results with a healthy endpoint observed many times → invariants.
     rows = []
     for i in range(1, 8):
-        rows.append({
-            "round": 1, "endpoint_id": "GET_health", "api_id": "GET_health",
-            "method": "GET", "path": "/health", "handler": "health",
-            "strategy": "schema_valid", "provenance": "schema", "input_class": "valid",
-            "input": {"body": None, "path_params": {}, "query": {}},
-            "expected": "2xx", "status": 200, "status_class": "2xx-3xx",
-            "latency_ms": 5.0, "shape_hash": "json:health", "error": None,
-            "request_id": None, "output_size": 2, "input_size": 1,
-            "body": {"id": i, "status": "ok"},
-        })
+        rows.append(
+            {
+                "round": 1,
+                "endpoint_id": "GET_health",
+                "api_id": "GET_health",
+                "method": "GET",
+                "path": "/health",
+                "handler": "health",
+                "strategy": "schema_valid",
+                "provenance": "schema",
+                "input_class": "valid",
+                "input": {"body": None, "path_params": {}, "query": {}},
+                "expected": "2xx",
+                "status": 200,
+                "status_class": "2xx-3xx",
+                "latency_ms": 5.0,
+                "shape_hash": "json:health",
+                "error": None,
+                "request_id": None,
+                "output_size": 2,
+                "input_size": 1,
+                "body": {"id": i, "status": "ok"},
+            }
+        )
     store.write_jsonl(store.results_path(repo), rows)
 
     prof = build_profile(repo)
