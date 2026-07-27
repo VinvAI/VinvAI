@@ -20,6 +20,7 @@ from pathlib import Path
 import click
 
 from . import store
+from .differential import run_differential
 from .functions import run_functions
 from .plan import build_plan
 from .profile import build_profile
@@ -184,6 +185,38 @@ def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbo
             module_timeout_s=module_timeout,
             python=python,
             logger=logging.getLogger("exerciser.functions"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("differential")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--target",
+    default=None,
+    help="One target as module:qualname (default: reference-finder proposals).",
+)
+@click.option(
+    "--reference",
+    default=None,
+    help="Reference implementation: 'cpython-exec' or module:qualname.",
+)
+@click.option(
+    "--timeout", default=60.0, show_default=True, help="Seconds per (target, reference) pair."
+)
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def differential_cmd(repo_path, target, reference, timeout, verbose):
+    _configure_logging(verbose)
+    try:
+        result = run_differential(
+            Path(repo_path),
+            target=target,
+            reference=reference,
+            timeout_s=timeout,
+            logger=logging.getLogger("exerciser.differential"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
