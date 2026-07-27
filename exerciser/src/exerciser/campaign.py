@@ -85,6 +85,13 @@ DEFAULT_MAX_TARGETS = 50
 # Upper bound on the credited-signature ledger persisted in ``campaign.json``.
 # Large enough that a repo's real defect population fits; bounded so the file
 # cannot grow without limit across years of runs.
+#
+# The ledger is kept LEAST-RECENTLY-USED, not sorted. Truncating a sorted set
+# evicted by ALPHABET: past the cap, whichever signatures happened to sort last
+# were dropped — including ones re-found on every single run — and a dropped
+# signature is re-creditable, so the loop pays twice for the same defect. LRU
+# evicts the signature nothing has re-found in the longest time, which is the
+# only eviction order that matches what the ledger is for.
 MAX_CREDITED_SIGNATURES = 5000
 
 HTTP_TECHNIQUES = ("schema_valid", "schema_boundary", "schema_negative")
@@ -671,9 +678,12 @@ def run_campaign(
     # Defects already paid for. A cluster signature credits ONCE, ever: within a
     # run (a deterministic oracle re-finds the same thing on every play of the
     # arm) and across runs (a defect found yesterday must not pay again today).
-    credited_signatures: set[str] = {
+    # An insertion-ordered ledger: oldest first, most recently re-found last.
+    # `dict` rather than `set` precisely so eviction can be LRU (see
+    # `MAX_CREDITED_SIGNATURES`).
+    credited_signatures: dict[str, None] = dict.fromkeys(
         str(s) for s in (prior.get("credited_signatures") or []) if isinstance(s, str)
-    }
+    )
 
     rng = random.Random(seed)
     covered_ground: set[str] = set()
@@ -717,7 +727,11 @@ def run_campaign(
         if play.signatures:
             unique = dict.fromkeys(play.signatures)
             new_signatures = [s for s in unique if s not in credited_signatures]
-            credited_signatures.update(new_signatures)
+            for sig in unique:
+                # Move-to-end on every sighting, not only the first: a signature
+                # this run re-found is the LAST thing that should be evicted.
+                credited_signatures.pop(sig, None)
+                credited_signatures[sig] = None
             violations = len(new_signatures)
             repeats = len(play.signatures) - violations
         else:
@@ -767,8 +781,9 @@ def run_campaign(
         "priors": {"seconds_per_probe_equivalent": SECONDS_PER_PROBE_EQUIVALENT},
         "bandit": bandit_doc,
         # Deliberately NOT decayed like the posteriors: a defect stays found.
-        # Bounded so the file cannot grow without limit on a long-lived repo.
-        "credited_signatures": sorted(credited_signatures)[:MAX_CREDITED_SIGNATURES],
+        # Bounded so the file cannot grow without limit on a long-lived repo,
+        # and bounded from the OLD end — the tail is what this run re-found.
+        "credited_signatures": list(credited_signatures)[-MAX_CREDITED_SIGNATURES:],
     }
     store.write_json(campaign_path(repo), doc)
 

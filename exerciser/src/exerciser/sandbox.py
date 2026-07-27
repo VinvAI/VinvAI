@@ -67,6 +67,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -114,6 +115,57 @@ DEFAULT_EXCLUDES = frozenset(
 # Effect kinds the ledger records. `filesystem-escape` is a write that pointed
 # outside the sandbox root and was therefore refused.
 EFFECT_KINDS = ("filesystem", "filesystem-escape", "network", "subprocess")
+
+# =========================================================================
+# What the shim CANNOT see — and must therefore not report as "no effect"
+# =========================================================================
+#
+# The shim patches Python-level entry points (`builtins.open`, `os.open`, the
+# `os` path family, `socket`, `subprocess`). A module that reaches the syscall
+# from C — `sqlite3.connect` opening a database, `ctypes` calling `open(2)`,
+# a libpq-backed driver writing a socket — goes straight past all of them, and
+# `filesystem_delta` only walks INSIDE the sandbox root, so an absolute path
+# outside it leaves no trace there either.
+#
+# The containment limit is documented and accepted (see the module docstring).
+# The REPORTING limit is not: a row that came back `status: "ok"`, `effects: {}`
+# and an empty ledger was affirmatively claiming the call had no effect. When
+# the static guard already flagged an impurity in one of these modules, the row
+# says the ledger is INCOMPLETE instead.
+C_EXTENSION_IO = "c-extension-io"
+
+# Module roots whose I/O is done in C and is therefore invisible to the shim.
+# Every one of these is also in `functions._IMPURE_MODULE_ROOTS`, so they are
+# precisely the targets the sandbox exists to promote.
+_UNOBSERVABLE_ROOTS: dict[str, str] = {
+    "asyncpg": C_EXTENSION_IO,
+    "ctypes": C_EXTENSION_IO,
+    "mysqldb": C_EXTENSION_IO,
+    "psycopg": C_EXTENSION_IO,
+    "psycopg2": C_EXTENSION_IO,
+    "sqlite3": C_EXTENSION_IO,
+}
+
+# Impurity reasons render the resolved call as `…name()`; this pulls the dotted
+# name back out so the root can be matched against the table above.
+_DOTTED_IN_REASON = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\(\)")
+
+
+def unobservable_effect_classes(reasons: Iterable[str]) -> list[str]:
+    """Effect classes these impurities predict that the shim cannot WITNESS.
+
+    Fed the static reasons the purity guard recorded for a target. A non-empty
+    result means the effect ledger for that target is incomplete — an empty
+    ``effects`` map on its rows is "we could not see", never "nothing happened".
+    """
+    out: set[str] = set()
+    for reason in reasons or ():
+        for dotted in _DOTTED_IN_REASON.findall(str(reason)):
+            klass = _UNOBSERVABLE_ROOTS.get(dotted.split(".")[0].lower())
+            if klass:
+                out.add(klass)
+    return sorted(out)
+
 
 # How many recorded attempts one row may carry, and how many rows the report
 # keeps. A pathological target can attempt thousands of writes; the ledger is
@@ -881,6 +933,11 @@ def _empty_report(policy: SandboxPolicy, candidates: int) -> dict[str, Any]:
         "root_removed": False,
         "effects": [],
         "effect_totals": dict.fromkeys(EFFECT_KINDS, 0),
+        # Targets whose effect ledger is INCOMPLETE, and the count of rows
+        # affected per class. An empty `effects` map on one of these rows means
+        # the shim could not see, not that the call did nothing.
+        "unobservable": [],
+        "unobservable_totals": {},
         "filesystem_delta": [],
         "module_timeouts": [],
         "refused": [],
@@ -948,6 +1005,8 @@ def run_sandboxed_targets(
     effects: list[dict[str, Any]] = []
     deltas: list[dict[str, Any]] = []
     totals = dict.fromkeys(EFFECT_KINDS, 0)
+    unobservable_totals: dict[str, int] = {}
+    unobservable_targets: dict[str, list[str]] = {}
 
     env = sandbox_env(sandbox, extra_pythonpath=[str(Path(__file__).resolve().parents[1])])
     preexec = rlimit_preexec(policy)
@@ -1056,6 +1115,11 @@ def run_sandboxed_targets(
             for row in module_rows:
                 row["sandboxed"] = True
                 row.setdefault("repo_packages", list(repo_packages))
+                classes = [str(c) for c in (row.get("unobservable") or [])]
+                if classes:
+                    unobservable_targets[str(row.get("target_id"))] = classes
+                    for klass in classes:
+                        unobservable_totals[klass] = unobservable_totals.get(klass, 0) + 1
                 for kind, details in (row.get("effects") or {}).items():
                     totals[kind] = totals.get(kind, 0) + len(details)
                     if len(effects) < MAX_EFFECT_ROWS:
@@ -1076,6 +1140,11 @@ def run_sandboxed_targets(
     report["calls"] = sum(1 for r in rows if r.get("phase") == "call")
     report["effects"] = effects
     report["effect_totals"] = totals
+    report["unobservable"] = [
+        {"target_id": tid, "classes": classes}
+        for tid, classes in sorted(unobservable_targets.items())
+    ]
+    report["unobservable_totals"] = dict(sorted(unobservable_totals.items()))
     report["filesystem_delta"] = deltas
     report["module_timeouts"] = timeouts
     log.info(
@@ -1191,13 +1260,21 @@ def _worker_main(argv: list[str]) -> int:
     for target in plan["targets"]:
         qual = str(target["qualname"])
         target_id = f"{module_name}:{qual}"
+        reasons = list(impurities.get(target_id) or [])
         base: dict[str, Any] = {
             "module": module_name,
             "target_id": target_id,
             "sandboxed": True,
             "repo_packages": repo_packages,
-            "refused_for": list(impurities.get(target_id) or [])[:4],
+            "refused_for": reasons[:4],
         }
+        # The static guard flagged an impurity CLASS this process cannot observe
+        # (C-extension I/O). Say so on every row for the target, so an empty
+        # `effects` map is read as "blind here", not as "no effect".
+        unobservable = unobservable_effect_classes(reasons)
+        if unobservable:
+            base["unobservable"] = unobservable
+            base["effects_complete"] = False
         try:
             candidate = getattr(mod, qual, None)
         except Exception:

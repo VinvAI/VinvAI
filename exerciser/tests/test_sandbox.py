@@ -46,12 +46,15 @@ from exerciser.sandbox import (
     sandbox_env,
     snapshot_tree,
     tree_delta,
+    unobservable_effect_classes,
 )
 
 # A note name no developer's home directory could plausibly already contain, so
 # "it is not in the real $HOME" is evidence about the sandbox and nothing else.
 HOME_NOTE = "vinv-sandbox-escape-probe.txt"
 ARTIFACT = "sandbox-artifact.txt"
+ESCAPE_NOTE = "vinv-sandbox-outside-root.txt"
+LEDGER_DB = "vinv-sandbox-ledger.db"
 
 _IMPURE_PKG = {
     "__init__.py": "",
@@ -91,6 +94,41 @@ def probe_shell(tag: str) -> str:
     return str(done.returncode)
 """,
 }
+
+
+def _escaping_pkg(outside: Path) -> dict[str, str]:
+    """A target that writes to a hard-coded ABSOLUTE path outside the tree.
+
+    The path is baked in at repo-build time precisely so no redirection can help
+    it: ``$HOME`` and ``$TMPDIR`` both point inside the sandbox, so a target that
+    writes "to the home directory" is testing REDIRECTION, not the escape guard.
+    """
+    return {
+        "__init__.py": "",
+        "escape.py": (
+            "def write_outside(tag: str) -> str:\n"
+            f"    path = {str(outside / ESCAPE_NOTE)!r}\n"
+            "    with open(path, 'w', encoding='utf-8') as fh:\n"
+            "        fh.write(str(tag))\n"
+            "    return path\n"
+        ),
+    }
+
+
+def _sqlite_pkg(outside: Path) -> dict[str, str]:
+    """A target whose I/O happens in C, where the shim cannot see it."""
+    return {
+        "__init__.py": "",
+        "ledger.py": (
+            "import sqlite3\n\n\n"
+            "def record_entry(tag: str) -> str:\n"
+            f"    path = {str(outside / LEDGER_DB)!r}\n"
+            "    conn = sqlite3.connect(path)\n"
+            "    conn.executescript('CREATE TABLE IF NOT EXISTS t (v TEXT)')\n"
+            "    return path\n"
+        ),
+    }
+
 
 # No chained calls anywhere: the purity walk refuses what it cannot RESOLVE, and
 # `x.strip().lower()` is rooted at a call, so even that is an impurity refusal.
@@ -176,6 +214,22 @@ def test_the_copy_skips_the_disposable_and_honours_gitignore(tmp_path: Path):
     assert report.files == 2, "mod.py and .gitignore only"
     assert report.bytes > 0
     assert report.to_json()["cap_mb"] == pytest.approx(SandboxPolicy().max_copy_mb)
+
+
+def test_the_shims_blind_spots_are_named_from_the_static_reasons():
+    # Which impurity CLASSES the shim cannot witness is decided from what the
+    # purity guard already recorded, not guessed at runtime — the shim by
+    # definition never sees what it cannot see.
+    assert unobservable_effect_classes(["calls sqlite3.connect()"]) == ["c-extension-io"]
+    assert unobservable_effect_classes(["calls ctypes.CDLL() via _load()"]) == ["c-extension-io"]
+    assert unobservable_effect_classes(
+        ["calls .execute() on _conn, built by psycopg2.connect()"]
+    ) == ["c-extension-io"]
+    # Everything the shim DOES intercept stays out of it, or the marker would be
+    # on every row and mean nothing.
+    assert unobservable_effect_classes([]) == []
+    assert unobservable_effect_classes(["calls os.remove()", "opens a file for writing"]) == []
+    assert unobservable_effect_classes(["calls requests.get()", "calls subprocess.run()"]) == []
 
 
 def test_a_repo_too_large_to_copy_refuses_rather_than_running_unsandboxed(tmp_path: Path):
@@ -354,6 +408,46 @@ def test_a_file_writing_target_runs_in_the_sandbox_and_leaves_the_repo_alone(tmp
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix worker spawn")
 def test_a_write_that_would_escape_the_tree_is_refused_and_recorded(tmp_path: Path):
+    # This test used to write to `$HOME`, which the sandbox REDIRECTS into the
+    # tree and therefore permits — so it exercised the redirection and never the
+    # escape guard at all. Neutering the guard to "permit everything" left it
+    # passing. The absolute path below is outside every redirection, which is
+    # the only thing `block_escaping_writes` actually decides about.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    repo = _make_repo(tmp_path / "repo", pkg=_escaping_pkg(outside))
+    probe = outside / ESCAPE_NOTE
+    assert not probe.exists(), "precondition: the probe file must not already exist"
+
+    result = run_functions(
+        repo,
+        module_timeout_s=120.0,
+        explore=False,
+        sandbox_policy=SandboxPolicy(enabled=True, keep_root=True),
+    )
+    report = result["sandbox"]
+    assert report["status"] == "ok", report.get("reason")
+    root = Path(report["root"])
+
+    calls = _for(_rows(repo), "write_outside")
+    assert calls, "the sandbox must actually CALL the refused target"
+    # THE assertion: the REAL absolute path outside the root was never written.
+    assert not probe.exists(), "a write outside the sandbox root must never land"
+    assert not list(root.rglob(ESCAPE_NOTE)), "…and it was refused, not redirected"
+
+    # It is refused as an ESCAPE, and the attempt is recorded as one.
+    attempts = _attempts(report, "write_outside", "filesystem-escape")
+    assert attempts and any(str(probe) in a for a in attempts), attempts
+    assert report["effect_totals"]["filesystem-escape"] > 0
+    assert all(r["status"] == "error" for r in calls)
+    assert all("outside the Vinv sandbox root" in r.get("error", "") for r in calls)
+    # …and the refusal is OUR apparatus, so it is counted, never called a defect.
+    assert all(r["contained"] for r in calls)
+    assert not any("write_outside" in c["title"] for c in result["clusters"])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix worker spawn")
+def test_a_write_to_the_home_directory_is_redirected_into_the_tree(tmp_path: Path):
     repo = _make_repo(tmp_path)
     home_note = Path(os.path.expanduser("~")) / HOME_NOTE
     assert not home_note.exists(), "precondition: the probe file must not already exist"
@@ -367,10 +461,57 @@ def test_a_write_that_would_escape_the_tree_is_refused_and_recorded(tmp_path: Pa
     report = result["sandbox"]
     root = Path(report["root"])
 
-    # $HOME was redirected, so the "home" write landed in the tree…
+    # $HOME is redirected, so the "home" write is PERMITTED and lands in the
+    # tree — a different control from the escape guard, and worth its own test.
     assert not home_note.exists(), "the developer's real home must never be written"
     assert list((root / "home").rglob(HOME_NOTE)), "…it landed in the sandbox home instead"
     assert any(HOME_NOTE in a for a in _attempts(report, "write_home_note", "filesystem"))
+    assert not _attempts(report, "write_home_note", "filesystem-escape")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix worker spawn")
+def test_a_c_extension_write_is_reported_as_unobservable_not_as_no_effect(tmp_path: Path):
+    # `sqlite3` is in the purity guard's impure-module roots, so sqlite3 targets
+    # are exactly what the sandbox PROMOTES — and its I/O is done in C, straight
+    # past `builtins.open`, `os.open` and the socket patches. The containment
+    # limit is documented and accepted. What is not acceptable is the REPORTING:
+    # the row came back `status: "ok"` with `effects: {}` and an empty ledger,
+    # affirmatively claiming the call had no effect while a real database sat on
+    # disk outside the sandbox root.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    repo = _make_repo(tmp_path / "repo", pkg=_sqlite_pkg(outside))
+
+    result = run_functions(
+        repo,
+        module_timeout_s=120.0,
+        explore=False,
+        sandbox_policy=SandboxPolicy(enabled=True, keep_root=True),
+    )
+    report = result["sandbox"]
+    assert report["status"] == "ok", report.get("reason")
+    calls = _for(_rows(repo), "record_entry")
+    assert calls and any(r["status"] == "ok" for r in calls)
+
+    # The honest statement of the limit, on the row itself…
+    assert all(r.get("unobservable") == ["c-extension-io"] for r in calls)
+    assert all(r.get("effects_complete") is False for r in calls)
+    # …in the summary…
+    assert report["unobservable_totals"]["c-extension-io"] >= 1
+    assert any(
+        entry["target_id"].endswith(":record_entry") and entry["classes"] == ["c-extension-io"]
+        for entry in report["unobservable"]
+    )
+    # …and once at the top level, where a reader of the run summary sees it.
+    assert any("INCOMPLETE" in d for d in result["diagnostics"])
+
+    # The evidence that the marker is not decorative: the write really did
+    # escape, and neither the ledger nor the before/after walk saw a thing.
+    assert (outside / LEDGER_DB).exists(), "sqlite3 wrote outside the root, as documented"
+    assert not _attempts(report, "record_entry", "filesystem")
+    assert not _attempts(report, "record_entry", "filesystem-escape")
+    created = [f for delta in report["filesystem_delta"] for f in delta["created"]]
+    assert not any(LEDGER_DB in name for name in created), "the in-root walk is blind to it"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="posix worker spawn")

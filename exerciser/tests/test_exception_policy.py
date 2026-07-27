@@ -331,6 +331,37 @@ def test_a_suppressed_signature_is_still_surfaced_for_adjudication():
     assert surfaced_within is not None, "never surfaced in 100 runs is an absorbing state"
 
 
+def test_one_run_is_one_decision_epoch_so_the_draw_is_memoised():
+    # A run judges the same signature many times — the verdict tally, the
+    # clustering pass, every row at the same call site. Re-drawing θ each time
+    # would make ONE run report a signature in the cluster list and not in the
+    # tally (or one row and not its twin), which is a report a reader cannot
+    # act on. The draw is therefore memoised per (signature, call site) for the
+    # life of the instance, and `new_epoch` is the only thing that clears it.
+    policy = ExceptionPolicy()
+    key = signature("HouseStyle", "repo")
+    for i in range(30):
+        policy.observe(key, target=f"pkg:f{i}", input_class="valid")
+    kwargs = dict(provenance="repo", total_targets=30, conformant=True)
+    rng = random.Random("memoised")
+
+    first = policy.decide(key, target="pkg:f0", rng=rng, **kwargs)
+    again = policy.decide(key, target="pkg:f0", rng=rng, **kwargs)
+    assert again.theta == first.theta, "the same site must not be re-drawn within a run"
+    assert again.reported == first.reported
+
+    # It is memoised per SITE, not globally: a different call site is its own
+    # decision, or one lucky draw would report the signature everywhere.
+    elsewhere = policy.decide(key, target="pkg:f1", rng=rng, **kwargs)
+    assert elsewhere.theta != first.theta
+
+    # …and a NEW epoch (a later run) draws afresh — that is what keeps a
+    # suppressed signature reachable across runs.
+    policy.new_epoch()
+    next_run = policy.decide(key, target="pkg:f0", rng=rng, **kwargs)
+    assert next_run.theta != first.theta
+
+
 def test_labels_are_what_actually_silence_a_signature():
     # The exploration must not make the oracle noisy again: real adjudications
     # sharpen the posterior, and a signature repeatedly called a refusal is

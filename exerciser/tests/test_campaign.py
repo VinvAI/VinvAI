@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from exerciser import campaign as campaign_module
 from exerciser import store
 from exerciser.bandit import Action
 from exerciser.campaign import (
@@ -395,6 +396,45 @@ def test_a_defect_found_yesterday_does_not_pay_again_today(tmp_path: Path):
         runners={"differential": _one_defect_forever("sig-new")},
     )
     assert third["violations"] == 1
+
+
+def _reports(*signatures: str):
+    """A stub oracle that reports a fixed set of cluster signatures every play."""
+
+    def runner(action: Action) -> Play:
+        return Play(violations=1, signatures=signatures, covered=(action.target,))
+
+    return runner
+
+
+def test_the_credited_ledger_evicts_the_least_recently_found_not_the_alphabet(
+    tmp_path: Path, monkeypatch
+):
+    # The ledger is bounded, so past the cap something has to go. Truncating a
+    # SORTED set evicted by alphabet: a signature re-found on every single run
+    # was dropped because its name sorted late, and a dropped signature is
+    # re-creditable — so the loop pays twice for the same defect, for ever.
+    monkeypatch.setattr(campaign_module, "MAX_CREDITED_SIGNATURES", 3)
+    store.write_json(
+        campaign_path(tmp_path),
+        {"version": 1, "credited_signatures": ["zzz-recurring", "b-idle", "c-idle"]},
+    )
+
+    runners = {"differential": _reports("zzz-recurring", "a-new")}
+    first = run_campaign(tmp_path, budget=1, patience=100, actions=[PAYING], runners=runners)
+    assert first["violations"] == 1, "only `a-new` is new; the recurring one was already paid for"
+
+    ledger = store.read_json(campaign_path(tmp_path))["credited_signatures"]
+    assert len(ledger) == 3, "the cap still holds"
+    assert ledger[-1] == "a-new" and "zzz-recurring" in ledger
+    assert "b-idle" not in ledger, "the least recently found signature is the one evicted"
+
+    # The property that matters: because it survived, the recurring defect is
+    # still not re-credited on the next run. Under alphabetical truncation
+    # `zzz-recurring` is gone here and this run pays for it a second time.
+    second = run_campaign(tmp_path, budget=1, patience=100, actions=[PAYING], runners=runners)
+    assert second["violations"] == 0
+    assert second["repeat_violations"] == 2
 
 
 def test_a_runner_that_reports_no_signatures_keeps_its_own_count(tmp_path: Path):

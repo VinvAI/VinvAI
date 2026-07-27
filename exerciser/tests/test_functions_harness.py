@@ -24,12 +24,14 @@ from exerciser.functions import (
     classify_row,
     denial_reason,
     discover_targets,
-    impurity_reasons,
+    discover_with_refusals,
+    impurities_in_source,
     is_denied,
-    module_function_defs,
+    is_test_scaffolding,
     module_imports,
     module_name_for,
     name_segments,
+    receiver_bindings,
     resolved_value_for,
     run_functions,
     value_for,
@@ -189,7 +191,7 @@ def test_test_modules_are_never_importable_targets():
 
 
 def _impurities(source: str, name: str) -> list[str]:
-    return impurity_reasons(name, module_function_defs(source), imports=module_imports(source))
+    return impurities_in_source(source, name)
 
 
 def test_purity_check_sees_what_the_body_does_not_what_it_is_called():
@@ -288,6 +290,107 @@ _BYPASSES = {
         "from os import remove\n\n\ndef tidy(path: str) -> None:\n    remove(path)\n",
         "tidy",
     ),
+    # 7. THE decorator hole. `@_wrap` is an `ast.Name`, not an `ast.Call`, so a
+    #    walk that only inspected `ast.Call` nodes judged the UNDECORATED body
+    #    while `getattr(mod, qualname)` handed back the wrapper. Proven
+    #    end-to-end: the target was discovered with nothing in SKIPPED or
+    #    REFUSED, and calling it wrote a file outside every sandbox.
+    #    `@_wrap()` WITH parens was always caught — it is a Call — so only the
+    #    plainer, commoner spelling got through.
+    "bare-decorator": (
+        "def _wrap(fn):\n"
+        "    def inner(*a, **k):\n"
+        "        with open('/tmp/sentinel', 'w') as fh:\n"
+        "            fh.write('the purity guard let this through')\n"
+        "        return fn(*a, **k)\n\n"
+        "    return inner\n\n\n"
+        "@_wrap\n"
+        "def add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    "bare-decorator-calls-os-remove": (
+        "import os\n\n\n"
+        "def _audit(fn):\n"
+        "    def inner(*a, **k):\n"
+        "        os.remove('/var/lib/app.lock')\n"
+        "        return fn(*a, **k)\n\n"
+        "    return inner\n\n\n"
+        "@_audit\n"
+        "def add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    # 8. Attribute-spelled decorators from objects this guard cannot read.
+    #    Decorated entry points are exactly what `discover_with_refusals`
+    #    prioritises, so these are not exotic shapes.
+    "celery-task-decorator": (
+        "import app\n\n\n@app.task\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    "django-transaction-decorator": (
+        "from django.db import transaction\n\n\n"
+        "@transaction.atomic\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    "imported-decorator": (
+        "from tenacity import retry\n\n\n"
+        "@retry\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    "computed-decorator": (
+        "DECORATORS = {}\n\n\n"
+        "@DECORATORS['audit']\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n",
+        "add_numbers",
+    ),
+    # 9. Module-level receiver objects. Not an import binding, so `_dotted_reason`
+    #    never saw them and the receiver-agnostic method backstop decided — which
+    #    has no entry for `post`, `delete_bucket`, `flushall`, `dispose`,
+    #    `connect` or `send`.
+    "module-level-session": (
+        "import requests\n\n_session = requests.Session()\n\n\n"
+        "def announce(url: str) -> None:\n    _session.post(url)\n",
+        "announce",
+    ),
+    "module-level-boto3-client": (
+        "import boto3\n\n_s3 = boto3.client('s3')\n\n\n"
+        "def tidy(bucket: str) -> None:\n    _s3.delete_bucket(Bucket=bucket)\n",
+        "tidy",
+    ),
+    "module-level-redis": (
+        "import redis\n\n_r = redis.Redis()\n\n\ndef reindex() -> None:\n    _r.flushall()\n",
+        "reindex",
+    ),
+    "module-level-engine": (
+        "from sqlalchemy import create_engine\n\n_e = create_engine('postgres://x')\n\n\n"
+        "def finish() -> None:\n    _e.dispose()\n",
+        "finish",
+    ),
+    "module-level-socket": (
+        "import socket\n\n_s = socket.socket()\n\n\n"
+        "def ping(host: str) -> None:\n    _s.connect((host, 80))\n    _s.send(b'x')\n",
+        "ping",
+    ),
+    # …including an instance of a class defined right here: the method body is
+    # readable, so it is READ rather than assumed inert.
+    "module-level-instance": (
+        "import os\n\n\nclass Store:\n"
+        "    def wipe(self, path):\n        os.remove(path)\n\n\n"
+        "_store = Store()\n\n\ndef refresh(path: str) -> None:\n    _store.wipe(path)\n",
+        "refresh",
+    ),
+    # 10. `os` members that mutate the filesystem or the process and were simply
+    #     missing from the attribute vocabulary. `os.mkfifo` was driven DIRECTLY
+    #     — not even promoted to the sandbox.
+    "os-mkfifo": ("import os\n\n\ndef make(path: str) -> None:\n    os.mkfifo(path)\n", "make"),
+    "os-chdir": ("import os\n\n\ndef enter(path: str) -> None:\n    os.chdir(path)\n", "enter"),
+    "os-setuid": ("import os\n\n\ndef drop(uid: int) -> None:\n    os.setuid(uid)\n", "drop"),
+    "os-umask": ("import os\n\n\ndef relax(mask: int) -> None:\n    os.umask(mask)\n", "relax"),
+    "os-ftruncate": (
+        "import os\n\n\ndef shrink(fd: int) -> None:\n    os.ftruncate(fd, 0)\n",
+        "shrink",
+    ),
+    "os-chroot": ("import os\n\n\ndef jail(path: str) -> None:\n    os.chroot(path)\n", "jail"),
+    "os-utime": ("import os\n\n\ndef touch(path: str) -> None:\n    os.utime(path)\n", "touch"),
+    "os-dup2": ("import os\n\n\ndef swap(a: int, b: int) -> None:\n    os.dup2(a, b)\n", "swap"),
 }
 
 
@@ -329,6 +432,139 @@ def test_a_chain_deeper_than_the_limit_is_refused_rather_than_assumed_harmless()
 def test_a_recursive_helper_terminates():
     source = "def a(n: int) -> int:\n    return 0 if n <= 0 else a(n - 1)\n"
     assert _impurities(source, "a") == []
+
+
+def test_a_decorated_target_whose_decorator_is_pure_is_still_driven():
+    # The decorator rule refuses what it cannot READ, not what it cannot
+    # recognise. A same-module wrapper is readable, so a decorated target whose
+    # wrapper only logs stays drivable — otherwise "judge the decorator" would
+    # just be a slower way of refusing every decorated function in the repo.
+    source = (
+        "import functools\n\n\n"
+        "def _timed(fn):\n"
+        "    @functools.wraps(fn)\n"
+        "    def inner(*args, **kwargs):\n"
+        "        return fn(*args, **kwargs)\n\n"
+        "    return inner\n\n\n"
+        "@_timed\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n"
+    )
+    assert _impurities(source, "add_numbers") == []
+
+
+def test_the_inert_stdlib_decorators_stay_drivable():
+    source = (
+        "import functools\nimport typing\n\n\n"
+        "@functools.lru_cache\ndef square(a: int) -> int:\n    return a * a\n\n\n"
+        "@functools.cache\ndef cube(a: int) -> int:\n    return a**3\n\n\n"
+        "@typing.final\ndef fixed(a: int) -> int:\n    return a\n"
+    )
+    for name in ("square", "cube", "fixed"):
+        assert _impurities(source, name) == [], name
+    # …and through the `from`-import spelling, which resolves to the same thing.
+    aliased = (
+        "from functools import lru_cache\n\n\n@lru_cache\ndef square(a: int) -> int:\n"
+        "    return a * a\n"
+    )
+    assert _impurities(aliased, "square") == []
+
+
+def test_a_pure_method_on_a_local_instance_stays_drivable():
+    # The receiver rule reads the class body; a method that computes rather than
+    # mutates is judged pure, exactly like a same-module function.
+    source = (
+        "class Store:\n    def size(self):\n        return 1\n\n\n"
+        "_store = Store()\n\n\ndef count() -> int:\n    return _store.size()\n"
+    )
+    assert _impurities(source, "count") == []
+
+
+def test_a_receiver_binding_records_what_the_name_holds():
+    bindings = receiver_bindings(
+        "import requests\nimport json\n\n\nclass Store:\n    pass\n\n\n"
+        "_session = requests.Session()\n_store = Store()\n_cfg = json.loads('{}')\n"
+    )
+    assert bindings["_session"] == "module:requests.Session"
+    assert bindings["_store"] == "class:Store"
+    assert "_cfg" not in bindings, "a pure constructor taints nothing"
+
+
+def test_the_xunit_fixture_hooks_are_test_scaffolding():
+    # `setup_module` in a non-test module was promoted into the sandbox: it has
+    # no `test_` anywhere in the name, so the prefix/suffix rule never saw it —
+    # and it IS the fixture, so calling it out of band runs the side effects
+    # without the teardown that was meant to follow.
+    for name in (
+        "setup_module",
+        "teardown_module",
+        "setup_function",
+        "teardown_function",
+        "setUp",
+        "tearDown",
+        "setUpClass",
+        "tearDownClass",
+        "setup_class",
+        "teardown_class",
+        "pkg.mod.setup_module",
+    ):
+        assert is_test_scaffolding(name), name
+    for name in ("setup_logging", "teardown_pipeline", "add", "configure"):
+        assert not is_test_scaffolding(name), name
+
+
+_DECORATED_DESTROYER_PKG = {
+    "__init__.py": "",
+    "calc.py": """\
+import os
+
+
+def _wrap(fn):
+    def inner(*a, **k):
+        os.remove("/var/lib/app/state.db")
+        return fn(*a, **k)
+
+    return inner
+
+
+@_wrap
+def add_numbers(a: int, b: int) -> int:
+    return a + b
+
+
+def total(values: list) -> int:
+    return sum(values)
+""",
+}
+
+
+def test_the_bare_decorated_destroyer_never_becomes_a_target(tmp_path: Path):
+    # End to end, because that is how the bypass was proven: the target was
+    # DISCOVERED with SKIPPED and REFUSED both empty, and the harness then called
+    # the wrapper.
+    repo = _make_repo(tmp_path, pkg=_DECORATED_DESTROYER_PKG)
+    targets, skipped = discover_targets(repo)
+    assert {t.qualname for t in targets} == {"total"}, "the decorated target must not be driven"
+    reasons = {s["id"]: s["reason"] for s in skipped}
+    entry = reasons["targetpkg.calc:add_numbers"]
+    assert "impure-body" in entry and "os.remove" in entry
+
+
+def test_setup_module_is_never_promoted_into_the_sandbox(tmp_path: Path):
+    pkg = {
+        "__init__.py": "",
+        "fixtures.py": (
+            "import os\n\n\ndef setup_module(module=None) -> None:\n"
+            "    os.makedirs('/var/lib/app', exist_ok=True)\n\n\n"
+            "def total(values: list) -> int:\n    return sum(values)\n"
+        ),
+    }
+    repo = _make_repo(tmp_path, pkg=pkg)
+    targets, skipped, refused = discover_with_refusals(repo)
+    assert {t.qualname for t in targets} == {"total"}
+    reasons = {s["id"]: s["reason"] for s in skipped}
+    assert reasons["targetpkg.fixtures:setup_module"] == "test-scaffolding"
+    # Scaffolding is TERMINAL, not recoverable: a fixture belongs to a test
+    # runner, and containment does not change that.
+    assert [r.target.qualname for r in refused] == []
 
 
 def test_an_unresolvable_bare_name_is_refused():
@@ -627,6 +863,28 @@ def test_an_unknown_exception_is_scored_by_what_it_inherits():
 
 def test_healthy_calls_classify_as_nothing():
     assert classify_row({"phase": "call", "status": "ok"}) is None
+
+
+def test_a_contained_import_is_the_sandbox_working_not_an_import_error():
+    # `call_verdict` has its own `contained` check, so the one in `classify_row`
+    # earns its keep on the IMPORT path: a module whose top level opens a socket
+    # dies with SandboxBlocked, and without this the run would report an
+    # `import-error` per contained module — a defect manufactured by our own
+    # apparatus. Deleting the guard makes this row classify as "import-error".
+    row = {
+        "phase": "import",
+        "status": "error",
+        "contained": True,
+        "sandboxed": True,
+        "error_type": "SandboxBlocked",
+        "error_module": "sitecustomize",
+        "error_mro": ["SandboxBlocked", "RuntimeError", "Exception", "BaseException"],
+        "repo_packages": ["targetpkg"],
+    }
+    assert classify_row(row) is None
+    # The control: the SAME import failure without containment IS reported.
+    uncontained = {k: v for k, v in row.items() if k != "contained"}
+    assert classify_row(uncontained) == "import-error"
 
 
 # ---- annotations the harness could not resolve ----------------------------

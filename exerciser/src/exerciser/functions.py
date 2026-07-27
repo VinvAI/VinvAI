@@ -413,14 +413,41 @@ def is_denied(name: str) -> bool:
     return denial_reason(name) is not None
 
 
+# The xunit-style fixture hooks pytest/unittest call around tests. They carry no
+# ``test_`` in the name, so the prefix/suffix rule below never saw them — and a
+# ``setup_module`` is exactly the function that creates the database the tests
+# then use. Lower-cased spellings, so ``setUp``/``tearDownClass`` match too.
+_XUNIT_HOOK_NAMES = frozenset(
+    {
+        "setup",
+        "setup_class",
+        "setup_function",
+        "setup_method",
+        "setup_module",
+        "setupclass",
+        "teardown",
+        "teardown_class",
+        "teardown_function",
+        "teardown_method",
+        "teardown_module",
+        "teardownclass",
+    }
+)
+
+
 def is_test_scaffolding(qualname: str) -> bool:
     """Whether a callable is pytest/unittest scaffolding rather than target code.
 
     A ``test_*`` function is collected and run by a test runner with fixtures;
     calling it out of band with guessed arguments exercises the fixtures'
     real side effects (databases, tmpdirs, network doubles), not the library.
+    The xunit hooks are the same thing one level up: ``setup_module`` IS the
+    fixture, and calling it out of band runs the side effects without the
+    teardown that was supposed to follow.
     """
     low = (qualname or "").rpartition(".")[2].lower()
+    if low in _XUNIT_HOOK_NAMES:
+        return True
     return low.startswith("test_") or low.endswith("_test") or low == "test"
 
 
@@ -530,36 +557,98 @@ _IMPURE_MODULE_ROOTS = frozenset(
 # Modules that are mostly harmless but have a mutating subset. Listing the
 # subset keeps `os.path.join` and `sys.version_info` drivable.
 _IMPURE_MODULE_ATTRS: dict[str, frozenset[str]] = {
+    # Audited against the whole `os` surface: everything that mutates the
+    # FILESYSTEM (contents, metadata, links, devices), the PROCESS (cwd, umask,
+    # identity, descriptors, environment) or spawns/replaces one. Read-only
+    # calls (`stat`, `listdir`, `getcwd`, `os.path.*`) are deliberately absent —
+    # over-blocking costs coverage and buys nothing.
     "os": frozenset(
         {
             "_exit",
             "abort",
+            "chdir",
+            "chflags",
             "chmod",
             "chown",
+            "chroot",
+            "copy_file_range",
+            "dup2",
             "execl",
+            "execle",
+            "execlp",
+            "execlpe",
             "execv",
             "execve",
+            "execvp",
+            "execvpe",
+            "fchdir",
+            "fchmod",
+            "fchown",
             "fork",
+            "forkpty",
+            "ftruncate",
+            "initgroups",
             "kill",
             "killpg",
+            "lchflags",
+            "lchmod",
+            "lchown",
             "link",
             "makedirs",
             "mkdir",
+            "mkfifo",
+            "mknod",
+            "nice",
+            "open",
+            "plock",
             "popen",
+            "posix_fallocate",
+            "posix_spawn",
+            "posix_spawnp",
             "putenv",
+            "pwrite",
+            "pwritev",
             "remove",
             "removedirs",
+            "removexattr",
             "rename",
             "renames",
             "replace",
             "rmdir",
+            "sendfile",
+            "setegid",
+            "seteuid",
+            "setgid",
+            "setgroups",
+            "setpgid",
+            "setpgrp",
+            "setpriority",
+            "setregid",
+            "setresgid",
+            "setresuid",
+            "setreuid",
+            "setsid",
+            "setuid",
+            "setxattr",
             "spawnl",
+            "spawnle",
+            "spawnlp",
+            "spawnlpe",
+            "spawnv",
+            "spawnve",
+            "spawnvp",
+            "spawnvpe",
+            "splice",
+            "startfile",
             "symlink",
             "system",
             "truncate",
+            "umask",
             "unlink",
             "unsetenv",
+            "utime",
             "write",
+            "writev",
         }
     ),
     "sys": frozenset({"exit"}),
@@ -656,6 +745,50 @@ _IMPURE_BARE_CALLS = frozenset(
 # whose bodies are not this repo's to inspect. `_IMPURE_BARE_CALLS` is checked
 # FIRST, so `exec` never reaches this allowlist.
 _BUILTIN_NAMES = frozenset(dir(builtins))
+
+# Decorators that REPLACE the callable and provably add no effect of their own:
+# the builtins that only change how a name is bound, plus the stdlib's
+# memoisation / typing / dispatch wrappers. Matched on the RESOLVED dotted name
+# (`from functools import wraps` → `functools.wraps`) as well as the literal
+# spelling.
+#
+# Everything not on this list is judged, and a wrapper whose body cannot be read
+# is REFUSED. That is the whole point: `getattr(mod, qualname)` returns the
+# DECORATED object, so a guard that judged the undecorated body was judging code
+# that never runs. A bare `@deco` is an `ast.Name`, not an `ast.Call`, which is
+# how the plainest spelling of the commonest shape walked straight past.
+_INERT_DECORATORS = frozenset(
+    {
+        "abc.abstractmethod",
+        "abc.abstractproperty",
+        "classmethod",
+        "contextlib.asynccontextmanager",
+        "contextlib.contextmanager",
+        "dataclasses.dataclass",
+        "enum.member",
+        "enum.nonmember",
+        "enum.unique",
+        "enum.verify",
+        "functools.cache",
+        "functools.cached_property",
+        "functools.lru_cache",
+        "functools.singledispatch",
+        "functools.singledispatchmethod",
+        "functools.total_ordering",
+        "functools.wraps",
+        "property",
+        "staticmethod",
+        "typing.final",
+        "typing.no_type_check",
+        "typing.overload",
+        "typing.runtime_checkable",
+        "typing.type_check_only",
+    }
+)
+
+# How a receiver binding records what the name holds (see `receiver_bindings`).
+_MODULE_TAINT = "module:"
+_CLASS_TAINT = "class:"
 
 # How far a same-module call chain is followed. A wrapper three hops from the
 # `os.remove` is exactly as destructive as the helper; beyond this the walk
@@ -788,22 +921,114 @@ def _nested_definitions(node: ast.AST) -> set[str]:
     }
 
 
+def _decorator_ref(decorator: ast.expr) -> ast.expr:
+    """The expression that NAMES a decorator, for ``@d`` and ``@d(...)`` alike."""
+    return decorator.func if isinstance(decorator, ast.Call) else decorator
+
+
+def _decorator_reason(decorator: ast.expr, imports: dict[str, str], known: set[str]) -> str | None:
+    """Why applying this decorator makes the decorated object unsafe to call.
+
+    ``None`` means one of exactly two things, both of them checkable: the
+    decorator is on the inert list, or it is a same-module name whose body the
+    transitive frontier judges next (``_local_calls`` puts it there). Anything
+    else — a third-party name, an attribute of a module this guard cannot read,
+    a computed expression — is refused, because the object the harness would
+    actually call is the WRAPPER, not the body that was inspected.
+    """
+    ref = _decorator_ref(decorator)
+    if isinstance(ref, ast.Name):
+        name = ref.id
+        dotted = imports.get(name, name)
+        if name in _INERT_DECORATORS or dotted in _INERT_DECORATORS:
+            return None
+        if name in known:
+            return None  # a same-module def: judged through the frontier
+        if name in _CODE_EVAL_NAMES:
+            return f"{CODE_EVALUATION_REASON}: {name}()"
+        reason = _dotted_reason(dotted)
+        return f"decorated by {name} — {reason}" if reason else _undecidable_decorator(name)
+    if isinstance(ref, ast.Attribute):
+        root, attrs = _attr_chain(ref)
+        if isinstance(root, ast.Name):
+            tail = ".".join(attrs)
+            candidates = list(
+                dict.fromkeys([f"{imports.get(root.id, root.id)}.{tail}", f"{root.id}.{tail}"])
+            )
+            if any(c in _INERT_DECORATORS for c in candidates):
+                return None
+            reason = next((r for r in (_dotted_reason(c) for c in candidates) if r), None)
+            rendered = f"{root.id}.{tail}"
+            if reason:
+                return f"decorated by {rendered} — {reason}"
+            return _undecidable_decorator(rendered)
+    # `@registry[name]`, `@make()()`, `@obj.handlers[0]` — computed at runtime.
+    return _INDIRECT_REASON
+
+
+def _undecidable_decorator(rendered: str) -> str:
+    return f"decorated by {rendered}() — wrapper body cannot be verified"
+
+
+def _decorator_names(node: ast.AST) -> set[str]:
+    """Bare names used as decorators anywhere in this body (including on it)."""
+    out: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        for decorator in child.decorator_list:
+            ref = _decorator_ref(decorator)
+            if isinstance(ref, ast.Name):
+                out.add(ref.id)
+    return out
+
+
+def _wrapped_parameter(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The name a decorator binds the function it decorates to, if it takes one.
+
+    Calling a bare PARAMETER is normally an unverifiable indirect call, and it
+    stays one everywhere else. Inside a body reached as a DECORATOR it is not:
+    that parameter holds the very function the guard is judging separately, so
+    ``return fn(*a, **kw)`` in a wrapper is resolved, not unknown. Without this
+    every same-module decorator — including provably inert ones — would refuse
+    its target for the wrapper's unavoidable call back into it.
+    """
+    positional = [*node.args.posonlyargs, *node.args.args]
+    return {positional[0].arg} if positional else set()
+
+
 def _direct_impurities(
     node: ast.AST,
     imports: dict[str, str] | None = None,
     known: set[str] | None = None,
+    receivers: dict[str, str] | None = None,
 ) -> list[str]:
     """World-changing — or unverifiable — calls made directly in one body.
 
     ``imports`` resolves local bindings to real dotted modules; ``known`` is the
-    set of same-module function names the caller will inspect separately. A bare
-    call to anything outside ``known`` ∪ builtins ∪ ``imports`` cannot be
-    resolved to source, and an unresolvable call is treated as impure.
+    set of same-module function (and ``Class.method``) names the caller will
+    inspect separately; ``receivers`` names objects built by an impure module or
+    a same-module class (see ``receiver_bindings``). A bare call to anything
+    outside ``known`` ∪ builtins ∪ ``imports`` cannot be resolved to source, and
+    an unresolvable call is treated as impure.
+
+    DECORATORS are judged here too, and they are judged as calls even when they
+    are written bare: ``@deco`` is an ``ast.Name``, so a walk that only looked at
+    ``ast.Call`` nodes inspected the undecorated body while the harness went on
+    to call the decorated object.
     """
     imports = imports or {}
     known = (known or set()) | _nested_definitions(node)
+    receivers = receivers or {}
     reasons: list[str] = []
     for child in ast.walk(node):
+        # --- decorators: `@deco`, `@deco(...)`, `@mod.deco` ------------------
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            for decorator in child.decorator_list:
+                reason = _decorator_reason(decorator, imports, known)
+                if reason is not None:
+                    reasons.append(reason)
+            continue
         if not isinstance(child, ast.Call):
             continue
         func = child.func
@@ -836,6 +1061,24 @@ def _direct_impurities(
                 continue
             attr = attrs[-1]
             if isinstance(root, ast.Name):
+                # A receiver BUILT by an impure module (`_session =
+                # requests.Session()`) or by a same-module class (`_store =
+                # Store()`). Neither is an import binding, so neither was ever
+                # resolved here — and a module-level client object is a commoner
+                # shape in real code than the aliased import that was fixed.
+                bound = receivers.get(root.id)
+                if bound is not None and bound.startswith(_MODULE_TAINT):
+                    origin = bound[len(_MODULE_TAINT) :]
+                    reasons.append(f"calls .{attr}() on {root.id}, built by {origin}()")
+                    continue
+                if bound is not None and bound.startswith(_CLASS_TAINT):
+                    cls = bound[len(_CLASS_TAINT) :]
+                    if len(attrs) == 1 and f"{cls}.{attr}" in known:
+                        continue  # the method body is judged through the frontier
+                    reasons.append(
+                        f"calls .{attr}() on {root.id} ({cls}) — no readable method body"
+                    )
+                    continue
                 tail = ".".join(attrs)
                 # Both readings, because either one being impure is enough: the
                 # RESOLVED module (`sp.run` -> `subprocess.run`) and the literal
@@ -862,13 +1105,38 @@ def _direct_impurities(
     return sorted(dict.fromkeys(reasons))
 
 
-def _local_calls(node: ast.AST, known: set[str]) -> list[str]:
-    """Same-module helpers this body calls by bare name."""
-    out = {
-        child.func.id
-        for child in ast.walk(node)
-        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-    }
+def _local_calls(
+    node: ast.AST, known: set[str], receivers: dict[str, str] | None = None
+) -> list[str]:
+    """Same-module bodies this one reaches: bare calls, DECORATORS, and methods.
+
+    Decorators count because a decorated target IS the wrapper — the frontier
+    has to reach ``_wrap`` for its body to be judged at all. Methods count when
+    the receiver is a known instance of a same-module class (``_store =
+    Store()`` then ``_store.wipe()``), which is how ``Store.wipe``'s
+    ``os.remove`` becomes visible.
+    """
+    receivers = receivers or {}
+    out: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            for decorator in child.decorator_list:
+                ref = _decorator_ref(decorator)
+                if isinstance(ref, ast.Name):
+                    out.add(ref.id)
+            continue
+        if not isinstance(child, ast.Call):
+            continue
+        if isinstance(child.func, ast.Name):
+            out.add(child.func.id)
+            continue
+        if isinstance(child.func, ast.Attribute):
+            root, attrs = _attr_chain(child.func)
+            if not isinstance(root, ast.Name) or len(attrs) != 1:
+                continue
+            bound = receivers.get(root.id)
+            if bound and bound.startswith(_CLASS_TAINT):
+                out.add(f"{bound[len(_CLASS_TAINT) :]}.{attrs[0]}")
     return sorted(out & known)
 
 
@@ -889,45 +1157,145 @@ def module_function_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFu
     }
 
 
+def module_method_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """``"Class.method"`` → its def, for module-level classes.
+
+    The harness never DRIVES a method — it can only call module-level
+    callables — but it has to be able to JUDGE one: a module-level
+    ``_store = Store()`` makes ``_store.wipe()`` a call into this file, and the
+    only way to know whether that wipes anything is to read ``Store.wipe``.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                out[f"{node.name}.{item.name}"] = item
+    return out
+
+
+def _construction_origin(func: ast.expr, imports: dict[str, str], classes: set[str]) -> str | None:
+    """What a call in ASSIGNMENT position builds, when that is knowable.
+
+    ``_MODULE_TAINT`` + the dotted callable when it comes out of a module whose
+    surface reaches outside the process; ``_CLASS_TAINT`` + the class name when
+    it is a same-module class. ``None`` when the value is anything else — a
+    plain factory, a literal, a call this guard cannot resolve.
+    """
+    if isinstance(func, ast.Name):
+        dotted = imports.get(func.id, func.id)
+        if _dotted_reason(dotted):
+            return _MODULE_TAINT + dotted
+        if func.id in classes:
+            return _CLASS_TAINT + func.id
+        return None
+    if isinstance(func, ast.Attribute):
+        root, attrs = _attr_chain(func)
+        if not isinstance(root, ast.Name):
+            return None
+        tail = ".".join(attrs)
+        for cand in dict.fromkeys([f"{imports.get(root.id, root.id)}.{tail}", f"{root.id}.{tail}"]):
+            if _dotted_reason(cand):
+                return _MODULE_TAINT + cand
+    return None
+
+
+def receiver_bindings(source: str, imports: dict[str, str] | None = None) -> dict[str, str]:
+    """Names bound to an object whose METHODS reach outside this file.
+
+    ``_session = requests.Session()`` binds a receiver whose every method is a
+    network call; ``_store = Store()`` binds one whose methods are right here.
+    Neither name is an import binding, so the attribute-chain walk — which only
+    ever resolved import bindings — fell through to the receiver-agnostic
+    ``_IMPURE_METHOD_NAMES`` backstop and accepted ``_session.post(url)``,
+    ``_s3.delete_bucket(...)``, ``_r.flushall()``, ``_sock.connect(...)``.
+
+    Bindings anywhere in the module count, including inside function bodies: the
+    map is deliberately not scope-aware, because a name that ever holds a client
+    object is not a name this guard should assume is inert somewhere else.
+    """
+    imports = module_imports(source) if imports is None else imports
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    classes = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        origin = _construction_origin(value.func, imports, classes)
+        if origin is None:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                out[target.id] = origin
+    return out
+
+
 def impurity_reasons(
     qualname: str,
     defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
     *,
     imports: dict[str, str] | None = None,
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
+    receivers: dict[str, str] | None = None,
     depth: int = DEFAULT_TRANSITIVE_DEPTH,
 ) -> list[str]:
     """Why calling ``qualname`` would change the world, or ``[]`` when it would not.
 
     Transitive to ``depth`` through same-module helpers: a wrapper whose body is
     one call to ``_really_delete()`` is exactly as destructive as the helper, and
-    an ``a -> b -> c`` chain hides it just as well as one hop did. The walk keeps
-    a visited set, so recursion and cycles terminate; if the chain is still
-    unexhausted at ``depth``, that is REPORTED as an impurity rather than assumed
-    harmless — the same discipline as every other refusal here.
+    an ``a -> b -> c`` chain hides it just as well as one hop did. The frontier
+    also carries DECORATORS (the harness calls the decorated object, so the
+    wrapper's body is the body that runs) and methods reached through a known
+    receiver. The walk keeps a visited set, so recursion and cycles terminate; if
+    the chain is still unexhausted at ``depth``, that is REPORTED as an impurity
+    rather than assumed harmless — the same discipline as every other refusal
+    here.
 
-    ``imports`` should come from ``module_imports`` of the same source, so
-    aliased modules resolve. Passing none is safe but weaker: an aliased
-    ``import subprocess as sp`` then only matches through the literal binding.
+    ``imports``/``methods``/``receivers`` should all come from the same source as
+    ``defs`` (``module_imports``, ``module_method_defs``, ``receiver_bindings``);
+    ``impurities_in_source`` wires them together. Passing none is safe but
+    weaker: an aliased ``import subprocess as sp`` then only matches through the
+    literal binding, and a module-level client object is judged by the
+    receiver-agnostic backstop alone.
     """
     node = defs.get(qualname)
     if node is None:
         return []
-    known = set(defs)
-    reasons = list(_direct_impurities(node, imports, known))
+    bodies: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {**(methods or {}), **defs}
+    known = set(bodies)
+    reasons = list(_direct_impurities(node, imports, known, receivers))
     seen = {qualname}
     frontier = [qualname]
     for _ in range(max(0, depth)):
         nxt: list[str] = []
         for name in frontier:
-            current = defs.get(name)
+            current = bodies.get(name)
             if current is None:
                 continue
-            for callee in _local_calls(current, known):
+            decorators = _decorator_names(current)
+            for callee in _local_calls(current, known, receivers):
                 if callee in seen:
                     continue
                 seen.add(callee)
                 nxt.append(callee)
-                for reason in _direct_impurities(defs[callee], imports, known):
+                body = bodies[callee]
+                scope = known | (_wrapped_parameter(body) if callee in decorators else set())
+                for reason in _direct_impurities(body, imports, scope, receivers):
                     reasons.append(f"{reason} via {callee}()")
         frontier = nxt
     if frontier:
@@ -936,6 +1304,27 @@ def impurity_reasons(
             "— cannot verify"
         )
     return sorted(dict.fromkeys(reasons))
+
+
+def impurities_in_source(
+    source: str, qualname: str, *, depth: int = DEFAULT_TRANSITIVE_DEPTH
+) -> list[str]:
+    """``impurity_reasons`` with every vocabulary read from the SAME source.
+
+    The one entry point callers should use: the imports, the class bodies and
+    the receiver bindings all have to come from the same text as the defs, and
+    wiring three of the four by hand is how a caller ends up with a weaker guard
+    than it thinks it has.
+    """
+    imports = module_imports(source)
+    return impurity_reasons(
+        qualname,
+        module_function_defs(source),
+        imports=imports,
+        methods=module_method_defs(source),
+        receivers=receiver_bindings(source, imports),
+        depth=depth,
+    )
 
 
 def impurity_class(reason: str) -> str:
@@ -986,10 +1375,14 @@ def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
     """Per-function ``{"params", "impurities"}`` for one module's source text."""
     defs = module_function_defs(source)
     imports = module_imports(source)
+    methods = module_method_defs(source)
+    receivers = receiver_bindings(source, imports)
     return {
         name: {
             "params": _ast_params(node),
-            "impurities": impurity_reasons(name, defs, imports=imports),
+            "impurities": impurity_reasons(
+                name, defs, imports=imports, methods=methods, receivers=receivers
+            ),
         }
         for name, node in defs.items()
     }
@@ -2016,6 +2409,19 @@ def run_functions(
             for entry in skipped:
                 if entry["id"] in driven:
                     entry["sandbox"] = "driven-under-containment"
+            blind = sandbox_report.get("unobservable") or []
+            if blind:
+                # Never let an empty effect ledger read as "no effect": the shim
+                # patches Python entry points, and these targets do their I/O
+                # from C. Said once at the top level so it is not only visible to
+                # a reader who opens the per-row detail.
+                classes = sorted({c for entry in blind for c in entry["classes"]})
+                diagnostics.append(
+                    f"sandbox effect ledger INCOMPLETE for {len(blind)} contained target(s) "
+                    f"({', '.join(classes)}) — their recorded effects are a LOWER BOUND, "
+                    "not a claim that nothing happened"
+                )
+                log.warning("functions_sandbox_unobservable %s", classes)
     total_targets = len(targets) + len(refusals)
 
     # Learn from the WHOLE run before judging any of it: dispersion and
