@@ -49,7 +49,7 @@ they only populate the covariates. ``mass()`` counts labels, and ``confident``
 means "labels have been seen", not "the harness has an opinion".
 
 **Reporting is a Thompson draw, not a threshold.** ``is_defect`` draws
-``θ ~ Beta(α, β)`` and reports when ``θ >= REPORT_THRESHOLD``. A greedy
+``θ ~ Beta(α, β)`` and reports when ``max(mean, θ) >= REPORT_THRESHOLD``. A greedy
 threshold on the posterior MEAN is what makes suppression self-sealing under
 partial feedback: a signature is only ever labelled if it is reported, so one
 below-threshold verdict removes the only path by which it could be corrected.
