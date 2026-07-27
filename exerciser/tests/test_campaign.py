@@ -25,6 +25,7 @@ from exerciser.campaign import (
 # Two oracles: one reliably finds violations, the other never does.
 PAYING = Action(target="pkg.mod:evaluate", technique="ast-corpus", oracle="differential")
 BARREN = Action(target="pkg.mod:helper", technique="deterministic", oracle="crash")
+HTTP = Action(target="GET /items", technique="schema_valid", oracle="status")
 
 
 def _runners(paying_violations: int = 1) -> dict:
@@ -324,3 +325,277 @@ def test_every_default_oracle_has_a_runner(tmp_path: Path):
     assert {"crash", "differential", "fault", "concurrency", "status", "environment"} <= set(
         runners
     )
+
+
+# ---- credit is paid ONCE per defect ----------------------------------------
+#
+# The bug: five of six runners returned the run's TOTAL cluster count, so a
+# deterministic oracle re-earned full credit on every play of the same arm.
+# Alpha climbed monotonically on one bug, Thompson concentrated, and because the
+# play never reported zero violations the no-improvement counter could never
+# fire — the campaign burned its whole budget re-finding one known defect and
+# reported it as sustained yield.
+
+
+def _one_defect_forever(signature: str = "sig-deterministic-defect"):
+    """A stub oracle that reports the SAME cluster on every single play."""
+
+    def runner(action: Action) -> Play:
+        return Play(violations=1, signatures=(signature,), covered=(action.target,))
+
+    return runner
+
+
+def test_the_same_defect_is_credited_exactly_once(tmp_path: Path):
+    result = run_campaign(
+        tmp_path,
+        budget=50,
+        patience=3,
+        actions=[PAYING],
+        runners={"differential": _one_defect_forever()},
+    )
+    assert result["violations"] == 1, "one defect pays once, however often it is re-found"
+    credited = [p for p in result["plays"] if p["violations"]]
+    assert len(credited) == 1 and credited[0]["play"] == 1
+    assert result["repeat_violations"] == len(result["plays"]) - 1
+
+    # …and because the repeats credit nothing, the stopping rule can finally see
+    # that the campaign has stopped making progress.
+    assert result["stopped"] == "no-improvement-patience"
+    assert result["plays_run"] == 4, "1 finding + `patience` barren plays"
+
+
+def test_a_defect_found_yesterday_does_not_pay_again_today(tmp_path: Path):
+    runners = {"differential": _one_defect_forever()}
+    first = run_campaign(tmp_path, budget=10, patience=100, actions=[PAYING], runners=runners)
+    assert first["violations"] == 1
+    assert store.read_json(campaign_path(tmp_path))["credited_signatures"] == [
+        "sig-deterministic-defect"
+    ]
+
+    second = run_campaign(tmp_path, budget=10, patience=100, actions=[PAYING], runners=runners)
+    assert second["violations"] == 0, "the ledger must survive the run"
+    assert second["repeat_violations"] == second["plays_run"]
+
+    # A genuinely NEW defect still pays, so the ledger suppresses repeats rather
+    # than the oracle.
+    third = run_campaign(
+        tmp_path,
+        budget=10,
+        patience=100,
+        actions=[PAYING],
+        runners={"differential": _one_defect_forever("sig-new")},
+    )
+    assert third["violations"] == 1
+
+
+def test_a_runner_that_reports_no_signatures_keeps_its_own_count(tmp_path: Path):
+    # There is nothing to dedupe on, so the honest answer is the count it gave.
+    result = run_campaign(
+        tmp_path, budget=5, patience=100, actions=[PAYING], runners=_runners(paying_violations=2)
+    )
+    assert result["violations"] == 10
+    assert result["repeat_violations"] == 0
+
+
+# ---- the adapter layer: result document -> Outcome -------------------------
+#
+# One stub of a fixed shape used to satisfy every runner, which meant the six
+# adapters — the code that decides what a result document is WORTH — were
+# effectively untested. These pin each adapter against a NON-EMPTY cluster list.
+
+
+def _cluster(signature: str, endpoint_id: str = "pkg.mod:evaluate") -> dict:
+    return {
+        "signature": signature,
+        "kind": "crash",
+        "title": "boom",
+        "endpoint_id": endpoint_id,
+        "method": "CALL",
+        "path": endpoint_id,
+        "count": 1,
+    }
+
+
+def _patch(monkeypatch, module: str, name: str, doc: dict) -> list[dict]:
+    """Make ``module.name`` return ``doc``; return the recorded call kwargs."""
+    calls: list[dict] = []
+    mod = __import__(f"exerciser.{module}", fromlist=[name])
+
+    def fake(*args, **kwargs):
+        calls.append(kwargs)
+        return doc
+
+    monkeypatch.setattr(mod, name, fake)
+    return calls
+
+
+def test_the_functions_adapter_credits_only_this_target_s_clusters(tmp_path, monkeypatch):
+    from exerciser.campaign import _functions_runner
+
+    _patch(
+        monkeypatch,
+        "functions",
+        "run_functions",
+        {
+            "targets": 3,
+            "modules": 2,
+            "calls": 9,
+            "verdicts": {"ok": 9},
+            "issue_clusters": 3,
+            "clusters": [
+                _cluster("sig-a"),
+                _cluster("sig-b"),
+                _cluster("sig-elsewhere", endpoint_id="pkg.mod:other"),
+            ],
+        },
+    )
+    play = _functions_runner(OracleConfig(repo=tmp_path))(PAYING)
+    assert play.violations == 2, "a cluster belonging to another target is not this play's"
+    assert play.signatures == ("sig-a", "sig-b")
+    assert play.subprocesses == 2
+    assert play.detail["calls"] == 9
+
+
+def test_the_differential_adapter_reads_clusters_not_the_total(tmp_path, monkeypatch):
+    from exerciser.campaign import _differential_runner
+
+    calls = _patch(
+        monkeypatch,
+        "differential",
+        "run_differential",
+        {
+            # The total and the cluster list disagree; the SIGNATURES are what a
+            # play may be credited for.
+            "mismatch_clusters": 99,
+            "comparisons": 12,
+            "policy_limit_count": 1,
+            "unadjudicated_count": 0,
+            "clusters": [_cluster("sig-diff-1"), _cluster("sig-diff-2")],
+        },
+    )
+    play = _differential_runner(OracleConfig(repo=tmp_path))(PAYING)
+    assert play.violations == 2
+    assert play.signatures == ("sig-diff-1", "sig-diff-2")
+    assert calls[0]["target"] == PAYING.target
+    assert play.detail["comparisons"] == 12
+
+
+def test_the_faults_adapter_passes_the_boundary_contract_through(tmp_path, monkeypatch):
+    from exerciser.campaign import _faults_runner
+
+    class _Boundary:
+        contract = {"kind": "queue"}
+        baseline = {"latency_ms": 3}
+
+    calls = _patch(
+        monkeypatch,
+        "faults",
+        "run_faults",
+        {
+            "issue_clusters": 1,
+            "faults_injected": 7,
+            "clusters": [_cluster("sig-fault")],
+        },
+    )
+    cfg = OracleConfig(repo=tmp_path, boundaries={PAYING.target: _Boundary()})
+    play = _faults_runner(cfg)(PAYING)
+    assert play.violations == 1 and play.signatures == ("sig-fault",)
+    assert calls[0]["contract"] == {"kind": "queue"}
+    assert calls[0]["baseline"] == {"latency_ms": 3}
+    assert play.detail["faults_injected"] == 7
+
+
+def test_the_concurrency_adapter_forwards_workers_and_repeats(tmp_path, monkeypatch):
+    from exerciser.campaign import _concurrency_runner
+
+    calls = _patch(
+        monkeypatch,
+        "concurrency",
+        "run_concurrency",
+        {
+            "issue_clusters": 2,
+            "worker_timed_out": True,
+            "clusters": [_cluster("sig-race-1"), _cluster("sig-race-2")],
+        },
+    )
+    play = _concurrency_runner(OracleConfig(repo=tmp_path, workers=8, repeats=5))(PAYING)
+    assert play.violations == 2
+    assert calls[0]["workers"] == 8 and calls[0]["repeats"] == 5
+    assert play.detail["worker_timed_out"] is True
+
+
+def test_the_environment_adapter_turns_its_clusters_into_violations(tmp_path, monkeypatch):
+    from exerciser.campaign import _environment_runner
+
+    _patch(
+        monkeypatch,
+        "environment",
+        "run_environment",
+        {
+            "status": "ok",
+            "issue_clusters": 1,
+            "clusters": [_cluster("sig-drift")],
+        },
+    )
+    play = _environment_runner(OracleConfig(repo=tmp_path))(PAYING)
+    assert play.violations == 1 and play.signatures == ("sig-drift",)
+    assert play.detail["status"] == "ok"
+
+
+# ---- the HTTP adapter's cumulative arithmetic ------------------------------
+
+
+def test_the_http_adapter_credits_only_what_is_new_in_a_cumulative_file(tmp_path, monkeypatch):
+    # issues.json accumulates across plays. Crediting its total each time would
+    # pay every later play for every earlier play's clusters.
+    from exerciser.campaign import _http_runner
+
+    doc = {"issue_clusters": 0, "probes_spent": 20}
+    _patch(monkeypatch, "run", "run_exercise", doc)
+    cfg = OracleConfig(repo=tmp_path, base_url="http://localhost:1")
+    runner = _http_runner(cfg)
+
+    store.write_json(store.issues_path(tmp_path), {"clusters": [_cluster("sig-500-a")]})
+    first = runner(PAYING)
+    assert first.violations == 1 and first.signatures == ("sig-500-a",)
+    assert first.detail["probes_spent"] == 20
+
+    # Second play: the file now holds the old cluster PLUS a new one.
+    store.write_json(
+        store.issues_path(tmp_path),
+        {"clusters": [_cluster("sig-500-a"), _cluster("sig-500-b")]},
+    )
+    second = runner(PAYING)
+    assert second.signatures == ("sig-500-a", "sig-500-b")
+
+    # The adapter reports the whole cumulative file every play; the campaign is
+    # what pays, and it pays for each signature exactly once.
+    result = run_campaign(
+        tmp_path, budget=2, patience=100, actions=[HTTP], runners={"status": runner}
+    )
+    assert result["violations"] == 2, "two distinct clusters, credited once each"
+    assert [p["violations"] for p in result["plays"]] == [2, 0]
+    assert result["repeat_violations"] == 2
+
+
+def test_the_http_adapter_falls_back_to_the_count_delta(tmp_path, monkeypatch):
+    # No readable issues.json (an older run, or a partial write): the adapter
+    # still must not re-credit, so it falls back to the DELTA in the count.
+    from exerciser.campaign import _http_runner
+
+    doc = {"issue_clusters": 1, "probes_spent": 20}
+    _patch(monkeypatch, "run", "run_exercise", doc)
+    runner = _http_runner(OracleConfig(repo=tmp_path, base_url="http://localhost:1"))
+
+    assert runner(PAYING).violations == 1
+    assert runner(PAYING).violations == 0, "the same cumulative total is not a new finding"
+    doc["issue_clusters"] = 3
+    assert runner(PAYING).violations == 2
+
+
+def test_the_http_adapter_refuses_to_run_without_a_base_url(tmp_path):
+    from exerciser.campaign import _http_runner
+
+    play = _http_runner(OracleConfig(repo=tmp_path))(HTTP)
+    assert play.error == "no base_url" and play.violations == 0

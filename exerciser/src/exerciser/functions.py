@@ -41,9 +41,13 @@ Refusing to call
    called, its body is parsed out of the source and inspected for calls that
    mutate the world outside the process: filesystem writes/removals, process
    spawning, network clients, database ``execute``/``commit``/``drop``, and
-   interpreter exit. Same-module helpers it calls are inspected too (depth 1).
-   This scales to a repo nobody has read, because it judges what the code DOES
-   rather than what it is called.
+   interpreter exit. Import ALIASES are resolved first (``import os as _os``
+   binds ``_os`` to ``os``), same-module helpers it calls are inspected too
+   (transitively, to ``DEFAULT_TRANSITIVE_DEPTH``), and anything the walk cannot
+   RESOLVE — an indirect call target, an unknown bare name, a chain deeper than
+   the depth limit — counts as impure rather than being skipped. This scales to
+   a repo nobody has read, because it judges what the code DOES rather than what
+   it is called.
 2. **Destructive-verb vocabulary (backstop).** For the cases source cannot be
    read, or where the damage happens through a library the pre-check does not
    know, the identifier is split into word segments (on ``_``/``.`` and
@@ -59,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import importlib
 import inspect
 import json
@@ -540,6 +545,24 @@ _IMPURE_MODULE_ATTRS: dict[str, frozenset[str]] = {
 
 # Method names that mean the same thing on every receiver: a DB cursor/session
 # commit, a schema drop, a path being unlinked or written.
+#
+# The second block was added after an audit showed the receiver-agnostic backstop
+# had no entry for the most common destructive calls in real code. Each costs
+# some coverage on a pure receiver, and each is taken deliberately:
+#
+# * ``remove``  — ``os.remove``/``Path.remove``/``set.remove`` share a name; the
+#   list-mutation case is the price of catching the filesystem one.
+# * ``run``     — ``subprocess.run`` under any receiver (``sp.run``, ``self.run``).
+# * ``move``/``rename`` — ``shutil.move``, ``Path.rename``: a file leaves its path.
+# * ``delete``/``flush`` — the ORM pair (``session.delete``, ``session.flush``);
+#   ``flush`` on a file object is a write reaching the disk, so both readings
+#   are impure.
+# * ``truncate`` — a file or a table losing its contents.
+#
+# ``close`` is deliberately NOT here: it is overwhelmingly a resource release on
+# a receiver that was only read, so it would refuse a large share of pure targets
+# for no safety gained — a closed handle changes nothing outside the process that
+# opening it did not already.
 _IMPURE_METHOD_NAMES = frozenset(
     {
         "commit",
@@ -564,38 +587,150 @@ _IMPURE_METHOD_NAMES = frozenset(
         "urlopen",
         "write_bytes",
         "write_text",
+        # --- added by the aliasing/indirect-dispatch audit ---
+        "delete",
+        "flush",
+        "move",
+        "remove",
+        "rename",
+        "run",
+        "truncate",
     }
 )
 
-# Bare names that only ever come from `from subprocess import …`-style imports.
+# Builtins that hand control to source this guard has never read. They are their
+# own IMPURITY CLASS (see `impurity_class`) because one consumer — the
+# differential oracle — exists precisely to drive code evaluators through its own
+# corpus, while the in-process crash harness must refuse them.
+_CODE_EVAL_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
+CODE_EVALUATION_REASON = "evaluates source text"
+
+# Bare names that only ever come from `from subprocess import …`-style imports,
+# plus the builtins that rebind the names this guard reasoned about
+# (`globals`/`locals`/`setattr`/`delattr`).
 _IMPURE_BARE_CALLS = frozenset(
     {
         "Popen",
         "check_call",
         "check_output",
+        "delattr",
         "exit",
         "getoutput",
+        "globals",
+        "locals",
         "quit",
         "removedirs",
         "rmdir",
         "rmtree",
+        "setattr",
         "system",
         "unlink",
         "urlopen",
     }
 )
 
+# Builtins are the one family of bare names that resolve without an import and
+# whose bodies are not this repo's to inspect. `_IMPURE_BARE_CALLS` is checked
+# FIRST, so `exec` never reaches this allowlist.
+_BUILTIN_NAMES = frozenset(dir(builtins))
+
+# How far a same-module call chain is followed. A wrapper three hops from the
+# `os.remove` is exactly as destructive as the helper; beyond this the walk
+# REFUSES rather than assumes (see `impurity_reasons`).
+DEFAULT_TRANSITIVE_DEPTH = 3
+
+# Expression kinds that may sit at the root of an attribute chain and still leave
+# the call verifiable: a name (resolved against the imports) or a literal
+# (`"a,b".split(",")`, `[].append(x)`). Anything else — a call, a subscript, a
+# lambda, an await — means the receiver is computed at runtime and the guard
+# cannot know what it is.
+_VERIFIABLE_ROOTS = (
+    ast.Name,
+    ast.Constant,
+    ast.JoinedStr,
+    ast.List,
+    ast.Tuple,
+    ast.Dict,
+    ast.Set,
+)
+
+_INDIRECT_REASON = "indirect call target — cannot verify"
+
 # `open(path, mode)` is a write when the mode says so.
 _WRITE_MODE_CHARS = frozenset({"w", "a", "x", "+"})
 _OPEN_NAMES = frozenset({"open"})
 
 
-def _call_root(node: ast.expr) -> str | None:
-    """Leftmost ``Name`` of an attribute chain: ``a.b.c(...)`` → ``a``."""
+def _attr_chain(node: ast.expr) -> tuple[ast.expr, list[str]]:
+    """Split an attribute chain into its root expression and attribute names.
+
+    ``a.b.c`` → ``(Name('a'), ['b', 'c'])``. The root is returned as an
+    EXPRESSION rather than a name so the caller can tell "rooted at a name it can
+    resolve" from "rooted at something computed at runtime".
+    """
+    attrs: list[str] = []
     cur = node
     while isinstance(cur, ast.Attribute):
+        attrs.append(cur.attr)
         cur = cur.value
-    return cur.id if isinstance(cur, ast.Name) else None
+    attrs.reverse()
+    return cur, attrs
+
+
+def module_imports(source: str) -> dict[str, str]:
+    """Local binding name → the dotted module path it actually refers to.
+
+    This is what makes the module vocabularies mean anything. The old walk
+    handed the local BINDING name straight to ``_IMPURE_MODULE_ROOTS``, so
+    ``import subprocess as sp`` defeated the whole check — the set has no ``sp``
+    in it. Resolving the alias first is the fix::
+
+        import os as _os          -> {"_os": "os"}
+        import os.path            -> {"os": "os"}
+        import a.b as c           -> {"c": "a.b"}
+        from os import remove     -> {"remove": "os.remove"}
+        from os.path import join  -> {"join": "os.path.join"}
+        from . import helper      -> {"helper": ".helper"}   (never a stdlib root)
+
+    Imports made INSIDE a function body count too: ``def stop(): import sys;
+    sys.exit(1)`` is exactly the shape the guard exists for.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    out[alias.asname] = alias.name
+                else:
+                    # `import a.b` binds only `a`.
+                    head = alias.name.split(".")[0]
+                    out[head] = head
+        elif isinstance(node, ast.ImportFrom):
+            # A relative import names a module inside THIS repo, never a stdlib
+            # root; the leading dots keep it from colliding with one.
+            dots = "." * (node.level or 0)
+            base = dots + (node.module or "")
+            prefix = base if base.endswith(".") or not base else base + "."
+            for alias in node.names:
+                if alias.name == "*":
+                    continue  # a star import binds names this guard cannot enumerate
+                out[alias.asname or alias.name] = prefix + alias.name
+    return out
+
+
+def _dotted_reason(dotted: str) -> str | None:
+    """Whether a resolved dotted call target reaches outside the process."""
+    parts = dotted.split(".")
+    root = parts[0].lower()
+    if root in _IMPURE_MODULE_ROOTS:
+        return f"calls {dotted}()"
+    if parts[-1] in _IMPURE_MODULE_ATTRS.get(root, frozenset()):
+        return f"calls {dotted}()"
+    return None
 
 
 def _is_write_open(call: ast.Call) -> bool:
@@ -617,35 +752,90 @@ def _is_write_open(call: ast.Call) -> bool:
     return True
 
 
-def _direct_impurities(node: ast.AST) -> list[str]:
-    """World-changing calls made directly in one function body."""
+def _nested_definitions(node: ast.AST) -> set[str]:
+    """Names ``def``/``class``-bound INSIDE this body.
+
+    Their bodies are inside ``node``, so ``ast.walk`` already judged them; a call
+    to one is therefore resolved, not unverifiable.
+    """
+    return {
+        child.name
+        for child in ast.walk(node)
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    }
+
+
+def _direct_impurities(
+    node: ast.AST,
+    imports: dict[str, str] | None = None,
+    known: set[str] | None = None,
+) -> list[str]:
+    """World-changing — or unverifiable — calls made directly in one body.
+
+    ``imports`` resolves local bindings to real dotted modules; ``known`` is the
+    set of same-module function names the caller will inspect separately. A bare
+    call to anything outside ``known`` ∪ builtins ∪ ``imports`` cannot be
+    resolved to source, and an unresolvable call is treated as impure.
+    """
+    imports = imports or {}
+    known = (known or set()) | _nested_definitions(node)
     reasons: list[str] = []
     for child in ast.walk(node):
         if not isinstance(child, ast.Call):
             continue
         func = child.func
+
+        # --- bare name: `f(...)` -------------------------------------------
         if isinstance(func, ast.Name):
             name = func.id
             if name in _OPEN_NAMES and _is_write_open(child):
                 reasons.append("opens a file for writing")
+            elif name in _CODE_EVAL_NAMES:
+                reasons.append(f"{CODE_EVALUATION_REASON}: {name}()")
             elif name in _IMPURE_BARE_CALLS:
                 reasons.append(f"calls {name}()")
+            elif name in imports:
+                # `from os import remove` then a bare `remove(path)`: judged on
+                # the module it really came from.
+                reason = _dotted_reason(imports[name])
+                if reason:
+                    reasons.append(reason)
+            elif name not in known and name not in _BUILTIN_NAMES:
+                reasons.append(f"calls {name}() — unresolved local name, cannot verify")
             continue
-        if not isinstance(func, ast.Attribute):
+
+        # --- attribute chain: `a.b.c(...)` ----------------------------------
+        if isinstance(func, ast.Attribute):
+            root, attrs = _attr_chain(func)
+            if not isinstance(root, _VERIFIABLE_ROOTS):
+                # `getattr(shutil, "rmtree")(root)`, `handlers[k].run()`, …
+                reasons.append(_INDIRECT_REASON)
+                continue
+            attr = attrs[-1]
+            if isinstance(root, ast.Name):
+                tail = ".".join(attrs)
+                # Both readings, because either one being impure is enough: the
+                # RESOLVED module (`sp.run` -> `subprocess.run`) and the literal
+                # binding (a name that shadows a module the guard knows).
+                candidates = [f"{imports.get(root.id, root.id)}.{tail}", f"{root.id}.{tail}"]
+                reason = next(
+                    (r for r in (_dotted_reason(c) for c in dict.fromkeys(candidates)) if r), None
+                )
+                if reason:
+                    reasons.append(reason)
+                    continue
+            if attr in _OPEN_NAMES and _is_write_open(child):
+                reasons.append("opens a file for writing")
+                continue
+            if attr in _IMPURE_METHOD_NAMES:
+                reasons.append(f"calls .{attr}()")
             continue
-        attr = func.attr
-        root = _call_root(func)
-        if root and root.lower() in _IMPURE_MODULE_ROOTS:
-            reasons.append(f"calls {root}.{attr}()")
-            continue
-        if root and attr in _IMPURE_MODULE_ATTRS.get(root, frozenset()):
-            reasons.append(f"calls {root}.{attr}()")
-            continue
-        if attr in _OPEN_NAMES and _is_write_open(child):
-            reasons.append("opens a file for writing")
-            continue
-        if attr in _IMPURE_METHOD_NAMES:
-            reasons.append(f"calls .{attr}()")
+
+        # --- anything else in call position ---------------------------------
+        # `getattr(shutil, "rmtree")(root)` (a Call as func), `table[k](x)`,
+        # `(lambda: os.remove(p))()`. The old walk `continue`d here and inspected
+        # NOTHING, which is how the worst bypass got in.
+        reasons.append(_INDIRECT_REASON)
     return sorted(dict.fromkeys(reasons))
 
 
@@ -680,17 +870,27 @@ def impurity_reasons(
     qualname: str,
     defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
     *,
-    depth: int = 1,
+    imports: dict[str, str] | None = None,
+    depth: int = DEFAULT_TRANSITIVE_DEPTH,
 ) -> list[str]:
     """Why calling ``qualname`` would change the world, or ``[]`` when it would not.
 
     Transitive to ``depth`` through same-module helpers: a wrapper whose body is
-    one call to ``_really_delete()`` is exactly as destructive as the helper.
+    one call to ``_really_delete()`` is exactly as destructive as the helper, and
+    an ``a -> b -> c`` chain hides it just as well as one hop did. The walk keeps
+    a visited set, so recursion and cycles terminate; if the chain is still
+    unexhausted at ``depth``, that is REPORTED as an impurity rather than assumed
+    harmless — the same discipline as every other refusal here.
+
+    ``imports`` should come from ``module_imports`` of the same source, so
+    aliased modules resolve. Passing none is safe but weaker: an aliased
+    ``import subprocess as sp`` then only matches through the literal binding.
     """
     node = defs.get(qualname)
     if node is None:
         return []
-    reasons = list(_direct_impurities(node))
+    known = set(defs)
+    reasons = list(_direct_impurities(node, imports, known))
     seen = {qualname}
     frontier = [qualname]
     for _ in range(max(0, depth)):
@@ -699,15 +899,34 @@ def impurity_reasons(
             current = defs.get(name)
             if current is None:
                 continue
-            for callee in _local_calls(current, set(defs)):
+            for callee in _local_calls(current, known):
                 if callee in seen:
                     continue
                 seen.add(callee)
                 nxt.append(callee)
-                for reason in _direct_impurities(defs[callee]):
+                for reason in _direct_impurities(defs[callee], imports, known):
                     reasons.append(f"{reason} via {callee}()")
         frontier = nxt
+    if frontier:
+        reasons.append(
+            f"call chain deeper than {depth} hops ({', '.join(sorted(frontier)[:3])}) "
+            "— cannot verify"
+        )
     return sorted(dict.fromkeys(reasons))
+
+
+def impurity_class(reason: str) -> str:
+    """Which control is supposed to handle this impurity.
+
+    ``"code-evaluation"`` — the body runs source text (``exec``/``eval``/
+    ``compile``/``__import__``). The differential oracle is BUILT to drive these
+    (it feeds them a curated corpus in its own worker and compares against
+    CPython), so it opts in; the crash harness, which would call them with a
+    guessed string in a process it shares with nothing, never does.
+
+    ``"world-mutation"`` — everything else, and nothing opts into it.
+    """
+    return "code-evaluation" if reason.startswith(CODE_EVALUATION_REASON) else "world-mutation"
 
 
 def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, Any]]:
@@ -743,8 +962,12 @@ def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, 
 def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
     """Per-function ``{"params", "impurities"}`` for one module's source text."""
     defs = module_function_defs(source)
+    imports = module_imports(source)
     return {
-        name: {"params": _ast_params(node), "impurities": impurity_reasons(name, defs)}
+        name: {
+            "params": _ast_params(node),
+            "impurities": impurity_reasons(name, defs, imports=imports),
+        }
         for name, node in defs.items()
     }
 
@@ -811,6 +1034,7 @@ def discover_targets(
     *,
     max_targets: int = 200,
     logger: logging.Logger | None = None,
+    allow_impurities: frozenset[str] = frozenset(),
 ) -> tuple[list[FunctionTarget], list[dict[str, str]]]:
     """Callables to drive, plus the skipped ones with reasons.
 
@@ -819,6 +1043,19 @@ def discover_targets(
     driver), then public module-level functions of the same files. Discovery
     imports nothing; signatures are read in the worker, so a module that
     explodes on import costs only its own results.
+
+    ``allow_impurities`` names ``impurity_class`` values a CALLER has its own
+    control for — today only the differential oracle, for ``"code-evaluation"``.
+    The default tolerates nothing.
+
+    A deliberate tradeoff lives here. The purity pre-check refuses what it cannot
+    RESOLVE (an indirect call target, an unknown bare name, a chain deeper than
+    the depth limit), so this function skips strictly more candidates than a
+    guard that inspected only what it recognised. That is the correct direction:
+    the harness imports third-party code and calls it in a process on a user's
+    machine, so an unverified target is a target not worth the coverage. Every
+    refusal is in ``skipped`` with its reason, so the loss is auditable rather
+    than silent.
     """
     log = logger or logging.getLogger(__name__)
     apis_doc = store.read_json(store.apis_json_path(repo))
@@ -854,10 +1091,9 @@ def discover_targets(
                 {"id": tid, "reason": "no module-level definition in source — nothing to verify"}
             )
             return
-        if fact["impurities"]:
-            skipped.append(
-                {"id": tid, "reason": "impure-body: " + "; ".join(fact["impurities"][:4])}
-            )
+        blocking = [r for r in fact["impurities"] if impurity_class(r) not in allow_impurities]
+        if blocking:
+            skipped.append({"id": tid, "reason": "impure-body: " + "; ".join(blocking[:4])})
             return
         targets.append(
             FunctionTarget(

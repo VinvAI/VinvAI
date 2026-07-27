@@ -27,6 +27,7 @@ from exerciser.functions import (
     impurity_reasons,
     is_denied,
     module_function_defs,
+    module_imports,
     module_name_for,
     name_segments,
     resolved_value_for,
@@ -188,7 +189,7 @@ def test_test_modules_are_never_importable_targets():
 
 
 def _impurities(source: str, name: str) -> list[str]:
-    return impurity_reasons(name, module_function_defs(source))
+    return impurity_reasons(name, module_function_defs(source), imports=module_imports(source))
 
 
 def test_purity_check_sees_what_the_body_does_not_what_it_is_called():
@@ -236,6 +237,193 @@ def test_reading_a_file_is_not_a_side_effect():
 def test_an_unreadable_mode_is_treated_as_a_write():
     source = "def save(path: str, mode: str) -> None:\n    open(path, mode)\n"
     assert _impurities(source, "save"), "a computed mode is not assumed to be 'r'"
+
+
+# ---- unit: the bypasses an audit drove through the purity check ------------
+#
+# Each of these was ACCEPTED by the guard — i.e. would have been imported and
+# called in-process — because the walk matched the local BINDING name against a
+# set of module roots and silently skipped anything it did not recognise.
+
+# The control the guard always refused, kept beside the bypasses so a test that
+# regresses to "refuse everything" is distinguishable from one that works.
+_CONTROL = "import os\n\n\ndef tidy(path: str) -> None:\n    os.remove(path)\n"
+
+_BYPASSES = {
+    # 1. An alias the module-root set has no entry for.
+    "aliased-module": (
+        "import os as _os\n\n\ndef tidy(path: str) -> None:\n    _os.remove(path)\n",
+        "tidy",
+    ),
+    "aliased-subprocess": (
+        "import subprocess as sp\n\n\ndef spawn(cmd: str) -> None:\n    sp.run([cmd])\n",
+        "spawn",
+    ),
+    # 2. The worst one: `ast.walk` saw a Call whose `.func` was itself a Call,
+    #    hit `continue`, and inspected NOTHING.
+    "getattr-dispatch": (
+        'import shutil\n\n\ndef sweep(root: str) -> None:\n    getattr(shutil, "rmtree")(root)\n',
+        "sweep",
+    ),
+    "subscript-dispatch": (
+        'def apply(table: dict, path: str) -> None:\n    table["rm"](path)\n',
+        "apply",
+    ),
+    # 3. Transitive depth was 1, so one extra hop hid the call.
+    "three-hop-chain": (
+        "import os\n\n\ndef a(p: str) -> None:\n    b(p)\n\n\n"
+        "def b(p: str) -> None:\n    c(p)\n\n\ndef c(p: str) -> None:\n    os.remove(p)\n",
+        "a",
+    ),
+    # 4. ORM mutation: no module root, and neither method name was listed.
+    "orm-session": (
+        "def purge(session, row) -> None:\n    session.delete(row)\n    session.flush()\n",
+        "purge",
+    ),
+    # 5. Arbitrary source text, executed.
+    "exec-builtin": ("def apply(code: str):\n    exec(code)\n", "apply"),
+    "eval-builtin": ("def apply(code: str):\n    return eval(code)\n", "apply"),
+    # 6. `from os import remove` — a bare name that is really a stdlib mutator.
+    "from-import": (
+        "from os import remove\n\n\ndef tidy(path: str) -> None:\n    remove(path)\n",
+        "tidy",
+    ),
+}
+
+
+def test_the_control_case_is_still_refused():
+    assert _impurities(_CONTROL, "tidy") == ["calls os.remove()"]
+
+
+@pytest.mark.parametrize("case", sorted(_BYPASSES))
+def test_every_audited_bypass_is_refused(case: str):
+    source, name = _BYPASSES[case]
+    assert _impurities(source, name), f"{case} was ACCEPTED — the guard is bypassed"
+
+
+def test_an_alias_resolves_to_the_module_it_really_names():
+    imports = module_imports(
+        "import os as _os\nimport a.b as c\nimport json.decoder\n"
+        "from os.path import join\nfrom . import helper\n"
+    )
+    assert imports["_os"] == "os"
+    assert imports["c"] == "a.b"
+    assert imports["json"] == "json", "`import a.b` binds only `a`"
+    assert imports["join"] == "os.path.join"
+    assert imports["helper"].startswith("."), "a relative import is never a stdlib root"
+
+
+def test_a_chain_deeper_than_the_limit_is_refused_rather_than_assumed_harmless():
+    # Depth is finite, so the honest answer past it is "cannot verify" — not
+    # silence, which is what let a 2-hop chain through when the limit was 1.
+    source = (
+        "import os\n\n\ndef a(p: str) -> None:\n    b(p)\n\n\n"
+        "def b(p: str) -> None:\n    c(p)\n\n\n"
+        "def c(p: str) -> None:\n    d(p)\n\n\ndef d(p: str) -> None:\n    e(p)\n\n\n"
+        "def e(p: str) -> None:\n    os.remove(p)\n"
+    )
+    reasons = _impurities(source, "a")
+    assert reasons and any("cannot verify" in r for r in reasons)
+
+
+def test_a_recursive_helper_terminates():
+    source = "def a(n: int) -> int:\n    return 0 if n <= 0 else a(n - 1)\n"
+    assert _impurities(source, "a") == []
+
+
+def test_an_unresolvable_bare_name_is_refused():
+    # `handler` is neither a builtin, an import, nor a same-module def, so the
+    # guard has no source to judge and must not assume it is pure.
+    source = "def dispatch(handler, x):\n    return handler(x)\n"
+    assert _impurities(source, "dispatch")
+
+
+def test_the_guard_did_not_become_refuse_everything():
+    # The whole point of hardening is that ORDINARY pure code stays drivable —
+    # builtins, literals, comprehensions, f-strings, nested defs, same-module
+    # helpers, stdlib READS.
+    source = (
+        "import os\nimport math\nfrom collections import Counter\n\n\n"
+        "def normalise(raw: str) -> str:\n"
+        "    parts = sorted(p.strip() for p in raw.split(','))\n"
+        "    return ','.join(parts)\n\n\n"
+        "def summarise(raw: str) -> str:\n"
+        "    counts = Counter(normalise(raw))\n"
+        "    return f'{len(counts)} distinct, {math.sqrt(len(raw)):.2f}'\n\n\n"
+        "def load(path: str) -> str:\n"
+        "    full = os.path.join(path, 'x')\n"
+        "    with open(full) as fh:\n"
+        "        return fh.read()\n\n\n"
+        "def tally(rows: list) -> int:\n"
+        "    def weigh(row):\n"
+        "        return len(row)\n\n"
+        "    return sum(weigh(r) for r in rows)\n"
+    )
+    for name in ("normalise", "summarise", "load", "tally"):
+        assert _impurities(source, name) == [], name
+
+
+# The audit's concrete scenario: NO arguments, so nothing depends on generated
+# values. The old guard accepted it; the harness would have imported the module
+# and deleted a real directory.
+_ALIASED_DESTROYER_PKG = {
+    "__init__.py": "",
+    "calc.py": """\
+import os as _os
+
+CACHE = "/var/cache/app"
+
+
+def total(values: list) -> int:
+    return sum(values)
+
+
+def compact_workspace():
+    for n in _os.listdir(CACHE):
+        _os.remove(CACHE + "/" + n)
+""",
+}
+
+
+def test_the_no_argument_aliased_destroyer_never_becomes_a_target(tmp_path: Path):
+    repo = _make_repo(tmp_path, pkg=_ALIASED_DESTROYER_PKG)
+    targets, skipped = discover_targets(repo)
+    assert {t.qualname for t in targets} == {"total"}
+    reasons = {s["id"]: s["reason"] for s in skipped}
+    assert "impure-body" in reasons["targetpkg.calc:compact_workspace"]
+    assert "os.remove" in reasons["targetpkg.calc:compact_workspace"]
+
+
+def test_the_differential_oracle_is_the_only_caller_that_may_take_an_evaluator(tmp_path: Path):
+    # Refusing `exec` costs the differential oracle its entire target class, so
+    # code-evaluation is a NAMED impurity class an opted-in caller can accept —
+    # and the in-process crash harness never does.
+    pkg = {
+        "__init__.py": "",
+        "sandbox.py": (
+            "def evaluate_code(code: str):\n    ns = {}\n    exec(code, ns)\n    return ns\n"
+        ),
+    }
+    repo = _make_repo(tmp_path, pkg=pkg)
+    strict, skipped = discover_targets(repo)
+    assert strict == []
+    assert "evaluates source text" in skipped[0]["reason"]
+
+    permitted, _ = discover_targets(repo, allow_impurities=frozenset({"code-evaluation"}))
+    assert {t.qualname for t in permitted} == {"evaluate_code"}
+
+    # …and the carve-out is exactly one class wide: a body that also removes
+    # files is still refused, opted in or not.
+    both = {
+        "__init__.py": "",
+        "sandbox.py": (
+            "import os as _o\n\n\ndef evaluate_code(code: str):\n"
+            "    exec(code)\n    _o.remove('/tmp/x')\n"
+        ),
+    }
+    repo2 = _make_repo(tmp_path / "two", pkg=both)
+    still, _ = discover_targets(repo2, allow_impurities=frozenset({"code-evaluation"}))
+    assert still == []
 
 
 def test_argument_sets_cover_the_input_classes():

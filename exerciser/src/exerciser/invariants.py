@@ -92,12 +92,6 @@ def _top_level_fields(body: Any) -> dict[str, Any]:
     return {}
 
 
-def _coerce_size(value: Any) -> int:
-    if isinstance(value, dict | list | str):
-        return len(value)
-    return 0
-
-
 def learn_invariants(observations: list[Observation]) -> list[Invariant]:
     """Infer the kept invariants for one endpoint. Deterministic, order-stable."""
     obs = [o for o in observations if o.body is not None]

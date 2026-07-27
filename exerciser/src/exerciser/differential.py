@@ -380,7 +380,11 @@ def propose_references(repo: Path, *, logger: logging.Logger | None = None) -> d
     "corpus": "ast", "extract": "auto"}``.
     """
     log = logger or logging.getLogger(__name__)
-    targets, _ = discover_targets(repo, logger=log)
+    # An evaluator CALLS `exec`/`eval` — that is what makes it an evaluator, and
+    # the purity pre-check refuses that class for the in-process crash harness.
+    # This oracle is the control for it: the target is driven in its own worker
+    # against a curated corpus, so it opts into that one class and no other.
+    targets, _ = discover_targets(repo, logger=log, allow_impurities=frozenset({"code-evaluation"}))
     path = store.exercise_dir(repo) / "references.json"
     existing = store.read_json(path)
     entries: dict[str, dict[str, Any]] = {}

@@ -34,6 +34,15 @@ that takes forty seconds to find one thing loses to one that finds the same
 thing in one second. Posteriors warm-start from ``campaign.json`` and are
 persisted back, so the allocation a repo learned survives the run.
 
+**Credit is paid once per defect.** Every oracle reports its findings as issue
+CLUSTERS with a stable signature, and the loop credits only signatures it has
+never credited before — within the run and, through ``campaign.json``, across
+runs. Without that, a deterministic oracle re-earns full credit every time the
+bandit replays its arm: the posterior climbs on one bug, the no-improvement
+counter never fires because the play never reports zero, and the campaign spends
+its whole budget re-discovering something it already knew while reporting
+sustained yield.
+
 **What is reported.** ``by_technique`` and ``by_oracle`` answer the question a
 human actually asks — "which technique paid on my repo?" — rather than making
 them read per-arm posteriors.
@@ -73,6 +82,10 @@ DEFAULT_PATIENCE = 8
 # a budget of 20 is just sampling; keeping the action space commensurate with
 # the budget is what lets the posteriors mean anything within one run.
 DEFAULT_MAX_TARGETS = 50
+# Upper bound on the credited-signature ledger persisted in ``campaign.json``.
+# Large enough that a repo's real defect population fits; bounded so the file
+# cannot grow without limit across years of runs.
+MAX_CREDITED_SIGNATURES = 5000
 
 HTTP_TECHNIQUES = ("schema_valid", "schema_boundary", "schema_negative")
 
@@ -97,6 +110,11 @@ class Play:
     subprocesses: int = 0
     detail: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    # Cluster signatures this play's oracle reported. The campaign dedupes these
+    # ACROSS plays and across runs, so `violations` is re-derived as the count of
+    # signatures never credited before. A runner that reports no signatures keeps
+    # its own `violations` (there is nothing to dedupe on).
+    signatures: tuple[str, ...] = ()
 
 
 # A runner is bound to its repo/config by ``default_runners``; the campaign
@@ -296,13 +314,49 @@ def _accepts(fn: Callable[..., Any], name: str) -> bool:
         return False
 
 
-def _clusters_for(result: dict[str, Any], target: str) -> int:
-    """Issue clusters this result attributes to ``target``."""
-    total = 0
-    for cluster in result.get("clusters") or []:
-        if isinstance(cluster, dict) and cluster.get("endpoint_id") == target:
-            total += 1
-    return total
+def _cluster_signature(cluster: dict[str, Any]) -> str:
+    """A stable identity for one cluster.
+
+    Every oracle's cluster document carries ``signature`` (``issues.normalize_
+    signature``), which is exactly the digit-normalised identity the rest of Vinv
+    dedupes on. The fallback exists only so a hand-written or older document
+    still dedupes on SOMETHING rather than silently paying twice.
+    """
+    sig = cluster.get("signature")
+    if isinstance(sig, str) and sig:
+        return sig
+    return "|".join(str(cluster.get(k, "")) for k in ("kind", "endpoint_id", "title"))
+
+
+def _findings(
+    result: dict[str, Any],
+    count_key: str,
+    *,
+    target: str | None = None,
+) -> tuple[int, tuple[str, ...]]:
+    """``(violations, signatures)`` for one oracle result document.
+
+    The signatures are what let the campaign credit a defect ONCE. Without them
+    every runner returned the run's TOTAL cluster count, so a deterministic
+    oracle re-earned full credit on every play of the same arm: alpha climbed
+    monotonically, Thompson concentrated on the arm, and because the play never
+    reported zero violations the no-improvement counter could never fire. The
+    campaign then spent its whole budget re-finding one known bug and reported it
+    as sustained yield.
+
+    ``count_key`` is the result's own total, used only when the document carries
+    no ``clusters`` list at all — then there is nothing to dedupe on and the
+    total is the honest answer.
+    """
+    clusters = result.get("clusters")
+    if not isinstance(clusters, list):
+        return int(result.get(count_key) or 0), ()
+    sigs = [
+        _cluster_signature(c)
+        for c in clusters
+        if isinstance(c, dict) and (target is None or c.get("endpoint_id") == target)
+    ]
+    return len(sigs), tuple(sigs)
 
 
 def _functions_runner(cfg: OracleConfig) -> OracleRunner:
@@ -342,8 +396,10 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
             policy.save(cfg.repo, logger=cfg.logger)
         except Exception as exc:
             cfg.logger.warning("campaign: dispersion self-supervision skipped: %s", exc)
+        violations, signatures = _findings(result, "issue_clusters", target=action.target)
         return Play(
-            violations=_clusters_for(result, action.target),
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=subprocesses,
             detail={"calls": result.get("calls"), "verdicts": result.get("verdicts")},
@@ -369,8 +425,10 @@ def _differential_runner(cfg: OracleConfig) -> OracleRunner:
             _learn_from_differential(cfg, result)
         except Exception as exc:
             cfg.logger.warning("campaign: differential self-supervision skipped: %s", exc)
+        violations, signatures = _findings(result, "mismatch_clusters")
         return Play(
-            violations=int(result.get("mismatch_clusters") or 0),
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
             detail={
@@ -428,8 +486,10 @@ def _faults_runner(cfg: OracleConfig) -> OracleRunner:
             python=cfg.python,
             logger=cfg.logger,
         )
+        violations, signatures = _findings(result, "issue_clusters")
         return Play(
-            violations=int(result.get("issue_clusters") or 0),
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
             detail={"faults_injected": result.get("faults_injected")},
@@ -450,8 +510,10 @@ def _concurrency_runner(cfg: OracleConfig) -> OracleRunner:
             python=cfg.python,
             logger=cfg.logger,
         )
+        violations, signatures = _findings(result, "issue_clusters")
         return Play(
-            violations=int(result.get("issue_clusters") or 0),
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
             detail={"worker_timed_out": result.get("worker_timed_out")},
@@ -473,14 +535,21 @@ def _http_runner(cfg: OracleConfig) -> OracleRunner:
             rounds=1,
             logger=cfg.logger,
         )
-        # issues.json is cumulative across plays, so only the DELTA is this
-        # play's finding — otherwise every later HTTP play would be credited
-        # with every earlier play's clusters.
+        # issues.json is cumulative across plays, so a play's finding is what is
+        # NEW in it — otherwise every later HTTP play would be credited with
+        # every earlier play's clusters. `run_exercise` reports only the count,
+        # so the signatures come from the document it just wrote; when that
+        # cannot be read, the count DELTA is the fallback (same intent, coarser).
         now = int(result.get("issue_clusters") or 0)
-        gained = max(0, now - cfg._http_clusters)
+        issues = store.read_json(store.issues_path(cfg.repo)) or {}
+        if isinstance(issues.get("clusters"), list):
+            violations, signatures = _findings(issues, "cluster_count")
+        else:
+            violations, signatures = max(0, now - cfg._http_clusters), ()
         cfg._http_clusters = now
         return Play(
-            violations=gained,
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=0,
             detail={"probes_spent": result.get("probes_spent")},
@@ -494,8 +563,10 @@ def _environment_runner(cfg: OracleConfig) -> OracleRunner:
 
     def run(action: Action) -> Play:
         result = run_environment(cfg.repo, timeout_s=cfg.timeout_s, logger=cfg.logger)
+        violations, signatures = _findings(result, "issue_clusters")
         return Play(
-            violations=int(result.get("issue_clusters") or 0),
+            violations=violations,
+            signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
             detail={"status": result.get("status")},
@@ -599,12 +670,20 @@ def run_campaign(
     bandit.arms = {k: v for k, v in bandit.arms.items() if k in live}
     warm_started = sum(1 for arm in bandit.arms.values() if arm.alpha != 1.0 or arm.beta != 1.0)
 
+    # Defects already paid for. A cluster signature credits ONCE, ever: within a
+    # run (a deterministic oracle re-finds the same thing on every play of the
+    # arm) and across runs (a defect found yesterday must not pay again today).
+    credited_signatures: set[str] = {
+        str(s) for s in (prior.get("credited_signatures") or []) if isinstance(s, str)
+    }
+
     rng = random.Random(seed)
     covered_ground: set[str] = set()
     plays: list[dict[str, Any]] = []
     stale = 0
     stopped = "budget-exhausted"
     total_violations = 0
+    repeat_violations = 0
 
     while len(plays) < budget:
         action = bandit.select(rng)
@@ -633,18 +712,35 @@ def run_campaign(
 
         fresh = [c for c in play.covered if c not in covered_ground]
         covered_ground.update(fresh)
+        # An oracle re-run on the same arm re-reports the same deterministic
+        # defect. Only signatures never credited before are this play's finding;
+        # the rest are counted as repeats and paid nothing, which is also what
+        # lets the no-improvement counter reach `patience`.
+        if play.signatures:
+            unique = dict.fromkeys(play.signatures)
+            new_signatures = [s for s in unique if s not in credited_signatures]
+            credited_signatures.update(new_signatures)
+            violations = len(new_signatures)
+            repeats = len(play.signatures) - violations
+        else:
+            violations, repeats = play.violations, 0
+        repeat_violations += repeats
+
         cost = probe_equivalents(elapsed, play.subprocesses)
-        outcome = Outcome(violations=play.violations, new_coverage=len(fresh), cost=cost)
+        outcome = Outcome(violations=violations, new_coverage=len(fresh), cost=cost)
         # rng is threaded in so the credit is BERNOULLI-ISED — the genuine
         # conjugate update, and the one Thompson's regret bound is proved for.
         bandit.update(action, outcome, rng=rng)
-        total_violations += play.violations
+        total_violations += violations
 
         plays.append(
             {
                 "play": len(plays) + 1,
                 **action.to_json(),
-                "violations": play.violations,
+                "violations": violations,
+                # Findings this play re-reported that a previous play (or a
+                # previous campaign) had already been paid for.
+                "repeat_violations": repeats,
                 "new_coverage": len(fresh),
                 "elapsed_s": round(elapsed, 4),
                 "cost_probe_equivalents": round(cost, 4),
@@ -654,7 +750,7 @@ def run_campaign(
             }
         )
 
-        if play.violations == 0 and not fresh:
+        if violations == 0 and not fresh:
             stale += 1
         else:
             stale = 0
@@ -672,6 +768,9 @@ def run_campaign(
         "patience": patience,
         "priors": {"seconds_per_probe_equivalent": SECONDS_PER_PROBE_EQUIVALENT},
         "bandit": bandit_doc,
+        # Deliberately NOT decayed like the posteriors: a defect stays found.
+        # Bounded so the file cannot grow without limit on a long-lived repo.
+        "credited_signatures": sorted(credited_signatures)[:MAX_CREDITED_SIGNATURES],
     }
     store.write_json(campaign_path(repo), doc)
 
@@ -684,7 +783,11 @@ def run_campaign(
         "budget": budget,
         "plays_run": len(plays),
         "warm_started_arms": warm_started,
+        # NEW findings only. `repeat_violations` is the re-discovery this loop
+        # refused to pay for — the number that used to be silently added in.
         "violations": total_violations,
+        "repeat_violations": repeat_violations,
+        "credited_signatures": len(credited_signatures),
         "new_ground": len(covered_ground),
         "stopped": stopped,
         # The question a human actually asks of the loop.
@@ -695,10 +798,11 @@ def run_campaign(
         "campaign_file": str(campaign_path(repo)),
     }
     log.info(
-        "campaign: %d/%d plays, %d violations, stopped=%s, preferred=%s",
+        "campaign: %d/%d plays, %d new violations (%d repeats), stopped=%s, preferred=%s",
         len(plays),
         budget,
         total_violations,
+        repeat_violations,
         stopped,
         preferred.key if preferred else "-",
     )

@@ -111,9 +111,6 @@ class AgentChannel:
             return None
         return entry.get("answer")
 
-    def answered(self, key: str) -> bool:
-        return self.answer(key) is not None
-
     # ---- asking ----------------------------------------------------------
 
     def ask(self, question: Question) -> Any:
