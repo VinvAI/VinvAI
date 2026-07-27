@@ -20,6 +20,7 @@ from pathlib import Path
 import click
 
 from . import store
+from .functions import run_functions
 from .plan import build_plan
 from .profile import build_profile
 from .regress import replay_suite
@@ -71,10 +72,14 @@ verify every endpoint of a service.
   2. exerciser run <repo> --base-url http://127.0.0.1:PORT
        Execute the plan against the live traced service, coverage-guided.
        Writes results.jsonl, bandit.json, issues.json, baselines/*.
-  3. exerciser profile <repo>
+  3. exerciser functions <repo>
+       Drive catalogued entry points and exported functions IN PROCESS
+       (isolated workers, per-module deadline). Writes functions.json,
+       function_results.jsonl. Needs no running service.
+  4. exerciser profile <repo>
        Build the behavioral profile + learned invariants.
        Writes profile.json, profile.md, invariants.json.
-  4. exerciser regress <repo> --base-url http://127.0.0.1:PORT
+  5. exerciser regress <repo> --base-url http://127.0.0.1:PORT
        Replay the accumulated behavior suite and report diffs.
 
 Requires identification's apis.json (run `identification consolidate` first) and,
@@ -150,6 +155,35 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
             seed=seed,
             settle_s=settle,
             logger=logging.getLogger("exerciser.run"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("functions")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--service", default=None, help="Optional service label.")
+@click.option("--max-targets", default=200, show_default=True, help="Cap on callables driven.")
+@click.option(
+    "--module-timeout",
+    default=30.0,
+    show_default=True,
+    help="Wall-clock seconds per module worker (a hang costs one module).",
+)
+@click.option("--python", default=None, help="Interpreter for the workers (default: this one).")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbose):
+    _configure_logging(verbose)
+    try:
+        result = run_functions(
+            Path(repo_path),
+            service=service,
+            max_targets=max_targets,
+            module_timeout_s=module_timeout,
+            python=python,
+            logger=logging.getLogger("exerciser.functions"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
