@@ -68,6 +68,23 @@
 					"type": "string",
 					"default": "",
 					"markdownDescription": "Path of the Vinv engines monorepo checkout. Leave empty to auto-detect (`~/.vinv/engines`, or the checkout the extension itself lives in)."
+				},
+				"vinv.engines.autoUpdate": {
+					"type": "string",
+					"enum": [
+						"",
+						"auto",
+						"prompt",
+						"never"
+					],
+					"enumDescriptions": [
+						"Use this build's default.",
+						"Update the engines checkout without asking.",
+						"Offer the update once per extension version.",
+						"Never touch the engines checkout."
+					],
+					"default": "",
+					"markdownDescription": "What to do when the engines checkout does not match the version this extension build was released with. Only ever applies to Vinv's own clone at `~/.vinv/engines` — a checkout you point at with `#vinv.enginesPath#` is never modified."
 				}
 			}
 		},
@@ -361,6 +378,12 @@
 				"icon": "$(cloud-download)"
 			},
 			{
+				"command": "vinv-vs.updateEngines",
+				"title": "Update Engines",
+				"category": "Vinv",
+				"icon": "$(sync)"
+			},
+			{
 				"command": "vinv-vs.openGraphExplorer",
 				"title": "Open Graph Explorer",
 				"category": "Vinv",
@@ -554,7 +577,8 @@
 		}
 	},
 	"scripts": {
-		"vscode:prepublish": "npm run check && npm run bundle",
+		"vscode:prepublish": "npm run stamp && npm run check && npm run bundle",
+		"stamp": "node ./scripts/stamp-engine-pin.mjs",
 		"package": "vsce package --no-rewrite-relative-links",
 		"compile": "tsc -p ./",
 		"check": "tsc -p ./ --noEmit",

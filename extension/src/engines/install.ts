@@ -22,6 +22,7 @@ import {
 	uvPath,
 } from './resolve';
 import { ensureEmbedderRunning, isEmbedderHealthy } from '../embedder/sidecar';
+import { ENGINE_REF } from './pinned';
 
 /** Official, non-interactive installer command for a missing prerequisite. */
 function installerCommand(tool: 'uv' | 'rust'): string {
@@ -107,7 +108,7 @@ async function ensurePrerequisites(): Promise<boolean> {
 }
 
 /** The command that builds the Rust index inside an engines checkout. */
-function cargoBuildCommand(root: string): string {
+export function cargoBuildCommand(root: string): string {
 	return `cargo build --release --manifest-path "${root}/index/Cargo.toml"`;
 }
 
@@ -152,6 +153,31 @@ function withPathPrefix(dirs: string[], command: string, shell: 'powershell' | '
 }
 
 /**
+ * Runs `steps` in a visible terminal, chained so each runs only if the previous
+ * one succeeded, with uv's and cargo's directories on PATH.
+ *
+ * The terminal is launched with an explicit shell so the syntax we emit is
+ * known: on Windows the default is PowerShell (where `&&` is a parse error), so
+ * force powershell.exe and emit PowerShell chaining; elsewhere use the default
+ * shell with POSIX `&&`. See chainSteps and withPathPrefix.
+ *
+ * Shared by the install and the pinned-ref update ([./update]) so both surface
+ * the same way — visible, in the user's own shell, nothing hidden.
+ */
+export function runInEnginesTerminal(name: string, steps: string[]): void {
+	const isWin = process.platform === 'win32';
+	const terminal = vscode.window.createTerminal(
+		isWin ? { name, shellPath: 'powershell.exe' } : { name },
+	);
+	terminal.show();
+	const shell: 'powershell' | 'posix' = isWin ? 'powershell' : 'posix';
+	const toolDirs = [uvPath(), cargoPath()]
+		.filter((p): p is string => p !== null)
+		.map((p) => path.dirname(p));
+	terminal.sendText(withPathPrefix(toolDirs, chainSteps(steps, shell), shell));
+}
+
+/**
  * Runs the engines install (or completes a partial one) in a terminal:
  * clone the monorepo to ~/.vinv/engines when no checkout exists, then
  * `uv sync` (Python engines + embedder) and `cargo build --release` (the
@@ -163,24 +189,6 @@ export async function installEngines(context: vscode.ExtensionContext): Promise<
 		return;
 	}
 	const existingRoot = resolveEnginesRoot(context);
-	// Launch with an explicit shell so the command syntax we emit is known: on
-	// Windows the terminal defaults to PowerShell (where `&&` is a parse error),
-	// so force powershell.exe and emit PowerShell chaining; elsewhere use the
-	// default shell with POSIX `&&`. See chainSteps.
-	const isWin = process.platform === 'win32';
-	const terminal = vscode.window.createTerminal(
-		isWin
-			? { name: 'Vinv Engines Install', shellPath: 'powershell.exe' }
-			: { name: 'Vinv Engines Install' },
-	);
-	terminal.show();
-	const shell: 'powershell' | 'posix' = isWin ? 'powershell' : 'posix';
-	// The directories of the resolved uv/cargo binaries, to put on PATH for the
-	// install command (see withPathPrefix). Non-null here — ensurePrerequisites
-	// passed — but filtered defensively.
-	const toolDirs = [uvPath(), cargoPath()]
-		.filter((p): p is string => p !== null)
-		.map((p) => path.dirname(p));
 	const root = existingRoot ?? defaultEnginesCloneDir();
 	const steps = existingRoot
 		? // Checkout present (dev checkout or previous clone) — just (re)sync + build.
@@ -188,10 +196,15 @@ export async function installEngines(context: vscode.ExtensionContext): Promise<
 		: [
 				`git clone -b ${REPO_BRANCH} ${REPO_URL} "${root}"`,
 				`cd "${root}"`,
+				// Land a fresh install on the ref this vsix was cut against, so it
+				// runs the same engines as every other user of this build rather
+				// than whatever tip-of-branch happens to be. Unstamped dev builds
+				// (ENGINE_REF === '') stay on the branch. See ./pinned.
+				...(ENGINE_REF ? [`git -c advice.detachedHead=false checkout --detach ${ENGINE_REF}`] : []),
 				'uv sync',
 				cargoBuildCommand(root),
 			];
-	terminal.sendText(withPathPrefix(toolDirs, chainSteps(steps, shell), shell));
+	runInEnginesTerminal('Vinv Engines Install', steps);
 	void vscode.window.showInformationMessage(
 		'Vinv: Installing engines in the terminal. When it finishes, discovery and tracing are ready to run.',
 	);
