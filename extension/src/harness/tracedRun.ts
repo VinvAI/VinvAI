@@ -52,7 +52,12 @@ export function parseTracedCommand(
 	}
 	const tracelens = unquote(cmd.slice(0, runIdx).trim());
 	const flags = cmd.slice(runIdx + 5, dashIdx);
-	const targetPackages = [...flags.matchAll(/--target-package\s+(\S+)/g)].map((m) => unquote(m[1]));
+	// Both spellings tracelens accepts (launcher/run.py: `("--target-package", "-t")`).
+	// Matching only the long form silently yielded ZERO target packages for a
+	// `-t`-spelled start command — a traced run that instruments nothing.
+	const targetPackages = [...flags.matchAll(/(?:--target-package|-t)\s+(\S+)/g)].map((m) =>
+		unquote(m[1]),
+	);
 	const after = cmd.slice(dashIdx + 4).trim();
 	const python = unquote(after.split(/\s+/)[0] ?? '');
 	if (!tracelens || !python) {
