@@ -12,6 +12,7 @@ import * as path from 'path';
 import {
 	auditChangedFiles,
 	classifyFailureOutput,
+	classifyRunFailure,
 	classifyTestRun,
 	extractCheckLines,
 	combineTestRuns,
@@ -30,7 +31,15 @@ import {
 	type ReplayBudgetParams,
 } from '../harness/replayStats';
 import { loadEpisodePolicy, POLICY_PRIORS, replayParams, REPLAY_PRIORS } from '../harness/episodeTelemetry';
-import { mergeCounterexampleIntoOracle, runAcceptanceTests } from '../harness/rewardEngine';
+import {
+	discoverPythonCandidates,
+	mergeCounterexampleIntoOracle,
+	resetInterpreterCache,
+	resolveTestInterpreter,
+	resolveTestPython,
+	runAcceptanceTests,
+	workspacePackageNames,
+} from '../harness/rewardEngine';
 import {
 	findReusableSet,
 	issueSignature,
@@ -448,6 +457,205 @@ suite('Acceptance tests against a real interpreter (F2P e2e)', () => {
 			fs.rmSync(ws, { recursive: true, force: true });
 			fs.rmSync(testsDir, { recursive: true, force: true });
 		}
+	});
+});
+
+// ---- interpreter resolution (the oracle's most fragile precondition) --------
+
+suite('Test-interpreter resolution', () => {
+	// Only the two keys under test are touched, and they are restored key by
+	// key — replacing process.env wholesale leaks into every later suite.
+	const ENV_KEYS = ['VINV_TEST_PYTHON', 'VIRTUAL_ENV'] as const;
+	let saved: Array<string | undefined> = [];
+	setup(() => {
+		resetInterpreterCache();
+		saved = ENV_KEYS.map((k) => process.env[k]);
+		ENV_KEYS.forEach((k) => delete process.env[k]);
+	});
+	teardown(() => {
+		ENV_KEYS.forEach((k, i) => {
+			if (saved[i] === undefined) {
+				delete process.env[k];
+			} else {
+				process.env[k] = saved[i];
+			}
+		});
+		resetInterpreterCache();
+	});
+
+	test('discovers venvs the old name whitelist missed, deterministically ordered', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-venvdisc-'));
+		try {
+			// The live failure: the workspace's only env was named `.venv-smol`,
+			// so resolution fell through to a bare python3 with none of the repo's
+			// dependencies installed.
+			for (const name of ['.venv-smol', 'venv311', 'node_modules', 'src']) {
+				fs.mkdirSync(path.join(ws, name, 'bin'), { recursive: true });
+				fs.writeFileSync(path.join(ws, name, 'bin', 'python'), '');
+			}
+			const found = discoverPythonCandidates(ws);
+			assert.ok(
+				found.includes(path.join(ws, '.venv-smol', 'bin', 'python')),
+				`a non-standard venv name must be discovered: ${found.join(', ')}`,
+			);
+			assert.ok(found.includes(path.join(ws, 'venv311', 'bin', 'python')));
+			// Shape alone is not enough — a directory must also LOOK like an env,
+			// so `node_modules/bin/python` and `src/bin/python` stay out.
+			assert.ok(!found.some((c) => c.includes(`${path.sep}node_modules${path.sep}`)));
+			assert.ok(!found.some((c) => c.includes(`${path.sep}src${path.sep}bin`)));
+			// PATH names come last, so a real env always outranks them.
+			assert.ok(found.indexOf('python3') > found.indexOf(path.join(ws, '.venv-smol', 'bin', 'python')));
+			assert.strictEqual(resolveTestPython(ws), path.join(ws, '.venv-smol', 'bin', 'python'));
+			// Alphabetical among the non-preferred names — never readdir order.
+			assert.deepStrictEqual(discoverPythonCandidates(ws), found);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('an explicit override and .venv keep priority over discovered envs', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-venvorder-'));
+		try {
+			for (const name of ['.venv', 'zz-venv']) {
+				fs.mkdirSync(path.join(ws, name, 'bin'), { recursive: true });
+				fs.writeFileSync(path.join(ws, name, 'bin', 'python'), '');
+			}
+			assert.strictEqual(discoverPythonCandidates(ws)[0], path.join(ws, '.venv', 'bin', 'python'));
+			process.env.VINV_TEST_PYTHON = '/custom/python';
+			assert.strictEqual(discoverPythonCandidates(ws)[0], '/custom/python');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('probe targets are the workspace packages, not tests or loose scripts', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-pkgs-'));
+		try {
+			fs.mkdirSync(path.join(ws, 'src', 'mypkg'), { recursive: true });
+			fs.writeFileSync(path.join(ws, 'src', 'mypkg', '__init__.py'), '');
+			fs.mkdirSync(path.join(ws, 'tests'), { recursive: true });
+			fs.writeFileSync(path.join(ws, 'tests', '__init__.py'), '');
+			fs.mkdirSync(path.join(ws, 'toolsdir'), { recursive: true });
+			fs.writeFileSync(path.join(ws, 'toolsdir', '__init__.py'), '');
+			fs.writeFileSync(path.join(ws, 'setup.py'), '');
+			// src-layout wins outright: root-level package dirs are tooling.
+			assert.deepStrictEqual(workspacePackageNames(ws), ['mypkg']);
+			fs.rmSync(path.join(ws, 'src'), { recursive: true, force: true });
+			assert.deepStrictEqual(workspacePackageNames(ws), ['toolsdir']);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('picks the interpreter that can actually import the code under test', async function () {
+		// The regression proper, with real interpreters: two venvs exist, only
+		// the oddly-named one has the workspace's dependency installed. Name
+		// ordering alone would pick the decoy `.venv` and produce 'unavailable';
+		// the probe picks the env that works.
+		if (process.platform === 'win32') {
+			this.skip();
+		}
+		this.timeout(180_000);
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-probe-e2e-'));
+		try {
+			const cp = require('child_process') as typeof import('child_process');
+			const make = (name: string): string => {
+				cp.execFileSync('python3', ['-m', 'venv', '--without-pip', path.join(ws, name)], {
+					stdio: 'ignore',
+					timeout: 120_000,
+				});
+				return path.join(ws, name, 'bin', 'python');
+			};
+			let decoy: string;
+			let good: string;
+			try {
+				decoy = make('.venv');
+				good = make('.venv-smol');
+			} catch {
+				this.skip();
+				return;
+			}
+			// Only the good env gets the dependency the package imports.
+			const purelib = cp
+				.execFileSync(good, ['-c', "import sysconfig;print(sysconfig.get_paths()['purelib'])"], {
+					encoding: 'utf8',
+				})
+				.trim();
+			fs.mkdirSync(purelib, { recursive: true });
+			fs.writeFileSync(path.join(purelib, 'vinv_only_here.py'), 'VALUE = 41\n');
+			fs.mkdirSync(path.join(ws, 'src', 'widget'), { recursive: true });
+			fs.writeFileSync(
+				path.join(ws, 'src', 'widget', '__init__.py'),
+				'import vinv_only_here\n\n\ndef bump():\n    return vinv_only_here.VALUE - 1  # the bug\n',
+			);
+
+			const resolved = await resolveTestInterpreter(ws);
+			assert.strictEqual(resolved.python, good, `probe must reject the decoy env (tried: ${JSON.stringify(resolved.tried)})`);
+			assert.strictEqual(resolved.imports, 'ok');
+			assert.ok(
+				resolved.tried.some((t) => t.python === decoy && /vinv_only_here|ModuleNotFoundError/.test(t.error)),
+				'the rejected candidate and its import error must be recorded as evidence',
+			);
+
+			// End to end: the acceptance oracle now returns a real fail-to-pass
+			// verdict where it previously returned 'unavailable'.
+			const testsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-probe-tests-'));
+			try {
+				const testFile = path.join(testsDir, 'test_acceptance.py');
+				fs.writeFileSync(testFile, 'from widget import bump\n\n\ndef test_bump():\n    assert bump() == 42\n');
+				const pre = await runAcceptanceTests(ws, testFile);
+				assert.strictEqual(pre.signal, 'fail', `pre-fix: ${pre.detail ?? pre.output.slice(-400)}`);
+				fs.writeFileSync(
+					path.join(ws, 'src', 'widget', '__init__.py'),
+					'import vinv_only_here\n\n\ndef bump():\n    return vinv_only_here.VALUE + 1\n',
+				);
+				const post = await runAcceptanceTests(ws, testFile);
+				assert.strictEqual(post.signal, 'pass', `post-fix: ${post.detail ?? post.output.slice(-400)}`);
+			} finally {
+				fs.rmSync(testsDir, { recursive: true, force: true });
+			}
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test("an unrunnable oracle explains itself instead of returning a bare 'unavailable'", async function () {
+		this.timeout(120_000);
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-loud-'));
+		const testsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-loud-tests-'));
+		try {
+			fs.mkdirSync(path.join(ws, 'src', 'ghostpkg'), { recursive: true });
+			fs.writeFileSync(
+				path.join(ws, 'src', 'ghostpkg', '__init__.py'),
+				'import a_dependency_nobody_installed\n',
+			);
+			const testFile = path.join(testsDir, 'test_acceptance.py');
+			fs.writeFileSync(testFile, 'from ghostpkg import missing\n\n\ndef test_x():\n    assert missing() == 1\n');
+			const run = await runAcceptanceTests(ws, testFile);
+			assert.strictEqual(run.signal, 'unavailable');
+			const detail = run.detail ?? '';
+			assert.match(detail, /import_error/, `detail must name the diagnosis: ${detail}`);
+			assert.match(detail, /interpreter: \S+/, `detail must name the interpreter tried: ${detail}`);
+			assert.match(
+				detail,
+				/a_dependency_nobody_installed/,
+				`detail must carry the captured failure: ${detail}`,
+			);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+			fs.rmSync(testsDir, { recursive: true, force: true });
+		}
+	});
+
+	test('run-failure diagnosis distinguishes infra causes from verdicts', () => {
+		assert.strictEqual(classifyRunFailure(0, 'ok', false), null);
+		assert.strictEqual(classifyRunFailure(1, '1 failed: AssertionError', false), null);
+		assert.strictEqual(classifyRunFailure(0, '', true), 'timeout');
+		assert.strictEqual(classifyRunFailure(null, '', false), 'spawn_failed');
+		assert.strictEqual(classifyRunFailure(1, "ModuleNotFoundError: No module named 'PIL'", false), 'import_error');
+		assert.strictEqual(classifyRunFailure(2, 'ERROR collecting test_x.py\nImportError', false), 'import_error');
+		assert.strictEqual(classifyRunFailure(5, 'no tests ran', false), 'nothing_collected');
+		assert.strictEqual(classifyRunFailure(9, 'Segmentation fault', false), 'crash');
 	});
 });
 

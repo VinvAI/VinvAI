@@ -270,6 +270,11 @@ export async function runTestSwarm(
 			const candidateFile = path.join(deps.storageDir, `candidate-${index}-${plan.lens}.py`);
 			fs.writeFileSync(candidateFile, result.test_code, { mode: 0o600 });
 			const pre = await deps.preRun(candidateFile);
+			// A candidate that could not RUN is an infrastructure report, not a
+			// verdict — carry the diagnosis (which interpreter, what failed) all
+			// the way to the manifest and the ledger. A bare 'pre-run unavailable'
+			// hid a fixable interpreter mismatch for a whole episode.
+			const unavailableReason = `pre-run ${pre.signal}${pre.detail ? ` — ${pre.detail}` : ''}`;
 			if (role === 'acceptance') {
 				if (pre.signal === 'fail') {
 					keptAcceptance.push(result.test_code);
@@ -281,7 +286,7 @@ export async function runTestSwarm(
 						role,
 						grade,
 						kept: false,
-						reason: pre.signal === 'pass' ? 'passes on pre-fix code — cannot discriminate' : `pre-run ${pre.signal}`,
+						reason: pre.signal === 'pass' ? 'passes on pre-fix code — cannot discriminate' : unavailableReason,
 						triage: pre.signal === 'pass' ? 'not_discriminating' : 'infra',
 						path: candidateFile,
 					});
@@ -321,7 +326,7 @@ export async function runTestSwarm(
 						reason:
 							pre.signal === 'fail'
 								? 'author expected this to pass on current code — preserved as a candidate latent defect (advisory)'
-								: `pre-run ${pre.signal}`,
+								: unavailableReason,
 						triage: pre.signal === 'fail' ? 'candidate_defect' : 'infra',
 						path: candidateFile,
 					});

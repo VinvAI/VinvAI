@@ -337,13 +337,14 @@ export function discoverPythonCandidates(workspaceRoot: string): string[] {
  * (`ast.parse`) and so do not care whether the workspace's deps are importable.
  * Test execution uses resolveTestInterpreter, which probes. */
 export function resolveTestPython(workspaceRoot: string): string | null {
-	const candidates = discoverPythonCandidates(workspaceRoot);
-	for (const c of candidates) {
-		if (path.isAbsolute(c) && fs.existsSync(c)) {
+	for (const c of discoverPythonCandidates(workspaceRoot)) {
+		// An absolute path must exist; a bare name is left for PATH resolution
+		// (unchanged from the original contract: python3 first on posix).
+		if (!path.isAbsolute(c) || fs.existsSync(c)) {
 			return c;
 		}
 	}
-	return candidates[candidates.length - 1] ?? (process.platform === 'win32' ? 'python' : 'python3');
+	return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 /** Directory names that are never the package under test. */

@@ -1433,7 +1433,11 @@ export async function runEpisode(
 						episode_id: episodeId,
 						status: acceptance.status,
 						regression: Boolean(regressionPath),
-						detail: (acceptance.detail ?? '').slice(0, 300),
+						// Budget raised from 300: an 'unavailable' now carries its
+						// diagnosis (interpreter tried, probe errors, output tail), and
+						// truncating that back to a generic prefix is exactly the
+						// failure this row exists to make debuggable.
+						detail: (acceptance.detail ?? '').slice(0, 1200),
 					});
 					postEpisodeUpdate({
 						kind: 'note',
@@ -1779,10 +1783,17 @@ export async function runEpisode(
 					} else {
 						// General tasks: the acceptance tests (when they exist) are the
 						// oracle — see below. Without them, evidence is the agent's own
-						// report and the human decides.
+						// report and the human decides. When an oracle WAS attempted and
+						// did not survive, say why: 'no automatic verification for this
+						// task kind' reads as "nothing could ever have checked this",
+						// which is false — and it buried a one-line interpreter fix
+						// behind a generic shrug while a correct fix went uncertified.
 						verify = {
 							verdict: 'inconclusive',
-							reason: 'no automatic verification for this task kind',
+							reason:
+								acceptance.status === 'unavailable' || acceptance.status === 'not_discriminating'
+									? `no automatic verification: the acceptance oracle is ${acceptance.status}${acceptance.detail ? ` — ${acceptance.detail.slice(0, 400)}` : ''}`
+									: 'no automatic verification for this task kind',
 							outputTail: run.stdout.slice(-evidenceBudget),
 						};
 					}
