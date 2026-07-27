@@ -295,7 +295,7 @@ def test_capture_works_under_python_O(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires os.fork")
-def test_fork_child_spans_go_to_sidecar_not_parent_file(tmp_path: Path) -> None:
+def test_fork_child_spans_are_isolated_then_merged_back(tmp_path: Path) -> None:
     proj, script = _write_target_project(
         tmp_path,
         script_body=(
@@ -320,19 +320,35 @@ def test_fork_child_spans_go_to_sidecar_not_parent_file(tmp_path: Path) -> None:
     events = [json.loads(ln) for ln in lines]  # raises if any line was torn
     assert any(e.get("component") == "demopkg.main.work" for e in events)
 
-    # Child spans landed in a pid-suffixed sidecar, itself valid JSONL.
-    sidecars = sorted(out.parent.glob(out.name + ".fork-*"))
-    assert sidecars, "fork child did not open a sidecar trace file"
-    side_events = []
-    for sc in sidecars:
-        for ln in sc.read_text(encoding="utf-8").splitlines():
-            if ln.strip():
-                side_events.append(json.loads(ln))
-    assert any(e.get("component") == "demopkg.main.work" for e in side_events)
-
-    # The summary accounts for the sidecars.
+    # The fork child wrote to its own pid-suffixed sidecar DURING the run —
+    # that isolation is what keeps the parent file free of interleaved lines.
+    # The summary still records that it happened.
     summary = json.loads(out.with_name(out.name + ".summary.json").read_text(encoding="utf-8"))
     assert summary["capture_health"]["fork_sidecar_files"]
+
+    # …and by the end those sidecars are MERGED BACK into the trace, because
+    # every reader in the repo resolves a capture by globbing `trace.jsonl`
+    # exactly: an unmerged sidecar is a capture that never happened.
+    assert not sorted(out.parent.glob(out.name + ".fork-*")), (
+        "fork sidecars must be folded into the main trace, not left on disk"
+    )
+    # Three work() calls happened across two processes: 'parent-pre' and
+    # 'parent-post' in the parent, 'child' in the fork. Without the merge the
+    # trace would carry only the parent's two.
+    work_enters = [
+        e
+        for e in events
+        if e.get("event") == "enter" and e.get("component") == "demopkg.main.work"
+    ]
+    assert len(work_enters) == 3, (
+        "the forked child's span must appear in the merged trace; got "
+        f"{len(work_enters)} work() enters"
+    )
+    # The child's argument was 'child' (5 chars) — distinct from both of the
+    # parent's, so its presence is unambiguous.
+    assert any(
+        (e.get("args_summary") or {}).get("item", {}).get("len") == 5 for e in work_enters
+    ), "the child's own call must be the one that was merged in"
 
 
 # ---------------------------------------------------------------------------

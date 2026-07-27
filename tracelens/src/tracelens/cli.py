@@ -91,7 +91,9 @@ def run_cmd(args: tuple[str, ...]) -> None:
                                      bytes (default 256).
       --accept-fork-loss             Silence the warning when --reload / --workers /
                                      gunicorn worker patterns are detected. Child
-                                     process spans are NOT captured today.
+                                     processes ARE traced and merged back at exit;
+                                     a worker outliving the supervisor can leave an
+                                     unmerged .child-<pid> sidecar.
       --memory / --no-memory         Force per-function memory attribution on/off (overrides
                                      the preset). Captured via tracemalloc byte deltas around
                                      each instrumented call and emitted as `mem_delta_bytes` on

@@ -268,14 +268,15 @@ def _warn_if_multi_process(user_command: list[str], accept_fork_loss: bool) -> N
     if any(tok in flat for tok in danger_tokens):
         msg = (
             "tracelens: detected multi-process target pattern (--reload, --workers, gunicorn). "
-            "Child-process spans will be lost; only the master is traced. "
+            "Workers ARE traced (sitecustomize bootstrap) and merged back at exit, but a "
+            "worker that outlives the supervisor leaves an unmerged .child-<pid> sidecar. "
             "Drop the offending flag or pass --accept-fork-loss to silence this warning."
         )
         if not accept_fork_loss:
             _log.warning(msg)
             print(f"\033[33m[tracelens] {msg}\033[0m", file=sys.stderr)
         else:
-            _log.info("tracelens: --accept-fork-loss set; silently tracing master only")
+            _log.info("tracelens: --accept-fork-loss set; multi-process pattern accepted")
 
 
 def _is_simple_python_script(cmd: list[str]) -> Path | None:
@@ -968,6 +969,12 @@ def _supervise_user_command(output: str) -> int | None:
         pass
     exit_code = _child_status_to_exit_code(status)
     torn_bytes = _finalize_trace_output(output)
+    # Fold in any child/fork sidecars BEFORE the summary is written: every
+    # reader in the repo resolves a capture by globbing `trace.jsonl` exactly,
+    # so an unmerged sidecar is a capture that was never taken.
+    from tracelens.launcher.child_bootstrap import merge_sidecars
+
+    merge_sidecars(output)
     if os.WIFSIGNALED(status) or torn_bytes:
         extra: dict[str, object] | None = (
             {"capture_health": {"truncated_tail_bytes": torn_bytes}} if torn_bytes else None
@@ -1026,9 +1033,23 @@ def _write_run_summary() -> None:
         selfcheck = _run_state.get("capture_selfcheck")
         if selfcheck:
             health["selfcheck"] = selfcheck
-        sidecars = sorted(p.name for p in log_path.parent.glob(log_path.name + ".fork-*"))
+        # Sidecars this run produced: the ones already folded into the trace
+        # PLUS any still on disk (a worker that outlived the merge). Reporting
+        # only what is left on disk would hide every sidecar that worked.
+        from tracelens.launcher.child_bootstrap import MERGED_SIDECARS
+
+        sidecars = sorted(
+            {p.name for p in log_path.parent.glob(log_path.name + ".fork-*")}
+            | {n for n in MERGED_SIDECARS if ".fork-" in n}
+        )
+        child_sidecars = sorted(
+            {p.name for p in log_path.parent.glob(log_path.name + ".child-*")}
+            | {n for n in MERGED_SIDECARS if ".child-" in n}
+        )
         if sidecars:
             health["fork_sidecar_files"] = sidecars
+        if child_sidecars:
+            health["child_sidecar_files"] = child_sidecars
         _summary_mod.write_summary(
             log_path,
             coverage_scan=_run_state.get("coverage_scan"),  # type: ignore[arg-type]
@@ -1160,6 +1181,21 @@ def run_main(argv: list[str] | None = None) -> None:
     # the flame-graph for the calling handler looks two-layer flat.
     executor_ctx_status = _exec_ctx.install()
     _run_state["executor_context_propagation"] = executor_ctx_status
+    # Arm child-process tracing BEFORE the target starts: it works by
+    # prepending a sitecustomize dir to PYTHONPATH, which only reaches
+    # processes spawned after this point. Subprocess executors (where
+    # sandboxed code actually runs) were entirely invisible without it.
+    from tracelens.launcher.child_bootstrap import install_child_bootstrap
+
+    _run_state["child_bootstrap_dir"] = install_child_bootstrap(output)
+    # Merge in THIS process too, not only in the supervisor: it runs the moment
+    # the target finishes (so the capture is complete immediately), and it is
+    # the only merge that happens at all under TRACELENS_NO_SUPERVISOR=1.
+    # merge_sidecars deletes what it folds in, so the later supervisor pass is
+    # a harmless no-op.
+    from tracelens.launcher.child_bootstrap import merge_at_exit as _merge_at_exit
+
+    _merge_at_exit(output)
     _install_hooks()
     _install_signal_handlers()
     _start_capture_selfcheck(output)
