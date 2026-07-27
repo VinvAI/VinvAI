@@ -16,7 +16,7 @@ Coding agents know your code. They have never understood how it behaves when it 
 
 <br><br>
 
-<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
+<img src="https://images.vinv.ai/vinv-loop.jpeg" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
 
 <sub>One command starts it. Vinv drives the other eight stages — every arrow is evidence, not a guess.</sub>
 
