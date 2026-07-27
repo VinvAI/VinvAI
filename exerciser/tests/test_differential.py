@@ -497,3 +497,23 @@ def test_a_real_evaluator_with_real_bugs_is_not_dropped(tmp_path: Path):
     result = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
     assert result["implausible_evaluators"] == {}, "a mostly-correct evaluator stays"
     assert result["mismatch_clusters"] >= 1
+
+
+def test_the_corpus_documents_what_it_deliberately_excludes():
+    # A corpus is only trustworthy if it is explicit about what it refuses to
+    # test. These are exported so a reader can audit the boundary rather than
+    # wonder why hash order or id() never appears.
+    from exerciser.semantics_corpus import (
+        EXCLUDED_UNSAFE,
+        IMPLEMENTATION_DEFINED,
+        RAISING_CORPUS,
+        SEMANTIC_CORPUS,
+    )
+
+    assert len(SEMANTIC_CORPUS) > 300 and len(RAISING_CORPUS) > 40
+    # Every exclusion states a REASON — an undocumented gap is indistinguishable
+    # from an oversight.
+    assert EXCLUDED_UNSAFE and all(len(r) > 20 for _s, r in EXCLUDED_UNSAFE)
+    # Implementation-defined cases are opt-in, never silently in the corpus.
+    assert IMPLEMENTATION_DEFINED
+    assert not (set(IMPLEMENTATION_DEFINED) & set(SEMANTIC_CORPUS))

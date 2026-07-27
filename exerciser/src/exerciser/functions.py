@@ -307,11 +307,6 @@ _DENY_MODULE_PARTS = frozenset(
 
 # Wall-clock deadline for one worker (all calls for one module).
 DEFAULT_MODULE_TIMEOUT_S = 30.0
-# Per-call deadline enforced inside the worker via a thread watchdog is not
-# possible without cooperation, so the module deadline is the real bound; this
-# caps how many calls one module may make so a fast function cannot monopolise
-# the module's budget.
-DEFAULT_CALLS_PER_FUNCTION = 6
 
 
 # =========================================================================

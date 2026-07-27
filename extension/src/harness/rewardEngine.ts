@@ -40,8 +40,10 @@ import {
 	auditChangedFiles,
 	buildTestGenPrompt,
 	classifyFailureOutput,
+	classifyRunFailure,
 	classifyTestRun,
 	combineTestRuns,
+	describeRunFailure,
 	extractCheckLines,
 	extractAcceptanceTestFile,
 	parseUnifiedDiff,
@@ -264,31 +266,270 @@ export const UNIFIED_RUNNER = [
 	'sys.exit(5 if ran == 0 else (1 if failed else 0))',
 ].join('\n');
 
-/** Resolves the python interpreter for running tests: an explicit override,
- * then the project venv (VIRTUAL_ENV or a .venv in the workspace), then
- * python3, then python — so a project whose tests need its installed deps is
- * exercised with the interpreter that HAS them. Returns null when none exist. */
-export function resolveTestPython(workspaceRoot: string): string | null {
+/** A directory name that could be a virtualenv. The name is only a cheap
+ * pre-filter — the real test is whether `<dir>/bin/python` exists — so this is
+ * deliberately permissive: `.venv`, `venv`, `.venv-smol`, `venv311`,
+ * `my-virtualenv`, `env` are all created by real tooling (uv, poetry --local,
+ * pdm --in-project, virtualenv, hand-rolled) and all put the interpreter in
+ * the same place. */
+function looksLikeVenvDir(name: string): boolean {
+	return /venv|virtualenv/i.test(name) || name === 'env' || name === '.env';
+}
+
+/**
+ * Every python interpreter worth trying for a workspace, best first.
+ *
+ * The old resolver only knew `.venv` and `venv` and otherwise fell through to
+ * a bare `python3`. Found live on a repo whose env is named `.venv-smol`: the
+ * fall-through interpreter could not import the package under test, so the
+ * acceptance oracle came back 'unavailable' and a CORRECT fix could not
+ * self-certify. Discovery is therefore shape-based (any root-level directory
+ * holding `bin/python`), not name-based, which also picks up uv / poetry
+ * --local / pdm --in-project envs for free.
+ *
+ * Order is deterministic — never readdir order — so the same workspace always
+ * resolves the same way: explicit override, the activated env, `.venv`, `venv`,
+ * then any other venv-shaped directory alphabetically, then PATH.
+ */
+export function discoverPythonCandidates(workspaceRoot: string): string[] {
 	const isWin = process.platform === 'win32';
 	const venvPython = (dir: string): string =>
 		isWin ? path.join(dir, 'Scripts', 'python.exe') : path.join(dir, 'bin', 'python');
 	const candidates: string[] = [];
-	if (process.env.VINV_TEST_PYTHON) {
-		candidates.push(process.env.VINV_TEST_PYTHON);
-	}
+	const push = (p: string | undefined | null): void => {
+		if (p && !candidates.includes(p)) {
+			candidates.push(p);
+		}
+	};
+	push(process.env.VINV_TEST_PYTHON);
 	if (process.env.VIRTUAL_ENV) {
-		candidates.push(venvPython(process.env.VIRTUAL_ENV));
+		push(venvPython(process.env.VIRTUAL_ENV));
 	}
 	for (const name of ['.venv', 'venv']) {
-		candidates.push(venvPython(path.join(workspaceRoot, name)));
+		push(venvPython(path.join(workspaceRoot, name)));
 	}
+	let entries: string[] = [];
+	try {
+		entries = fs
+			.readdirSync(workspaceRoot, { withFileTypes: true })
+			.filter((d) => d.isDirectory() || d.isSymbolicLink())
+			.map((d) => d.name)
+			.filter(looksLikeVenvDir)
+			.sort();
+	} catch {
+		// Unreadable workspace root: the fixed candidates still apply.
+	}
+	for (const name of entries) {
+		const python = venvPython(path.join(workspaceRoot, name));
+		if (fs.existsSync(python)) {
+			push(python);
+		}
+	}
+	// PATH lookups last (Windows commonly ships only `python`).
+	push(isWin ? 'python' : 'python3');
+	push(isWin ? 'python3' : 'python');
+	return candidates;
+}
+
+/** Resolves the python interpreter for running tests, WITHOUT probing: the
+ * first candidate that exists on disk, else the PATH name. Used by the static
+ * pre-gate and the mutation smoke, which only need to run stdlib-only scripts
+ * (`ast.parse`) and so do not care whether the workspace's deps are importable.
+ * Test execution uses resolveTestInterpreter, which probes. */
+export function resolveTestPython(workspaceRoot: string): string | null {
+	const candidates = discoverPythonCandidates(workspaceRoot);
 	for (const c of candidates) {
-		if (c && fs.existsSync(c)) {
+		if (path.isAbsolute(c) && fs.existsSync(c)) {
 			return c;
 		}
 	}
-	// PATH lookups: python3 then python (Windows commonly ships only `python`).
-	return isWin ? 'python' : 'python3';
+	return candidates[candidates.length - 1] ?? (process.platform === 'win32' ? 'python' : 'python3');
+}
+
+/** Directory names that are never the package under test. */
+const NON_PACKAGE_DIRS = new Set([
+	'test',
+	'tests',
+	'testing',
+	'docs',
+	'doc',
+	'examples',
+	'example',
+	'benchmarks',
+	'scripts',
+	'build',
+	'dist',
+	'node_modules',
+	'site-packages',
+]);
+
+/**
+ * The importable top-level PACKAGES a workspace ships (directories holding an
+ * `__init__.py`, under the root and under `src/`). These are the probe targets
+ * — "can this interpreter import the code under test?" is the question that
+ * actually decides whether an acceptance run will produce a verdict.
+ *
+ * Packages only, never loose top-level modules: importing a package's
+ * `__init__` is what the authored tests do anyway, whereas importing a stray
+ * root-level script would execute code the test run never would.
+ */
+export function workspacePackageNames(workspaceRoot: string): string[] {
+	const names: string[] = [];
+	for (const base of [path.join(workspaceRoot, 'src'), workspaceRoot]) {
+		let entries: string[];
+		try {
+			entries = fs
+				.readdirSync(base, { withFileTypes: true })
+				.filter((d) => d.isDirectory())
+				.map((d) => d.name)
+				.sort();
+		} catch {
+			continue;
+		}
+		for (const name of entries) {
+			if (name.startsWith('.') || NON_PACKAGE_DIRS.has(name.toLowerCase()) || looksLikeVenvDir(name)) {
+				continue;
+			}
+			if (fs.existsSync(path.join(base, name, '__init__.py')) && !names.includes(name)) {
+				names.push(name);
+			}
+		}
+		if (names.length) {
+			// A src-layout repo's packages live in src/ — do not also treat
+			// root-level package dirs (tooling, plugins) as probe targets.
+			break;
+		}
+	}
+	return names.slice(0, 3);
+}
+
+/** Probe script: append the workspace import roots, import each named package,
+ * report pytest availability. Exits 0 when everything imported, 3 otherwise. */
+const IMPORT_PROBE = [
+	'import sys, os, importlib',
+	'for r in [p for p in sys.argv[1].split(os.pathsep) if p]:',
+	'    if r not in sys.path:',
+	'        sys.path.append(r)',
+	'missing = []',
+	"for name in [n for n in sys.argv[2].split(',') if n]:",
+	'    try:',
+	'        importlib.import_module(name)',
+	'    except BaseException as e:',
+	"        missing.append(f'{name}: {type(e).__name__}: {e}')",
+	'try:',
+	'    import pytest',
+	'    has_pytest = 1',
+	'except Exception:',
+	'    has_pytest = 0',
+	"print(f'VINV_PROBE pytest={has_pytest}')",
+	'for m in missing:',
+	"    print(f'VINV_MISSING {m}')",
+	'sys.exit(3 if missing else 0)',
+].join('\n');
+
+export interface ResolvedInterpreter {
+	/** The interpreter test runs should use. */
+	python: string;
+	/** Whether it can import the workspace's own packages ('unprobed' when the
+	 * workspace ships no importable package, so there was nothing to check). */
+	imports: 'ok' | 'failed' | 'unprobed';
+	/** Whether pytest is importable under the chosen interpreter. */
+	hasPytest: boolean;
+	/** Per-candidate probe failures — the evidence behind an 'unavailable'. */
+	tried: Array<{ python: string; error: string }>;
+}
+
+/** Probes are cached per workspace: an episode runs the acceptance file many
+ * times (double-run flake guard × attempts × mutation smoke) and the answer
+ * cannot change mid-episode. */
+const interpreterCache = new Map<string, ResolvedInterpreter>();
+
+/** Test seam — drops the memoized probe results. */
+export function resetInterpreterCache(): void {
+	interpreterCache.clear();
+}
+
+/** A single-line diagnostic for one failed probe (bounded). */
+function probeError(run: BoundedRun): string {
+	if (run.timedOut) {
+		return 'probe timed out';
+	}
+	const missing = run.output
+		.split('\n')
+		.filter((l) => l.startsWith('VINV_MISSING '))
+		.map((l) => l.slice('VINV_MISSING '.length).trim());
+	if (missing.length) {
+		return missing.join('; ').slice(0, 300);
+	}
+	if (run.exitCode === null) {
+		return 'interpreter could not be launched';
+	}
+	return (run.output.trim().split('\n').slice(-2).join(' ') || `exit ${run.exitCode}`).slice(0, 300);
+}
+
+/**
+ * Chooses the interpreter for TEST EXECUTION by asking each candidate whether
+ * it can actually import the code under test, preferring one that also has
+ * pytest. No amount of name ordering can answer that question — a repo may
+ * have a stale `.venv` next to the real env, or none at all — so the choice is
+ * made by evidence, exactly like every other gate in this engine.
+ *
+ * When nothing imports the workspace, this does NOT fabricate a working setup:
+ * it returns the best-effort interpreter with imports:'failed' and the per
+ * candidate errors, so the caller can report WHY the oracle was unavailable
+ * instead of shrugging.
+ */
+export async function resolveTestInterpreter(workspaceRoot: string): Promise<ResolvedInterpreter> {
+	const cached = interpreterCache.get(workspaceRoot);
+	if (cached) {
+		return cached;
+	}
+	const candidates = discoverPythonCandidates(workspaceRoot);
+	const packages = workspacePackageNames(workspaceRoot);
+	const fallback: ResolvedInterpreter = {
+		python: resolveTestPython(workspaceRoot) ?? candidates[0] ?? 'python3',
+		imports: packages.length ? 'failed' : 'unprobed',
+		hasPytest: false,
+		tried: [],
+	};
+	if (packages.length === 0) {
+		// Nothing importable to probe (flat script layout): keep the historical
+		// existence-ordered choice rather than spend processes proving nothing.
+		interpreterCache.set(workspaceRoot, fallback);
+		return fallback;
+	}
+	const roots = workspaceImportRoots(workspaceRoot);
+	const tried: Array<{ python: string; error: string }> = [];
+	let firstImporting: ResolvedInterpreter | null = null;
+	const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-probe-'));
+	try {
+		for (const python of candidates) {
+			if (path.isAbsolute(python) && !fs.existsSync(python)) {
+				continue;
+			}
+			const run = await runBounded([python, '-c', IMPORT_PROBE, roots, packages.join(',')], isolated, 60_000);
+			if (run.exitCode !== 0) {
+				tried.push({ python, error: probeError(run) });
+				continue;
+			}
+			const hasPytest = /VINV_PROBE pytest=1/.test(run.output);
+			const resolved: ResolvedInterpreter = { python, imports: 'ok', hasPytest, tried };
+			if (hasPytest) {
+				interpreterCache.set(workspaceRoot, resolved);
+				return resolved;
+			}
+			firstImporting ??= resolved;
+		}
+	} finally {
+		try {
+			fs.rmSync(isolated, { recursive: true, force: true });
+		} catch {
+			// Temp cleanup is best-effort.
+		}
+	}
+	const chosen = firstImporting ?? { ...fallback, tried };
+	interpreterCache.set(workspaceRoot, chosen);
+	return chosen;
 }
 
 /** The import roots for a workspace: the root, plus root/src for src-layout. */
@@ -307,10 +548,11 @@ function workspaceImportRoots(workspaceRoot: string): string {
 async function runTestFileOnce(
 	workspaceRoot: string,
 	testFile: string,
-): Promise<{ signal: 'pass' | 'fail' | 'unavailable'; output: string }> {
-	const python = resolveTestPython(workspaceRoot);
+): Promise<{ signal: 'pass' | 'fail' | 'unavailable'; output: string; detail?: string }> {
+	const interpreter = await resolveTestInterpreter(workspaceRoot);
+	const python = interpreter.python;
 	if (!python) {
-		return { signal: 'unavailable', output: 'no python interpreter found' };
+		return { signal: 'unavailable', output: '', detail: 'no python interpreter found' };
 	}
 	const isolatedCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-run-'));
 	try {
@@ -319,7 +561,15 @@ async function runTestFileOnce(
 			isolatedCwd,
 			testTimeoutMs(),
 		);
-		return { signal: classifyTestRun(run.exitCode, run.output, run.timedOut), output: run.output };
+		const signal = classifyTestRun(run.exitCode, run.output, run.timedOut);
+		if (signal !== 'unavailable') {
+			return { signal, output: run.output };
+		}
+		return {
+			signal,
+			output: run.output,
+			detail: explainUnavailable(run, interpreter),
+		};
 	} finally {
 		try {
 			fs.rmSync(isolatedCwd, { recursive: true, force: true });
@@ -329,14 +579,46 @@ async function runTestFileOnce(
 	}
 }
 
-/** Two runs, must agree (flake guard). Returns the last run's output. */
+/**
+ * The operator-facing WHY behind an 'unavailable' run: the diagnosis, the
+ * interpreter that produced it, what the interpreter probe found, and the
+ * output tail. 'unavailable' with no explanation is what let a correct fix go
+ * uncertified — the message has to be actionable, not merely honest.
+ */
+function explainUnavailable(run: BoundedRun, interpreter: ResolvedInterpreter): string {
+	const kind = classifyRunFailure(run.exitCode, run.output, run.timedOut) ?? 'crash';
+	const parts = [`${describeRunFailure(kind)} [${kind}]`, `interpreter: ${interpreter.python}`];
+	if (interpreter.imports === 'failed') {
+		const probes = interpreter.tried
+			.map((t) => `${t.python} → ${t.error}`)
+			.slice(0, 3)
+			.join(' | ');
+		parts.push(
+			`no discovered interpreter could import the workspace package${probes ? ` (tried: ${probes})` : ''}`,
+		);
+	} else if (!interpreter.hasPytest) {
+		parts.push('pytest not importable — ran under the built-in fallback runner');
+	}
+	const tail = run.output.trim().split('\n').slice(-4).join(' / ').slice(-400);
+	if (tail) {
+		parts.push(`output tail: ${tail}`);
+	}
+	return parts.join('; ');
+}
+
+/** Two runs, must agree (flake guard). Returns the last run's output, and the
+ * diagnostic of whichever run could not produce a verdict. */
 export async function runAcceptanceTests(
 	workspaceRoot: string,
 	testFile: string,
-): Promise<{ signal: TestSignal; output: string }> {
+): Promise<{ signal: TestSignal; output: string; detail?: string }> {
 	const first = await runTestFileOnce(workspaceRoot, testFile);
 	const second = await runTestFileOnce(workspaceRoot, testFile);
-	return { signal: combineTestRuns(first.signal, second.signal), output: second.output };
+	return {
+		signal: combineTestRuns(first.signal, second.signal),
+		output: second.output,
+		detail: second.detail ?? first.detail,
+	};
 }
 
 /**
@@ -420,7 +702,7 @@ export async function generateAcceptanceTests(
 	return {
 		status: 'unavailable',
 		path: testFile,
-		detail: `pre-fix validation was ${pre.signal}: ${pre.output.slice(-400)}`,
+		detail: `pre-fix validation was ${pre.signal}: ${pre.detail ?? pre.output.slice(-400)}`,
 	};
 }
 

@@ -203,46 +203,6 @@ class BetaArm:
 
 
 @dataclass
-class EndpointBandit:
-    """The per-endpoint posterior grid over the available strategies."""
-
-    strategies: tuple[str, ...]
-    arms: dict[str, BetaArm] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        for s in self.strategies:
-            self.arms.setdefault(s, BetaArm())
-
-    def select(self, rng: random.Random) -> str:
-        """Thompson draw: sample each arm's θ and return the argmax strategy.
-
-        Ties (identical draws — possible only with a pathological RNG) break on
-        the fixed STRATEGIES order, keeping selection deterministic per seed.
-        """
-        best: str | None = None
-        best_theta = -1.0
-        for s in self.strategies:
-            arm = self.arms[s]
-            theta = rng.betavariate(arm.alpha, arm.beta)
-            if theta > best_theta:
-                best_theta = theta
-                best = s
-        return best or self.strategies[0]
-
-    def update(self, strategy: str, outcome: Outcome | int) -> None:
-        arm = self.arms.get(strategy)
-        if arm is not None:
-            arm.update(outcome)
-
-    def preferred(self) -> str:
-        """The current best arm by posterior mean (for the summary)."""
-        return max(self.strategies, key=lambda s: self.arms[s].mean())
-
-    def to_json(self) -> dict[str, Any]:
-        return {s: self.arms[s].to_json() for s in self.strategies}
-
-
-@dataclass
 class ActionBandit:
     """Thompson sampling over the full ``(target × technique × oracle)`` space.
 
@@ -349,6 +309,62 @@ class ActionBandit:
                 a.key: {**a.to_json(), **self.arms[a.key].to_json()} for a in sorted(self.actions)
             },
         }
+
+
+@dataclass
+class EndpointBandit:
+    """One HTTP endpoint's strategy choice — a FACADE over ``ActionBandit``.
+
+    An endpoint's input-strategy choice is not a different problem from the
+    campaign's oracle choice; it is the same ``(target x technique x oracle)``
+    draw with the target fixed to this endpoint and the oracle fixed to
+    ``status``. Keeping a second implementation of Thompson sampling for it
+    meant two code paths for one piece of mathematics, so this is now a thin
+    adapter: it owns no posteriors of its own, translates strategy names to
+    actions, and delegates every draw and update.
+
+    The two bandits form a HIERARCHY, not a duplication — the campaign decides
+    which oracle deserves the next unit of budget, and when that draw picks the
+    HTTP oracle this decides which input strategy to spend it on.
+    """
+
+    strategies: tuple[str, ...]
+    endpoint: str = "endpoint"
+    inner: ActionBandit = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.inner = ActionBandit(actions=tuple(self._action(s) for s in self.strategies))
+
+    def _action(self, strategy: str) -> Action:
+        return Action(target=self.endpoint, technique=strategy, oracle="status")
+
+    @property
+    def arms(self) -> dict[str, BetaArm]:
+        """Posteriors keyed by strategy — the shape callers and tests expect."""
+        return {s: self.inner.arms[self._action(s).key] for s in self.strategies}
+
+    def select(self, rng: random.Random) -> str:
+        """Thompson draw over this endpoint's available strategies.
+
+        Ties break on the fixed strategy order, keeping selection deterministic
+        per seed (``ActionBandit`` sorts its actions, and technique names carry
+        the order here).
+        """
+        chosen = self.inner.select(rng)
+        return chosen.technique if chosen is not None else self.strategies[0]
+
+    def update(self, strategy: str, outcome: Outcome | int) -> None:
+        if strategy in self.strategies:
+            self.inner.update(self._action(strategy), outcome)
+
+    def preferred(self) -> str:
+        """The current best strategy by posterior mean (for the summary)."""
+        arms = self.arms
+        return max(self.strategies, key=lambda s: arms[s].mean())
+
+    def to_json(self) -> dict[str, Any]:
+        arms = self.arms
+        return {s: arms[s].to_json() for s in self.strategies}
 
 
 def seed_actions_from_prior(

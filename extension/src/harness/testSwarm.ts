@@ -213,7 +213,9 @@ export interface SwarmDeps {
 	spawnInfo: AgentSpawn;
 	/** Runs a test file twice on the CURRENT (pre-fix) code — the caller's
 	 * runAcceptanceTests, injected so the swarm is unit-testable. */
-	preRun: (testFile: string) => Promise<{ signal: string; output: string }>;
+	preRun: (
+		testFile: string,
+	) => Promise<{ signal: string; output: string; detail?: string }>;
 	storageDir: string;
 	issue: string;
 	goal?: string;

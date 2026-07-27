@@ -157,6 +157,66 @@ export function classifyTestRun(
 }
 
 /**
+ * WHY a run classified 'unavailable' — the diagnosis behind the verdict.
+ *
+ * 'unavailable' is honest but opaque: an episode that reports it tells the
+ * operator nothing about whether the oracle is unfixable (a genuinely
+ * unrunnable test) or one line of setup away (the wrong interpreter). Found
+ * live: a correct fix could not self-certify because the tests ran under a
+ * bare `python3` that could not import the workspace package — the failure was
+ * fully diagnosable from the output and was reported as a generic shrug.
+ * Returns null when the run DID produce a verdict (pass/fail).
+ */
+export type RunFailureKind =
+	| 'timeout'
+	| 'import_error'
+	| 'nothing_collected'
+	| 'spawn_failed'
+	| 'crash';
+
+export function classifyRunFailure(
+	exitCode: number | null,
+	output: string,
+	timedOut: boolean,
+): RunFailureKind | null {
+	if (timedOut) {
+		return 'timeout';
+	}
+	if (exitCode === null) {
+		return 'spawn_failed';
+	}
+	if (classifyTestRun(exitCode, output, timedOut) !== 'unavailable') {
+		return null;
+	}
+	// Import failures are checked BEFORE the exit-5 shape: pytest reports a
+	// collection ImportError as exit 2, and the plain-python path surfaces it
+	// as an uncaught ModuleNotFoundError (exit 1) — same cause, same fix.
+	if (/ModuleNotFoundError|ImportError|error(s)? during collection|ERROR collecting/i.test(output)) {
+		return 'import_error';
+	}
+	if (exitCode === 5 || /no tests ran|collected 0 items/i.test(output)) {
+		return 'nothing_collected';
+	}
+	return 'crash';
+}
+
+/** One-line, operator-readable rendering of a run-failure diagnosis. */
+export function describeRunFailure(kind: RunFailureKind): string {
+	switch (kind) {
+		case 'timeout':
+			return 'the test run exceeded its time budget';
+		case 'import_error':
+			return 'the interpreter could not import the code under test';
+		case 'nothing_collected':
+			return 'the file ran but no test was collected';
+		case 'spawn_failed':
+			return 'the interpreter could not be launched';
+		default:
+			return 'the test run crashed before producing a verdict';
+	}
+}
+
+/**
  * Classifies a FAILING run's output by failure class: 'assertion' when the
  * test's own check fired (AssertionError, a pytest-rewritten `E  assert`
  * diff, or a DID-NOT-RAISE from raises()), 'exception' when the test crashed
