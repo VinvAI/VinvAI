@@ -20,10 +20,27 @@ oracle violations found per unit cost, so that is the objective:
 * the score is then divided by the play's cost in probe-equivalents, so an
   expensive technique must find proportionally more to keep its posterior.
 
-The credit lands in a ``Beta(α, β)`` posterior as a fractional pseudo-count
-(``α += credit``, ``β += 1 − credit``), so α+β still grows by exactly one per
-play and the conjugate update is unchanged — ``docs/learning.md §2``'s
-Beta/Bernoulli scheme generalised from a bit to a bounded score.
+**How the credit lands, stated exactly.** Two update rules are implemented and
+they are NOT equivalent:
+
+* *fractional* (the default, ``rng=None``) — ``α += credit``,
+  ``β += 1 − credit``. α+β still grows by exactly one per play, but this is the
+  standard BOUNDED-REWARD RELAXATION of the Beta/Bernoulli conjugate update, not
+  a conjugate update: the true conjugate posterior for a ``[0,1]``-valued reward
+  is not Beta. Its practical consequence is one-directional and worth naming —
+  substituting the mean for the draw removes the credit's own variance, so the
+  posterior is strictly TIGHTER than the Bernoulli one at equal play counts
+  (compare a run of ``credit=0.25`` plays against Bernoulli(0.25) draws with the
+  same mean). A tighter posterior narrows the Thompson draw, so this rule
+  EXPLORES LESS than Thompson sampling's regret bounds assume. Those bounds are
+  proved for Bernoulli rewards and do not carry over unmodified.
+* *Bernoulli* (``update(..., rng=rng)``) — draw ``b ~ Bernoulli(credit)`` and
+  add the bit. This restores the genuine conjugate update and with it the regret
+  guarantee, at the price of a noisier posterior early on.
+
+The fractional rule stays the default because the per-endpoint loop's tests pin
+its arithmetic; the top-level campaign (``campaign.py``) opts into the Bernoulli
+rule, where the guarantee is what is actually wanted.
 
 Selection is Thompson sampling: draw ``θ_a ~ Beta(α_a, β_a)`` for every
 available action and play ``argmax_a θ_a``. A seeded ``random.Random`` makes the
@@ -48,9 +65,25 @@ STRATEGIES = (
     "semantic",
 )
 
-# Score for a play that broke no oracle but reached new ground. Coverage is the
-# exploration bonus, not the objective — high enough that exploring still pays
-# when nothing is breaking, low enough that a violation always outranks it.
+# Default score for a play that broke no oracle but reached new ground.
+#
+# This is a PRIOR, not a tuning constant, and it is adjustable and persisted:
+# ``ActionBandit.coverage_bonus`` overrides it, ``to_json()`` writes the value in
+# force, and ``seed_actions_from_prior`` restores it — so a repo that learns a
+# different exchange rate keeps it.
+#
+# The default is derived rather than picked. The number IS an exchange rate: it
+# answers "how many new-ground-but-nothing-broke plays is one oracle violation
+# worth?", because with credit 1.0 for a violation and ``c`` for coverage, an
+# arm that covers new ground every play ties an arm that violates on a fraction
+# ``c`` of its plays. 0.25 sets that indifference point at 4:1 — four
+# exploratory plays per violation. That is the ratio at which exploring is still
+# clearly subordinate to finding (a coverage-only arm can never outrank an arm
+# violating more than a quarter of the time, so the loop cannot be captured by a
+# cheap coverage treadmill) while still being enough to keep an unexplored arm's
+# posterior moving when nothing at all is breaking, which is the common case on
+# a healthy repo. The two constraints bracket it to roughly [0.1, 0.35]; 0.25 is
+# the round number inside that bracket.
 COVERAGE_BONUS = 0.25
 
 
@@ -70,12 +103,12 @@ class Outcome:
     new_coverage: int = 0
     cost: float = 1.0
 
-    def credit(self) -> float:
+    def credit(self, coverage_bonus: float = COVERAGE_BONUS) -> float:
         """Bounded score in [0, 1]: violations first, coverage as the bonus."""
         if self.violations > 0:
             value = 1.0
         elif self.new_coverage > 0:
-            value = COVERAGE_BONUS
+            value = coverage_bonus
         else:
             value = 0.0
         return value / max(1.0, self.cost)

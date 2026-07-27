@@ -64,6 +64,7 @@ from typing import Any
 from . import store
 from .functions import detect_src_roots, discover_targets
 from .issues import FailureCluster, normalize_signature
+from .semantics_corpus import RAISING_CORPUS, SEMANTIC_CORPUS
 
 DEFAULT_TIMEOUT_S = 60.0
 
@@ -256,118 +257,72 @@ def adjudication_prompt(target: str, snippet: str, message: str) -> str:
 # bare `result` expression. Kept deliberately inside what a restrictive
 # evaluator SHOULD support — disagreement on these is a defect, not a policy.
 
-AST_CORPUS: tuple[str, ...] = (
-    # arithmetic & numeric semantics
-    "result = 7 // 2\nresult",
-    "result = -7 // 2\nresult",
-    "result = 7 % -3\nresult",
-    "result = 2 ** 10\nresult",
-    "result = 0.1 + 0.2\nresult",
-    "result = divmod(17, 5)\nresult",
-    "result = round(2.675, 2)\nresult",
-    # comparisons (incl. chained) & boolean ops
-    "result = 1 < 2 < 3\nresult",
-    "result = 3 > 2 > 3\nresult",
-    "result = (0 or '' or 'x')\nresult",
-    "result = (1 and [] and 2)\nresult",
-    "result = not []\nresult",
-    "result = 'a' in 'cat' and 3 not in [1, 2]\nresult",
-    "v = 1\nresult = (v == 1.0, v is not None)\nresult",
-    # strings & f-strings
-    "x = 5\nresult = f'{x:03d}-{x!r}'\nresult",
-    "result = 'ab' * 3 + ''.join(['c', 'd'])\nresult",
-    "result = 'Hello World'.title().swapcase()\nresult",
-    "result = 'a,b,,c'.split(',')\nresult",
-    # collections & comprehensions
-    "result = [i * i for i in range(5) if i % 2]\nresult",
-    "result = {k: v for k, v in [('a', 1), ('b', 2)]}\nresult",
-    "result = {c for c in 'hello'} == set('hello')\nresult",
-    "result = list(x + y for x, y in zip([1, 2], [10, 20]))\nresult",
-    "result = sorted({'b': 2, 'a': 1}.items())\nresult",
-    # slicing & unpacking
-    "result = [0, 1, 2, 3, 4][::-1][1:3]\nresult",
-    "a, *rest = [1, 2, 3, 4]\nresult = (a, rest)\nresult",
-    "first, (second, third) = 1, (2, 3)\nresult = first + second + third\nresult",
-    "d = {'x': 1}\nresult = {**d, 'y': 2}\nresult",
-    # control flow
-    "result = 0\nfor i in range(4):\n    result += i\nelse:\n    result += 100\nresult",
-    "result = 0\nwhile result < 5:\n    result += 2\nresult",
-    # while-else is a SEPARATE code path from for-else: an interpreter can
-    # implement one and silently drop the other, and dropping it returns a
-    # plausible number rather than raising.
-    "result = 0\nwhile result < 3:\n    result += 1\nelse:\n    result += 100\nresult",
-    "result = 0\nfor i in range(4):\n    if i == 2:\n        break\nelse:\n    result = 100\nresult",
-    "result = []\nfor i in range(6):\n    if i == 2:\n        continue\n    if i == 4:\n        break\n    result.append(i)\nresult",
-    "result = 'big' if 10 > 5 else 'small'\nresult",
-    # context managers: __exit__ must be called on the manager, NOT on whatever
-    # __enter__ returned — a distinction an interpreter re-implementation gets
-    # wrong silently, and only a manager whose __enter__ returns something else
-    # exposes it.
-    "class CM:\n"
-    "    def __init__(self):\n"
-    "        self.closed = False\n"
-    "    def __enter__(self):\n"
-    "        return 'inner'\n"
-    "    def __exit__(self, *a):\n"
-    "        self.closed = True\n"
-    "        return False\n"
-    "m = CM()\n"
-    "with m as v:\n"
-    "    pass\n"
-    "result = (v, m.closed)\n"
-    "result",
-    "log = []\n"
-    "class CM2:\n"
-    "    def __enter__(self):\n"
-    "        log.append('in')\n"
-    "        return self\n"
-    "    def __exit__(self, *a):\n"
-    "        log.append('out')\n"
-    "        return False\n"
-    "with CM2():\n"
-    "    log.append('body')\n"
-    "result = log\n"
-    "result",
-    # exceptions
-    "try:\n    1 / 0\nexcept ZeroDivisionError as e:\n    result = type(e).__name__\nresult",
-    "try:\n    result = 'no-raise'\nexcept ValueError:\n    result = 'caught'\nelse:\n    result = result + '-else'\nfinally:\n    result = result + '-finally'\nresult",
-    "def f():\n    try:\n        return 'try'\n    finally:\n        pass\nresult = f()\nresult",
-    # functions, closures, defaults, *args/**kwargs, lambda
-    "def add(a, b=10, *args, **kw):\n    return a + b + sum(args) + len(kw)\nresult = add(1, 2, 3, 4, k=5)\nresult",
-    "def outer():\n    x = 1\n    def inner():\n        nonlocal x\n        x += 1\n        return x\n    inner()\n    return inner()\nresult = outer()\nresult",
-    "result = (lambda x: x * 2)(21)\nresult",
-    "fns = [lambda i=i: i for i in range(3)]\nresult = [f() for f in fns]\nresult",
-    # generators
-    "def gen(n):\n    for i in range(n):\n        yield i * 2\nresult = list(gen(4))\nresult",
-    "g = (x + 1 for x in range(3))\nresult = sum(g)\nresult",
-    # classes & dunder basics
-    "class P:\n    def __init__(self, x):\n        self.x = x\n    def __repr__(self):\n        return f'P({self.x})'\nresult = repr(P(3))\nresult",
-    "class C:\n    count = 0\n    def bump(self):\n        C.count += 1\n        return C.count\nc = C()\nc.bump()\nresult = c.bump()\nresult",
-    # assignment semantics
-    "x = 5\nx += 3\nx *= 2\nresult = x\nresult",
-    "result = [1, 2]\nresult[0], result[1] = result[1], result[0]\nresult",
-    "n = 10\nresult = [y := n + 1, y * 2]\nresult",
-    # builtins an evaluator must proxy correctly
-    "result = list(map(str, filter(None, [0, 1, '', 'a'])))\nresult",
-    "result = (min([3, 1, 2]), max((4, 9)), abs(-7), len('abcd'))\nresult",
-    "result = isinstance(True, int) and issubclass(bool, int)\nresult",
-    "result = list(enumerate(['a', 'b'], start=1))\nresult",
-    "result = int('ff', 16) + float('2.5')\nresult",
-    # mutation & identity edge cases
-    "a = [1, 2]\nb = a\nb.append(3)\nresult = a\nresult",
-    "def f(x, acc=[]):\n    acc.append(x)\n    return list(acc)\nf(1)\nresult = f(2)\nresult",
-)
+# The corpus is the deterministic half of this oracle, and its breadth IS its
+# power: a differential test only finds what the corpus provokes. It is
+# therefore derived from the Python Language Reference, CPython's own
+# semantics tests (test_scope / test_augassign / test_listcomps /
+# test_unpack_ex / test_patma / test_generators / test_contextlib), and the
+# published divergence lists of real re-implementations (PyPy
+# cpython_differences, RustPython, Skulpt, Brython) — not from one target.
+#
+# `semantics_corpus` carries the detail, including per-snippet provenance
+# comments and the deliberately EXCLUDED cases (hash salting, id(), __del__
+# timing, refcounts) that would otherwise make comparisons flaky rather than
+# informative. Weighting favours SEMANTIC_CORPUS: an interpreter bug that
+# returns a plausible wrong value is invisible to every exception-based
+# oracle, which is exactly the class this exists to find.
+AST_CORPUS: tuple[str, ...] = SEMANTIC_CORPUS
+AST_CORPUS_RAISING: tuple[str, ...] = RAISING_CORPUS
+
+
+def _ubiquity() -> dict[str, float]:
+    """How often each ast node type appears across the corpus.
+
+    A node type present in almost every snippet (``Name``, ``Assign``,
+    ``Expr``, ``Load``) carries no information: matching it means matching
+    ordinary prose. Which types those are is DERIVED from the corpus rather
+    than listed, so it stays correct as the corpus grows.
+    """
+    corpus = (*AST_CORPUS, *AST_CORPUS_RAISING)
+    counts: dict[str, int] = {}
+    for snippet in corpus:
+        for node in _snippet_constructs(snippet):
+            counts[node] = counts.get(node, 0) + 1
+    total = max(1, len(corpus))
+    return {k: v / total for k, v in counts.items()}
+
+
+# Node types appearing in more than this fraction of the corpus are treated as
+# uninformative — matching one proves nothing about the refusal.
+_UBIQUITY_CAP = 0.25
+
+
+def _discriminative_constructs(snippet: str) -> set[str]:
+    """Constructs in ``snippet`` that are rare enough to be evidence."""
+    ubiquity = _UBIQUITY
+    return {c for c in _snippet_constructs(snippet) if ubiquity.get(c, 0.0) <= _UBIQUITY_CAP}
+
+
+def _names_word(haystack: str, needle: str) -> bool:
+    """Word-bounded containment — 'name' must not match 'undefined_name_xyz'."""
+    import re as _re
+
+    return (
+        _re.search(rf"(?<![A-Za-z0-9_]){_re.escape(needle)}(?![A-Za-z0-9_])", haystack) is not None
+    )
+
+
+# =========================================================================
+# The ast-corpus: deterministic snippets spanning node types
+# =========================================================================
+#
+# Every snippet is self-contained, import-free, dunder-light, and ends with a
+# bare `result` expression. Kept deliberately inside what a restrictive
+# evaluator SHOULD support — disagreement on these is a defect, not a policy.
+
 
 # Snippets that must RAISE under CPython — an evaluator that accepts them has
 # widened the language.
-AST_CORPUS_RAISING: tuple[str, ...] = (
-    "result = 1 / 0\nresult",
-    "result = [1, 2][5]\nresult",
-    "result = {'a': 1}['b']\nresult",
-    "result = int('not-a-number')\nresult",
-    "result = 'a' + 1\nresult",
-    "result = undefined_name_xyz\nresult",
-)
 
 
 # =========================================================================
@@ -660,6 +615,19 @@ def judge_row(
             return {
                 "kind": "policy-limit",
                 "detail": f"deliberately refused ({reason}): {got_msg[:180]}",
+            }
+        if verdict == "unresolved":
+            # Uniform with the rejects-valid path: a refusal nothing structural
+            # explains is QUEUED, not called either way. A sandbox wrapping an
+            # exception type is normal practice, so whether losing the type is
+            # a defect is exactly the judgement layer 2 exists to make.
+            return {
+                "kind": "unadjudicated",
+                "detail": (
+                    f"target raised {got.get('exception')} where the reference "
+                    f"raises {ref_exc}, and the refusal could not be classified "
+                    f"structurally ({reason}): {got_msg[:140]}"
+                ),
             }
         return {
             "kind": "wrong-exception",

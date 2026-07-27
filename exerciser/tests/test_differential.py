@@ -275,8 +275,11 @@ def evaluate_code(code: str, tools=None):
     unconfigured = run_differential(
         repo, target="engine.sandbox:evaluate_code", reference="cpython-exec"
     )
+    # Unconfigured the target refuses EVERYTHING; those refusals name nothing
+    # structural, so they land on the adjudication queue rather than being
+    # asserted to be defects.
     assert any(
-        "no tools configured" in c["exemplar"]["detail"] for c in unconfigured["clusters"]
+        "no tools configured" in q["message"] for q in unconfigured["unadjudicated"]
     ), "unconfigured, the target refuses everything"
 
     configured = run_differential(
@@ -286,8 +289,9 @@ def evaluate_code(code: str, tools=None):
         call_kwargs={"tools": "@engine.sandbox:ALLOWED"},
     )
     assert not any(
-        "no tools configured" in c["exemplar"]["detail"] for c in configured["clusters"]
+        "no tools configured" in q["message"] for q in configured["unadjudicated"]
     ), "the @module:SYMBOL value resolved and reached the call"
+    assert not any("no tools configured" in c["exemplar"]["detail"] for c in configured["clusters"])
 
     # And the entry persists its config, so a later bare run stays configured.
     saved = store.read_json(store.exercise_dir(repo) / "references.json")
