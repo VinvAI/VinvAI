@@ -268,6 +268,16 @@ def differential_cmd(
 @click.option(
     "--baseline", default=None, help="JSON well-formed payload; faults replace ONE field of it."
 )
+@click.option(
+    "--auto-target",
+    "auto_targets",
+    multiple=True,
+    help=(
+        "Derive a boundary from this consumer's own annotations (module:fn). "
+        "Repeatable. What the code does not declare becomes ONE cached "
+        "question on the agent channel."
+    ),
+)
 @click.option("--chunk-field", default=None, help="Field carrying the stream chunks.")
 @click.option(
     "--chunk-canonical",
@@ -278,7 +288,16 @@ def differential_cmd(
 @click.option("--python", default=None, help="Interpreter for the workers (TARGET's venv).")
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def faults_cmd(
-    repo_path, target, contract, baseline, chunk_field, chunk_canonical, timeout, python, verbose
+    repo_path,
+    target,
+    contract,
+    baseline,
+    auto_targets,
+    chunk_field,
+    chunk_canonical,
+    timeout,
+    python,
+    verbose,
 ):
     _configure_logging(verbose)
     try:
@@ -287,6 +306,7 @@ def faults_cmd(
             target=target,
             contract=json.loads(contract) if contract else None,
             baseline=json.loads(baseline) if baseline else None,
+            auto_targets=list(auto_targets) or None,
             chunk_field=chunk_field,
             chunk_canonical=chunk_canonical,
             timeout_s=timeout,

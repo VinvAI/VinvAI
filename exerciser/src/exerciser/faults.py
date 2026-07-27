@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .agent_loop import AgentChannel, Question, question_key
 from .functions import detect_src_roots
 from .issues import FailureCluster, normalize_signature
 
@@ -414,6 +415,84 @@ def cluster_fault_failures(rows: list[dict[str, Any]]) -> list[FailureCluster]:
     return sorted(clusters.values(), key=lambda c: (c.kind, c.path))
 
 
+def infer_contract_from_signature(
+    target: str, python: str | None = None, repo: Path | None = None
+) -> dict[str, str]:
+    """Best-effort type contract from the consumer's own annotations.
+
+    The cataloguer needs to know what shapes a boundary legally admits. Making
+    a human write that out by hand is what stops this oracle being usable on an
+    unfamiliar repo, so the first source is the code itself: an annotated
+    parameter already DECLARES its admissible domain. Unannotated parameters
+    are left out — they are what the agent channel is for.
+    """
+    import subprocess as _sp
+
+    roots = detect_src_roots(repo) if repo is not None else ["."]
+    base = repo.resolve() if repo is not None else Path.cwd()
+    sys_path_lines = "".join(f"sys.path.insert(0, {str((base / r).resolve())!r})\n" for r in roots)
+    code = (
+        "import importlib, inspect, json, sys\n"
+        + sys_path_lines
+        + f"mod_name, _, qual = {target!r}.partition(':')\n"
+        "try:\n"
+        "    obj = importlib.import_module(mod_name)\n"
+        "    for part in qual.split('.'):\n"
+        "        obj = getattr(obj, part)\n"
+        "    sig = inspect.signature(obj)\n"
+        "except BaseException:\n"
+        "    print('{}'); sys.exit(0)\n"
+        "out = {}\n"
+        "for name, p in sig.parameters.items():\n"
+        "    if name in ('self', 'cls') or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):\n"
+        "        continue\n"
+        "    ann = p.annotation\n"
+        "    if ann is p.empty:\n"
+        "        continue\n"
+        "    out[name] = getattr(ann, '__name__', None) or str(ann)\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        proc = _sp.run(  # noqa: S603 (fixed argv, no shell)
+            [python or sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(base),
+        )
+        data = json.loads((proc.stdout or "{}").strip() or "{}")
+        return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError, _sp.TimeoutExpired):
+        return {}
+
+
+def contract_question(target: str, known: dict[str, str]) -> Question:
+    """Ask the agent channel for the contract the annotations do not state."""
+    prompt = (
+        "A fault-injection oracle needs the TYPE CONTRACT of a dependency "
+        "boundary so it can generate adversarial-but-LEGAL values for it — "
+        "values the contract permits but that the consuming code may not "
+        "handle (an optional field actually absent, an empty list, a string "
+        "holding an unpaired surrogate, stream chunks arriving out of order).\n\n"
+        f"Boundary: {target}\n"
+        f"Types already known from annotations: {json.dumps(known, indent=2)}\n\n"
+        "Give the contract for EVERY parameter this boundary accepts, using "
+        "Python type syntax, marking optionality honestly (`str | None` only "
+        "when None is genuinely permitted). Include a well-formed baseline "
+        "payload the consumer accepts today.\n\n"
+        'Reply with exactly: {"contract": {"<param>": "<type>"}, '
+        '"baseline": {"<param>": <value>}}'
+    )
+    return Question(
+        key=question_key("contract", target),
+        topic="contract",
+        subject=target,
+        prompt=prompt,
+        reply_schema='{"contract": {"<param>": "<type>"}, "baseline": {"<param>": <value>}}',
+        context={"target": target, "known_from_annotations": known},
+    )
+
+
 def load_boundaries(repo: Path) -> list[FaultBoundary]:
     """Declared boundaries from ``.vinv/exercise/boundaries.json``."""
     doc = store.read_json(store.exercise_dir(repo) / "boundaries.json")
@@ -440,13 +519,24 @@ def run_faults(
     baseline: dict[str, Any] | None = None,
     chunk_field: str | None = None,
     chunk_canonical: str | None = None,
+    auto_targets: list[str] | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     python: str | None = None,
+    max_questions: int = 25,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
-    """Drive every declared boundary over its fault catalogue. Persists and summarises."""
+    """Drive every declared boundary over its fault catalogue. Persists and summarises.
+
+    With neither ``target`` nor a declared ``boundaries.json``, ``auto_targets``
+    derives boundaries from the consumers' own annotations, falling back to the
+    agent channel for contracts the code does not state.
+    """
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
+    store.exercise_dir(repo).mkdir(parents=True, exist_ok=True)
+    channel = AgentChannel(repo, "contract", max_new=max_questions)
+    # Bound on every branch: an auto-derived boundary has no declared sweep.
+    chunk_by_target: dict[str, tuple[str, str]] = {}
 
     if target:
         boundary = FaultBoundary(
@@ -471,9 +561,31 @@ def run_faults(
             {"version": 1, "boundaries": sorted(merged.values(), key=lambda e: e["target"])},
         )
         boundaries = [boundary]
-        chunk_by_target = (
-            {target: (chunk_field, chunk_canonical)} if chunk_field and chunk_canonical else {}
-        )
+        if chunk_field and chunk_canonical:
+            chunk_by_target = {target: (chunk_field, chunk_canonical)}
+    elif auto_targets:
+        # No declaration: DERIVE boundaries from the consumers themselves, so
+        # the oracle is usable on a repo where nobody has written a
+        # boundaries.json. Annotations supply what they can; the rest becomes
+        # a question on the agent channel (asked once, cached forever).
+        boundaries = []
+        for auto in auto_targets:
+            known = infer_contract_from_signature(auto, python, repo)
+            answered = channel.answer(question_key("contract", auto)) if channel else None
+            if isinstance(answered, dict) and isinstance(answered.get("contract"), dict):
+                contract_map = {str(k): str(v) for k, v in answered["contract"].items()}
+                base = answered.get("baseline")
+                baseline_map = dict(base) if isinstance(base, dict) else {}
+            else:
+                contract_map, baseline_map = known, {}
+                if channel is not None and not known:
+                    channel.ask(contract_question(auto, known))
+            if contract_map:
+                boundaries.append(
+                    FaultBoundary(
+                        name=auto, target=auto, contract=contract_map, baseline=baseline_map
+                    )
+                )
     else:
         boundaries = load_boundaries(repo)
         doc = store.read_json(store.exercise_dir(repo) / "boundaries.json") or {}
@@ -483,13 +595,24 @@ def run_faults(
             if isinstance(e, dict) and e.get("chunk_field") and e.get("chunk_canonical")
         }
 
+    channel_state = channel.save(logger=log)
+
     diagnostics: list[str] = []
     if not boundaries:
-        diagnostics.append(
-            "0 fault boundaries declared — this oracle is idle. Declare one in "
-            '.vinv/exercise/boundaries.json as {"target": "module:fn", '
-            '"contract": {"content": "str | None"}, "baseline": {...}} to arm it.'
-        )
+        if channel_state["pending"]:
+            diagnostics.append(
+                f"0 fault boundaries armed — {channel_state['pending']} boundary "
+                "contract(s) are queued on the agent channel "
+                f"({channel_state['file']}); answer them and re-run. Contracts "
+                "are cached by shape, so this cost is paid once."
+            )
+        else:
+            diagnostics.append(
+                "0 fault boundaries declared — this oracle is idle. Declare one in "
+                '.vinv/exercise/boundaries.json as {"target": "module:fn", '
+                '"contract": {"content": "str | None"}, "baseline": {...}}, or pass '
+                "--auto-target module:fn to derive one from its annotations."
+            )
         log.warning("faults_empty %s", diagnostics[0])
 
     src_roots = detect_src_roots(repo)
@@ -573,6 +696,9 @@ def run_faults(
         "chunk_splits": sum(1 for r in rows if r.get("phase") == "chunk-sweep"),
         "issue_clusters": len(clusters),
         "timeouts": timeouts,
+        # What the engine had to ask an agent, and what it never has to ask
+        # again — the caching claim, measured.
+        "agent_channel": channel_state,
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "fault_results.jsonl"),
     }
