@@ -21,6 +21,7 @@ import click
 
 from . import store
 from .differential import run_differential
+from .faults import run_faults
 from .functions import run_functions
 from .plan import build_plan
 from .profile import build_profile
@@ -236,6 +237,50 @@ def differential_cmd(repo_path, target, reference, timeout, python, call_kwargs,
             timeout_s=timeout,
             python=python,
             logger=logging.getLogger("exerciser.differential"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("faults")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--target", default=None, help="Consumer to drive as module:qualname (kwargs-called)."
+)
+@click.option(
+    "--contract",
+    default=None,
+    help='JSON type contract of the boundary, e.g. \'{"content": "str | None"}\'.',
+)
+@click.option(
+    "--baseline", default=None, help="JSON well-formed payload; faults replace ONE field of it."
+)
+@click.option("--chunk-field", default=None, help="Field carrying the stream chunks.")
+@click.option(
+    "--chunk-canonical",
+    default=None,
+    help="Canonical stream text; every split point is swept for aggregator convergence.",
+)
+@click.option("--timeout", default=60.0, show_default=True, help="Seconds per boundary.")
+@click.option("--python", default=None, help="Interpreter for the workers (TARGET's venv).")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def faults_cmd(
+    repo_path, target, contract, baseline, chunk_field, chunk_canonical, timeout, python, verbose
+):
+    _configure_logging(verbose)
+    try:
+        result = run_faults(
+            Path(repo_path),
+            target=target,
+            contract=json.loads(contract) if contract else None,
+            baseline=json.loads(baseline) if baseline else None,
+            chunk_field=chunk_field,
+            chunk_canonical=chunk_canonical,
+            timeout_s=timeout,
+            python=python,
+            logger=logging.getLogger("exerciser.faults"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
