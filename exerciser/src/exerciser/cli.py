@@ -43,8 +43,13 @@ _force_utf8_stdio()
 
 def _emit(result: dict) -> None:
     click.echo(json.dumps(result, indent=2, default=str))
-    if isinstance(result, dict) and result.get("status") == "error":
-        sys.exit(1)
+    if isinstance(result, dict):
+        # Diagnostics (e.g. "0 endpoints — Vinv cannot exercise this repo")
+        # must be LOUD: a silent zero looks exactly like a clean run.
+        for diag in result.get("diagnostics") or []:
+            click.secho(f"WARNING: {diag}", err=True, fg="yellow")
+        if result.get("status") == "error":
+            sys.exit(1)
 
 
 def _configure_logging(verbose: bool) -> None:

@@ -20,16 +20,16 @@ Both are fully deterministic: the same index yields the same output every run.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
 import tomllib
-from pathlib import Path
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from identification.store import open_identification_store
-
 
 # Method names ubiquitous in the Python/JS standard libraries and common
 # frameworks (``session.get``, ``"…".format``, ``items.append``, ``res.json``).
@@ -120,8 +120,7 @@ _RE_METHODS_LIST = re.compile(r"""["']([A-Za-z]+)["']""")
 # JS/TS — Express/Koa/Fastify/Hapi imperative routes (path must start with '/'
 # to keep `.get(` off Map/cache/localStorage lookups).
 _RE_JS_METHOD_CALL = re.compile(
-    r"""\.(get|post|put|patch|delete|head|options|all)\(\s*"""
-    r"""[`"'](/[^`"']*)[`"']""",
+    r"""\.(get|post|put|patch|delete|head|options|all)\(\s*""" r"""[`"'](/[^`"']*)[`"']""",
     re.IGNORECASE,
 )
 # NestJS controller decorators: @Get("x")  @Post()  @Delete(":id")
@@ -143,6 +142,272 @@ _RE_SPRING = re.compile(
 
 
 # =========================================================================
+# Declarative route tables (AST, Python)
+# =========================================================================
+#
+# Regexes cover DECORATOR-shaped registration; frameworks that build their app
+# from a literal routing TABLE never match them.  Plain Starlette is the
+# canonical case —
+#   app = Starlette(routes=[Route("/", homepage), Route("/chat", chat,
+#   methods=["POST"])])
+# declares two endpoints and zero decorators, and (unlike FastAPI) serves no
+# ``/openapi.json`` to fall back on.  These are extracted with the ``ast``
+# module instead: deterministic, whitespace-immune, and able to resolve the
+# endpoint FUNCTION (``Route``'s second argument) directly rather than
+# guessing the handler from adjacency.  Covered forms:
+#
+# * ``Route("/x", handler, methods=[...])`` / ``WebSocketRoute`` — inline in a
+#   ``routes=[...]`` kwarg of ``Starlette``/``FastAPI``/``APIRouter``, in a
+#   list/tuple assigned to a module variable (including ``+`` concatenation
+#   and ``*splat``), or anywhere else in the file (``app.routes.append``).
+# * ``Mount("/prefix", routes=[...])`` and ``Mount("/prefix", app=subapp)``
+#   where ``subapp`` is a same-file ``Starlette(routes=...)`` — the mount
+#   prefix is joined onto every nested path, recursively.
+# * aiohttp — ``app.router.add_get("/x", handler)`` (and add_post/…/add_route/
+#   add_view) plus route-table ``web.get("/x", handler)`` entries.
+# * tornado — ``Application([(r"/x", Handler), …])`` and ``URLSpec`` pairs.
+#
+# Each extractor is GATED on the framework's name appearing in the file text,
+# so a repo-local class that happens to be called ``Route`` cannot mint
+# phantom endpoints in unrelated codebases.  A file that fails ``ast.parse``
+# contributes nothing (the regex passes still run over it).
+
+_STARLETTE_ROUTE_CALLS = ("Route", "WebSocketRoute")
+_STARLETTE_MOUNT_CALLS = ("Mount", "Host")
+_STARLETTE_APP_CTORS = ("Starlette", "FastAPI", "APIRouter", "Router")
+_AIOHTTP_ADD_METHODS = {
+    "add_get": "GET",
+    "add_post": "POST",
+    "add_put": "PUT",
+    "add_patch": "PATCH",
+    "add_delete": "DELETE",
+    "add_head": "HEAD",
+    "add_options": "OPTIONS",
+    "add_view": "*",
+}
+_AIOHTTP_TABLE_METHODS = {
+    "get",
+    "post",
+    "put",
+    "patch",
+    "delete",
+    "head",
+    "options",
+    "view",
+}
+
+
+def _ast_leaf_name(node: ast.AST | None) -> str | None:
+    """Bare identifier of a Name/Attribute expression (``pkg.mod.chat`` -> ``chat``)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _ast_const_str(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _py_declarative_routes(text: str) -> list[tuple[str, str, int, str, str | None]]:
+    """``(method, path, line, framework, handler)`` for declarative route tables.
+
+    Deterministic AST walk — see the section comment above for covered forms.
+    ``handler`` is the endpoint function/class named in the declaration itself
+    (``None`` for lambdas and unresolvable expressions, in which case the
+    caller falls back to symbol adjacency).
+    """
+    has_starlette = "starlette" in text or "fastapi" in text
+    has_aiohttp = "aiohttp" in text
+    has_tornado = "tornado" in text
+    if not (has_starlette or has_aiohttp or has_tornado):
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+
+    out: list[tuple[str, str, int, str, str | None]] = []
+    # Name -> assigned expression, for resolving `routes=table` /
+    # `Mount("/p", app=subapp)` references within the file.
+    assigns: dict[str, ast.expr] = {}
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if value is None:
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name):
+                assigns[t.id] = value
+
+    consumed: set[int] = set()  # id() of Call nodes already emitted via a walk
+
+    def _kw(call: ast.Call, name: str) -> ast.expr | None:
+        for kw in call.keywords:
+            if kw.arg == name:
+                return kw.value
+        return None
+
+    def _route_handler(call: ast.Call) -> str | None:
+        if len(call.args) >= 2:
+            leaf = _ast_leaf_name(call.args[1])
+            if leaf:
+                return leaf
+        return _ast_leaf_name(_kw(call, "endpoint") or _kw(call, "app"))
+
+    def _route_methods(call: ast.Call) -> list[str]:
+        methods = _kw(call, "methods")
+        if isinstance(methods, ast.List | ast.Tuple | ast.Set):
+            got = [_ast_const_str(e) for e in methods.elts]
+            named = [m.upper() for m in got if m]
+            if named:
+                return named
+        return ["GET"]  # Starlette's default for Route(...)
+
+    def _route_path(call: ast.Call) -> str | None:
+        if call.args:
+            return _ast_const_str(call.args[0])
+        return _ast_const_str(_kw(call, "path"))
+
+    def _emit_route(call: ast.Call, prefix: str) -> None:
+        path = _route_path(call)
+        if path is None:
+            return
+        full = _join_route(prefix, path)
+        handler = _route_handler(call)
+        if _ast_leaf_name(call.func) == "WebSocketRoute":
+            out.append(("WEBSOCKET", full, call.lineno, "starlette", handler))
+        else:
+            for meth in _route_methods(call):
+                out.append((meth, full, call.lineno, "starlette", handler))
+
+    def _walk_routes(node: ast.expr | None, prefix: str, depth: int) -> None:
+        """Interpret ``node`` as a routes-list expression mounted at ``prefix``."""
+        if node is None or depth > 8:
+            return
+        if isinstance(node, ast.Name):
+            _walk_routes(assigns.get(node.id), prefix, depth + 1)
+        elif isinstance(node, ast.List | ast.Tuple | ast.Set):
+            for elt in node.elts:
+                _walk_routes(elt, prefix, depth + 1)
+        elif isinstance(node, ast.Starred):
+            _walk_routes(node.value, prefix, depth + 1)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            _walk_routes(node.left, prefix, depth + 1)
+            _walk_routes(node.right, prefix, depth + 1)
+        elif isinstance(node, ast.Call):
+            _handle_call(node, prefix, depth)
+
+    def _handle_call(call: ast.Call, prefix: str, depth: int) -> None:
+        leaf = _ast_leaf_name(call.func)
+        if leaf in _STARLETTE_ROUTE_CALLS:
+            if id(call) not in consumed:
+                consumed.add(id(call))
+                _emit_route(call, prefix)
+        elif leaf in _STARLETTE_MOUNT_CALLS:
+            if id(call) in consumed:
+                return
+            consumed.add(id(call))
+            sub_prefix = prefix
+            if leaf == "Mount":
+                mount_path = _route_path(call)
+                if mount_path and mount_path != "/":
+                    sub_prefix = _join_route(prefix, mount_path)
+            _walk_routes(_kw(call, "routes"), sub_prefix, depth + 1)
+            app = _kw(call, "app")
+            if app is None and len(call.args) >= 2:
+                app = call.args[1]
+            if isinstance(app, ast.Name):
+                app = assigns.get(app.id)
+            if isinstance(app, ast.Call) and _ast_leaf_name(app.func) in _STARLETTE_APP_CTORS:
+                _walk_routes(_kw(app, "routes"), sub_prefix, depth + 1)
+        elif leaf in _STARLETTE_APP_CTORS:
+            _walk_routes(_kw(call, "routes"), prefix, depth + 1)
+
+    if has_starlette:
+        # Pass 1: app constructors and Mounts establish prefixes and consume
+        # their nested Route calls; ast.walk is documented pre-order, and the
+        # `consumed` set makes the sweep order-independent regardless.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                leaf = _ast_leaf_name(node.func)
+                if leaf in _STARLETTE_APP_CTORS or leaf in _STARLETTE_MOUNT_CALLS:
+                    _handle_call(node, "", 0)
+        # Pass 2: any Route not reached above (appended imperatively, or in a
+        # table the ctor pass could not see) still counts, unprefixed.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and id(node) not in consumed:
+                if _ast_leaf_name(node.func) in _STARLETTE_ROUTE_CALLS:
+                    _handle_call(node, "", 0)
+
+    if has_aiohttp:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            leaf = _ast_leaf_name(node.func)
+            if leaf in _AIOHTTP_ADD_METHODS and isinstance(node.func, ast.Attribute):
+                path = _route_path(node)
+                handler = _ast_leaf_name(node.args[1]) if len(node.args) > 1 else None
+                if path and path.startswith("/"):
+                    out.append((_AIOHTTP_ADD_METHODS[leaf], path, node.lineno, "aiohttp", handler))
+            elif leaf == "add_route" and isinstance(node.func, ast.Attribute):
+                if len(node.args) >= 2:
+                    meth = _ast_const_str(node.args[0]) or "*"
+                    path = _ast_const_str(node.args[1])
+                    handler = _ast_leaf_name(node.args[2]) if len(node.args) > 2 else None
+                    if path and path.startswith("/"):
+                        out.append((meth.upper(), path, node.lineno, "aiohttp", handler))
+            elif (
+                leaf in _AIOHTTP_TABLE_METHODS
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "web"
+                and len(node.args) >= 2
+            ):
+                path = _ast_const_str(node.args[0])
+                if path and path.startswith("/"):
+                    meth = "*" if leaf == "view" else leaf.upper()
+                    out.append((meth, path, node.lineno, "aiohttp", _ast_leaf_name(node.args[1])))
+
+    if has_tornado:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            leaf = _ast_leaf_name(node.func)
+            if leaf == "URLSpec" and len(node.args) >= 2:
+                path = _ast_const_str(node.args[0])
+                if path:
+                    out.append(("*", path, node.lineno, "tornado", _ast_leaf_name(node.args[1])))
+            elif leaf == "Application":
+                table = node.args[0] if node.args else _kw(node, "handlers")
+                if isinstance(table, ast.Name):
+                    table = assigns.get(table.id)
+                if isinstance(table, ast.List | ast.Tuple):
+                    for elt in table.elts:
+                        if isinstance(elt, ast.Tuple | ast.List) and len(elt.elts) >= 2:
+                            path = _ast_const_str(elt.elts[0])
+                            if path:
+                                out.append(
+                                    (
+                                        "*",
+                                        path,
+                                        elt.elts[0].lineno,
+                                        "tornado",
+                                        _ast_leaf_name(elt.elts[1]),
+                                    )
+                                )
+
+    return out
+
+
+# =========================================================================
 # Non-HTTP entry-point patterns (deterministic, per-language)
 # =========================================================================
 #
@@ -158,6 +423,19 @@ _RE_SPRING = re.compile(
 _RE_PY_CLI = re.compile(
     r"""@\s*[\w.]+\.(command|group)\(\s*(?:["']([^"']*)["'])?""",
 )
+# Python — argparse CLIs.  Two deterministic signals: a subcommand registration
+# (`sub.add_parser("name")`) is an entry per se; a bare `ArgumentParser(...)`
+# only counts when the same file also CALLS `.parse_args(` — plenty of helper
+# modules build parsers they never run.
+_RE_PY_ARGPARSE_ADD_PARSER = re.compile(
+    r"""\.add_parser\(\s*["']([^"']+)["']""",
+)
+_RE_PY_ARGPARSE_CTOR = re.compile(r"""\bArgumentParser\s*\(""")
+_RE_PY_ARGPARSE_PROG = re.compile(
+    r"""\bArgumentParser\s*\([^)]*?prog\s*=\s*["']([^"']+)["']""",
+    re.DOTALL,
+)
+_RE_PY_PARSE_ARGS = re.compile(r"""\.parse_args\s*\(""")
 # Python — Celery tasks: @shared_task, @app.task(...), @celery.task(name="..")
 _RE_PY_CELERY = re.compile(
     r"""@\s*(?:[\w.]+\.)?(?:shared_task|task|periodic_task)\b"""
@@ -177,7 +455,8 @@ _RE_PY_ONEVENT = re.compile(
 )
 # Python — bare script entry: if __name__ == "__main__":
 _RE_PY_MAIN = re.compile(
-    r"""^[ \t]*if\s+__name__\s*==\s*["']__main__["']""", re.MULTILINE,
+    r"""^[ \t]*if\s+__name__\s*==\s*["']__main__["']""",
+    re.MULTILINE,
 )
 
 # Python — stdlib http.server / socketserver / wsgiref services.  These have no
@@ -200,18 +479,30 @@ _RE_PY_MAIN = re.compile(
 # file is itself scanned when vinv indexes its own repo, and a verbatim
 # ``ServerClass(`` in a comment would self-match.
 _STDLIB_HTTP_HANDLER_BASES = (
-    "BaseHTTPRequestHandler", "SimpleHTTPRequestHandler", "CGIHTTPRequestHandler",
+    "BaseHTTPRequestHandler",
+    "SimpleHTTPRequestHandler",
+    "CGIHTTPRequestHandler",
 )
 _STDLIB_SOCKET_HANDLER_BASES = (
-    "BaseRequestHandler", "StreamRequestHandler", "DatagramRequestHandler",
+    "BaseRequestHandler",
+    "StreamRequestHandler",
+    "DatagramRequestHandler",
 )
 _STDLIB_SERVER_CLASSES = (
-    "ThreadingHTTPServer", "HTTPServer",
-    "ThreadingTCPServer", "ThreadingUDPServer", "TCPServer", "UDPServer",
-    "UnixStreamServer", "UnixDatagramServer", "ForkingTCPServer", "ForkingUDPServer",
+    "ThreadingHTTPServer",
+    "HTTPServer",
+    "ThreadingTCPServer",
+    "ThreadingUDPServer",
+    "TCPServer",
+    "UDPServer",
+    "UnixStreamServer",
+    "UnixDatagramServer",
+    "ForkingTCPServer",
+    "ForkingUDPServer",
 )
 _RE_PY_CLASS_DEF = re.compile(
-    r"""^([ \t]*)class\s+(\w+)\s*\(([^)]*)\)\s*:""", re.MULTILINE,
+    r"""^([ \t]*)class\s+(\w+)\s*\(([^)]*)\)\s*:""",
+    re.MULTILINE,
 )
 _RE_PY_DO_METHOD = re.compile(
     r"""^([ \t]*)def\s+do_(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE)\s*\(""",
@@ -260,7 +551,9 @@ def _py_block_end(lines: list[str], header_idx: int, header_indent: int) -> int:
 
 
 def _py_class_ranges(
-    text: str, lines: list[str], bases: tuple[str, ...],
+    text: str,
+    lines: list[str],
+    bases: tuple[str, ...],
 ) -> list[tuple[str, int, int, int]]:
     """``(class_name, header_line_idx, body_end_idx, header_indent)`` for every
     class in ``text`` whose base list names one of ``bases``."""
@@ -278,7 +571,8 @@ def _module_str_sequence(text: str, name: str) -> list[str]:
     """Path literals of a module-level ``NAME = ("/a", "/b")`` tuple/list constant."""
     m = re.search(
         rf"""^[ \t]*{re.escape(name)}\s*=\s*[(\[]([^)\]]*)[)\]]""",
-        text, re.MULTILINE,
+        text,
+        re.MULTILINE,
     )
     if not m:
         return []
@@ -316,16 +610,16 @@ def _path_hints(body: str, module_text: str) -> list[str]:
     return ordered
 
 
-def _stdlib_http_routes(text: str) -> list[tuple[str, str, int, str]]:
-    """``(METHOD, path, line, framework)`` for every ``do_<VERB>`` method of an
-    ``http.server`` request-handler subclass declared in ``text``."""
+def _stdlib_http_routes(text: str) -> list[tuple[str, str, int, str, str | None]]:
+    """``(METHOD, path, line, framework, handler)`` for every ``do_<VERB>``
+    method of an ``http.server`` request-handler subclass declared in ``text``."""
     if not any(b in text for b in _STDLIB_HTTP_HANDLER_BASES):
         return []
     lines = text.splitlines()
     classes = _py_class_ranges(text, lines, _STDLIB_HTTP_HANDLER_BASES)
     if not classes:
         return []
-    out: list[tuple[str, str, int, str]] = []
+    out: list[tuple[str, str, int, str, str | None]] = []
     for m in _RE_PY_DO_METHOD.finditer(text):
         def_idx = text.count("\n", 0, m.start())
         def_indent = len(m.group(1))
@@ -338,7 +632,7 @@ def _stdlib_http_routes(text: str) -> list[tuple[str, str, int, str]]:
         body = "\n".join(lines[def_idx + 1 : _py_block_end(lines, def_idx, def_indent)])
         verb = m.group(2).upper()
         for path in _path_hints(body, text) or ["/"]:
-            out.append((verb, path, def_idx + 1, "http.server"))
+            out.append((verb, path, def_idx + 1, "http.server", None))
     return out
 
 
@@ -411,9 +705,7 @@ _RE_JS_CLI = re.compile(r"""\.command\(\s*[`"']([^`"']+)[`"']""")
 _RE_JS_MCP_STDIO = re.compile(r"""\bnew\s+StdioServerTransport\s*\(""")
 # JS/TS — hand-rolled stdio JSON-RPC loops: consuming process.stdin in a file
 # that also speaks the "jsonrpc" tag (same conjunction gate as Python).
-_RE_JS_STDIN_READ = re.compile(
-    r"""\bprocess\.stdin\.(?:on|once|setEncoding|resume|pipe)\s*\("""
-)
+_RE_JS_STDIN_READ = re.compile(r"""\bprocess\.stdin\.(?:on|once|setEncoding|resume|pipe)\s*\(""")
 # JS/TS — node-cron / node-schedule: cron.schedule("* * * * *", fn)
 _RE_JS_CRON = re.compile(
     r"""\b(?:cron|schedule|nodeCron)\.schedule\(\s*[`"']([^`"']+)[`"']""",
@@ -425,7 +717,8 @@ _RE_JS_WORKER = re.compile(
 
 
 def _entrypoints_in_source(
-    text: str, ext: str,
+    text: str,
+    ext: str,
 ) -> list[tuple[str, str, int, str]]:
     """Return ``(kind, trigger, line, framework)`` for every NON-HTTP entry point
     declared in ``text`` — CLI commands, background/queue tasks, scheduled jobs,
@@ -440,6 +733,14 @@ def _entrypoints_in_source(
     if ext in _PY_EXTS:
         for m in _RE_PY_CLI.finditer(text):
             out.append(("cli_command", m.group(2) or "", _line_of(m.start()), "click/typer"))
+        for m in _RE_PY_ARGPARSE_ADD_PARSER.finditer(text):
+            out.append(("cli_command", m.group(1), _line_of(m.start()), "argparse"))
+        ctor = _RE_PY_ARGPARSE_CTOR.search(text)
+        if ctor is not None and _RE_PY_PARSE_ARGS.search(text):
+            prog = _RE_PY_ARGPARSE_PROG.search(text)
+            out.append(
+                ("cli_command", prog.group(1) if prog else "", _line_of(ctor.start()), "argparse")
+            )
         for m in _RE_PY_CELERY.finditer(text):
             out.append(("background_task", m.group(1) or "", _line_of(m.start()), "celery"))
         for m in _RE_PY_DRAMATIQ.finditer(text):
@@ -461,9 +762,7 @@ def _entrypoints_in_source(
             if m is not None:
                 # Trigger assembled without the literal token so this file
                 # never self-matches when vinv indexes its own repo.
-                out.append(
-                    ("stdio_server", "sys." + "stdin", _line_of(m.start()), "jsonrpc-stdio")
-                )
+                out.append(("stdio_server", "sys." + "stdin", _line_of(m.start()), "jsonrpc-stdio"))
         for cls_name, line in _stdlib_socket_handlers(text):
             out.append(("socket_handler", cls_name, line, "socketserver"))
         root = _stdlib_service_root(text)
@@ -482,9 +781,7 @@ def _entrypoints_in_source(
         if _JSONRPC_TAG in text.lower():
             m = _RE_JS_STDIN_READ.search(text)
             if m is not None:
-                out.append(
-                    ("stdio_server", "process.stdin", _line_of(m.start()), "jsonrpc-stdio")
-                )
+                out.append(("stdio_server", "process.stdin", _line_of(m.start()), "jsonrpc-stdio"))
 
     return out
 
@@ -502,7 +799,7 @@ def _entrypoints_in_source(
 
 _SERVICE_KIND_BY_ENTRY: dict[str, str] = {
     "http_api": "http-service",
-    "event_hook": "http-service",   # lifecycle hook of the serving app process
+    "event_hook": "http-service",  # lifecycle hook of the serving app process
     "stdio_server": "stdio-server",
     "cli_command": "cli",
     "script_main": "cli",
@@ -563,11 +860,29 @@ def _module_match(imp_module: str, file_module: str) -> bool:
 
 
 # Directories never worth scanning for app-assembly (include_router) files.
-_MOUNT_SCAN_SKIP = frozenset({
-    ".git", ".vinv", ".hg", ".svn", "node_modules", ".venv", "venv", "env",
-    "__pycache__", "dist", "build", ".mypy_cache", ".pytest_cache", ".tox",
-    ".ruff_cache", "site-packages", ".next", ".cache", "data",
-})
+_MOUNT_SCAN_SKIP = frozenset(
+    {
+        ".git",
+        ".vinv",
+        ".hg",
+        ".svn",
+        "node_modules",
+        ".venv",
+        "venv",
+        "env",
+        "__pycache__",
+        "dist",
+        "build",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".tox",
+        ".ruff_cache",
+        "site-packages",
+        ".next",
+        ".cache",
+        "data",
+    }
+)
 
 
 def _scan_repo_mount_files(root: Path, already: set[str]) -> dict[str, str]:
@@ -633,17 +948,23 @@ def _collect_mount_prefixes(file_texts: dict[str, str]) -> dict[tuple[str, str],
 
 
 def _routes_in_source(
-    text: str, ext: str, mounts: dict[str, str] | None = None,
-) -> list[tuple[str, str, int, str]]:
-    """Return ``(method, path, line, framework)`` for every route declared in
-    ``text``.  Deterministic regex extraction; method is upper-cased and ``"*"``
-    when the registration does not name one (Django paths, Go ``HandleFunc``).
-    Router-local mount prefixes (``APIRouter(prefix=...)``) and any cross-file
-    ``include_router(prefix=...)`` mount prefix (passed in ``mounts`` as
-    ``{router_var: prefix}`` for this file) are joined onto each path so the
-    result is the real runtime path.
+    text: str,
+    ext: str,
+    mounts: dict[str, str] | None = None,
+) -> list[tuple[str, str, int, str, str | None]]:
+    """Return ``(method, path, line, framework, handler)`` for every route
+    declared in ``text``.  Deterministic extraction — regexes for decorator /
+    imperative registration plus an AST pass for declarative route tables;
+    method is upper-cased and ``"*"`` when the registration does not name one
+    (Django paths, Go ``HandleFunc``).  ``handler`` is the endpoint symbol when
+    the declaration itself names one (declarative tables); ``None`` means the
+    caller should attribute the handler by symbol adjacency, as decorators sit
+    directly above their function.  Router-local mount prefixes
+    (``APIRouter(prefix=...)``) and any cross-file ``include_router(prefix=...)``
+    mount prefix (passed in ``mounts`` as ``{router_var: prefix}`` for this
+    file) are joined onto each path so the result is the real runtime path.
     """
-    out: list[tuple[str, str, int, str]] = []
+    out: list[tuple[str, str, int, str, str | None]] = []
     mounts = mounts or {}
 
     def _line_of(pos: int) -> int:
@@ -668,35 +989,36 @@ def _routes_in_source(
             if declared and not declared.startswith("/"):
                 continue
             path = _full(m.group(1), declared)
-            out.append((m.group(2).upper(), path, _line_of(m.start()), "fastapi/flask"))
+            out.append((m.group(2).upper(), path, _line_of(m.start()), "fastapi/flask", None))
         for m in _RE_PY_ROUTE_DECORATOR.finditer(text):
             path = _full(m.group(1), m.group(2))
             methods = _RE_METHODS_LIST.findall(m.group(3)) or ["GET"]
             for meth in methods:
-                out.append((meth.upper(), path, _line_of(m.start()), "flask"))
+                out.append((meth.upper(), path, _line_of(m.start()), "flask", None))
         for m in _RE_PY_ADD_ROUTE.finditer(text):
             path = _full(m.group(1), m.group(2))
             for meth in _RE_METHODS_LIST.findall(m.group(3)) or ["*"]:
-                out.append((meth.upper(), path, _line_of(m.start()), "fastapi/starlette"))
+                out.append((meth.upper(), path, _line_of(m.start()), "fastapi/starlette", None))
         for m in _RE_PY_DJANGO.finditer(text):
-            out.append(("*", m.group(1), _line_of(m.start()), "django"))
+            out.append(("*", m.group(1), _line_of(m.start()), "django", None))
         out.extend(_stdlib_http_routes(text))
+        out.extend(_py_declarative_routes(text))
     elif ext in _JS_EXTS:
         for m in _RE_JS_METHOD_CALL.finditer(text):
-            out.append((m.group(1).upper(), m.group(2), _line_of(m.start()), "express"))
+            out.append((m.group(1).upper(), m.group(2), _line_of(m.start()), "express", None))
         for m in _RE_TS_NEST_DECORATOR.finditer(text):
-            out.append((m.group(1).upper(), m.group(2) or "/", _line_of(m.start()), "nestjs"))
+            out.append((m.group(1).upper(), m.group(2) or "/", _line_of(m.start()), "nestjs", None))
     elif ext in _GO_EXTS:
         for m in _RE_GO_METHOD.finditer(text):
             meth = m.group(1).upper()
             if meth in ("HANDLEFUNC", "HANDLE"):
                 meth = "*"
-            out.append((meth, m.group(2), _line_of(m.start()), "go"))
+            out.append((meth, m.group(2), _line_of(m.start()), "go", None))
     elif ext in _JVM_EXTS:
         for m in _RE_SPRING.finditer(text):
             verb = m.group(1)
             meth = "*" if verb == "Request" else verb.upper()
-            out.append((meth, m.group(2), _line_of(m.start()), "spring"))
+            out.append((meth, m.group(2), _line_of(m.start()), "spring", None))
 
     return out
 
@@ -714,9 +1036,15 @@ def _routes_in_source(
 # Path segments that mark a file as test/fixture code.  A segment matches when
 # it equals one of these, or starts with ``test_`` / ends with ``_test``
 # (extension stripped).  ``conftest`` covers pytest's per-directory hook files.
-_TEST_PATH_SEGMENTS = frozenset({
-    "tests", "fixture", "fixtures", "demo_app", "conftest",
-})
+_TEST_PATH_SEGMENTS = frozenset(
+    {
+        "tests",
+        "fixture",
+        "fixtures",
+        "demo_app",
+        "conftest",
+    }
+)
 
 
 def _is_test_path(rel: str, testpath_dirs: Iterable[str] = ()) -> bool:
@@ -760,7 +1088,7 @@ def _pytest_testpath_dirs(root: Path) -> list[str]:
         for tp in raw:
             if not isinstance(tp, str) or not tp:
                 continue
-            abs_dir = (cfg.parent / tp)
+            abs_dir = cfg.parent / tp
             try:
                 rel_dir = abs_dir.resolve().relative_to(root)
             except ValueError:
@@ -772,6 +1100,7 @@ def _pytest_testpath_dirs(root: Path) -> list[str]:
 # =========================================================================
 # consolidate — enumerate every entry point from source
 # =========================================================================
+
 
 def list_service_apis(
     project_root: Path,
@@ -875,8 +1204,7 @@ def list_service_apis(
             # Mount prefixes that target a router variable defined in THIS file.
             this_mod = _file_to_module(rel)
             file_mounts = {
-                var: pfx for (mod, var), pfx in mount_map.items()
-                if _module_match(mod, this_mod)
+                var: pfx for (mod, var), pfx in mount_map.items() if _module_match(mod, this_mod)
             }
             routes = _routes_in_source(text, ext, file_mounts)
             entrypoints = _entrypoints_in_source(text, ext)
@@ -888,9 +1216,11 @@ def list_service_apis(
                 store.get_symbols_for_file(rel),
                 key=lambda s: s["start_line"],
             )
-            for method, path, line, framework in routes:
+            for method, path, line, framework, decl_handler in routes:
                 frameworks.add(framework)
-                handler = _enclosing_handler(symbols, line)
+                # Declarative registrations (Route("/x", chat)) name their
+                # endpoint function directly — trust that over adjacency.
+                handler = decl_handler or _enclosing_handler(symbols, line)
                 # A route's path is recorded AS DECLARED (prefixes are not
                 # resolved), so many controllers legitimately share an empty or
                 # bare path (e.g. `@router.get("")`).  Such routes are distinct
@@ -978,8 +1308,33 @@ def list_service_apis(
     finally:
         store.close()
 
+    # A silent zero must never look like a clean run: an empty (or HTTP-empty)
+    # inventory is loudly diagnosed, both in the result document (so every
+    # downstream consumer — exerciser plan, extension, MCP — can surface it)
+    # and on the log.
+    diagnostics: list[str] = []
+    if not api_list:
+        non_http_kinds = sorted(k for k in kind_counts if k != "http_api")
+        if non_http_kinds:
+            diagnostics.append(
+                "0 HTTP endpoints discovered — Vinv cannot exercise this repo "
+                "over HTTP. Non-HTTP entry points were catalogued "
+                f"({', '.join(non_http_kinds)}); the function-level harness "
+                "drives those instead."
+            )
+        else:
+            diagnostics.append(
+                "0 endpoints discovered — Vinv cannot exercise this repo. No "
+                "HTTP routes and no other entry points (CLI, worker, "
+                "scheduler, stdio, __main__) were found. If this repo does "
+                "define services, route discovery has a coverage gap — "
+                "report the framework."
+            )
+        log.warning("consolidate_empty %s", diagnostics[0])
+
     result: dict[str, Any] = {
         "status": "ok",
+        "diagnostics": diagnostics,
         "service": service,
         "code_root": str(root),
         "index_store": store_dir,
@@ -1014,15 +1369,19 @@ def list_service_apis(
 
     log.info(
         "consolidate_done apis=%d entrypoints=%d kinds=%s indexed_files=%d store=%s",
-        len(api_list), len(entrypoints_list), dict(sorted(kind_counts.items())),
-        len(rel_files), store_dir,
+        len(api_list),
+        len(entrypoints_list),
+        dict(sorted(kind_counts.items())),
+        len(rel_files),
+        store_dir,
     )
 
     out_dir = root / ".vinv" / "identification"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "apis.json").write_text(
-            json.dumps(result, indent=2), encoding="utf-8",
+            json.dumps(result, indent=2),
+            encoding="utf-8",
         )
         result["output_file"] = str(out_dir / "apis.json")
     except OSError as exc:
@@ -1032,7 +1391,10 @@ def list_service_apis(
 
 
 def _entrypoint_id(
-    kind: str, trigger: str, handler: str | None, rel: str,
+    kind: str,
+    trigger: str,
+    handler: str | None,
+    rel: str,
 ) -> str:
     """Filesystem-safe id for a non-HTTP entry point.
 
@@ -1077,7 +1439,9 @@ _RE_RUNNER_REF = re.compile(
 
 
 def _main_guard_handler(
-    text: str, guard_line: int, symbols: list[dict[str, Any]],
+    text: str,
+    guard_line: int,
+    symbols: list[dict[str, Any]],
 ) -> str | None:
     """The same-file function a ``__main__`` guard block calls, if any.
 
@@ -1125,7 +1489,8 @@ def _enclosing_handler(symbols: list[dict[str, Any]], route_line: int) -> str | 
     # Only a function body can host an imperative registration; a module or
     # class range containing the route line just means "decorator at that scope".
     containing = [
-        s for s in symbols
+        s
+        for s in symbols
         if s["start_line"] <= route_line <= s["end_line"]
         and s.get("node_type") == "function_definition"
     ]
@@ -1160,6 +1525,7 @@ def _api_id(method: str, path: str, handler: str | None = None) -> str:
 # calltree — deterministic call tree for one entry point
 # =========================================================================
 
+
 def build_api_call_tree(
     project_root: Path,
     *,
@@ -1193,7 +1559,10 @@ def build_api_call_tree(
 
     # Reuse the verified code-based consolidation to find the handler + its file.
     inventory = list_service_apis(
-        root, service=service, store_dir=store_dir, logger=log,
+        root,
+        service=service,
+        store_dir=store_dir,
+        logger=log,
     )
     entrypoints = inventory.get("entrypoints", [])
     store_dir = inventory.get("index_store", store_dir)
@@ -1237,12 +1606,14 @@ def build_api_call_tree(
             "index_store": store_dir,
             "store_kind": None,
             "max_depth": max_depth,
-            "stats": {"internal_functions": 0, "external_calls": 0,
-                      "max_depth_reached": 0},
+            "stats": {"internal_functions": 0, "external_calls": 0, "max_depth_reached": 0},
             "tree": {
                 "name": target.get("trigger") or target.get("id"),
-                "file": rel_file, "line": route_line,
-                "resolved": False, "children": [], "note": note,
+                "file": rel_file,
+                "line": route_line,
+                "resolved": False,
+                "children": [],
+                "note": note,
             },
         }
 
@@ -1257,7 +1628,9 @@ def build_api_call_tree(
         return cached
 
     def resolve_target(
-        target_name: str, caller_file: str, caller_lang: str | None,
+        target_name: str,
+        caller_file: str,
+        caller_lang: str | None,
         caller_sid: str | None = None,
     ) -> tuple[dict[str, Any] | None, int]:
         """Map a call name (possibly dotted, e.g. ``self.x.foo``) to one symbol.
@@ -1361,7 +1734,10 @@ def build_api_call_tree(
         children: list[dict[str, Any]] = []
         for tname in sorted(set(store.get_out_links(sym["symbol_id"]))):
             chosen, ambig = resolve_target(
-                tname, sym["file_path"], sym.get("language"), sym["symbol_id"],
+                tname,
+                sym["file_path"],
+                sym.get("language"),
+                sym["symbol_id"],
             )
             if chosen is None:
                 unresolved.add(tname)
@@ -1385,19 +1761,12 @@ def build_api_call_tree(
         return children
 
     try:
-        file_syms = [
-            s for s in store.get_symbols_for_file(rel_file)
-            if _symbol_name(s) == handler
-        ]
+        file_syms = [s for s in store.get_symbols_for_file(rel_file) if _symbol_name(s) == handler]
         if not file_syms:
-            raise LookupError(
-                f"Handler '{handler}' not found in index symbols for {rel_file}."
-            )
+            raise LookupError(f"Handler '{handler}' not found in index symbols for {rel_file}.")
         # Pick the symbol whose range best fits the route line: containing first,
         # else nearest by start_line.
-        containing = [
-            s for s in file_syms if s["start_line"] <= route_line <= s["end_line"]
-        ]
+        containing = [s for s in file_syms if s["start_line"] <= route_line <= s["end_line"]]
         root_sym = (
             max(containing, key=lambda s: s["start_line"])
             if containing
@@ -1437,7 +1806,11 @@ def build_api_call_tree(
 
     log.info(
         "call_tree_done id=%s handler=%s internal=%d external=%d depth=%d",
-        target.get("id"), handler, len(internal), len(unresolved), depth_reached,
+        target.get("id"),
+        handler,
+        len(internal),
+        len(unresolved),
+        depth_reached,
     )
 
     out_dir = root / ".vinv" / "identification"
@@ -1461,8 +1834,7 @@ def render_call_tree_text(result: dict[str, Any]) -> str:
     else:
         header = f"[{kind}] {ep.get('trigger') or ep.get('id')}"
     lines = [
-        f"{header}  →  {ep.get('handler')}()"
-        f"  [{ep.get('file')}:{ep.get('line')}]",
+        f"{header}  →  {ep.get('handler')}()" f"  [{ep.get('file')}:{ep.get('line')}]",
     ]
 
     def walk(node: dict[str, Any], prefix: str, is_last: bool, is_root: bool) -> None:
@@ -1550,9 +1922,9 @@ def _qual_matches(component: str, module: str, name: str) -> bool:
     parts = component.split(".")
     if not parts or parts[-1] != name:
         return False
-    cands = {".".join(parts[:-1])}            # module or module.Class
+    cands = {".".join(parts[:-1])}  # module or module.Class
     if len(parts) >= 3:
-        cands.add(".".join(parts[:-2]))       # drop one class segment
+        cands.add(".".join(parts[:-2]))  # drop one class segment
     for c in cands:
         if c == module or c.endswith("." + module) or module.endswith("." + c):
             return True
@@ -1560,7 +1932,9 @@ def _qual_matches(component: str, module: str, name: str) -> bool:
 
 
 def _class_methods_executed(
-    module: str, cls: str, components: Iterable[str],
+    module: str,
+    cls: str,
+    components: Iterable[str],
 ) -> list[str]:
     """Runtime components that are methods of class ``cls`` defined in ``module``.
 
@@ -1573,15 +1947,11 @@ def _class_methods_executed(
     hits: list[str] = []
     for comp in components:
         parts = comp.split(".")
-        for i in range(1, len(parts) - 1):       # need a trailing method segment
+        for i in range(1, len(parts) - 1):  # need a trailing method segment
             if parts[i] != cls:
                 continue
             owner = ".".join(parts[:i])
-            if (
-                owner == module
-                or owner.endswith("." + module)
-                or module.endswith("." + owner)
-            ):
+            if owner == module or owner.endswith("." + module) or module.endswith("." + owner):
                 hits.append(comp)
                 break
     return hits
@@ -1673,15 +2043,17 @@ def _reconstruct_forest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         kind = ev.get("event")
         if kind == "enter":
             depth = ev.get("depth")
-            open_spans.setdefault(key, []).append({
-                "component": ev.get("component", ""),
-                "request_id": ev.get("request_id"),
-                "depth": depth if isinstance(depth, int) else 0,
-                "children": [],
-                "duration_ms": 0.0,
-                "status": "ok",
-                "error_type": None,
-            })
+            open_spans.setdefault(key, []).append(
+                {
+                    "component": ev.get("component", ""),
+                    "request_id": ev.get("request_id"),
+                    "depth": depth if isinstance(depth, int) else 0,
+                    "children": [],
+                    "duration_ms": 0.0,
+                    "status": "ok",
+                    "error_type": None,
+                }
+            )
         elif kind == "exit":
             stack = open_spans.get(key)
             if stack:
@@ -1755,8 +2127,12 @@ def map_trace_to_tree(
     root = project_root.resolve()
 
     static = build_api_call_tree(
-        root, api_id=api_id, service=service, store_dir=store_dir,
-        max_depth=max_depth, logger=log,
+        root,
+        api_id=api_id,
+        service=service,
+        store_dir=store_dir,
+        max_depth=max_depth,
+        logger=log,
     )
     ep = static["entrypoint"]
     handler = ep["handler"]
@@ -1834,8 +2210,7 @@ def map_trace_to_tree(
         if name and file:
             mod = _file_to_module(file)
             hit = next(
-                (c for c in sorted(runtime_by_func.get(name, []))
-                 if _qual_matches(c, mod, name)),
+                (c for c in sorted(runtime_by_func.get(name, [])) if _qual_matches(c, mod, name)),
                 None,
             )
             if hit is not None:
@@ -1951,8 +2326,12 @@ def map_trace_to_tree(
 
     log.info(
         "trace_map_done id=%s handler_observed=%s requests=%d executed=%d/%d runtime_only=%d",
-        ep.get("id"), bool(handler_nodes), len(matched_requests),
-        executed, total_static, len(runtime_only),
+        ep.get("id"),
+        bool(handler_nodes),
+        len(matched_requests),
+        executed,
+        total_static,
+        len(runtime_only),
     )
 
     out_dir = root / ".vinv" / "identification"
@@ -2078,9 +2457,7 @@ def render_trace_map_text(result: dict[str, Any]) -> str:
 # exercised each endpoint (deterministic: code index + trace counts)
 # =========================================================================
 
-_HTTP_VERBS = frozenset(
-    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
-)
+_HTTP_VERBS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"})
 
 
 def _root_span_counts(events: list[dict[str, Any]]) -> dict[tuple[str, str], int]:
@@ -2136,7 +2513,10 @@ def summarize_traces(
     root = project_root.resolve()
 
     consolidated = list_service_apis(
-        root, service=service, store_dir=store_dir, logger=log,
+        root,
+        service=service,
+        store_dir=store_dir,
+        logger=log,
     )
     apis = consolidated.get("apis", [])
 
@@ -2151,15 +2531,17 @@ def summarize_traces(
         n = counts.get(key, 0)
         if n:
             matched.add(key)
-        rows.append({
-            "id": a["id"],
-            "method": a["method"],
-            "path": a["path"],
-            "handler": a.get("handler"),
-            "file": a.get("file"),
-            "line": a.get("line"),
-            "trace_count": n,
-        })
+        rows.append(
+            {
+                "id": a["id"],
+                "method": a["method"],
+                "path": a["path"],
+                "handler": a.get("handler"),
+                "file": a.get("file"),
+                "line": a.get("line"),
+                "trace_count": n,
+            }
+        )
     rows.sort(key=lambda r: (-r["trace_count"], r["path"], r["method"]))
 
     unmatched = sorted(
@@ -2186,14 +2568,18 @@ def summarize_traces(
 
     log.info(
         "tracesummary_done apis=%d exercised=%d invocations=%d trace=%s",
-        len(rows), result["exercised_count"], total_invocations, trace_path,
+        len(rows),
+        result["exercised_count"],
+        total_invocations,
+        trace_path,
     )
 
     out_dir = root / ".vinv" / "identification"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "tracesummary.json").write_text(
-            json.dumps(result, indent=2), encoding="utf-8",
+            json.dumps(result, indent=2),
+            encoding="utf-8",
         )
         result["output_file"] = str(out_dir / "tracesummary.json")
     except OSError as exc:
@@ -2215,15 +2601,12 @@ def render_trace_summary_text(result: dict[str, Any]) -> str:
     width = max((len(f"{e['method']} {e['path']}") for e in endpoints), default=0)
     for e in endpoints:
         route = f"{e['method']} {e['path']}".ljust(width)
-        lines.append(
-            f"  {e['trace_count']:>5}  {route}  → {e.get('handler') or '?'}()"
-        )
+        lines.append(f"  {e['trace_count']:>5}  {route}  → {e.get('handler') or '?'}()")
     unmatched = result.get("unmatched_roots", [])
     if unmatched:
         lines.append("")
         lines.append(
-            f"unmatched trace roots (no endpoint resolved to this path): "
-            f"{len(unmatched)}"
+            f"unmatched trace roots (no endpoint resolved to this path): " f"{len(unmatched)}"
         )
         for u in unmatched:
             lines.append(f"  {u['trace_count']:>5}  {u['root']}")

@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import state, store
 from .bandit import STRATEGIES, EndpointBandit, bandit_summary, seed_from_prior
@@ -123,8 +124,21 @@ def run_exercise(
     rng = random.Random(f"exercise {seed}")
 
     plan = store.read_json(store.plan_path(repo))
-    if not isinstance(plan, dict) or not plan.get("endpoints"):
+    if not isinstance(plan, dict):
         return {"status": "error", "error": "no plan.json — run `exerciser plan` first"}
+    if not plan.get("endpoints"):
+        # A present-but-empty plan is a different failure from a missing one:
+        # route discovery found nothing to exercise. Say exactly that — a
+        # silent (or mislabeled) zero must never look like a clean run.
+        return {
+            "status": "error",
+            "error": (
+                "plan.json has 0 endpoints — Vinv cannot exercise this repo "
+                "over HTTP. Check identification's apis.json diagnostics; "
+                "non-HTTP entry points are driven by the function-level "
+                "harness instead."
+            ),
+        }
     endpoints = plan["endpoints"]
 
     # Generation compaction of the unbounded logs (results, state ledger,
@@ -769,7 +783,7 @@ def _execution_row(
         "request_id": result.request_id,
         "output_size": _size_of(result.body),
         "input_size": _input_size(candidate),
-        "body": result.body if isinstance(result.body, (dict, list)) else None,
+        "body": result.body if isinstance(result.body, dict | list) else None,
     }
 
 
@@ -781,14 +795,14 @@ def _last_strategy(executions: list[dict[str, Any]], api_id: str, round_no: int)
 
 
 def _size_of(value: Any) -> int:
-    if isinstance(value, (dict, list, str)):
+    if isinstance(value, dict | list | str):
         return len(value)
     return 0
 
 
 def _input_size(candidate: Candidate) -> int:
     n = 0
-    if isinstance(candidate.body, (dict, list, str)):
+    if isinstance(candidate.body, dict | list | str):
         n += len(candidate.body)
     n += len(candidate.path_params) + len(candidate.query)
     return n

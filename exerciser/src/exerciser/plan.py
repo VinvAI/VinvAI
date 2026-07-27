@@ -85,7 +85,7 @@ def _observed_examples(repo: Path, handler: str | None) -> dict[str, Any] | None
 def _example_from_summary(summ: dict[str, Any]) -> Any:
     if summ.get("truncated") or summ.get("summary_error"):
         return None
-    if isinstance(summ.get("v"), (bool, int, float)):
+    if isinstance(summ.get("v"), bool | int | float):
         return summ["v"]
     head = summ.get("head")
     if head is not None:
@@ -110,7 +110,8 @@ def _newest_trace(repo: Path) -> Path | None:
 _SEMANTIC_REPLY_SCHEMA = (
     '{"plans": [{"endpoint": "<METHOD PATH>", '
     '"inputs": {"body": {..}|null, "path_params": {..}, "query": {..}, "headers": {..}}, '
-    '"setup": [{"endpoint": "<METHOD PATH>", "inputs": {..}, "capture": {"<var>": "<json-pointer into the response>"}}], '
+    '"setup": [{"endpoint": "<METHOD PATH>", "inputs": {..}, '
+    '"capture": {"<var>": "<json-pointer into the response>"}}], '
     '"expect": {"status": <int>|"2xx"|"4xx", "notes": "<what a correct service does>"}}]}'
 )
 
@@ -178,7 +179,9 @@ def render_semantic_prompt(
 
 
 def _endpoint_plan(
-    endpoint: Endpoint, repo: Path, seed: int,
+    endpoint: Endpoint,
+    repo: Path,
+    seed: int,
 ) -> dict[str, Any]:
     """The per-endpoint plan record: schema inputs by class + observed + semantic
     flag, each carrying provenance."""
@@ -196,14 +199,16 @@ def _endpoint_plan(
             body = generate_value(body_schema, s, cls) if body_schema else None
             path_params = _gen_path_params(endpoint, s, cls)
             query = _gen_query_params(endpoint, s, cls)
-            inputs.append({
-                "strategy": _CLASS_STRATEGY[cls],
-                "provenance": "schema",
-                "class": cls,
-                "body": body,
-                "path_params": path_params,
-                "query": query,
-            })
+            inputs.append(
+                {
+                    "strategy": _CLASS_STRATEGY[cls],
+                    "provenance": "schema",
+                    "class": cls,
+                    "body": body,
+                    "path_params": path_params,
+                    "query": query,
+                }
+            )
 
     # Layer 1b: property-based valid instance from hypothesis-jsonschema, when the
     # optional dependency is installed (install-safe: absent → skipped). It feeds
@@ -211,42 +216,48 @@ def _endpoint_plan(
     if body_schema and hypothesis_valid_available():
         hv = hypothesis_valid_instance(body_schema, seed)
         if hv is not None:
-            inputs.append({
-                "strategy": "schema_valid",
-                "provenance": "hypothesis-jsonschema",
-                "class": "valid",
-                "body": hv,
-                "path_params": _gen_path_params(endpoint, seed + 1, "valid"),
-                "query": _gen_query_params(endpoint, seed, "valid"),
-            })
+            inputs.append(
+                {
+                    "strategy": "schema_valid",
+                    "provenance": "hypothesis-jsonschema",
+                    "class": "valid",
+                    "body": hv,
+                    "path_params": _gen_path_params(endpoint, seed + 1, "valid"),
+                    "query": _gen_query_params(endpoint, seed, "valid"),
+                }
+            )
 
     # Layer 2: observed examples (real trace values).
     observed = _observed_examples(repo, endpoint.handler)
     if observed:
-        inputs.append({
-            "strategy": "observed",
-            "provenance": "trace",
-            "class": "observed",
-            "body": observed if endpoint.body_schema else None,
-            "path_params": _observed_path_params(endpoint, observed),
-            "query": {},
-        })
+        inputs.append(
+            {
+                "strategy": "observed",
+                "provenance": "trace",
+                "class": "observed",
+                "body": observed if endpoint.body_schema else None,
+                "path_params": _observed_path_params(endpoint, observed),
+                "query": {},
+            }
+        )
 
     # Auth permutations: an anonymous variant of a protected endpoint is a
     # deterministic negative-auth probe (a correct service returns 401/403). The
     # user/superuser identities require credentials, which only a semantic scenario
     # can obtain — those ride the semantic layer's setup steps.
     if endpoint.requires_auth:
-        inputs.append({
-            "strategy": "schema_negative",
-            "provenance": "auth-permutation",
-            "class": "negative",
-            "auth": "anonymous",
-            "body": generate_value(body_schema, seed, "valid") if body_schema else None,
-            "path_params": _gen_path_params(endpoint, seed, "valid"),
-            "query": {},
-            "headers": {},
-        })
+        inputs.append(
+            {
+                "strategy": "schema_negative",
+                "provenance": "auth-permutation",
+                "class": "negative",
+                "auth": "anonymous",
+                "body": generate_value(body_schema, seed, "valid") if body_schema else None,
+                "path_params": _gen_path_params(endpoint, seed, "valid"),
+                "query": {},
+                "headers": {},
+            }
+        )
 
     return {
         **endpoint.to_json(),
@@ -317,6 +328,20 @@ def build_plan(
         input_source = "apis.json"
     log.info("plan: %d endpoints from %s", len(endpoints), input_source)
 
+    # A silent zero must never look like a clean run: an empty plan means Vinv
+    # will generate NOTHING for this repo, so say so — in the plan document,
+    # on the log, and (via cli.py) on stderr.
+    diagnostics: list[str] = []
+    if not endpoints:
+        diagnostics.append(
+            "0 endpoints in the exercise plan — Vinv cannot exercise this repo "
+            "over HTTP. Either route discovery found no routes (check "
+            "identification's apis.json diagnostics) or every route was "
+            "filtered out. The function-level harness (`exerciser functions`) "
+            "drives non-HTTP entry points instead."
+        )
+        log.warning("plan_empty %s", diagnostics[0])
+
     # Coverage gaps from a prior profile (when one exists) sharpen the semantic
     # prompt so the harness targets exactly the uncovered symbols.
     gaps_by_id = _coverage_gaps_by_endpoint(repo)
@@ -328,7 +353,9 @@ def build_plan(
         record = _endpoint_plan(ep, repo, seed)
         if ep.needs_semantics:
             prompt = render_semantic_prompt(
-                ep, record.get("observed"), coverage_gaps=gaps_by_id.get(ep.api_id),
+                ep,
+                record.get("observed"),
+                coverage_gaps=gaps_by_id.get(ep.api_id),
             )
             prompt_file = store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json"
             # Preserve any reply the harness already authored — re-planning must
@@ -340,8 +367,10 @@ def build_plan(
             preserved_reply = existing.get("reply") if isinstance(existing, dict) else None
             expired_reason = existing.get("reply_expired") if isinstance(existing, dict) else None
             expired_for = existing.get("reply_expired_for") if isinstance(existing, dict) else None
-            if expired_reason and expired_for is not None and (
-                expired_for != store.reply_fingerprint(preserved_reply)
+            if (
+                expired_reason
+                and expired_for is not None
+                and (expired_for != store.reply_fingerprint(preserved_reply))
             ):
                 # A fresh reply landed since the expiry — the flag is spent.
                 expired_reason = expired_for = None
@@ -353,29 +382,34 @@ def build_plan(
                     "credentials/resources it depends on actually exist, or create "
                     "them in setup steps)."
                 )
-            store.write_json(prompt_file, {
-                "api_id": ep.api_id,
-                "endpoint": f"{ep.method} {ep.path}",
-                "reply_schema": _SEMANTIC_REPLY_SCHEMA,
-                "prompt": prompt,
-                "reply": preserved_reply,  # the extension fills this after dispatch
-                **({"reply_expired": expired_reason,
-                    "reply_expired_for": expired_for} if expired_reason else {}),
-            })
+            store.write_json(
+                prompt_file,
+                {
+                    "api_id": ep.api_id,
+                    "endpoint": f"{ep.method} {ep.path}",
+                    "reply_schema": _SEMANTIC_REPLY_SCHEMA,
+                    "prompt": prompt,
+                    "reply": preserved_reply,  # the extension fills this after dispatch
+                    **(
+                        {"reply_expired": expired_reason, "reply_expired_for": expired_for}
+                        if expired_reason
+                        else {}
+                    ),
+                },
+            )
             record["semantic_prompt_file"] = str(prompt_file)
             semantic_prompts.append(str(prompt_file))
         # Fold in a stored reply for ANY endpoint, not just needs-semantics
         # ones: the Journey view lets a user author input plans for ordinary
         # endpoints too, and they ride the same prompts/<api_id>.json channel.
-        reply = _read_semantic_reply(
-            store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json"
-        )
+        reply = _read_semantic_reply(store.prompts_dir(repo) / f"{_safe(ep.api_id)}.json")
         if reply:
             record["semantic_inputs"] = reply
         plans.append(record)
 
     result: dict[str, Any] = {
         "status": "ok",
+        "diagnostics": diagnostics,
         "service": service,
         "repo": str(repo),
         "base_url": base_url,
@@ -387,8 +421,12 @@ def build_plan(
     }
     store.write_json(store.plan_path(repo), result)
     result["output_file"] = str(store.plan_path(repo))
-    log.info("plan: wrote %s (%d endpoints, %d semantic prompts)",
-             store.plan_path(repo), len(plans), len(semantic_prompts))
+    log.info(
+        "plan: wrote %s (%d endpoints, %d semantic prompts)",
+        store.plan_path(repo),
+        len(plans),
+        len(semantic_prompts),
+    )
     return result
 
 

@@ -165,7 +165,8 @@ _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "opt
 
 
 def endpoints_from_openapi(
-    spec: dict[str, Any], apis: list[dict[str, Any]],
+    spec: dict[str, Any],
+    apis: list[dict[str, Any]],
 ) -> list[Endpoint]:
     """Build the endpoint list from a live spec, reconciling handlers from apis.json."""
     # Handler lookup by (method, path-suffix).
@@ -185,7 +186,11 @@ def endpoints_from_openapi(
             m = method.upper()
             match = by_key.get((m, _path_suffix(str(path))))
             handler = match.get("handler") if match else operation.get("operationId")
-            api_id = match.get("id") if match else f"{m}_{_path_suffix(str(path)).replace('/', '_') or 'root'}"
+            api_id = (
+                match.get("id")
+                if match
+                else f"{m}_{_path_suffix(str(path)).replace('/', '_') or 'root'}"
+            )
             body = _body_schema_of(operation, spec)
             params = _params_of(operation, spec)
             requires_auth = _op_requires_auth(operation)
@@ -212,6 +217,9 @@ def endpoints_from_apis(apis: list[dict[str, Any]]) -> list[Endpoint]:
     for a in apis:
         method = a["method"].upper()
         path = a["path"]
+        if method == "WEBSOCKET":
+            # Catalogued (WebSocketRoute) but not drivable by the HTTP prober.
+            continue
         if any(path.rstrip("/").endswith(s.rstrip("/")) for s in _SKIP_PATH_SUFFIXES):
             continue
         endpoints.append(
@@ -269,7 +277,9 @@ def _synth_params_from_path(path: str) -> list[dict[str, Any]]:
 _SEMANTIC_PATH_HINTS = ("login", "token", "auth", "signup", "reset", "recovery", "password")
 
 
-def _looks_semantic(method: str, path: str, body: dict[str, Any] | None, requires_auth: bool) -> bool:
+def _looks_semantic(
+    method: str, path: str, body: dict[str, Any] | None, requires_auth: bool
+) -> bool:
     """Whether an endpoint should be flagged ``needs-semantics``.
 
     Auth chains, resource-dependent CRUD (a mutation on a ``{id}`` resource that

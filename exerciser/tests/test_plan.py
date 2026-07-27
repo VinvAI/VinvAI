@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 
 from exerciser import store
-from exerciser.plan import build_plan, render_semantic_prompt
 from exerciser.openapi import Endpoint
+from exerciser.plan import build_plan, render_semantic_prompt
 
 
 def _seed_apis(repo: Path, apis: list[dict]):
@@ -17,10 +17,18 @@ def _seed_apis(repo: Path, apis: list[dict]):
 
 
 def test_plan_offline_from_apis(tmp_path):
-    _seed_apis(tmp_path, [
-        {"id": "GET_health", "method": "GET", "path": "/health", "handler": "health"},
-        {"id": "DELETE_items_id", "method": "DELETE", "path": "/items/{id}", "handler": "delete_item"},
-    ])
+    _seed_apis(
+        tmp_path,
+        [
+            {"id": "GET_health", "method": "GET", "path": "/health", "handler": "health"},
+            {
+                "id": "DELETE_items_id",
+                "method": "DELETE",
+                "path": "/items/{id}",
+                "handler": "delete_item",
+            },
+        ],
+    )
     result = build_plan(tmp_path, base_url=None)
     assert result["status"] == "ok"
     assert result["input_source"] == "apis.json"
@@ -39,22 +47,58 @@ def test_plan_has_all_three_schema_classes(tmp_path):
 
 
 def test_semantic_prompt_ends_with_reply_schema_and_tools():
-    ep = Endpoint(api_id="POST_login", method="POST", path="/login/access-token",
-                  handler="login", requires_auth=False, needs_semantics=True,
-                  body_schema={"type": "object", "properties": {"username": {"type": "string"}}})
-    prompt = render_semantic_prompt(ep, {"username": "a@b.c"}, coverage_gaps=["verify_pw", "get_user"])
+    ep = Endpoint(
+        api_id="POST_login",
+        method="POST",
+        path="/login/access-token",
+        handler="login",
+        requires_auth=False,
+        needs_semantics=True,
+        body_schema={"type": "object", "properties": {"username": {"type": "string"}}},
+    )
+    prompt = render_semantic_prompt(
+        ep, {"username": "a@b.c"}, coverage_gaps=["verify_pw", "get_user"]
+    )
     assert '"plans"' in prompt  # exact reply schema present
     assert ".vinv/exercise/" in prompt  # tells the agent its artifacts
     assert "verify_pw" in prompt  # coverage gaps threaded in
 
 
 def test_semantic_prompt_written_to_disk(tmp_path):
-    _seed_apis(tmp_path, [
-        {"id": "POST_login_access_token", "method": "POST",
-         "path": "/login/access-token", "handler": "login"},
-    ])
+    _seed_apis(
+        tmp_path,
+        [
+            {
+                "id": "POST_login_access_token",
+                "method": "POST",
+                "path": "/login/access-token",
+                "handler": "login",
+            },
+        ],
+    )
     build_plan(tmp_path)
     prompts = list(store.prompts_dir(tmp_path).glob("*.json"))
     assert prompts
     doc = json.loads(prompts[0].read_text())
     assert "prompt" in doc and "reply_schema" in doc and doc["reply"] is None
+
+
+def test_empty_plan_is_loudly_diagnosed(tmp_path):
+    # No apis.json at all → zero endpoints. The plan must say so, not
+    # silently produce an empty document that looks like a clean run.
+    result = build_plan(tmp_path)
+    assert result["endpoint_count"] == 0
+    (msg,) = result["diagnostics"]
+    assert "0 endpoints" in msg
+
+
+def test_run_distinguishes_empty_plan_from_missing_plan(tmp_path):
+    from exerciser.run import run_exercise
+
+    missing = run_exercise(tmp_path, base_url="http://127.0.0.1:1")
+    assert "no plan.json" in missing["error"]
+
+    build_plan(tmp_path)  # writes an empty plan
+    empty = run_exercise(tmp_path, base_url="http://127.0.0.1:1")
+    assert empty["status"] == "error"
+    assert "0 endpoints" in empty["error"]
