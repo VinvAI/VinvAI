@@ -38,9 +38,7 @@ def test_template_files_present() -> None:
         assert (_PROMPTS_DIR / f"{key}.txt").is_file(), f"{key}.txt missing from prompts dir"
 
 
-@pytest.mark.parametrize(
-    "key", ["documentation_instruction", "documentation_instruction_portable"]
-)
+@pytest.mark.parametrize("key", ["documentation_instruction", "documentation_instruction_portable"])
 def test_template_formats_cleanly(key: str) -> None:
     assert _template(key).format(**_DOC_KW).strip()
 
