@@ -49,6 +49,12 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# The differential oracle's ast-corpus is deliberately one Python snippet per
+# line (newline-joined multi-statement programs); wrapping them would corrupt
+# the source they represent.
+"src/exerciser/differential.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
