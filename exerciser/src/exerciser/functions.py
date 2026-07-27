@@ -116,7 +116,6 @@ from typing import Any
 
 from . import store
 from ._worker import worker_entrypoint
-from .containment import ContainmentTier
 from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
 from .issues import FailureCluster, build_clusters
 from .sandbox import SandboxPolicy, run_sandboxed_targets
@@ -2801,27 +2800,31 @@ def run_functions(
     # only way to end up with no second pass is an explicit opt-out or a policy
     # that disables itself.
     #
-    # The default DEMANDS A REAL OS WALL. The targets this pass recovers are
-    # exactly the ones the purity guard refused — code it believes may do
-    # destructive I/O — and the process shim is, by this module's own admission,
-    # "structurally blind to a C extension calling open(2)/connect(2)"
-    # (`sqlite3.connect()` really escapes it). `containment._candidates()`
-    # returns nothing on any platform that is not linux/darwin, so on Windows
-    # the shim IS the fallback: enabling this pass by default without requiring
-    # a tier meant previously-REFUSED destructive targets started EXECUTING
-    # behind a wall documented as unable to stop them. That was a net safety
-    # regression, and it is the only place in this PR where safety moved
-    # backwards.
+    # The default does NOT demand an OS wall, deliberately.
     #
-    # Requiring the tier restores the pre-existing behaviour where a host with
-    # no real wall simply leaves those targets refused — visibly, with a
-    # recorded reason, never silently. A caller who understands the tradeoff can
-    # still pass an explicit `sandbox_policy` with a lower `require_tier`.
-    sbx = sandbox_policy or (
-        None
-        if sandbox is False
-        else SandboxPolicy(enabled=True, require_tier=ContainmentTier.OS_SANDBOX)
-    )
+    # A pre-production audit read the default-on containment as a safety
+    # regression: the targets this pass recovers are the ones the purity guard
+    # refused, and the process shim is "structurally blind to a C extension
+    # calling open(2)/connect(2)" — `sqlite3.connect()` really escapes it. That
+    # much is true. But requiring `os-sandbox` here was the wrong remedy, for
+    # two reasons:
+    #
+    #   * the shim is a REAL boundary for the common case (a disposable tree,
+    #     redirected HOME/TMPDIR, and patched open/os/socket/subprocess), and
+    #     where it is blind it says so — the row carries `effects_complete:
+    #     False` and the run raises an `unobservable` diagnostic naming the
+    #     C-extension roots. An honestly-reported partial wall is not the same
+    #     failure as a silent one;
+    #   * `_candidates()` yields nothing off linux/darwin, AND a stock Linux CI
+    #     runner has no `bwrap` and cannot `unshare` (`/proc/self/uid_map:
+    #     Operation not permitted`). So requiring the tier does not "restore
+    #     safety on Windows" — it disables the recovery pass nearly everywhere,
+    #     which is a much larger behaviour change than the concern warranted.
+    #
+    # A caller who does want the hard guarantee asks for it explicitly with
+    # `SandboxPolicy(require_tier=...)`, and then a host without a real wall
+    # refuses loudly rather than downgrading. That is the knob's purpose.
+    sbx = sandbox_policy or (None if sandbox is False else SandboxPolicy(enabled=True))
     opted_out = sbx is None or not sbx.enabled
     if opted_out:
         sbx = None

@@ -752,7 +752,18 @@ def test_a_c_extension_write_is_reported_as_unobservable_under_the_process_shim(
     assert report["status"] == "ok", report.get("reason")
     assert report["tier"] == "process-shim"
     assert report["effects_complete"] is False
-    assert "capped containment" in (report["containment"]["fallback_reason"] or "")
+    # WHY the run is on the weak rung is host-dependent, and the test must not
+    # depend on which route it took. On a host WITH an OS sandbox (macOS ships
+    # sandbox-exec) `max_tier` caps it down and the reason says so. On a host
+    # WITHOUT one — a stock Linux CI runner has no `bwrap` and cannot
+    # `unshare` (`/proc/self/uid_map: Operation not permitted`) — the tier is
+    # already process-shim, so no cap is applied and the reason is the probe
+    # failure instead. Both are the shim tier, honestly explained; asserting
+    # only the capped wording made this test fail on Linux for a reason that has
+    # nothing to do with what it is checking.
+    reason = report["containment"]["fallback_reason"] or ""
+    assert reason, "arriving on the weak rung must always carry a reason"
+    assert "capped containment" in reason or "not on PATH" in reason or "unusable" in reason, reason
     calls = _for(_rows(repo), "record_entry")
     assert calls and any(r["status"] == "ok" for r in calls)
 

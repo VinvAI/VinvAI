@@ -946,22 +946,9 @@ def test_impure_bodies_are_skipped_with_a_recorded_reason(tmp_path: Path):
 
 
 def test_the_driver_never_calls_an_impure_target_in_process(tmp_path: Path):
-    """The invariant this test has always been about: nothing escapes.
-
-    The SAFETY half holds on every host — an impure target is never called in
-    this process and the file outside the repo survives.
-
-    The RECOVERY half is host-dependent by design. `run_functions` now defaults
-    to `require_tier=os-sandbox`, because the targets this pass recovers are
-    exactly the ones the purity guard refused, and the process shim cannot stop
-    a C extension calling `open(2)`/`connect(2)` — `sqlite3.connect()` really
-    escapes it. On a host with no OS mechanism (any non-linux/darwin platform;
-    `containment._candidates()` returns nothing) they stay REFUSED, which is
-    what happened before containment was defaulted on. Asserting recovery
-    unconditionally would be asserting a guarantee this host cannot provide.
-    """
-    from exerciser.containment import ContainmentTier, detect_containment
-
+    # The impure target IS driven now — that is the routing change — but never in
+    # this process and never outside containment. The invariant the test has
+    # always been about is unchanged: the file outside the repo survives.
     repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
     victim = tmp_path / "victim.txt"
     victim.write_text("still here", encoding="utf-8")
@@ -972,18 +959,12 @@ def test_the_driver_never_calls_an_impure_target_in_process(tmp_path: Path):
     impure = [
         r for r in rows if "tidy" in r.get("target_id", "") or "housekeep" in r.get("target_id", "")
     ]
-    # Unconditional: never in-process, and the world outside the repo is intact.
-    assert all(r.get("sandboxed") for r in impure), "an impure target ran IN-PROCESS"
+    assert impure, "the impure targets are routed to containment, not dropped"
+    assert all(r.get("sandboxed") for r in impure), "…and NONE of them ran in-process"
     assert victim.read_text(encoding="utf-8") == "still here"
     assert any("impure-body" in s["reason"] for s in result["skipped"])
-
     entry = next(s for s in result["skipped"] if s["id"].endswith(":tidy"))
-    if detect_containment().tier is ContainmentTier.OS_SANDBOX:
-        assert impure, "with a real OS wall the impure targets must be recovered"
-        assert entry["sandbox"].startswith("driven-under-containment")
-    else:
-        assert not impure, "without an OS wall they must stay refused, not run"
-        assert "driven-under-containment" not in entry["sandbox"]
+    assert entry["sandbox"].startswith("driven-under-containment")
 
 
 def test_opting_out_of_containment_leaves_the_impure_set_refused_and_says_so(tmp_path: Path):
