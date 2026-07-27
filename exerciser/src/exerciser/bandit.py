@@ -49,7 +49,7 @@ class BetaArm:
         return self.alpha / (self.alpha + self.beta)
 
     def update(self, covered_new: int) -> None:
-        """Bernoulli update: success iff the probe covered ≥1 new symbol."""
+        """Bernoulli update: success iff the probe covered ≥1 new symbol/branch arm."""
         self.plays += 1
         self.reward_sum += max(0, covered_new)
         if covered_new > 0:
@@ -108,7 +108,9 @@ class EndpointBandit:
 
 
 def seed_from_prior(
-    bandit: EndpointBandit, prior: dict[str, Any] | None, decay: float = 0.5,
+    bandit: EndpointBandit,
+    prior: dict[str, Any] | None,
+    decay: float = 0.5,
 ) -> EndpointBandit:
     """Warm-start arms from a previous run's posteriors, decayed toward Beta(1,1).
 
@@ -145,7 +147,7 @@ def bandit_summary(bandits: dict[str, EndpointBandit]) -> dict[str, Any]:
         }
     return {
         "priors": {"alpha0": 1.0, "beta0": 1.0},
-        "reward": "bernoulli: 1 iff probe covered >=1 new symbol",
+        "reward": "bernoulli: 1 iff probe covered >=1 new symbol or branch arm",
         "selection": "thompson: theta_s ~ Beta(alpha_s,beta_s), play argmax_s theta_s",
         "pooled": pooled,
         "per_endpoint": per_endpoint,

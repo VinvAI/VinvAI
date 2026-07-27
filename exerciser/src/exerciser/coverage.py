@@ -31,12 +31,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from identification.runner import map_trace_to_tree
-
 # Deliberate reuse of the runner's capture resolution (freshest trace.jsonl,
 # service-directory aware): both joins below MUST read the same capture file,
 # or "observed" and the coverage numbers would describe different runs.
-from identification.runner import _resolve_trace_file
+from identification.runner import _resolve_trace_file, map_trace_to_tree
 
 
 def handler_observed_in_trace(
@@ -85,6 +83,79 @@ def handler_observed_in_trace(
     except OSError:
         return False
     return False
+
+
+def _normalize_handler(handler: str | None) -> str | None:
+    """Display-form handler ("items-read_items()") → bare function name."""
+    if not handler:
+        return None
+    handler = handler.removesuffix("()")
+    if "-" in handler:
+        handler = handler.rsplit("-", 1)[-1]
+    return handler or None
+
+
+def branch_ids_for_endpoint(
+    repo: Path,
+    handler: str | None,
+    *,
+    service: str | None = None,
+    trace: str | None = None,
+) -> set[str]:
+    """Branch arms (from tracelens ``branch_hits`` lines) credited to ``handler``.
+
+    A branch id is ``file:line:src->dst`` — one arm of one conditional. Hits are
+    credited when their ``request_id`` belongs to a request whose spans include
+    the handler; hits with no request id (module import, framework startup) are
+    credited too, so they reward whichever endpoint's round first observes them
+    — they are infrastructure the probe genuinely exercised. First-hit-only on
+    the tracelens side keeps this set monotone, which is exactly what the
+    "newly covered" reward needs. No capture / no branch lines → empty set.
+    """
+    handler = _normalize_handler(handler)
+    try:
+        trace_path = _resolve_trace_file(Path(repo), service, trace)
+    except (FileNotFoundError, OSError):
+        return set()
+    suffix = "." + handler if handler else None
+    rids: set[str] = set()
+    branch_rows: list[dict[str, Any]] = []
+    try:
+        with trace_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"branch_hits"' in line:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and isinstance(row.get("hits"), list):
+                        branch_rows.append(row)
+                elif handler and handler in line and '"enter"' in line:
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(ev, dict) or ev.get("event") != "enter":
+                        continue
+                    comp = ev.get("component")
+                    rid = ev.get("request_id")
+                    if (
+                        isinstance(comp, str)
+                        and isinstance(rid, str)
+                        and (comp == handler or (suffix and comp.endswith(suffix)))
+                    ):
+                        rids.add(rid)
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for row in branch_rows:
+        for hit in row["hits"]:
+            if not isinstance(hit, dict):
+                continue
+            rid = hit.get("request_id")
+            if rid is None or rid in rids:
+                ids.add(f"{hit.get('file')}:{hit.get('line')}:{hit.get('src')}->{hit.get('dst')}")
+    return ids
 
 
 def _walk(node: dict[str, Any]):
@@ -173,14 +244,18 @@ def endpoint_coverage(
             )
         else:
             log.debug("coverage: tracemap failed for %s: %s", api_id, exc)
+        branch_ids = branch_ids_for_endpoint(repo, handler, service=service, trace=trace)
         return {
             "api_id": api_id,
-            "covered_ids": set(),
+            # Branch arms still reward exploration even when the static overlay
+            # could not be built — the trace speaks for itself.
+            "covered_ids": branch_ids,
             "covered": 0,
             "total": 0,
             "pct": 0.0,
             "uncovered": [],
             "handler_observed": observed,
+            "branch_arms": len(branch_ids),
         }
     tree = result.get("tree", {})
     covered_ids, all_ids = _covered_symbol_ids(tree)
@@ -201,9 +276,14 @@ def endpoint_coverage(
             api_id,
             handler_name,
         )
+    # Branch arms join the reward-id set so the bandit's "newly covered" signal
+    # keeps moving after every function has been ENTERED once — the input space
+    # is explored branch by branch, not function by function. The displayed
+    # covered/total stay symbol-denominated (branches have no static total here).
+    branch_ids = branch_ids_for_endpoint(repo, handler_name, service=service, trace=trace)
     return {
         "api_id": api_id,
-        "covered_ids": covered_ids,
+        "covered_ids": covered_ids | branch_ids,
         "covered": len(covered_ids),
         "total": len(all_ids),
         "pct": cov.get(
@@ -211,4 +291,5 @@ def endpoint_coverage(
         ),
         "uncovered": _uncovered_names(tree),
         "handler_observed": observed,
+        "branch_arms": len(branch_ids),
     }

@@ -38,6 +38,7 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
     tracer_calibration: dict[str, Any] | None = None
     gc_pause_count = 0
     gc_pause_total_ms = 0.0
+    branch_arm_count = 0
     if not log_path.is_file():
         return {"error": f"log not found: {log_path}"}
     with log_path.open(encoding="utf-8") as fh:
@@ -66,6 +67,13 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
                 d = obj.get("duration_ms")
                 if isinstance(d, int | float):
                     gc_pause_total_ms += float(d)
+                continue
+            if ev == "branch_hits":
+                # Branch-coverage line (launcher/monitoring_hook.py) — counted
+                # so the summary reports coverage depth; not a span row, so it
+                # must not pollute component/request statistics.
+                hits = obj.get("hits")
+                branch_arm_count += len(hits) if isinstance(hits, list) else 0
                 continue
             comp = obj.get("component", "?")
             components[comp] += 1
@@ -124,6 +132,9 @@ def summarize_jsonl(log_path: Path) -> dict[str, Any]:
             if gc_pause_count == 0
             else {"count": gc_pause_count, "total_pause_ms": round(gc_pause_total_ms, 4)}
         ),
+        # Distinct branch arms first-hit during the run (monitoring_hook branch
+        # coverage); None for traces captured without branch_hits lines.
+        "branch_arms": branch_arm_count if branch_arm_count else None,
     }
 
 

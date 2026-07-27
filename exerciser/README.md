@@ -39,11 +39,11 @@ Artifacts land under `<repo>/.vinv/exercise/`:
 
 - **Coverage-guided loop:** Thompson sampling over generation strategies per
   endpoint. Each `(endpoint, strategy)` carries a `Beta(α, β)` posterior (priors
-  `α₀=β₀=1`); a probe's reward bit is `1` when it covers ≥1 new symbol, `0`
+  `α₀=β₀=1`); a probe's reward bit is `1` when it covers ≥1 new symbol or branch arm, `0`
   otherwise, and `α += successes, β += failures` — the same Bernoulli/Beta update
   `docs/learning.md §2` uses for the composition bandit. Selection samples
   `θ_s ~ Beta(α_s, β_s)` and plays `argmax_s θ_s` (seeded RNG → deterministic).
-  The loop stops when a whole round covers no new symbol or the budget is spent.
+  The loop stops when a whole round covers no new symbol/branch or the budget is spent.
 - **Invariant confidence (Daikon-lite):** an invariant is kept only with support
   `≥5` observations and `0` counterexamples; its confidence is the Laplace
   estimate `(s+1)/(n+2)` over `n` relevant observations (`s=n` when there are no
