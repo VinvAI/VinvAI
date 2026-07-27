@@ -190,27 +190,35 @@ def test_empty_action_bandit_selects_nothing():
 # ---- the update rule, stated honestly ---------------------------------------
 
 
-def test_the_fractional_rule_is_tighter_than_the_bernoulli_one():
+def test_the_fractional_rule_removes_the_credits_own_variance():
     # The audited claim was "Beta/Bernoulli conjugate update". It is not: the
-    # fractional alpha += credit is the bounded-reward RELAXATION, and posting
-    # the mean instead of a draw removes the credit's own variance. The
-    # posterior is therefore strictly tighter at equal play counts, which
-    # narrows the Thompson draw and under-explores relative to the regret bound.
-    outcome = Outcome(new_coverage=1)  # credit == COVERAGE_BONUS == 0.25
-    fractional = BetaArm()
-    bernoulli = BetaArm()
-    rng = random.Random("variance")
-    for _ in range(400):
-        fractional.update(outcome)
-        bernoulli.update(outcome, rng=rng)
+    # fractional `alpha += credit` is the bounded-reward RELAXATION, and posting
+    # the mean instead of a draw removes the credit's own variance.
+    #
+    # That difference is a property of the SAMPLING DISTRIBUTION across
+    # experiments, not of any single run: at equal alpha+beta the Beta variance
+    # depends only on how close alpha is to beta, so one Bernoulli realisation
+    # can land either side of the fractional one. Asserting per-realisation (as
+    # this test first did) is a coin flip — it failed on an ordinary seed.
+    outcome = Outcome(new_coverage=1)  # credit == COVERAGE_BONUS
 
-    def spread(arm: BetaArm) -> float:
-        a, b = arm.alpha, arm.beta
-        return (a * b) / (((a + b) ** 2) * (a + b + 1.0))  # Beta variance
+    def posterior_mean(seed: str | None) -> float:
+        arm = BetaArm()
+        rng = random.Random(seed) if seed is not None else None
+        for _ in range(200):
+            arm.update(outcome, rng=rng) if rng else arm.update(outcome)
+        return arm.mean()
 
-    # Same evidence, same mean in expectation — but a strictly narrower belief.
-    assert abs(fractional.mean() - bernoulli.mean()) < 0.1
-    assert spread(fractional) < spread(bernoulli), "the relaxation explores less"
+    fractional = [posterior_mean(None) for _ in range(12)]
+    bernoulli = [posterior_mean(f"seed-{i}") for i in range(12)]
+
+    # The relaxation is DETERMINISTIC: same evidence, same posterior, always.
+    assert len(set(fractional)) == 1, "the fractional rule must not vary at all"
+    # The honest conjugate update does vary, which is the exploration the
+    # relaxation gives up.
+    assert len(set(bernoulli)) > 1, "Bernoulli draws must carry their variance"
+    # And it is centred on the same place.
+    assert abs(sum(bernoulli) / len(bernoulli) - fractional[0]) < 0.05
 
 
 def test_bernoulli_updates_post_whole_counts():
@@ -252,9 +260,19 @@ def test_the_coverage_bonus_is_an_adjustable_persisted_prior():
 
 
 def test_the_default_coverage_bonus_is_the_documented_exchange_rate():
-    # 0.25 is an exchange rate, not a dial: it sets the point at which a
-    # coverage-only arm ties an arm that violates on a quarter of its plays.
-    assert Outcome(new_coverage=1).credit() == COVERAGE_BONUS
-    tie = Outcome(violations=1).credit() * COVERAGE_BONUS
-    assert Outcome(new_coverage=1).credit() == tie / 1.0 * 1.0
-    assert 0.1 <= COVERAGE_BONUS <= 0.35
+    # 0.25 is an EXCHANGE RATE, not a dial: it is the point at which an arm
+    # that only ever reaches new ground ties an arm that finds a violation on
+    # one play in four. Asserting the consequence pins the number — the
+    # previous version reduced to COVERAGE_BONUS == COVERAGE_BONUS and would
+    # have passed at any value.
+    always_covers = BetaArm()
+    violates_1_in_4 = BetaArm()
+    for i in range(400):
+        always_covers.update(Outcome(new_coverage=1))
+        violates_1_in_4.update(Outcome(violations=1) if i % 4 == 0 else Outcome())
+    assert abs(always_covers.mean() - violates_1_in_4.mean()) < 0.02, (
+        f"at COVERAGE_BONUS={COVERAGE_BONUS} the two must be near-indifferent; "
+        f"got {always_covers.mean():.3f} vs {violates_1_in_4.mean():.3f}"
+    )
+    # And a violation must always outrank pure coverage on a single play.
+    assert Outcome(violations=1).credit() > Outcome(new_coverage=99).credit()
