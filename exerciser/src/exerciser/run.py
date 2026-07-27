@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import state, store
-from .bandit import STRATEGIES, EndpointBandit, bandit_summary, seed_from_prior
+from .bandit import STRATEGIES, EndpointBandit, Outcome, bandit_summary, seed_from_prior
 from .baseline import apply_baselines, status_class
 from .compaction import compact_artifacts
 from .coverage import endpoint_coverage
@@ -220,6 +220,7 @@ def run_exercise(
     while spent < budget and no_improve_rounds < rounds and active_ids:
         round_no += 1
         round_new_symbols = 0
+        round_violations = 0
         for api_id in list(active_ids):
             if spent >= budget:
                 break
@@ -271,20 +272,28 @@ def run_exercise(
             new_ids = set(cov.get("covered_ids", set())) - covered_ids_by_ep[api_id]
             covered_ids_by_ep[api_id] |= set(cov.get("covered_ids", set()))
             round_new_symbols += len(new_ids)
-            # Attribute this round's newly-covered symbols to the strategy last
-            # played for the endpoint (the reward for that arm's probe).
+            # Attribute this round's outcome to the strategy last played for the
+            # endpoint. The objective is ORACLE VIOLATIONS per unit cost —
+            # coverage is the exploration bonus, not the goal — so the round's
+            # violations for this endpoint are counted alongside the new symbols.
             last_strategy = _last_strategy(executions, api_id, round_no)
             if last_strategy:
-                bandits[api_id].update(last_strategy, len(new_ids))
+                violations = _round_violations(executions, api_id, round_no)
+                round_violations += violations
+                bandits[api_id].update(
+                    last_strategy,
+                    Outcome(violations=violations, new_coverage=len(new_ids), cost=1.0),
+                )
         if round_new_symbols == 0:
             no_improve_rounds += 1
         else:
             no_improve_rounds = 0
         log.info(
-            "round %d: %d probes spent, %d new symbols (no-improve %d/%d)",
+            "round %d: %d probes spent, %d new symbols, %d oracle violations " "(no-improve %d/%d)",
             round_no,
             spent,
             round_new_symbols,
+            round_violations,
             no_improve_rounds,
             rounds,
         )
@@ -845,6 +854,27 @@ def _enforce_monotonic(
             row = rows[idx]
             existing = row.get("invariant_violation")
             row["invariant_violation"] = f"{existing}; {violation}" if existing else violation
+
+
+def _round_violations(executions: list[dict[str, Any]], api_id: str, round_no: int) -> int:
+    """Oracle violations this endpoint produced in ``round_no``.
+
+    A violation is the oracle SPEAKING: a 5xx, a transport crash, or a broken
+    learned invariant. A 4xx on a negative-class probe is the endpoint working
+    correctly — counting it would teach the loop to spam malformed inputs.
+    """
+    count = 0
+    for ex in executions:
+        if ex.get("api_id") != api_id or ex.get("round") != round_no:
+            continue
+        status = ex.get("status")
+        if ex.get("invariant_violation"):
+            count += 1
+        elif ex.get("error") and status is None:
+            count += 1
+        elif isinstance(status, int) and status >= 500:
+            count += 1
+    return count
 
 
 def _last_strategy(executions: list[dict[str, Any]], api_id: str, round_no: int) -> str | None:
