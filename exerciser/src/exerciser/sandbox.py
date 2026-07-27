@@ -35,18 +35,32 @@ What containment actually is
   applied in a POSIX ``preexec_fn``. Every cap is guarded and only ever LOWERS a
   limit, so a platform that lacks one simply skips it.
 
-The honest limit
-----------------
+The capability ladder
+---------------------
 
-The network/process/write guards are Python-level monkeypatches. They stop a
-well-behaved Python client — ``requests``, ``httpx``, ``subprocess.run``, an
-``open(path, "w")``, an ``os.open(path, O_CREAT)`` — which is what an ordinary
-function in an ordinary repo does by accident. They do NOT stop a determined
-caller: ``ctypes``, a C extension calling ``open(2)``/``connect(2)`` directly, or
-code that re-execs a fresh interpreter all bypass them. Containment here is
-about ACCIDENTS, not adversaries. The durable guarantee is the disposable tree
-and the copied repo: whatever a target manages to write, it writes to a copy
-that is deleted, under a ``HOME`` and ``TMPDIR`` that are deleted with it.
+The guards above are Python-level monkeypatches, and a monkeypatch is
+structurally blind to a C extension calling ``open(2)``/``connect(2)`` itself.
+That was not a theoretical gap: ``sqlite3.connect("/abs/path/outside")`` created
+a real database outside the sandbox root, and ``sqlite3`` is exactly the kind of
+module this sandbox exists to promote.
+
+So the wall is chosen by ``containment.detect_containment``, which PROBES the
+host and returns the strongest rung it can actually demonstrate:
+
+* ``OS_SANDBOX`` — ``sandbox-exec`` (macOS), ``bwrap`` or ``unshare`` (Linux).
+  A write outside the root is refused by the KERNEL, so it is impossible rather
+  than intercepted, and the effect ledger may honestly claim completeness.
+* ``PROCESS_SHIM`` — everything described above, unchanged. Accidents, not
+  adversaries; ``effects_complete`` stays False wherever the static guard
+  predicted C-level I/O.
+* ``NONE`` — nothing runs.
+
+The shim runs at every tier: under an OS sandbox it is no longer the wall, but
+it is still the LEDGER, and "this function opened a socket" is worth reporting
+even when the kernel would have refused it anyway. ``SandboxPolicy.require_tier``
+lets a caller demand ``OS_SANDBOX`` and be REFUSED rather than quietly given the
+weaker rung. Every report states the tier it achieved and what that tier
+guarantees.
 
 Failure is CLOSED. If the temp tree cannot be made, the shim cannot be written,
 or the repo exceeds the copy cap, ``prepare_sandbox`` raises and every candidate
@@ -77,6 +91,16 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from .containment import (
+    SHIM_MECHANISM,
+    ContainmentMechanism,
+    ContainmentTier,
+    detect_containment,
+    os_denial,
+    parse_tier,
+    unshare_env,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids an import cycle
     from .functions import Refusal
@@ -113,8 +137,9 @@ DEFAULT_EXCLUDES = frozenset(
 )
 
 # Effect kinds the ledger records. `filesystem-escape` is a write that pointed
-# outside the sandbox root and was therefore refused.
-EFFECT_KINDS = ("filesystem", "filesystem-escape", "network", "subprocess")
+# outside the sandbox root and was therefore refused BY THE SHIM; `os-denied` is
+# one the kernel refused, which is the only kind a C extension can produce.
+EFFECT_KINDS = ("filesystem", "filesystem-escape", "network", "subprocess", "os-denied")
 
 # =========================================================================
 # What the shim CANNOT see — and must therefore not report as "no effect"
@@ -181,8 +206,9 @@ class IsolationUnavailable(RuntimeError):
     """Containment could not be established, so nothing may be run.
 
     Raised — never swallowed into a "run anyway" path — when the temp tree
-    cannot be created, the shim cannot be written, or the repo is too large to
-    copy under the configured cap.
+    cannot be created, the shim cannot be written, the repo is too large to copy
+    under the configured cap, or the policy demanded a containment TIER this
+    host cannot provide.
     """
 
 
@@ -210,7 +236,21 @@ class SandboxPolicy:
     block_escaping_writes: bool = True
     honour_gitignore: bool = True
     keep_root: bool = False
+    # Where the disposable tree is created. ``None`` means the system temp
+    # directory. A caller that also sets ``keep_root`` should set this, because
+    # "keep the tree for inspection" without saying WHERE leaves one orphaned
+    # tree per run in ``$TMPDIR`` forever.
+    root_parent: Path | None = None
     exclude_patterns: frozenset[str] = DEFAULT_EXCLUDES
+    # The weakest rung this caller will accept. ``OS_SANDBOX`` turns "the host
+    # only offers the Python shim" from a silent downgrade into a REFUSAL, which
+    # is the only way a caller can insist on a guarantee rather than hope for
+    # one. ``None`` accepts whatever the ladder found (never ``NONE``).
+    require_tier: ContainmentTier | None = None
+    # A deliberate CEILING, for exercising the weaker rung on a host that offers
+    # a stronger one — a test reproducing shim behaviour, an operator narrowing
+    # down a difference. It can only ever weaken, and the report says so.
+    max_tier: ContainmentTier | None = None
 
     @property
     def max_copy_bytes(self) -> int:
@@ -227,6 +267,8 @@ class SandboxPolicy:
             "block_subprocess": self.block_subprocess,
             "block_escaping_writes": self.block_escaping_writes,
             "honour_gitignore": self.honour_gitignore,
+            "require_tier": self.require_tier.value if self.require_tier else None,
+            "max_tier": self.max_tier.value if self.max_tier else None,
         }
 
 
@@ -265,6 +307,11 @@ class Sandbox:
     ledger: Path
     copy: CopyReport
     policy: SandboxPolicy = field(default_factory=SandboxPolicy)
+    mechanism: ContainmentMechanism = SHIM_MECHANISM
+
+    @property
+    def tier(self) -> ContainmentTier:
+        return self.mechanism.tier
 
     def dispose(self) -> None:
         """Discard the whole tree — every effect the target had lands here."""
@@ -670,21 +717,53 @@ def write_shim(directory: Path) -> Path:
 # =========================================================================
 
 
+def resolve_mechanism(
+    policy: SandboxPolicy,
+    *,
+    python: str | None = None,
+    logger: logging.Logger | None = None,
+) -> ContainmentMechanism:
+    """The rung this policy gets, or ``IsolationUnavailable`` if it demanded more.
+
+    The refusal is the entire point of ``require_tier``: a caller that asked for
+    an OS wall and was handed the Python shim would otherwise have no way to
+    tell, and would go on reporting completeness it never had.
+    """
+    mechanism = detect_containment(
+        block_network=policy.block_network,
+        max_tier=policy.max_tier,
+        python=python,
+        logger=logger,
+    )
+    required = parse_tier(policy.require_tier)
+    if required is not None and mechanism.tier < required:
+        raise IsolationUnavailable(
+            f"policy requires containment tier '{required.value}' but this host "
+            f"only offers '{mechanism.tier.value}' "
+            f"({mechanism.fallback_reason or mechanism.detail or 'no reason recorded'})"
+        )
+    return mechanism
+
+
 def prepare_sandbox(
     repo: Path,
     policy: SandboxPolicy,
     *,
     parent_dir: Path | None = None,
+    mechanism: ContainmentMechanism | None = None,
 ) -> Sandbox:
     """Build a disposable containment tree for ``repo``, or refuse.
 
     Raises ``IsolationUnavailable`` when the tree cannot be made, the shim
-    cannot be written, or the repo exceeds the copy cap. There is no partial
-    success: a caller that catches this must leave every candidate refused.
+    cannot be written, the repo exceeds the copy cap, or the policy demanded a
+    tier the host cannot provide. There is no partial success: a caller that
+    catches this must leave every candidate refused.
     """
+    mechanism = mechanism or resolve_mechanism(policy)
     repo = repo.resolve()
+    parent = parent_dir or policy.root_parent
     try:
-        root = Path(tempfile.mkdtemp(prefix="vinv-sandbox-", dir=str(parent_dir or "") or None))
+        root = Path(tempfile.mkdtemp(prefix="vinv-sandbox-", dir=str(parent) if parent else None))
     except OSError as exc:
         raise IsolationUnavailable(f"cannot create a sandbox temp tree: {exc}") from exc
     try:
@@ -721,6 +800,7 @@ def prepare_sandbox(
         ledger=root / "ledger.json",
         copy=report,
         policy=policy,
+        mechanism=mechanism,
     )
 
 
@@ -757,6 +837,13 @@ def sandbox_env(
     env["VINV_SANDBOX_BLOCK_NETWORK"] = "1" if policy.block_network else "0"
     env["VINV_SANDBOX_BLOCK_SUBPROCESS"] = "1" if policy.block_subprocess else "0"
     env["VINV_SANDBOX_BLOCK_ESCAPING_WRITES"] = "1" if policy.block_escaping_writes else "0"
+    # The worker's completeness claim follows the TIER, so the tier has to reach
+    # the worker. A missing/unknown value reads as the weakest rung, which is the
+    # fail-closed direction: it can only ever make the report more cautious.
+    env["VINV_CONTAINMENT_TIER"] = sandbox.mechanism.tier.value
+    env["VINV_CONTAINMENT_MECHANISM"] = sandbox.mechanism.name
+    if sandbox.mechanism.name == "unshare":
+        env.update(unshare_env([sandbox.root], base=env))
     parts = [str(sandbox.shim), *(str(p) for p in extra_pythonpath)]
     inherited = env.get("PYTHONPATH")
     if inherited:
@@ -845,19 +932,24 @@ def group_attempts(attempts: Iterable[dict[str, Any]]) -> dict[str, list[str]]:
     return out
 
 
-def mark_contained(row: dict[str, Any]) -> dict[str, Any]:
-    """Tag a row whose exception came from the containment shim, not the target.
+def mark_contained(row: dict[str, Any], tier: ContainmentTier | None = None) -> dict[str, Any]:
+    """Tag a row whose exception came from the containment, not from the target.
 
-    An exception the SHIM raised is our apparatus working, not the target
+    An exception our APPARATUS raised is the apparatus working, not the target
     failing: "this function opens a socket" is already reported, honestly, as an
     effect-ledger entry. Without this tag the verdict path would manufacture one
     ``function-crash`` per contained target — a defect per blocked socket — which
     is precisely the false signal that makes a harness ignorable.
 
-    The test is the exception's DEFINING MODULE (``sitecustomize``), which is a
-    fact about the class rather than a guess from its message, so a target that
-    catches ``SandboxBlocked`` and raises its own error is still judged on its
-    own error.
+    Two apparatus, two tests. For the SHIM, the exception's defining module
+    (``sitecustomize``) — a fact about the class rather than a guess from its
+    message, so a target that catches ``SandboxBlocked`` and raises its own error
+    is still judged on its own error. For an OS SANDBOX, the shape of a kernel
+    refusal (a denial errno, or the message a C extension turns one into), which
+    is the only trace ``sqlite3`` leaves when the kernel refuses its ``open(2)``.
+    The OS test is deliberately generous — under a kernel wall an ambiguous
+    ``PermissionError`` is attributed to the wall — because containment must
+    never be able to fabricate a finding.
     """
     if (
         row.get("status") == "error"
@@ -865,6 +957,20 @@ def mark_contained(row: dict[str, Any]) -> dict[str, Any]:
         and row.get("error_module") == "sitecustomize"
     ):
         row["contained"] = True
+        row["contained_by"] = "process-shim"
+        return row
+    if tier is ContainmentTier.OS_SANDBOX:
+        denial = os_denial(row)
+        if denial is not None:
+            kind, detail = denial
+            row["contained"] = True
+            row["contained_by"] = "os-sandbox"
+            row["os_denial"] = {"kind": kind, "detail": detail}
+            effects = row.setdefault("effects", {})
+            if isinstance(effects, dict):
+                bucket = effects.setdefault("os-denied", [])
+                if isinstance(bucket, list) and detail not in bucket:
+                    bucket.append(detail)
     return row
 
 
@@ -923,6 +1029,12 @@ def _empty_report(policy: SandboxPolicy, candidates: int) -> dict[str, Any]:
         "status": "ok",
         "reason": None,
         "policy": policy.to_json(),
+        # The rung of the capability ladder this run actually achieved, and what
+        # that rung guarantees. Stated on EVERY report, including the ones that
+        # refused, so no reader ever has to infer the strength of the wall.
+        "tier": ContainmentTier.NONE.value,
+        "containment": None,
+        "effects_complete": False,
         "candidates": candidates,
         "targets": 0,
         "modules": 0,
@@ -970,11 +1082,25 @@ def run_sandboxed_targets(
     log = logger or logging.getLogger(__name__)
     report = _empty_report(policy, len(refusals))
     if not refusals:
+        # The ladder is still reported: "nothing to contain" and "we could not
+        # have contained it" are very different facts about a run.
+        try:
+            idle = resolve_mechanism(policy, python=python, logger=log)
+        except IsolationUnavailable as exc:
+            report["reason"] = str(exc)
+            return {"status": "ok", "rows": [], "report": report}
+        report["tier"] = idle.tier.value
+        report["containment"] = idle.to_json()
+        report["effects_complete"] = idle.effects_complete
         report["reason"] = "no impurity-only refusals to drive"
         return {"status": "ok", "rows": [], "report": report}
 
     try:
-        sandbox = prepare_sandbox(repo, policy)
+        mechanism = resolve_mechanism(policy, python=python, logger=log)
+        report["tier"] = mechanism.tier.value
+        report["containment"] = mechanism.to_json()
+        report["effects_complete"] = mechanism.effects_complete
+        sandbox = prepare_sandbox(repo, policy, mechanism=mechanism)
     except IsolationUnavailable as exc:
         report["status"] = "unavailable"
         report["reason"] = str(exc)
@@ -987,7 +1113,9 @@ def run_sandboxed_targets(
     report["copy"] = sandbox.copy.to_json()
     report["root"] = str(sandbox.root)
     log.info(
-        "sandbox: copied %d files (%.1f MB) in %.0f ms into %s",
+        "sandbox: tier=%s (%s), copied %d files (%.1f MB) in %.0f ms into %s",
+        sandbox.mechanism.tier.value,
+        sandbox.mechanism.name,
         sandbox.copy.files,
         sandbox.copy.bytes / (1024 * 1024),
         sandbox.copy.ms,
@@ -1028,16 +1156,20 @@ def run_sandboxed_targets(
                 ),
                 encoding="utf-8",
             )
-            cmd = [
-                python or sys.executable,
-                "-m",
-                "exerciser.sandbox",
-                "--worker",
-                "--plan",
-                str(plan_file),
-                "--repo",
-                str(sandbox.repo_copy),
-            ]
+            cmd = sandbox.mechanism.wrap(
+                [
+                    python or sys.executable,
+                    "-m",
+                    "exerciser.sandbox",
+                    "--worker",
+                    "--plan",
+                    str(plan_file),
+                    "--repo",
+                    str(sandbox.repo_copy),
+                ],
+                root=sandbox.root,
+                block_network=policy.block_network,
+            )
             before = snapshot_tree(sandbox.root, skip=ignore)
             try:
                 proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
@@ -1187,6 +1319,12 @@ def _worker_main(argv: list[str]) -> int:
     plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
     module_name = str(plan["module"])
     repo_packages = plan.get("repo_packages") or []
+    # An unset or unrecognised value reads as the WEAKEST rung: a worker that
+    # cannot tell what wall it is behind must not claim the strong one.
+    try:
+        tier = parse_tier(os.environ.get("VINV_CONTAINMENT_TIER")) or ContainmentTier.PROCESS_SHIM
+    except ValueError:
+        tier = ContainmentTier.PROCESS_SHIM
 
     ledger = getattr(sys, "__vinv_sandbox_ledger__", None)
     if ledger is None or not hasattr(ledger, "attempts"):
@@ -1235,10 +1373,13 @@ def _worker_main(argv: list[str]) -> int:
                         "error_type": type(exc).__name__,
                         "error_module": getattr(type(exc), "__module__", "") or "",
                         "error_mro": [c.__name__ for c in type(exc).__mro__],
+                        "error_errno": getattr(exc, "errno", None),
+                        "containment_tier": tier.value,
                         "repo_packages": repo_packages,
                         "effects": drain(mark),
                         "error": str(exc)[:400],
-                    }
+                    },
+                    tier,
                 )
             ]
         )
@@ -1265,14 +1406,22 @@ def _worker_main(argv: list[str]) -> int:
             "module": module_name,
             "target_id": target_id,
             "sandboxed": True,
+            "containment_tier": tier.value,
             "repo_packages": repo_packages,
             "refused_for": reasons[:4],
         }
-        # The static guard flagged an impurity CLASS this process cannot observe
-        # (C-extension I/O). Say so on every row for the target, so an empty
-        # `effects` map is read as "blind here", not as "no effect".
+        # Completeness FOLLOWS THE TIER. Under an OS sandbox a write outside the
+        # root is impossible and one inside it is caught by the before/after walk
+        # of the tree, so there is no third place for an effect to hide and the
+        # ledger may claim completeness. Under the shim it may not: the static
+        # guard flagged an impurity class this process cannot observe (C-extension
+        # I/O), and an empty `effects` map there means "blind here", not "no
+        # effect".
         unobservable = unobservable_effect_classes(reasons)
-        if unobservable:
+        if tier is ContainmentTier.OS_SANDBOX:
+            base["unobservable"] = []
+            base["effects_complete"] = True
+        elif unobservable:
             base["unobservable"] = unobservable
             base["effects_complete"] = False
         try:
@@ -1314,7 +1463,7 @@ def _worker_main(argv: list[str]) -> int:
             row = fn._call_once(module_name, qual, candidate, arg_set)
             row.update(base)
             row["effects"] = drain(mark)
-            rows.append(mark_contained(row))
+            rows.append(mark_contained(row, tier))
     fn._emit(rows)
     return 0
 

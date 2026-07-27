@@ -204,11 +204,22 @@ def enumerate_actions(
     try:
         from . import functions
 
-        targets, _skipped = functions.discover_targets(repo, max_targets=max_targets, logger=log)
+        targets, _skipped, refusals = functions.discover_with_refusals(
+            repo, max_targets=max_targets, logger=log
+        )
+        # The crash oracle drives the unverifiable set through containment now,
+        # so those targets are BUDGETABLE: enumerating only the verified-pure
+        # ones would hand the bandit an action space four fifths smaller than the
+        # oracle it allocates to. Concurrency stays pure-only — it runs its
+        # schedules IN PROCESS, and containment is not part of that path.
         function_targets = [t.id for t in targets]
+        contained_targets = [r.id for r in refusals]
         _arm(
             "crash",
-            [Action(target=t, technique="deterministic", oracle="crash") for t in function_targets],
+            [
+                Action(target=t, technique="deterministic", oracle="crash")
+                for t in [*function_targets, *contained_targets]
+            ],
         )
         _arm(
             "concurrency",
@@ -217,10 +228,16 @@ def enumerate_actions(
                 for t in function_targets
             ],
         )
-        if not function_targets:
+        if not function_targets and not contained_targets:
             space.notes.append(
                 "0 function targets discovered — the crash and concurrency "
                 "oracles are not armed (is the code index built?)"
+            )
+        elif not function_targets:
+            space.notes.append(
+                f"0 verified-pure function targets — the crash oracle is armed on "
+                f"{len(contained_targets)} target(s) driven under containment; "
+                "the concurrency oracle (in-process) is not armed"
             )
     except Exception as exc:
         space.notes.append(f"function oracles unavailable: {exc}")

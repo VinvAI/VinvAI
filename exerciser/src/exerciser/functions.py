@@ -58,26 +58,39 @@ Refusing to call
    ``__main__`` are never importable targets: importing them runs fixtures and
    migrations against real state.
 
-A refusal is not a dead end
----------------------------
+A refusal is not a dead end — containment is where it goes
+----------------------------------------------------------
 
 The purity guard is right to refuse, but if refusal were the END of it the
 harness's coverage ceiling would be "whatever happens to be pure" — and the
 functions that touch the filesystem, the network or a subprocess are usually the
-ones worth exercising. ``run_functions(sandbox=True)`` runs a SECOND pass over
-the targets refused ONLY for impurity, inside ``sandbox``'s containment: a
-disposable copy of the repo, ``cwd``/``HOME``/``TMPDIR``/``XDG_*`` redirected
-into a temp tree, network and process spawning refused by a generated
-``sitecustomize`` shim, POSIX ``setrlimit`` caps, and the existing wall-clock
-deadline. What each target ATTEMPTED is recorded as an effect ledger, which is
-useful output in its own right: "this function writes 3 files and opens a
-socket" is a behavioural fact even when the call returns cleanly.
+ones worth exercising. So ``run_functions`` routes on what the guard could
+prove, not on a flag:
 
-Two invariants hold there. Destructive NAMES and test scaffolding are never
-promoted — containment changes what a call costs, not whether calling
-``drop_database`` was ever sensible. And isolation fails CLOSED: if the tree
-cannot be made or the repo is too big to copy, the targets stay refused with the
-reason recorded, and nothing runs unsandboxed.
+* verified pure → in process, the fast path;
+* unverifiable or impure (decorated, receiver-tainted, an unresolved chain) →
+  automatically through ``sandbox``'s containment, no flag required;
+* destructive NAME or test scaffolding → refused outright, never promoted.
+
+That last one is not squeamishness: containment changes what a call costs, not
+whether calling ``drop_database`` was ever sensible.
+
+Containment means a disposable copy of the repo, ``cwd``/``HOME``/``TMPDIR``/
+``XDG_*`` redirected into a temp tree, POSIX ``setrlimit`` caps, the existing
+wall-clock deadline — and the strongest WALL the host can actually demonstrate
+(``containment.detect_containment``: an OS sandbox where one probes clean,
+otherwise the generated ``sitecustomize`` shim). What each target ATTEMPTED is
+recorded as an effect ledger, which is useful output in its own right: "this
+function writes 3 files and opens a socket" is a behavioural fact even when the
+call returns cleanly.
+
+Making the sandbox opt-IN had this backwards. It made SAFETY the thing you had
+to remember to ask for, and on one real repository the default run drove 46
+targets where containment drives 147. ``sandbox=False`` still exists, as an
+opt-OUT: the unverified set then stays refused, loudly, and nothing runs loose.
+Isolation fails CLOSED throughout — if the tree cannot be made, the repo is too
+big to copy, or the policy demanded a tier this host cannot provide, the targets
+stay refused with the reason recorded.
 """
 
 from __future__ import annotations
@@ -790,6 +803,11 @@ _INERT_DECORATORS = frozenset(
 _MODULE_TAINT = "module:"
 _CLASS_TAINT = "class:"
 
+# The conventional first parameter of a method. `self.sink.record(x)` is rooted
+# at a name no receiver map can ever contain, so it needs its OWN resolution
+# step (`attribute_bindings`) before the unresolvable-chain rule below fires.
+_SELF_NAMES = frozenset({"self", "cls"})
+
 # How far a same-module call chain is followed. A wrapper three hops from the
 # `os.remove` is exactly as destructive as the helper; beyond this the walk
 # REFUSES rather than assumes (see `impurity_reasons`).
@@ -940,7 +958,14 @@ def _decorator_reason(decorator: ast.expr, imports: dict[str, str], known: set[s
     if isinstance(ref, ast.Name):
         name = ref.id
         dotted = imports.get(name, name)
-        if name in _INERT_DECORATORS or dotted in _INERT_DECORATORS:
+        # The allowlist is consulted on the RESOLVED name only. Checking the bare
+        # spelling too made `from mylib import staticmethod` — a third-party
+        # wrapper wearing a builtin's name — read as inert and drivable, which is
+        # the exact aliasing bug the rest of this file resolves imports to avoid.
+        # (`_dotted_reason` below still checks both readings: for IMPURITY either
+        # match is enough, so consulting both is the conservative direction; for
+        # an ALLOWLIST it is the permissive one.)
+        if _inert_decorator(name, imports):
             return None
         if name in known:
             return None  # a same-module def: judged through the frontier
@@ -952,11 +977,11 @@ def _decorator_reason(decorator: ast.expr, imports: dict[str, str], known: set[s
         root, attrs = _attr_chain(ref)
         if isinstance(root, ast.Name):
             tail = ".".join(attrs)
+            if _inert_decorator(f"{root.id}.{tail}", imports):
+                return None
             candidates = list(
                 dict.fromkeys([f"{imports.get(root.id, root.id)}.{tail}", f"{root.id}.{tail}"])
             )
-            if any(c in _INERT_DECORATORS for c in candidates):
-                return None
             reason = next((r for r in (_dotted_reason(c) for c in candidates) if r), None)
             rendered = f"{root.id}.{tail}"
             if reason:
@@ -964,6 +989,21 @@ def _decorator_reason(decorator: ast.expr, imports: dict[str, str], known: set[s
             return _undecidable_decorator(rendered)
     # `@registry[name]`, `@make()()`, `@obj.handlers[0]` — computed at runtime.
     return _INDIRECT_REASON
+
+
+def _inert_decorator(spelling: str, imports: dict[str, str]) -> bool:
+    """Whether this decorator spelling is on the provably-inert allowlist.
+
+    Resolution wins over spelling: a name (or an attribute chain's root) that the
+    module IMPORTED is judged only as what it was imported as. A spelling the
+    module never imported is a builtin or a same-module name and is matched
+    literally, which is what keeps a plain ``@staticmethod`` inert.
+    """
+    head, _, tail = spelling.partition(".")
+    resolved = imports.get(head)
+    if resolved is None:
+        return spelling in _INERT_DECORATORS
+    return (f"{resolved}.{tail}" if tail else resolved) in _INERT_DECORATORS
 
 
 def _undecidable_decorator(rendered: str) -> str:
@@ -997,11 +1037,43 @@ def _wrapped_parameter(node: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]
     return {positional[0].arg} if positional else set()
 
 
+def _resolve_receiver(
+    root_id: str,
+    attrs: list[str],
+    receivers: dict[str, str],
+    self_attrs: dict[str, str],
+) -> tuple[str | None, list[str], str]:
+    """``(taint, remaining attributes, how to render the receiver)``.
+
+    Two ways a chain's receiver becomes knowable. A module-level binding
+    (``_session = requests.Session()`` → ``receivers``), and — inside a method
+    body — an attribute the class assigned to ``self`` (``self.session =
+    requests.Session()`` → ``self_attrs``). The second is what made
+    ``self.sink.record(tag)`` verifiable at all: ``self`` is in no receiver map,
+    so before this the chain fell through to the receiver-agnostic NAME backstop
+    and a body that wrote a file outside the repo was judged pure.
+    """
+    bound = receivers.get(root_id)
+    if bound is not None:
+        return bound, attrs, root_id
+    if root_id in _SELF_NAMES and len(attrs) >= 2:
+        bound = self_attrs.get(attrs[0])
+        if bound is not None:
+            return bound, attrs[1:], f"{root_id}.{attrs[0]}"
+    return None, attrs, root_id
+
+
+def _resolvable_root(root_id: str, imports: dict[str, str], known: set[str]) -> bool:
+    """Whether the guard can say what a chain's ROOT name refers to."""
+    return root_id in imports or root_id in known or root_id in _BUILTIN_NAMES
+
+
 def _direct_impurities(
     node: ast.AST,
     imports: dict[str, str] | None = None,
     known: set[str] | None = None,
     receivers: dict[str, str] | None = None,
+    self_attrs: dict[str, str] | None = None,
 ) -> list[str]:
     """World-changing — or unverifiable — calls made directly in one body.
 
@@ -1020,6 +1092,7 @@ def _direct_impurities(
     imports = imports or {}
     known = (known or set()) | _nested_definitions(node)
     receivers = receivers or {}
+    self_attrs = self_attrs or {}
     reasons: list[str] = []
     for child in ast.walk(node):
         # --- decorators: `@deco`, `@deco(...)`, `@mod.deco` ------------------
@@ -1063,21 +1136,20 @@ def _direct_impurities(
             if isinstance(root, ast.Name):
                 # A receiver BUILT by an impure module (`_session =
                 # requests.Session()`) or by a same-module class (`_store =
-                # Store()`). Neither is an import binding, so neither was ever
-                # resolved here — and a module-level client object is a commoner
-                # shape in real code than the aliased import that was fixed.
-                bound = receivers.get(root.id)
+                # Store()`), reached either through a module-level binding or
+                # through `self.<attr>` inside a method body. Neither is an
+                # import binding, so neither was ever resolved here — and a
+                # client object held on `self` is the commonest shape of all.
+                bound, rest, label = _resolve_receiver(root.id, attrs, receivers, self_attrs)
                 if bound is not None and bound.startswith(_MODULE_TAINT):
                     origin = bound[len(_MODULE_TAINT) :]
-                    reasons.append(f"calls .{attr}() on {root.id}, built by {origin}()")
+                    reasons.append(f"calls .{attr}() on {label}, built by {origin}()")
                     continue
                 if bound is not None and bound.startswith(_CLASS_TAINT):
                     cls = bound[len(_CLASS_TAINT) :]
-                    if len(attrs) == 1 and f"{cls}.{attr}" in known:
+                    if len(rest) == 1 and f"{cls}.{attr}" in known:
                         continue  # the method body is judged through the frontier
-                    reasons.append(
-                        f"calls .{attr}() on {root.id} ({cls}) — no readable method body"
-                    )
+                    reasons.append(f"calls .{attr}() on {label} ({cls}) — no readable method body")
                     continue
                 tail = ".".join(attrs)
                 # Both readings, because either one being impure is enough: the
@@ -1089,6 +1161,18 @@ def _direct_impurities(
                 )
                 if reason:
                     reasons.append(reason)
+                    continue
+                # An attribute chain two deep or more, rooted at a name this
+                # guard cannot resolve to a module, a same-module definition, a
+                # tainted receiver or a builtin. `self.sink.record(tag)`,
+                # `cfg.client.send(x)`, `ctx.s3.upload_file(...)`: the object the
+                # method runs on is decided at runtime, so the body that would
+                # run has never been read. The file already refuses an
+                # unresolvable BARE NAME (`calls f() — unresolved local name`);
+                # refusing the chain is the same rule, and its absence was a
+                # hole a real filesystem write walked straight through.
+                if len(attrs) >= 2 and not _resolvable_root(root.id, imports, known):
+                    reasons.append(_INDIRECT_REASON)
                     continue
             if attr in _OPEN_NAMES and _is_write_open(child):
                 reasons.append("opens a file for writing")
@@ -1106,17 +1190,22 @@ def _direct_impurities(
 
 
 def _local_calls(
-    node: ast.AST, known: set[str], receivers: dict[str, str] | None = None
+    node: ast.AST,
+    known: set[str],
+    receivers: dict[str, str] | None = None,
+    self_attrs: dict[str, str] | None = None,
 ) -> list[str]:
     """Same-module bodies this one reaches: bare calls, DECORATORS, and methods.
 
     Decorators count because a decorated target IS the wrapper — the frontier
     has to reach ``_wrap`` for its body to be judged at all. Methods count when
     the receiver is a known instance of a same-module class (``_store =
-    Store()`` then ``_store.wipe()``), which is how ``Store.wipe``'s
-    ``os.remove`` becomes visible.
+    Store()`` then ``_store.wipe()``, or ``self.sink = Sink()`` then
+    ``self.sink.record()``), which is how the receiver's ``os.remove`` becomes
+    visible.
     """
     receivers = receivers or {}
+    self_attrs = self_attrs or {}
     out: set[str] = set()
     for child in ast.walk(node):
         if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
@@ -1132,11 +1221,11 @@ def _local_calls(
             continue
         if isinstance(child.func, ast.Attribute):
             root, attrs = _attr_chain(child.func)
-            if not isinstance(root, ast.Name) or len(attrs) != 1:
+            if not isinstance(root, ast.Name):
                 continue
-            bound = receivers.get(root.id)
-            if bound and bound.startswith(_CLASS_TAINT):
-                out.add(f"{bound[len(_CLASS_TAINT) :]}.{attrs[0]}")
+            bound, rest, _label = _resolve_receiver(root.id, attrs, receivers, self_attrs)
+            if bound and bound.startswith(_CLASS_TAINT) and len(rest) == 1:
+                out.add(f"{bound[len(_CLASS_TAINT) :]}.{rest[0]}")
     return sorted(out & known)
 
 
@@ -1179,13 +1268,19 @@ def module_method_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunc
     return out
 
 
-def _construction_origin(func: ast.expr, imports: dict[str, str], classes: set[str]) -> str | None:
+def _construction_origin(
+    func: ast.expr,
+    imports: dict[str, str],
+    classes: set[str],
+    factories: dict[str, str] | None = None,
+) -> str | None:
     """What a call in ASSIGNMENT position builds, when that is knowable.
 
     ``_MODULE_TAINT`` + the dotted callable when it comes out of a module whose
     surface reaches outside the process; ``_CLASS_TAINT`` + the class name when
-    it is a same-module class. ``None`` when the value is anything else — a
-    plain factory, a literal, a call this guard cannot resolve.
+    it is a same-module class; whatever a same-module FACTORY was found to
+    return (``def _make(): return requests.Session()``). ``None`` when the value
+    is anything else — a literal, a call this guard cannot resolve.
     """
     if isinstance(func, ast.Name):
         dotted = imports.get(func.id, func.id)
@@ -1193,6 +1288,8 @@ def _construction_origin(func: ast.expr, imports: dict[str, str], classes: set[s
             return _MODULE_TAINT + dotted
         if func.id in classes:
             return _CLASS_TAINT + func.id
+        if factories:
+            return factories.get(func.id)
         return None
     if isinstance(func, ast.Attribute):
         root, attrs = _attr_chain(func)
@@ -1205,6 +1302,119 @@ def _construction_origin(func: ast.expr, imports: dict[str, str], classes: set[s
     return None
 
 
+def _own_returns(node: ast.AST) -> list[ast.Return]:
+    """``return`` statements belonging to THIS body, not to a nested ``def``."""
+    out: list[ast.Return] = []
+    stack: list[ast.AST] = list(ast.iter_child_nodes(node))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        if isinstance(current, ast.Return):
+            out.append(current)
+        stack.extend(ast.iter_child_nodes(current))
+    return out
+
+
+def _factory_origins(
+    tree: ast.AST, imports: dict[str, str], classes: set[str], rounds: int = 3
+) -> dict[str, str]:
+    """Same-module functions whose EVERY return is one known construction.
+
+    ``def _make(): return requests.Session()`` then ``_session = _make()`` binds
+    a receiver just as surely as calling ``requests.Session()`` inline did, and
+    the indirection is the whole point of writing a factory. A function with no
+    returns, a bare ``return``, a non-call return, or two returns that build
+    DIFFERENT things is not one of these — the guard would be guessing.
+
+    Iterated to a fixed point (bounded) so a factory calling a factory resolves.
+    """
+    out: dict[str, str] = {}
+    for _ in range(max(1, rounds)):
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if node.name in out:
+                continue
+            returns = _own_returns(node)
+            if not returns:
+                continue
+            origins: set[str] = set()
+            for statement in returns:
+                value = statement.value
+                if not isinstance(value, ast.Call):
+                    origins.clear()
+                    break
+                origin = _construction_origin(value.func, imports, classes, out)
+                if origin is None:
+                    origins.clear()
+                    break
+                origins.add(origin)
+            if len(origins) == 1:
+                out[node.name] = origins.pop()
+                changed = True
+        if not changed:
+            break
+    return out
+
+
+def _assignment_pairs(target: ast.expr, value: ast.expr):
+    """``(target, value)`` pairs for one binding, over-tainting when unsure.
+
+    ``a, b = Session(), 30`` splits elementwise. ``a, b = make_pair()`` cannot
+    be split, so BOTH names are paired with the whole call — over-tainting a
+    name costs coverage, and under-tainting one runs an uncontained network
+    client.
+    """
+    if isinstance(target, ast.Tuple | ast.List):
+        elements = target.elts
+        if isinstance(value, ast.Tuple | ast.List) and len(value.elts) == len(elements):
+            for sub_target, sub_value in zip(elements, value.elts, strict=True):
+                yield from _assignment_pairs(sub_target, sub_value)
+            return
+        for sub_target in elements:
+            yield from _assignment_pairs(sub_target, value)
+        return
+    if isinstance(target, ast.Starred):
+        yield from _assignment_pairs(target.value, value)
+        return
+    yield target, value
+
+
+def _iterated_values(iterable: ast.expr) -> list[ast.expr]:
+    """The expressions a ``for`` target could be bound to, as far as is knowable."""
+    if isinstance(iterable, ast.List | ast.Tuple | ast.Set):
+        return list(iterable.elts)
+    return [iterable]
+
+
+def _binding_sites(tree: ast.AST):
+    """Every ``(target, value)`` pair in a module, whatever syntax bound it.
+
+    Plain assignment was the only shape the receiver map used to see, and five
+    ordinary ways of binding a client object walked past it: tuple assignment,
+    ``with … as``, the walrus, a ``for`` target, and a same-module factory (that
+    last one is handled in ``_construction_origin``). Each of them produced an
+    empty binding map and a DRIVABLE verdict on ``_s.post(url)``.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                yield from _assignment_pairs(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            yield from _assignment_pairs(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            yield from _assignment_pairs(node.target, node.value)
+        elif isinstance(node, ast.With | ast.AsyncWith):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    yield from _assignment_pairs(item.optional_vars, item.context_expr)
+        elif isinstance(node, ast.For | ast.AsyncFor):
+            for value in _iterated_values(node.iter):
+                yield from _assignment_pairs(node.target, value)
+
+
 def receiver_bindings(source: str, imports: dict[str, str] | None = None) -> dict[str, str]:
     """Names bound to an object whose METHODS reach outside this file.
 
@@ -1214,6 +1424,10 @@ def receiver_bindings(source: str, imports: dict[str, str] | None = None) -> dic
     ever resolved import bindings — fell through to the receiver-agnostic
     ``_IMPURE_METHOD_NAMES`` backstop and accepted ``_session.post(url)``,
     ``_s3.delete_bucket(...)``, ``_r.flushall()``, ``_sock.connect(...)``.
+
+    Every binding SYNTAX counts, not just ``x = C()``: a tuple unpack, a ``with``
+    target, a walrus, a ``for`` target and a same-module factory all bind the
+    same dangerous object, and each of them used to yield an empty map.
 
     Bindings anywhere in the module count, including inside function bodies: the
     map is deliberately not scope-aware, because a name that ever holds a client
@@ -1225,24 +1439,61 @@ def receiver_bindings(source: str, imports: dict[str, str] | None = None) -> dic
     except (SyntaxError, ValueError):
         return {}
     classes = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+    factories = _factory_origins(tree, imports, classes)
+    out: dict[str, str] = {}
+    for target, value in _binding_sites(tree):
+        if not isinstance(target, ast.Name) or not isinstance(value, ast.Call):
+            continue
+        origin = _construction_origin(value.func, imports, classes, factories)
+        if origin is not None:
+            out[target.id] = origin
+    return out
+
+
+def attribute_bindings(source: str, imports: dict[str, str] | None = None) -> dict[str, str]:
+    """``"Class.attr"`` → what that instance attribute holds.
+
+    The receiver map answers "what does the NAME ``_session`` hold"; this one
+    answers "what does ``self.session`` hold", which is the shape almost all
+    real client objects actually take. Without it a method body reached through
+    a tainted receiver had its own chains rooted at ``self`` — a name in no
+    receiver map — and fell through to the NAME backstop: ``self.sink.record()``
+    was judged pure while ``Sink.record`` wrote a file outside the repo.
+
+    Every method counts, not only ``__init__``: a ``connect()`` that assigns
+    ``self.session`` is the same hazard arriving later.
+    """
+    imports = module_imports(source) if imports is None else imports
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    classes = {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+    factories = _factory_origins(tree, imports, classes)
     out: dict[str, str] = {}
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets: list[ast.expr] = list(node.targets)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-        else:
+        if not isinstance(node, ast.ClassDef):
             continue
-        value = node.value
-        if not isinstance(value, ast.Call):
-            continue
-        origin = _construction_origin(value.func, imports, classes)
-        if origin is None:
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                out[target.id] = origin
+        for target, value in _binding_sites(node):
+            if not isinstance(value, ast.Call):
+                continue
+            if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
+                continue
+            if target.value.id not in _SELF_NAMES:
+                continue
+            origin = _construction_origin(value.func, imports, classes, factories)
+            if origin is not None:
+                out[f"{node.name}.{target.attr}"] = origin
     return out
+
+
+def _self_attrs_for(name: str, attributes: dict[str, str]) -> dict[str, str]:
+    """The ``self.<attr>`` taints in scope while judging ``"Class.method"``."""
+    cls, sep, _method = name.partition(".")
+    if not sep:
+        return {}
+    prefix = f"{cls}."
+    return {k[len(prefix) :]: v for k, v in attributes.items() if k.startswith(prefix)}
 
 
 def impurity_reasons(
@@ -1252,6 +1503,7 @@ def impurity_reasons(
     imports: dict[str, str] | None = None,
     methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
     receivers: dict[str, str] | None = None,
+    attributes: dict[str, str] | None = None,
     depth: int = DEFAULT_TRANSITIVE_DEPTH,
 ) -> list[str]:
     """Why calling ``qualname`` would change the world, or ``[]`` when it would not.
@@ -1266,16 +1518,18 @@ def impurity_reasons(
     rather than assumed harmless — the same discipline as every other refusal
     here.
 
-    ``imports``/``methods``/``receivers`` should all come from the same source as
-    ``defs`` (``module_imports``, ``module_method_defs``, ``receiver_bindings``);
-    ``impurities_in_source`` wires them together. Passing none is safe but
-    weaker: an aliased ``import subprocess as sp`` then only matches through the
-    literal binding, and a module-level client object is judged by the
-    receiver-agnostic backstop alone.
+    ``imports``/``methods``/``receivers``/``attributes`` should all come from the
+    same source as ``defs`` (``module_imports``, ``module_method_defs``,
+    ``receiver_bindings``, ``attribute_bindings``); ``impurities_in_source``
+    wires them together. Passing none is safe but weaker: an aliased ``import
+    subprocess as sp`` then only matches through the literal binding, and a
+    client object held on ``self`` is judged by the receiver-agnostic backstop
+    alone.
     """
     node = defs.get(qualname)
     if node is None:
         return []
+    attributes = attributes or {}
     bodies: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {**(methods or {}), **defs}
     known = set(bodies)
     reasons = list(_direct_impurities(node, imports, known, receivers))
@@ -1288,14 +1542,18 @@ def impurity_reasons(
             if current is None:
                 continue
             decorators = _decorator_names(current)
-            for callee in _local_calls(current, known, receivers):
+            for callee in _local_calls(
+                current, known, receivers, _self_attrs_for(name, attributes)
+            ):
                 if callee in seen:
                     continue
                 seen.add(callee)
                 nxt.append(callee)
                 body = bodies[callee]
                 scope = known | (_wrapped_parameter(body) if callee in decorators else set())
-                for reason in _direct_impurities(body, imports, scope, receivers):
+                for reason in _direct_impurities(
+                    body, imports, scope, receivers, _self_attrs_for(callee, attributes)
+                ):
                     reasons.append(f"{reason} via {callee}()")
         frontier = nxt
     if frontier:
@@ -1323,6 +1581,7 @@ def impurities_in_source(
         imports=imports,
         methods=module_method_defs(source),
         receivers=receiver_bindings(source, imports),
+        attributes=attribute_bindings(source, imports),
         depth=depth,
     )
 
@@ -1377,11 +1636,17 @@ def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
     imports = module_imports(source)
     methods = module_method_defs(source)
     receivers = receiver_bindings(source, imports)
+    attributes = attribute_bindings(source, imports)
     return {
         name: {
             "params": _ast_params(node),
             "impurities": impurity_reasons(
-                name, defs, imports=imports, methods=methods, receivers=receivers
+                name,
+                defs,
+                imports=imports,
+                methods=methods,
+                receivers=receivers,
+                attributes=attributes,
             ),
         }
         for name, node in defs.items()
@@ -1960,6 +2225,10 @@ def _call_once(module: str, qual: str, fn: Any, arg_set: dict[str, Any]) -> dict
             # an exception INHERITS (Python's own taxonomy) is what lets the
             # policy transfer to a repo whose exception names are unknown.
             error_mro=[c.__name__ for c in type(exc).__mro__],
+            # The kernel's own reason code, when there is one. Under an OS
+            # sandbox this is how a refusal is told from a target's own failure:
+            # EPERM on a write is the containment working, not a defect.
+            error_errno=getattr(exc, "errno", None),
             error=str(exc)[:400],
             traceback_tail="".join(traceback.format_exception_only(type(exc), exc))[:400],
         )
@@ -2231,7 +2500,7 @@ def run_functions(
     only_targets: list[str] | None = None,
     seed: int | None = None,
     explore: bool = True,
-    sandbox: bool = False,
+    sandbox: bool | None = None,
     sandbox_policy: SandboxPolicy | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -2255,14 +2524,24 @@ def run_functions(
     byte-identical output for identical inputs (regression fixtures, tests
     pinning an exact cluster set) turn it off.
 
-    ``sandbox`` (default OFF, so nothing about an existing run changes) turns the
-    purity guard's refusals from a coverage CEILING into a second pass: targets
-    refused ONLY for impurity are driven again inside ``sandbox``'s containment
-    — a disposable copy of the repo, redirected ``HOME``/``TMPDIR``, a blocked
-    network, blocked process spawning — and their outcomes join the same rows,
-    tagged ``sandboxed``. Targets refused for a destructive NAME or as test
-    scaffolding are NEVER promoted: containment changes what a call costs, not
-    whether calling ``drop_database`` was ever a sensible thing to do.
+    ROUTING. Coverage and safety are not in tension here, and the flag that used
+    to make them so is gone. A target goes exactly one of three ways:
+
+    * **verified pure** → in-process, the fast path, unchanged;
+    * **unverifiable or impure** (decorated, receiver-tainted, an unresolved
+      chain, an impure body) → automatically routed to containment, no flag
+      required, because containment is simply WHERE unverifiable code runs;
+    * **destructive name / test scaffolding** → refused outright, never
+      sandboxed. Containment changes what a call costs, not whether calling
+      ``drop_database`` was ever a sensible thing to do.
+
+    ``sandbox`` defaults to ``None``, which means "route the unverifiable
+    through containment when we can". It is now an opt-OUT (``False``: the impure
+    set stays refused, and the run says so) rather than the switch that unlocks
+    coverage — making SAFETY opt-in was backwards, and it cost a real repo four
+    fifths of its drivable surface. ``True`` is accepted and means the same as
+    the default; ``sandbox_policy`` still wins outright, so a caller that wants a
+    particular tier, copy cap or ``require_tier`` passes one.
 
     If containment cannot be established the pass reports ``unavailable``, every
     candidate stays refused with the reason recorded on its ``skipped`` entry,
@@ -2272,10 +2551,13 @@ def run_functions(
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
     targets, skipped, refusals = discover_with_refusals(repo, max_targets=max_targets, logger=log)
-    sbx = sandbox_policy or (SandboxPolicy(enabled=True) if sandbox else None)
-    if sbx is None or not sbx.enabled:
+    # `sandbox is None` is the DEFAULT and means "contain them if we can", so the
+    # only way to end up with no second pass is an explicit opt-out or a policy
+    # that disables itself.
+    sbx = sandbox_policy or (None if sandbox is False else SandboxPolicy(enabled=True))
+    opted_out = sbx is None or not sbx.enabled
+    if opted_out:
         sbx = None
-        refusals = []
     if only_targets is not None:
         # Per-target selection: the campaign bandit allocates budget to ONE
         # action, so it must be able to drive one function rather than sweeping
@@ -2286,6 +2568,21 @@ def run_functions(
         refusals = [r for r in refusals if r.id in wanted]
 
     diagnostics: list[str] = []
+    if opted_out and refusals:
+        # LOUD, not silent. The impure set is where the interesting functions
+        # live; a run that leaves it undriven has to say so on the summary as
+        # well as on every individual skip entry.
+        held = {r.id for r in refusals}
+        for entry in skipped:
+            if entry["id"] in held:
+                entry["sandbox"] = "containment disabled by the caller — target stays refused"
+        diagnostics.append(
+            f"containment disabled by the caller — {len(refusals)} unverifiable/impure "
+            "target(s) stay refused and were never driven"
+        )
+        log.warning("functions_sandbox_opted_out %d targets stay refused", len(refusals))
+        refusals = []
+
     if not targets and not refusals:
         diagnostics.append(
             "0 function targets discovered — nothing to drive in-process. "
@@ -2406,9 +2703,10 @@ def run_functions(
             )
             log.warning("functions_sandbox_unavailable %s", reason)
         else:
+            tier = str(sandbox_report.get("tier") or "unknown")
             for entry in skipped:
                 if entry["id"] in driven:
-                    entry["sandbox"] = "driven-under-containment"
+                    entry["sandbox"] = f"driven-under-containment ({tier})"
             blind = sandbox_report.get("unobservable") or []
             if blind:
                 # Never let an empty effect ledger read as "no effect": the shim
