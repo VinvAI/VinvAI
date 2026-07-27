@@ -168,6 +168,14 @@ export async function dispatchIssueEpisode(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	issues: ReadonlyArray<{ title: string; detail: string; rows?: number[] }>,
+	opts?: {
+		/** Overrides the telemetry trigger (default 'smoke-errors'). Assert-shaped
+		 * dispatches (invariant/baseline violations) pass 'invariant-violation'. */
+		trigger?: string;
+		/** Overrides the exception-flavored default criteria — a silent value
+		 * violation is not fixed by "no longer produces these errors". */
+		successCriteria?: string[];
+	},
 ): Promise<boolean> {
 	if (issues.length === 0 || isEpisodeRunning() || isHarnessBusy()) {
 		return false; // busy-lock discipline: the issues stay eligible next pass
@@ -175,7 +183,7 @@ export async function dispatchIssueEpisode(
 	const rows = [...new Set(issues.flatMap((i) => i.rows ?? []))];
 	const task: EpisodeTask = {
 		kind: 'general',
-		trigger: 'smoke-errors',
+		trigger: opts?.trigger ?? 'smoke-errors',
 		title:
 			issues.length === 1
 				? issues[0].title
@@ -184,7 +192,7 @@ export async function dispatchIssueEpisode(
 			'Automatic analysis of the live traced service identified these issues:\n\n' +
 			issues.map((i) => `## ${i.title}\n${i.detail}`).join('\n\n'),
 		seedRows: rows.length ? rows : undefined,
-		successCriteria: [
+		successCriteria: opts?.successCriteria ?? [
 			'The listed functions/endpoints no longer produce these errors when the same requests are replayed',
 			'No new errors are introduced elsewhere in the trace',
 		],

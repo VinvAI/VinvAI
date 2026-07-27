@@ -12,6 +12,8 @@ import {
 	issueEpisodesFromClusters,
 	type ExerciseIssuesDoc,
 	type ExerciseProfile,
+	isAssertShapedKind,
+	ASSERT_SUCCESS_CRITERIA,
 } from '../harness/exerciseRunner';
 import { computeFlowModel, type FlowFacts } from '../views/flowModel';
 
@@ -98,6 +100,26 @@ suite('exercise state derivation (pure)', () => {
 		assert.ok(eps[0].title.startsWith('Behavior: '));
 		assert.ok(eps[0].detail.includes('abc123'));
 		assert.ok(eps[0].detail.includes('POST /items'));
+	});
+
+	test('assert-shaped kinds are recognised and phrased as silent violations', () => {
+		assert.ok(isAssertShapedKind('invariant-violation'));
+		assert.ok(isAssertShapedKind('baseline-degraded'));
+		assert.ok(!isAssertShapedKind('server-error'));
+		assert.ok(!isAssertShapedKind('crash'));
+		const eps = issueEpisodesFromClusters([
+			{ signature: 'def456', kind: 'invariant-violation',
+			  title: "GET /health — stable_enum violated: 'status' took a value outside its learned set",
+			  endpoint_id: 'GET_health', method: 'GET', path: '/health' },
+		]);
+		assert.ok(eps[0].detail.includes('without raising'));
+		assert.ok(eps[0].detail.includes('invariants.json'));
+	});
+
+	test('assert-shaped success criteria are value-shaped, not error-shaped', () => {
+		assert.ok(ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('golden baseline')));
+		assert.ok(ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('does not delete or weaken')));
+		assert.ok(!ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('no longer produce these errors')));
 	});
 });
 

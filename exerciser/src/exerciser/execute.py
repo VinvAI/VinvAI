@@ -32,6 +32,11 @@ class ProbeResult:
     error: str | None
     request_id: str | None
     content_type: str | None
+    # Digest of the response VALUES (canonical JSON, or raw bytes). The shape
+    # hash erases values by design; this keeps them, so a plausibly-shaped
+    # wrong answer is detectable. Appended with a default so the positional
+    # 7-arg construction sites stay valid.
+    value_digest: str | None = None
 
 
 def _fill_path(path: str, path_params: dict[str, Any]) -> str:
@@ -72,15 +77,34 @@ def _shape_signature(value: Any, depth: int = 0) -> str:
         return "{" + ",".join(entries) + "}"
     if isinstance(value, bool):
         return "boolean"
-    if isinstance(value, (int, float)):
+    if isinstance(value, int | float):
         return "number"
     return "string"
+
+
+def response_value_digest(body_text: str, content_type: str | None) -> str | None:
+    """Value-level digest of a response body (16 hex chars), or None when empty.
+
+    JSON bodies digest their canonical form (sorted keys, minimal separators) so
+    key order cannot alias two equal values; anything else digests raw bytes.
+    Complements ``response_shape_hash``, which deliberately erases values.
+    """
+    if not body_text:
+        return None
+    looks_json = ("json" in (content_type or "")) or body_text.lstrip()[:1] in '[{"'
+    if looks_json:
+        try:
+            canonical = json.dumps(json.loads(body_text), sort_keys=True, separators=(",", ":"))
+            return "v:" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        except ValueError:
+            pass
+    return "raw:" + hashlib.sha256(body_text.encode()).hexdigest()[:16]
 
 
 def response_shape_hash(body_text: str, content_type: str | None) -> str:
     if not body_text:
         return "empty"
-    looks_json = ("json" in (content_type or "")) or body_text.lstrip()[:1] in "[{\""
+    looks_json = ("json" in (content_type or "")) or body_text.lstrip()[:1] in '[{"'
     if looks_json:
         try:
             sig = _shape_signature(json.loads(body_text))
@@ -154,7 +178,12 @@ def execute_probe(
 
 
 def _result(
-    status: int, started: float, text: str, ctype: str | None, rid: str | None, err: str | None,
+    status: int,
+    started: float,
+    text: str,
+    ctype: str | None,
+    rid: str | None,
+    err: str | None,
 ) -> ProbeResult:
     latency = (time.monotonic() - started) * 1000.0
     parsed: Any = None
@@ -170,4 +199,5 @@ def _result(
         error=err,
         request_id=rid,
         content_type=ctype,
+        value_digest=response_value_digest(text, ctype),
     )

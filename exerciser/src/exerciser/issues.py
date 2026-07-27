@@ -36,7 +36,7 @@ def normalize_signature(kind: str, text: str) -> str:
 @dataclass
 class FailureCluster:
     signature: str
-    kind: str  # "server-error" | "crash" | "invariant-violation"
+    kind: str  # "server-error" | "crash" | "invariant-violation" | "baseline-degraded"
     title: str
     endpoint_id: str
     method: str
@@ -106,6 +106,51 @@ def cluster_failures(executions: list[dict[str, Any]]) -> list[FailureCluster]:
                     "expected": ex.get("expected"),
                 },
                 covered_frames=list(ex.get("covered_frames", []) or []),
+            )
+            clusters[sig] = cluster
+        cluster.count += 1
+    return sorted(clusters.values(), key=lambda c: (c.kind, c.path, c.method))
+
+
+def clusters_from_baseline(
+    verdicts: dict[str, dict[str, str]],
+    observations: list[dict[str, Any]],
+) -> list[FailureCluster]:
+    """``baseline-degraded`` clusters from golden-baseline verdicts.
+
+    A degraded verdict is the assert-shaped failure class: the endpoint answered
+    (often 2xx) but its status class, response shape, or stable value regressed
+    against the earned golden entry — "output changed but nothing raised".
+    ``observations`` are the same records handed to ``apply_baselines`` (keyed
+    by ``probeId``), used to attribute endpoint/method/path.
+    """
+    by_probe = {o.get("probeId"): o for o in observations}
+    clusters: dict[str, FailureCluster] = {}
+    for probe_id, verdict in verdicts.items():
+        if verdict.get("verdict") != "degraded":
+            continue
+        o = by_probe.get(probe_id) or {}
+        method = o.get("method", "?")
+        path = o.get("path", "?")
+        detail = verdict.get("detail", "baseline degraded")
+        sig = normalize_signature(
+            "baseline-degraded", _cluster_text("baseline-degraded", method, path, detail)
+        )
+        cluster = clusters.get(sig)
+        if cluster is None:
+            cluster = FailureCluster(
+                signature=sig,
+                kind="baseline-degraded",
+                title=f"{method} {path} — {detail}",
+                endpoint_id=o.get("endpointId", "?"),
+                method=method,
+                path=path,
+                exemplar={
+                    "probe_id": probe_id,
+                    "status": o.get("httpStatus"),
+                    "detail": detail,
+                    "expected": "the earned golden baseline for this probe",
+                },
             )
             clusters[sig] = cluster
         cluster.count += 1

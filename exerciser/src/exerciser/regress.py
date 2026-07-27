@@ -14,17 +14,25 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from . import state, store
 from .baseline import apply_baselines, status_class
 from .execute import ProbeResult, execute_probe
+from .invariants import check_observation
 from .optimize import bootstrap_median_ci
 from .scenario import run_scenario
 from .throughput import percentile
 
 ProbeFn = Callable[..., ProbeResult]
+
+
+def _size_of(value: Any) -> int:
+    if isinstance(value, dict | list | str):
+        return len(value)
+    return 0
 
 
 def _suite_from_results(executions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -132,6 +140,11 @@ def replay_suite(
     # touching them is ENVIRONMENT drift (our own residue), not a regression.
     planted = state.planted_values(repo)
 
+    # Learned invariants — ENFORCED on every replay: a healthy-looking reply
+    # that breaks a learned assertion is an ``invariant`` diff, the class no
+    # status code or exception ever surfaces.
+    inv_by_endpoint = store.read_invariants_by_endpoint(repo)
+
     # Fresh credentials for authed cases (captured live, never from disk).
     fresh_auth = (
         _fresh_auth_headers(repo, base_url, probe_fn) if any(c.get("auth") for c in suite) else []
@@ -164,8 +177,32 @@ def replay_suite(
                 "httpStatus": result.status,
                 "handler": case.get("handler"),
                 "shapeHash": result.shape_hash,
+                # For comparison against a value-stable golden entry only; a
+                # single replay proves no stability, so this never SEEDS one
+                # (no valueStable flag).
+                "valueDigest": result.value_digest,
             }
         )
+        if result.status is not None and 200 <= result.status < 400:
+            invs = inv_by_endpoint.get(f"{case['method']} {case['path']}")
+            if invs:
+                violations = check_observation(
+                    invs,
+                    result.body,
+                    output_size=_size_of(result.body),
+                    input_size=len(case.get("input") or {}),
+                )
+                if violations:
+                    diffs.append(
+                        {
+                            "kind": "invariant",
+                            "probeId": case["probeId"],
+                            "endpoint_id": case["endpoint_id"],
+                            "method": case["method"],
+                            "path": case["path"],
+                            "detail": "; ".join(violations),
+                        }
+                    )
         diff = _case_diff(case, result, latency_regression_factor)
         if diff and diff["kind"] == "perf":
             diff = _confirm_perf_diff(
@@ -199,6 +236,7 @@ def replay_suite(
         "contract_diffs": sum(1 for d in diffs if d["kind"] == "contract"),
         "perf_diffs": sum(1 for d in diffs if d["kind"] == "perf"),
         "environment_diffs": sum(1 for d in diffs if d["kind"] == "environment"),
+        "invariant_diffs": sum(1 for d in diffs if d["kind"] == "invariant"),
         "auth_cases_skipped": auth_skipped,
         "degraded": sum(1 for v in verdicts.values() if v["verdict"] == "degraded"),
         "improved": sum(1 for v in verdicts.values() if v["verdict"] == "improved"),
@@ -250,10 +288,10 @@ def _confirm_perf_diff(
             headers=headers,
             exercise_id=exercise_id,
         )
-        if isinstance(res.latency_ms, (int, float)):
+        if isinstance(res.latency_ms, int | float):
             latencies.append(float(res.latency_ms))
     prev = case.get("prev_latency_ms")
-    if not latencies or not isinstance(prev, (int, float)):
+    if not latencies or not isinstance(prev, int | float):
         return None
     median = percentile(latencies, 0.5)
     ci_low, _ = bootstrap_median_ci(latencies)
@@ -285,7 +323,10 @@ def _case_diff(
             "kind": "behavior",
             "endpoint": f"{case['method']} {case['path']}",
             "input_class": case["input_class"],
-            "detail": f"status class {exp_class} (HTTP {exp_status}) → {got_class} (HTTP {result.status})",
+            "detail": (
+                f"status class {exp_class} (HTTP {exp_status}) "
+                f"→ {got_class} (HTTP {result.status})"
+            ),
         }
     if exp_class == "2xx-3xx" and case["expected_shape"] != result.shape_hash:
         return {
@@ -295,7 +336,7 @@ def _case_diff(
             "detail": f"response shape {case['expected_shape']} → {result.shape_hash}",
         }
     prev = case.get("prev_latency_ms")
-    if isinstance(prev, (int, float)) and prev > 1.0 and result.latency_ms > prev * latency_factor:
+    if isinstance(prev, int | float) and prev > 1.0 and result.latency_ms > prev * latency_factor:
         return {
             "kind": "perf",
             "endpoint": f"{case['method']} {case['path']}",

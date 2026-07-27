@@ -28,7 +28,8 @@ from .baseline import apply_baselines, status_class
 from .compaction import compact_artifacts
 from .coverage import endpoint_coverage
 from .execute import ProbeResult, execute_probe
-from .issues import cluster_failures, issues_document
+from .invariants import check_monotonic_sequence, check_observation
+from .issues import cluster_failures, clusters_from_baseline, issues_document
 from .scenario import run_scenario, substitute
 
 # Type of the injected probe executor (real one = execute.execute_probe), so the
@@ -171,6 +172,11 @@ def run_exercise(
         )
         covered_ids_by_ep[api_id] = set()
 
+    # Learned invariants (from a prior `exerciser profile`), indexed by
+    # "METHOD path" — the assertions this run will ENFORCE on every healthy
+    # response. Empty on the first-ever run (nothing learned yet).
+    inv_by_endpoint = store.read_invariants_by_endpoint(repo)
+
     # Environment canary: before spending the budget, dry-run the FIRST setup
     # step of every authored scenario (the login chains). A reset database, a
     # missing seed user, or rotated credentials fails HERE, loudly, with the
@@ -239,14 +245,17 @@ def run_exercise(
                 exercise_id=exercise_id,
             )
             spent += 1
-            executions.append(
-                _execution_row(
-                    round_no,
-                    ep,
-                    candidate,
-                    result,
-                )
+            row = _execution_row(
+                round_no,
+                ep,
+                candidate,
+                result,
             )
+            # The learned invariants JUDGE every healthy response: a 2xx with a
+            # plausible shape but a wrong value is a first-class failure, not a
+            # pass. (Assertions learned by a prior `exerciser profile`.)
+            _enforce_invariants(row, inv_by_endpoint)
+            executions.append(row)
         # After the round, settle then re-join coverage for every active endpoint.
         if settle_s > 0:
             time.sleep(settle_s)
@@ -362,8 +371,20 @@ def run_exercise(
             }
         )
 
-    # Failure clustering → issues.json (deterministic probes + scenario failures).
-    clusters = cluster_failures(executions + scenario_failures)
+    # Cross-call invariants (id_monotonic) judge the run's ordered responses.
+    _enforce_monotonic(executions, inv_by_endpoint)
+
+    # Golden behavior baselines from the healthy executions — applied BEFORE
+    # clustering so a degraded verdict (status/shape/value regression with
+    # nothing raised) becomes a first-class issue cluster.
+    observations = _baseline_observations(executions)
+    baseline_verdicts = apply_baselines(repo, observations)
+
+    # Failure clustering → issues.json (deterministic probes + scenario
+    # failures + assert-shaped baseline degradations).
+    clusters = cluster_failures(executions + scenario_failures) + clusters_from_baseline(
+        baseline_verdicts, observations
+    )
     store.write_json(store.issues_path(repo), issues_document(clusters))
 
     # State ledger: what this run planted in the service, then best-effort
@@ -383,10 +404,6 @@ def run_exercise(
         else 0
     )
     state.append_ledger(repo, creations)
-
-    # Golden behavior baselines from the healthy executions.
-    observations = _baseline_observations(executions)
-    baseline_verdicts = apply_baselines(repo, observations)
 
     # Bandit posteriors.
     summary = bandit_summary(bandits)
@@ -784,7 +801,50 @@ def _execution_row(
         "output_size": _size_of(result.body),
         "input_size": _input_size(candidate),
         "body": result.body if isinstance(result.body, dict | list) else None,
+        "value_digest": result.value_digest,
     }
+
+
+def _enforce_invariants(
+    row: dict[str, Any], inv_by_endpoint: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Judge one healthy execution row against its endpoint's learned invariants.
+
+    Violations land in ``row["invariant_violation"]`` — the flag
+    ``cluster_failures`` reads — so a wrong VALUE clusters exactly like a 5xx.
+    Only 2xx responses are judged: invariants are learned over healthy outputs.
+    """
+    if row.get("status_class") != "2xx-3xx":
+        return
+    invs = inv_by_endpoint.get(f"{row.get('method')} {row.get('path')}")
+    if not invs:
+        return
+    violations = check_observation(
+        invs,
+        row.get("body"),
+        output_size=row.get("output_size", 0),
+        input_size=row.get("input_size", 0),
+    )
+    if violations:
+        row["invariant_violation"] = "; ".join(violations)
+
+
+def _enforce_monotonic(
+    executions: list[dict[str, Any]], inv_by_endpoint: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Cross-call ``id_monotonic`` enforcement over the run's ordered rows."""
+    by_endpoint: dict[str, list[dict[str, Any]]] = {}
+    for ex in executions:
+        if ex.get("status_class") == "2xx-3xx" and ex.get("body") is not None:
+            by_endpoint.setdefault(f"{ex.get('method')} {ex.get('path')}", []).append(ex)
+    for key, rows in by_endpoint.items():
+        invs = inv_by_endpoint.get(key)
+        if not invs:
+            continue
+        for idx, violation in check_monotonic_sequence(invs, [r.get("body") for r in rows]):
+            row = rows[idx]
+            existing = row.get("invariant_violation")
+            row["invariant_violation"] = f"{existing}; {violation}" if existing else violation
 
 
 def _last_strategy(executions: list[dict[str, Any]], api_id: str, round_no: int) -> str | None:
@@ -818,6 +878,7 @@ def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, A
     import json as _json
 
     seen: dict[str, dict[str, Any]] = {}
+    digests: dict[str, list[str | None]] = {}
     for ex in executions:
         # Only valid-class / observed / semantic requests seed a behaviour
         # baseline; negative probes intentionally provoke 4xx and must not.
@@ -829,6 +890,7 @@ def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, A
             default=str,
         )
         probe_id = hashlib.sha256(key.encode()).hexdigest()[:16]
+        digests.setdefault(probe_id, []).append(ex.get("value_digest"))
         seen[probe_id] = {
             "probeId": probe_id,
             "endpointId": ex["endpoint_id"],
@@ -838,4 +900,15 @@ def _baseline_observations(executions: list[dict[str, Any]]) -> list[dict[str, A
             "handler": ex.get("handler"),
             "shapeHash": ex["shape_hash"],
         }
+    for probe_id, obs in seen.items():
+        # A value digest is attached only when this run PROVED value stability:
+        # the same probe fired at least twice and every response carried the
+        # identical digest. Endpoints with dynamic output (timestamps, counters)
+        # fail that bar and stay digest-free — no false "value changed" alarms.
+        # ``valueStable`` marks the proof, gating baseline SEEDING; comparison
+        # alone needs only the digest.
+        ds = digests.get(probe_id, [])
+        stable = len(ds) >= 2 and len(set(ds)) == 1 and ds[0] is not None
+        obs["valueDigest"] = ds[0] if stable else None
+        obs["valueStable"] = stable
     return list(seen.values())

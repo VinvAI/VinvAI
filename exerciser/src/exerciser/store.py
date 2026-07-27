@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def exercise_dir(repo: Path) -> Path:
@@ -54,6 +55,22 @@ def issues_path(repo: Path) -> Path:
     return exercise_dir(repo) / "issues.json"
 
 
+def read_invariants_by_endpoint(repo: Path) -> dict[str, list[dict[str, Any]]]:
+    """The learned invariants from ``invariants.json``, keyed by "METHOD path".
+
+    The map both ``run`` and ``regress`` ENFORCE against replayed responses.
+    An absent or invalid document yields an empty map — enforcement has nothing
+    to say until a profile has learned something.
+    """
+    doc = read_json(invariants_path(repo))
+    out: dict[str, list[dict[str, Any]]] = {}
+    if isinstance(doc, dict):
+        for inv in doc.get("invariants") or []:
+            if isinstance(inv, dict) and isinstance(inv.get("endpoint"), str):
+                out.setdefault(inv["endpoint"], []).append(inv)
+    return out
+
+
 def apis_json_path(repo: Path) -> Path:
     return repo / ".vinv" / "identification" / "apis.json"
 
@@ -63,6 +80,7 @@ def reply_fingerprint(reply: Any) -> str | None:
     if reply is None:
         return None
     import hashlib
+
     blob = json.dumps(reply, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 

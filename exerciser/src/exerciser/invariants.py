@@ -27,6 +27,7 @@ the support threshold) is unit-tested directly.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any
 
 # The minimum number of supporting observations before an invariant is reported.
@@ -34,6 +35,10 @@ MIN_SUPPORT = 5
 # A field is only treated as a stable enum when its distinct-value count stays at
 # or below this cap (above it, it is free-form, not an enum).
 _ENUM_MAX_CARDINALITY = 8
+# Confidence floor for ENFORCING a learned invariant. Learning keeps everything
+# above MIN_SUPPORT; enforcement additionally demands this much evidence so a
+# barely-witnessed invariant cannot mint false failures.
+ENFORCE_MIN_CONFIDENCE = 0.8
 
 
 @dataclass
@@ -53,15 +58,23 @@ class Invariant:
     description: str
     support: int
     confidence: float
+    # Machine-readable parameters the ENFORCER needs (the description is prose):
+    # stable_enum → {"values": [...]}, numeric_bound → {"min": lo, "max": hi}.
+    # Additive — documents written before this key simply cannot be enforced for
+    # the parameterised kinds.
+    params: dict[str, Any] = dc_field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "kind": self.kind,
             "field": self.field,
             "description": self.description,
             "support": self.support,
             "confidence": round(self.confidence, 4),
         }
+        if self.params:
+            out["params"] = self.params
+        return out
 
 
 def _laplace(supporting: int, total: int) -> float:
@@ -80,7 +93,7 @@ def _top_level_fields(body: Any) -> dict[str, Any]:
 
 
 def _coerce_size(value: Any) -> int:
-    if isinstance(value, (dict, list, str)):
+    if isinstance(value, dict | list | str):
         return len(value)
     return 0
 
@@ -113,32 +126,43 @@ def learn_invariants(observations: list[Observation]) -> list[Invariant]:
         non_null = sum(1 for v in values if v is not None)
         if non_null == n and n == len(field_bodies):
             invariants.append(
-                Invariant("never_null", fname, f"'{fname}' is always present and non-null",
-                          n, _laplace(n, n))
+                Invariant(
+                    "never_null",
+                    fname,
+                    f"'{fname}' is always present and non-null",
+                    n,
+                    _laplace(n, n),
+                )
             )
 
         # stable_enum: small distinct set of scalar (str/bool/int-enum) values.
-        scalars = [v for v in values if isinstance(v, (str, bool))]
+        scalars = [v for v in values if isinstance(v, str | bool)]
         if scalars and len(scalars) == n:
             distinct = sorted({str(v) for v in scalars})
             if 1 < len(distinct) <= _ENUM_MAX_CARDINALITY:
                 invariants.append(
                     Invariant(
-                        "stable_enum", fname,
+                        "stable_enum",
+                        fname,
                         f"'{fname}' only ever took values {{{', '.join(distinct)}}}",
-                        n, _laplace(n, n),
+                        n,
+                        _laplace(n, n),
+                        params={"values": distinct},
                     )
                 )
 
         # numeric_bound: numeric field within observed [min, max].
-        nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        nums = [v for v in values if isinstance(v, int | float) and not isinstance(v, bool)]
         if nums and len(nums) == n:
             lo, hi = min(nums), max(nums)
             invariants.append(
                 Invariant(
-                    "numeric_bound", fname,
+                    "numeric_bound",
+                    fname,
                     f"'{fname}' stayed within [{lo}, {hi}]",
-                    n, _laplace(n, n),
+                    n,
+                    _laplace(n, n),
+                    params={"min": lo, "max": hi},
                 )
             )
 
@@ -150,13 +174,15 @@ def learn_invariants(observations: list[Observation]) -> list[Invariant]:
                 for o in sorted(obs, key=lambda o: o.call_index)
                 if fname in _top_level_fields(o.body)
             ]
-            seq = [v for v in seq if isinstance(v, (int, float)) and not isinstance(v, bool)]
-            if len(seq) >= MIN_SUPPORT and all(b > a for a, b in zip(seq, seq[1:])):
+            seq = [v for v in seq if isinstance(v, int | float) and not isinstance(v, bool)]
+            if len(seq) >= MIN_SUPPORT and all(b > a for a, b in zip(seq, seq[1:], strict=False)):
                 invariants.append(
                     Invariant(
-                        "id_monotonic", fname,
+                        "id_monotonic",
+                        fname,
                         f"'{fname}' strictly increased across successive calls",
-                        len(seq), _laplace(len(seq), len(seq)),
+                        len(seq),
+                        _laplace(len(seq), len(seq)),
                     )
                 )
 
@@ -167,11 +193,112 @@ def learn_invariants(observations: list[Observation]) -> list[Invariant]:
         if holds == len(sized):
             invariants.append(
                 Invariant(
-                    "size_relation", None,
+                    "size_relation",
+                    None,
                     "len(output) <= len(input) on every observation",
-                    len(sized), _laplace(len(sized), len(sized)),
+                    len(sized),
+                    _laplace(len(sized), len(sized)),
                 )
             )
 
     invariants.sort(key=lambda i: (i.kind, i.field or ""))
     return invariants
+
+
+# =========================================================================
+# Enforcement — the learned assertions actually judge new responses
+# =========================================================================
+#
+# ``learn_invariants`` proposes; this checks. A plausibly-shaped WRONG answer
+# (2xx, right schema, wrong value) raises nothing and degrades no status class,
+# so without enforcement it is invisible end-to-end — the single largest defect
+# class in any library. Violation strings deliberately name the invariant kind
+# and field but NOT the offending value: cluster signatures digit-normalise, and
+# a value-per-cluster explosion would drown the signal.
+
+
+def check_observation(
+    invariants: list[dict[str, Any]],
+    body: Any,
+    *,
+    output_size: int = 0,
+    input_size: int = 0,
+    min_confidence: float = ENFORCE_MIN_CONFIDENCE,
+) -> list[str]:
+    """Violations of the stateless learned invariants against ONE response.
+
+    ``invariants`` are ``Invariant.to_json`` dicts (the ``invariants.json`` /
+    ``profile.json`` form). Only 2xx responses should be judged — invariants
+    are learned over healthy outputs. ``id_monotonic`` is cross-call and is
+    checked by ``check_monotonic_sequence`` instead. Deterministic and pure.
+    """
+    violations: list[str] = []
+    fields = _top_level_fields(body)
+    for inv in invariants:
+        if not isinstance(inv, dict) or inv.get("confidence", 0) < min_confidence:
+            continue
+        kind = inv.get("kind")
+        fname = inv.get("field")
+        params = inv.get("params") or {}
+        if kind == "never_null":
+            # Judged only when the body yielded dict fields at all — an empty
+            # collection response has no record to inspect, which is absence of
+            # evidence, not a violation.
+            if fields and fields.get(fname) is None:
+                violations.append(
+                    f"never_null violated: '{fname}' missing or null "
+                    f"(learned: always present and non-null)"
+                )
+        elif kind == "stable_enum":
+            values = params.get("values")
+            if values and fname in fields:
+                v = fields[fname]
+                if isinstance(v, str | bool) and str(v) not in values:
+                    violations.append(
+                        f"stable_enum violated: '{fname}' took a value outside " f"its learned set"
+                    )
+        elif kind == "numeric_bound":
+            lo, hi = params.get("min"), params.get("max")
+            lname = (fname or "").lower()
+            if lname == "id" or lname.endswith("_id"):
+                # Ids legitimately grow past any observed bound; id_monotonic
+                # is the invariant that judges them.
+                continue
+            if lo is not None and hi is not None and fname in fields:
+                v = fields[fname]
+                if isinstance(v, int | float) and not isinstance(v, bool) and not (lo <= v <= hi):
+                    violations.append(f"numeric_bound violated: '{fname}' left its learned range")
+        elif kind == "size_relation":
+            if input_size > 0 and output_size > input_size:
+                violations.append("size_relation violated: len(output) > len(input)")
+    return violations
+
+
+def check_monotonic_sequence(
+    invariants: list[dict[str, Any]],
+    bodies_in_order: list[Any],
+    *,
+    min_confidence: float = ENFORCE_MIN_CONFIDENCE,
+) -> list[tuple[int, str]]:
+    """Cross-call check for ``id_monotonic``: ``(body_index, violation)`` pairs.
+
+    ``bodies_in_order`` are one endpoint's successful response bodies in call
+    order; the index identifies WHICH call broke the ordering so the caller can
+    flag that execution row.
+    """
+    out: list[tuple[int, str]] = []
+    for inv in invariants:
+        if not isinstance(inv, dict) or inv.get("confidence", 0) < min_confidence:
+            continue
+        if inv.get("kind") != "id_monotonic":
+            continue
+        fname = inv.get("field")
+        prev: float | None = None
+        for i, body in enumerate(bodies_in_order):
+            v = _top_level_fields(body).get(fname)
+            if not isinstance(v, int | float) or isinstance(v, bool):
+                continue
+            if prev is not None and v <= prev:
+                out.append((i, f"id_monotonic violated: '{fname}' did not strictly increase"))
+            prev = v
+    return out

@@ -19,7 +19,7 @@ The comparison + ratchet logic here is a line-for-line port of ``compareObservat
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +49,11 @@ def _baseline_file(repo: Path, endpoint_id: str) -> Path:
 
 def read_baseline(repo: Path, endpoint_id: str) -> dict[str, Any] | None:
     data = store.read_json(_baseline_file(repo, endpoint_id))
-    if isinstance(data, dict) and data.get("version") == 1 and isinstance(data.get("entries"), dict):
+    if (
+        isinstance(data, dict)
+        and data.get("version") == 1
+        and isinstance(data.get("entries"), dict)
+    ):
         return data
     return None
 
@@ -70,18 +74,45 @@ def compare_observation(entry: dict[str, Any], observed: dict[str, Any]) -> dict
     if after > before:
         return {
             "verdict": "improved",
-            "detail": f"status improved: baseline {entry.get('statusClass')} → {status_class(observed.get('httpStatus'))}",
+            "detail": (
+                f"status improved: baseline {entry.get('statusClass')} "
+                f"→ {status_class(observed.get('httpStatus'))}"
+            ),
         }
-    if entry.get("statusClass") == "2xx-3xx" and entry.get("shapeHash") != observed.get("shapeHash"):
+    if entry.get("statusClass") == "2xx-3xx" and entry.get("shapeHash") != observed.get(
+        "shapeHash"
+    ):
         return {
             "verdict": "degraded",
-            "detail": f"response shape changed: {entry.get('shapeHash')} → {observed.get('shapeHash')}",
+            "detail": (
+                f"response shape changed: {entry.get('shapeHash')} "
+                f"→ {observed.get('shapeHash')}"
+            ),
+        }
+    if (
+        entry.get("statusClass") == "2xx-3xx"
+        and entry.get("valueDigest")
+        and observed.get("valueDigest")
+        and entry.get("valueDigest") != observed.get("valueDigest")
+    ):
+        # Same status class, same shape, different VALUES. A valueDigest is only
+        # seeded for probes whose output proved value-stable (identical digests
+        # across repeated calls in one run), so drift here is a real behaviour
+        # change — the "output changed but nothing raised" class. Entries or
+        # observations without a digest express no opinion.
+        return {
+            "verdict": "degraded",
+            "detail": (
+                "response value changed on a value-stable probe "
+                f"(shape unchanged): {entry.get('valueDigest')} → {observed.get('valueDigest')}"
+            ),
         }
     return {"verdict": "same", "detail": ""}
 
 
 def apply_baselines(
-    repo: Path, observations: list[dict[str, Any]],
+    repo: Path,
+    observations: list[dict[str, Any]],
 ) -> dict[str, dict[str, str]]:
     """Port of probeBaseline.applyBaselines: record first-seen passing probes,
     compare the rest, ratchet improvements. Returns verdicts keyed by probeId.
@@ -95,11 +126,13 @@ def apply_baselines(
     for o in observations:
         by_endpoint.setdefault(o["endpointId"], []).append(o)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     for endpoint_id, group in by_endpoint.items():
         try:
             existing = read_baseline(repo, endpoint_id) or {
-                "version": 1, "endpointId": endpoint_id, "entries": {},
+                "version": 1,
+                "endpointId": endpoint_id,
+                "entries": {},
             }
             dirty = False
             for o in group:
@@ -115,6 +148,9 @@ def apply_baselines(
                             "httpStatus": o.get("httpStatus"),
                             "handler": o.get("handler"),
                             "shapeHash": o.get("shapeHash"),
+                            # Additive, nullable: seeded only when the run
+                            # PROVED this probe's output value-stable.
+                            "valueDigest": (o.get("valueDigest") if o.get("valueStable") else None),
                             "capturedAt": now,
                         }
                         dirty = True
@@ -122,12 +158,25 @@ def apply_baselines(
                     continue
                 cmp = compare_observation(entry, o)
                 verdicts[o["probeId"]] = cmp
+                if (
+                    cmp["verdict"] == "same"
+                    and not entry.get("valueDigest")
+                    and o.get("valueStable")
+                    and o.get("valueDigest")
+                ):
+                    # Earned stability backfill: an older golden entry (or one
+                    # recorded before value digests existed) gains the digest
+                    # the first time a run proves the probe value-stable.
+                    entry["valueDigest"] = o["valueDigest"]
+                    existing["entries"][o["probeId"]] = entry
+                    dirty = True
                 if cmp["verdict"] == "improved":
                     existing["entries"][o["probeId"]] = {
                         **entry,
                         "statusClass": status_class(o.get("httpStatus")),
                         "httpStatus": o.get("httpStatus"),
                         "shapeHash": o.get("shapeHash"),
+                        "valueDigest": (o.get("valueDigest") if o.get("valueStable") else None),
                         "capturedAt": now,
                     }
                     dirty = True

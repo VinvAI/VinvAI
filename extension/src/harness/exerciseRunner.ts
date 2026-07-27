@@ -98,6 +98,25 @@ export function exerciseStateFromArtifacts(
 }
 
 /**
+ * Assert-shaped cluster kinds: the service ANSWERED (usually 2xx) but its
+ * output broke a learned invariant or regressed against the golden baseline —
+ * "output changed but nothing raised". These dispatch with value-shaped
+ * success criteria; "no longer produces these errors" would be vacuous.
+ */
+export function isAssertShapedKind(kind: string): boolean {
+	return kind === 'invariant-violation' || kind === 'baseline-degraded';
+}
+
+/** Success criteria for an assert-shaped (silent wrong-value) dispatch. */
+export const ASSERT_SUCCESS_CRITERIA: readonly string[] = [
+	'Replaying the failing input yields output that satisfies the learned invariants ' +
+		'and matches the golden baseline (status class, shape, and stable values)',
+	'The fix changes the wrong VALUE/behavior — it does not delete or weaken the ' +
+		'invariant/baseline that caught it',
+	'No new errors or invariant violations are introduced elsewhere',
+];
+
+/**
  * Maps behavioral failure clusters into the shape dispatchIssueEpisode consumes
  * (title + detail + seed rows). Pure. Only NEW clusters (not previously
  * dispatched) should be passed by the caller.
@@ -107,11 +126,16 @@ export function issueEpisodesFromClusters(
 ): Array<{ title: string; detail: string; rows?: number[] }> {
 	return clusters.map((c) => ({
 		title: `Behavior: ${c.title}`,
-		detail:
-			`The behavioral exerciser drove ${c.method} ${c.path} and hit a ${c.kind}.\n` +
-			`Failure signature: ${c.signature}\n` +
-			`See .vinv/exercise/issues.json (cluster ${c.signature}) and results.jsonl for the ` +
-			`failing input, expected-vs-got, and covered frames.`,
+		detail: isAssertShapedKind(c.kind)
+			? `The behavioral exerciser drove ${c.method} ${c.path}: the service answered ` +
+				`without raising, but its output violated a learned assertion (${c.kind}).\n` +
+				`Failure signature: ${c.signature}\n` +
+				`See .vinv/exercise/issues.json (cluster ${c.signature}), invariants.json for ` +
+				`the learned assertion, and baselines/ for the golden entry it regressed against.`
+			: `The behavioral exerciser drove ${c.method} ${c.path} and hit a ${c.kind}.\n` +
+				`Failure signature: ${c.signature}\n` +
+				`See .vinv/exercise/issues.json (cluster ${c.signature}) and results.jsonl for the ` +
+				`failing input, expected-vs-got, and covered frames.`,
 	}));
 }
 
@@ -289,15 +313,31 @@ async function exercisePassOnce(
 	publishExerciseState(state);
 
 	// Dispatch NEW behavioral failure clusters as fix episodes (signature-deduped).
+	// Error-shaped and assert-shaped clusters dispatch separately: a silent
+	// wrong-value violation needs value-shaped success criteria and its own
+	// trigger, not "no longer produces these errors". One episode runs at a
+	// time — whichever batch dispatches first wins this pass, the other stays
+	// eligible (dispatchIssueEpisode returns false while busy).
 	if (issues && issues.clusters.length > 0 && isAutoEpisodesEnabled()) {
 		const dispatched = readDispatched(context);
 		const fresh = issues.clusters.filter((c) => !dispatched.has(c.signature));
-		if (fresh.length > 0) {
+		const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
+		const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));
+		if (errorShaped.length > 0) {
 			const handedOff = await dispatchIssueEpisode(
-				context, workspaceRoot, issueEpisodesFromClusters(fresh),
+				context, workspaceRoot, issueEpisodesFromClusters(errorShaped),
 			);
 			if (handedOff) {
-				await recordDispatched(context, fresh.map((c) => c.signature));
+				await recordDispatched(context, errorShaped.map((c) => c.signature));
+			}
+		}
+		if (assertShaped.length > 0) {
+			const handedOff = await dispatchIssueEpisode(
+				context, workspaceRoot, issueEpisodesFromClusters(assertShaped),
+				{ trigger: 'invariant-violation', successCriteria: [...ASSERT_SUCCESS_CRITERIA] },
+			);
+			if (handedOff) {
+				await recordDispatched(context, assertShaped.map((c) => c.signature));
 			}
 		}
 	}

@@ -164,7 +164,9 @@ export interface EpisodeTask extends PackTask {
 	/** Seeds the first attempt's prior-failure evidence (e.g. a dispute's
 	 * counterexample failing output) so the pack opens with the proof. */
 	priorFailureSeed?: string;
-	/** What triggered this episode (for telemetry): 'service-exit', 'smoke-errors', 'graph', 'qna', 'manual'. */
+	/** What triggered this episode (for telemetry): 'service-exit', 'smoke-errors',
+	 * 'invariant-violation' (assert-shaped: output changed but nothing raised),
+	 * 'graph', 'qna', 'manual'. */
 	trigger: string;
 }
 
