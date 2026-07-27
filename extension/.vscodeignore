@@ -19,6 +19,8 @@ scripts/**
 **/.vinv-activated
 .vinv-welcomed
 **/.vinv-welcomed
+.vinv-oss-announced
+**/.vinv-oss-announced
 *.vsix
 **/*.vsix
 *.zip

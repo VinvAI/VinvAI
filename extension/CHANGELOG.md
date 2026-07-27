@@ -4,6 +4,104 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-07-28
+
+### ✨ Added
+
+- **The exerciser drives your functions, not just your HTTP surface.** A
+  function-level harness runs entry points and exported functions in-process,
+  so a project with no web API is no longer a blank run. Route discovery gained
+  an AST extractor for declarative route tables (plain Starlette `Route`/`Mount`,
+  `APIRouter(routes=[...])`, aiohttp, tornado) and for argparse CLIs — these were
+  invisible to the decorator-shaped patterns, which made a real repo look like a
+  clean zero-endpoint run. An empty inventory is now loudly diagnosed instead of
+  passing silently.
+- **Nothing has to be running.** A target that assumes Postgres, Redis, or S3 is
+  now served by stand-ins built on the standards rather than the wire protocols —
+  one PEP 249 adapter covers every conforming driver, SQLAlchemy URLs are
+  rewritten, and schema is recovered from the repo's own metadata and DDL first,
+  then induced from the database's own errors. Previously those calls simply
+  failed to connect and were never exercised.
+- **Containment is enforced at the OS layer, and it is the default route.** Vinv
+  probes what the host actually enforces (sandbox-exec on macOS, bwrap or unshare
+  on Linux) and picks the strongest wall, instead of relying on a Python-level
+  shim that a C extension could walk straight through. Verified-pure code runs
+  in-process; anything unverifiable or impure is contained automatically;
+  `--no-sandbox` is the opt-out.
+- **New oracles.** Differential (evaluators compared against their reference
+  implementation, over a researched 378-case corpus), concurrency, environment
+  (upstream signature drift and the dependency-resolution matrix), exception
+  policy, and fault injection with adversarial-but-legal boundary shapes.
+- **Child processes are traced too.** A `sitecustomize` bootstrap follows the run
+  into its children and merges the sidecar spans back into one trace.
+- **Engines are pinned to the build that drives them.** Each release stamps the
+  engines commit it was cut against, so an extension version and an engine commit
+  are a reproducible pair rather than a frozen client talking to a moving server.
+  When the checkout has drifted, the update is offered once per extension version
+  — the new `vinv.engines.autoUpdate` setting chooses auto / prompt / never, and a
+  checkout you point at yourself with `vinv.enginesPath` is never touched.
+
+### 🐛 Fixed
+
+An adversarial pre-production audit found 64 shipping defects; they are fixed
+here, with ~290 new tests weighted toward proving what must *not* be flagged.
+
+- **Big repos no longer hang.** The exercise runner never drained the child's
+  stdout, so planning deadlocked on any repo past roughly 44 endpoints and was
+  killed at the 3-minute timeout — it worked on a demo and failed on every real
+  service. Killing a run also orphaned the Python child mid-probe, and a crashed
+  step silently reported the *previous* pass's numbers as this pass's success.
+- **Credentials stay out of your repo and off the wire.** Response bodies were
+  persisted verbatim, so a login `200` wrote its bearer token and plaintext
+  password into `.vinv/`. Harvested scalars were also spliced into path params,
+  issuing requests like `DELETE /users/<jwt>` and leaking the token into the
+  target's access log. Bodies are redacted (shape and types preserved) and only
+  id-shaped values reach path params.
+- **Far fewer false positives.** `NaN` poisoned numeric bounds three ways
+  (including making `invariants.json` unparseable); the confidence gate could not
+  reject anything and is replaced with Daikon's statistical justification test;
+  a size relation was checked against a constant, so it fired on every replay;
+  the credential axis collapsed every identity onto one probe id, producing a
+  permanent self-inflicted "regression"; and the drift filter was suppressing
+  real regressions.
+- **Authenticated flows are actually exercised.** Form-encoded endpoints
+  (FastAPI's OAuth2 password login) were JSON-encoded and `422`'d forever, so the
+  whole authenticated pass was skipped for want of a token, and document-level
+  OpenAPI `security` was ignored, which made a fully protected API look public.
+- **Branch coverage rewards both arms.** On Python 3.12/3.13 only one arm per
+  conditional was recorded, so flipping a condition earned no reward — removing
+  the exploration gradient the feature exists for.
+- **Distinct failures stay distinct.** `500`/`502`/`503` on one path collapsed
+  into a single cluster, so one fix episode was dispatched against a
+  mischaracterised failure.
+- **Windows safety restored.** Containment had been defaulted on where no OS
+  mechanism exists, so previously-refused impure targets started executing behind
+  a shim that cannot stop them. Without a real OS wall they stay refused.
+- **The "Vinv is now open source" notice shows again on fresh installs.** Its
+  one-time marker was being packaged into the vsix — the sibling markers were
+  excluded but this one was not — so every new install started out already
+  marked as notified. Same symptom as the 0.0.10 fix, reached by a different
+  route.
+- **Operational fixes.** Worker pipes are explicitly UTF-8 both directions (a
+  target printing an emoji used to kill the run on Windows), workers stream
+  instead of batching so a hang no longer discards completed rows, and the
+  sandbox tree is really removed rather than reported as removed.
+
+### 🔧 Maintenance
+
+- **RL loop redesign.** The action space is richer, the bandit is rewarded for
+  oracle violations rather than coverage (new coverage keeps a small bonus), each
+  defect is credited once, and the defect/refusal boundary is learned instead of
+  hardcoded against exception names.
+- **One agent channel**, asked once, cached forever, and budgeted.
+- One shared cluster builder replaces five drifting copies; ~50 lines of dead
+  code removed; the repo-wide ruff debt is cleared.
+- Docs: both READMEs now lead with what Vinv does to agent-written code, with the
+  loop diagram served from the image CDN, and four claims corrected against the
+  code.
+- CI no longer requires an OS containment wall by default, and a host-shaped
+  assertion is unpinned.
+
 ## [0.1.1] — 2026-07-26
 
 ### 🐛 Fixed
