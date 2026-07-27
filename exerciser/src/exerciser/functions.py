@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
 from .issues import FailureCluster, normalize_signature
 
 # Call names/modules a harness must never invoke, however they were catalogued.
@@ -415,6 +416,7 @@ def _worker_main(argv: list[str]) -> int:
             sys.path.insert(0, p)
 
     module_name = plan["module"]
+    repo_packages = plan.get("repo_packages") or []
     rows: list[dict[str, Any]] = []
     try:
         mod = importlib.import_module(module_name)
@@ -426,12 +428,17 @@ def _worker_main(argv: list[str]) -> int:
                 "phase": "import",
                 "status": "error",
                 "error_type": type(exc).__name__,
+                "error_module": getattr(type(exc), "__module__", "") or "",
+                "error_mro": [c.__name__ for c in type(exc).__mro__],
+                "repo_packages": plan.get("repo_packages") or [],
                 "error": str(exc)[:400],
             }
         )
         _emit(rows)
         return 0
 
+    for row in rows:  # the import-failure row, if any
+        row.setdefault("repo_packages", repo_packages)
     for target in plan["targets"]:
         qual = target["qualname"]
         try:
@@ -462,7 +469,9 @@ def _worker_main(argv: list[str]) -> int:
             )
             continue
         for arg_set in arg_sets_for(params):
-            rows.append(_call_once(module_name, qual, fn, arg_set))
+            row = _call_once(module_name, qual, fn, arg_set)
+            row["repo_packages"] = repo_packages
+            rows.append(row)
     _emit(rows)
     return 0
 
@@ -489,6 +498,14 @@ def _call_once(module: str, qual: str, fn: Any, arg_set: dict[str, Any]) -> dict
         row.update(
             status="error",
             error_type=type(exc).__name__,
+            # WHERE the exception class is defined: an exception the target
+            # package defines itself is a deliberate refusal signal, not a
+            # crash. builtins/third-party origins are judged on type alone.
+            error_module=getattr(type(exc), "__module__", "") or "",
+            # The class hierarchy the target itself declared. Scoring by what
+            # an exception INHERITS (Python's own taxonomy) is what lets the
+            # policy transfer to a repo whose exception names are unknown.
+            error_mro=[c.__name__ for c in type(exc).__mro__],
             error=str(exc)[:400],
             traceback_tail="".join(traceback.format_exception_only(type(exc), exc))[:400],
         )
@@ -519,46 +536,155 @@ def _expected_for(input_class: str) -> str:
 
 # Exception types a wrong-typed (negative-class) argument SHOULD produce: they
 # are the function correctly refusing bad input, not a defect.
-_TYPED_REJECTIONS = frozenset(
-    {
-        "TypeError",
-        "ValueError",
-        "AttributeError",
-        "KeyError",
-        "IndexError",
-        "NotImplementedError",
-        "AssertionError",
-        "ValidationError",
-        "PydanticCustomError",
-    }
+# The only NON-learned rule: a call the harness itself got wrong (it failed to
+# supply a parameter) is a HARNESS defect, not a target one. This is about our
+# own call construction, not about the target's exception vocabulary, so it is
+# not something to learn per repo.
+_MALFORMED_CALL_MARKERS = (
+    "required positional argument",
+    "required keyword-only argument",
+    "unexpected keyword argument",
+    "takes no arguments",
 )
 
 
-def classify_row(row: dict[str, Any]) -> str | None:
-    """Failure kind for one call row, or None when the call is not a failure.
+def call_verdict(
+    row: dict[str, Any],
+    policy: ExceptionPolicy | None = None,
+    *,
+    total_targets: int = 0,
+) -> str:
+    """Classify one call outcome, using the LEARNED exception policy.
 
-    * A ``valid``-class call that raises is ``function-crash`` — the function
-      broke on input its own annotations invited.
-    * A ``negative``-class call that raises an UNTYPED exception is
-      ``function-crash`` too: rejecting bad input with ``TypeError`` is correct,
-      dying with ``RecursionError`` or ``KeyError`` deep inside is not.
-    * An import that raises is ``import-error``.
+    ``ok`` | ``rejected`` (the target refused our guessed value) |
+    ``malformed-call`` (our own fault) | ``defect``.
+
+    There is deliberately no built-in list of exception names: which exceptions
+    mean "no" is a property of the repository under test, and is learned from
+    dispersion, input-class invariance and provenance (see
+    ``exception_policy``). Without a policy the structural priors alone decide,
+    which is still repo-agnostic.
+    """
+    if row.get("status") != "error":
+        return "ok"
+    etype = str(row.get("error_type", ""))
+    message = str(row.get("error", ""))
+    if etype == "TypeError" and any(m in message for m in _MALFORMED_CALL_MARKERS):
+        return "malformed-call"
+    policy = policy or ExceptionPolicy()
+    prov = provenance_of(
+        str(row.get("error_module", "")), {str(n) for n in (row.get("repo_packages") or [])}
+    )
+    fam = family_of(row.get("error_mro") or [etype])
+    key = signature(etype, prov)
+    # valid/boundary values conform to the declared annotation (0 IS an int);
+    # negative values deliberately violate it.
+    conformant = str(row.get("input_class", "")) in ("valid", "boundary")
+    return (
+        "defect"
+        if policy.is_defect(
+            key,
+            provenance=prov,
+            total_targets=total_targets,
+            family=fam,
+            conformant=conformant,
+        )
+        else "rejected"
+    )
+
+
+def classify_row(
+    row: dict[str, Any],
+    policy: ExceptionPolicy | None = None,
+    *,
+    total_targets: int = 0,
+) -> str | None:
+    """Failure kind for one row, or None when it is not a reportable defect.
+
+    The harness GUESSES inputs, so it cannot tell "the function is broken" from
+    "the function refused my made-up value" by looking at one call. The learned
+    policy makes that call from evidence across the whole run, and everything
+    it declines is still COUNTED in the verdict tally — never silently dropped.
     """
     if row.get("phase") == "import" and row.get("status") == "error":
+        # Import supplies NO input, so nothing the harness did can explain the
+        # failure. Two structural exemptions, and everything else is the
+        # module's own doing: a dependency this machine lacks (the ImportError
+        # family, which ModuleNotFoundError inherits), and an exception the
+        # REPO defines — a package stating its own precondition ("you must
+        # provide an api_key") rather than breaking.
+        mro = list(row.get("error_mro") or [str(row.get("error_type", ""))])
+        prov = provenance_of(
+            str(row.get("error_module", "")),
+            {str(n) for n in (row.get("repo_packages") or [])},
+        )
+        # Membership in the MRO, not the most-specific family: ModuleNotFoundError
+        # IS an ImportError, and both mean "this machine lacks a dependency".
+        if "ImportError" in mro or prov == "repo":
+            return None
         return "import-error"
-    if row.get("phase") != "call" or row.get("status") != "error":
+    if row.get("phase") != "call":
         return None
-    etype = row.get("error_type", "")
-    if row.get("input_class") == "valid":
-        return "function-crash"
-    return None if etype in _TYPED_REJECTIONS else "function-crash"
+    return (
+        "function-crash"
+        if call_verdict(row, policy, total_targets=total_targets) == "defect"
+        else None
+    )
 
 
-def cluster_function_failures(rows: list[dict[str, Any]]) -> list[FailureCluster]:
+def learn_exception_policy(
+    rows: list[dict[str, Any]], policy: ExceptionPolicy, total_targets: int
+) -> ExceptionPolicy:
+    """Feed a run's outcomes into the policy BEFORE any of them are judged.
+
+    Order matters: dispersion and class-invariance are properties of the whole
+    run, so every sighting must be recorded before the first verdict is taken.
+    Sightings carry no defect label — they are unlabelled evidence that shapes
+    the structural features; only downstream feedback (``record_feedback``)
+    supplies labels.
+    """
+    for row in rows:
+        if row.get("status") != "error":
+            continue
+        prov = provenance_of(
+            str(row.get("error_module", "")),
+            {str(n) for n in (row.get("repo_packages") or [])},
+        )
+        policy.observe(
+            signature(str(row.get("error_type", "")), prov),
+            target=str(row.get("target_id", "")),
+            input_class=str(row.get("input_class", "import")),
+        )
+    return policy
+
+
+def _policy_report(policy: ExceptionPolicy, total_targets: int) -> dict[str, Any]:
+    """Per-signature decision probabilities, for the run summary."""
+    out: dict[str, Any] = {}
+    for key, ev in sorted(policy.evidence.items()):
+        _, provenance = key.rsplit("@", 1) if "@" in key else (key, "unknown")
+        probability, confident = policy.defect_probability(
+            key, provenance=provenance, total_targets=total_targets, family=key.split("@")[0]
+        )
+        out[key] = {
+            "defect_probability": round(probability, 4),
+            "confident": confident,
+            "targets": len(ev.targets),
+            "occurrences": ev.occurrences,
+        }
+    return out
+
+
+def cluster_function_failures(
+    rows: list[dict[str, Any]],
+    policy: ExceptionPolicy | None = None,
+    *,
+    total_targets: int = 0,
+) -> list[FailureCluster]:
     """Cluster failing function calls the same way HTTP failures cluster."""
     clusters: dict[str, FailureCluster] = {}
     for row in rows:
-        kind = classify_row(row)
+        kind = classify_row(row, policy, total_targets=total_targets)
         if kind is None:
             continue
         target = row.get("target_id", "?")
@@ -619,6 +745,9 @@ def run_functions(
     by_module: dict[str, list[FunctionTarget]] = {}
     for t in targets:
         by_module.setdefault(t.module, []).append(t)
+    # Every top-level package this repo owns — an exception defined in any of
+    # them is the repo's own deliberate signal, whichever module raised it.
+    repo_packages = sorted({t.module.partition(".")[0] for t in targets})
 
     src_roots = detect_src_roots(repo)
     tmp_dir = store.exercise_dir(repo) / "functions"
@@ -633,6 +762,7 @@ def run_functions(
             {
                 "module": module,
                 "src_roots": src_roots,
+                "repo_packages": repo_packages,
                 "targets": [t.to_json() for t in mod_targets],
             },
         )
@@ -687,10 +817,22 @@ def run_functions(
         if proc.returncode != 0 and not rows:
             log.debug("functions: worker for %s exited %s", module, proc.returncode)
 
-    clusters = cluster_function_failures(rows)
+    # Learn from the WHOLE run before judging any of it: dispersion and
+    # class-invariance are run-level properties, so a first-pass over every
+    # sighting has to happen before the first verdict.
+    policy = ExceptionPolicy.load(repo)
+    learn_exception_policy(rows, policy, len(targets))
+    policy.save(repo, logger=log)
+
+    clusters = cluster_function_failures(rows, policy, total_targets=len(targets))
     store.write_jsonl(store.exercise_dir(repo) / "function_results.jsonl", rows)
 
     called = sum(1 for r in rows if r.get("phase") == "call")
+    verdicts: dict[str, int] = {}
+    for r in rows:
+        if r.get("phase") == "call":
+            v = call_verdict(r, policy, total_targets=len(targets))
+            verdicts[v] = verdicts.get(v, 0) + 1
     result: dict[str, Any] = {
         "status": "ok",
         "diagnostics": diagnostics,
@@ -700,6 +842,15 @@ def run_functions(
         "modules": len(by_module),
         "calls": called,
         "errors": sum(1 for r in rows if r.get("status") == "error"),
+        # Honest accounting of every call outcome. `rejected` and `environment`
+        # are NOT defects — the harness guesses inputs, so a refusal is usually
+        # the function working — but they are counted, never hidden.
+        "verdicts": dict(sorted(verdicts.items())),
+        # What the LEARNED policy currently believes — the DECISION probability
+        # (structural priors blended with accumulated evidence), not the raw
+        # posterior, so a run is auditable rather than an oracle handing down
+        # opinions.
+        "exception_policy": _policy_report(policy, len(targets)),
         "module_timeouts": timeouts,
         "skipped": skipped[:100],
         "skipped_count": len(skipped),

@@ -18,6 +18,7 @@ import pytest
 from exerciser import store
 from exerciser.functions import (
     arg_sets_for,
+    call_verdict,
     classify_row,
     discover_targets,
     is_denied,
@@ -157,14 +158,99 @@ def test_untyped_explosion_on_bad_input_is_a_failure():
     assert classify_row(row) == "function-crash"
 
 
-def test_any_raise_on_valid_input_is_a_failure():
+def test_a_refused_guess_is_not_a_defect():
+    # The harness GUESSES arguments from type hints, so a `str` annotation does
+    # not make every string valid. A function raising ValueError/TypeError on a
+    # made-up value is working correctly — reporting it produced 40 false
+    # findings against real smolagents, which is how a tool gets ignored.
+    for etype, mro in (
+        ("TypeError", ["TypeError", "Exception"]),
+        ("ValueError", ["ValueError", "Exception"]),
+        ("AttributeError", ["AttributeError", "Exception"]),
+        ("KeyError", ["KeyError", "LookupError", "Exception"]),
+    ):
+        row = {
+            "phase": "call",
+            "status": "error",
+            "input_class": "valid",
+            "error_type": etype,
+            "error_module": "builtins",
+            "error_mro": mro,
+            "error": "unsupported value",
+        }
+        assert call_verdict(row) == "rejected", etype
+        assert classify_row(row) is None
+
+
+def test_exceptions_no_input_can_justify_are_defects():
+    # Scored by the builtin ancestor in the MRO — Python's own taxonomy —
+    # not by a curated list of names.
+    for etype, mro in (
+        ("UnboundLocalError", ["UnboundLocalError", "NameError", "Exception"]),
+        ("NameError", ["NameError", "Exception"]),
+        ("RecursionError", ["RecursionError", "RuntimeError", "Exception"]),
+        ("AssertionError", ["AssertionError", "Exception"]),
+    ):
+        row = {
+            "phase": "call",
+            "status": "error",
+            "input_class": "valid",
+            "error_type": etype,
+            "error_module": "builtins",
+            "error_mro": mro,
+        }
+        assert call_verdict(row) == "defect", etype
+        assert classify_row(row) == "function-crash"
+
+
+def test_environment_failures_are_not_defects():
+    for etype, mro in (
+        ("ModuleNotFoundError", ["ModuleNotFoundError", "ImportError", "Exception"]),
+        ("EOFError", ["EOFError", "Exception"]),
+        ("FileNotFoundError", ["FileNotFoundError", "OSError", "Exception"]),
+        ("SystemExit", ["SystemExit", "BaseException"]),
+    ):
+        row = {
+            "phase": "call",
+            "status": "error",
+            "input_class": "valid",
+            "error_type": etype,
+            "error_module": "builtins",
+            "error_mro": mro,
+        }
+        assert call_verdict(row) == "rejected", etype
+        assert classify_row(row) is None
+
+
+def test_a_call_the_harness_botched_is_never_the_targets_fault():
     row = {
         "phase": "call",
         "status": "error",
         "input_class": "valid",
         "error_type": "TypeError",
+        "error": "visualizer() missing 1 required positional argument: 'image_path'",
     }
-    assert classify_row(row) == "function-crash"
+    assert call_verdict(row) == "malformed-call"
+    assert classify_row(row) is None
+
+
+def test_an_unknown_exception_is_scored_by_what_it_inherits():
+    # A name nobody has seen is still scored correctly, because the MRO says
+    # what it IS. This is what makes the policy transfer to a new repo.
+    refusing = {
+        "phase": "call",
+        "status": "error",
+        "input_class": "valid",
+        "error_type": "TotallyNovelError",
+        "error_module": "vendor.sdk",
+        "error_mro": ["TotallyNovelError", "ValueError", "Exception"],
+    }
+    assert call_verdict(refusing) == "rejected"
+    breaking = {
+        **refusing,
+        "error_mro": ["TotallyNovelError", "UnboundLocalError", "NameError", "Exception"],
+    }
+    assert call_verdict(breaking) == "defect"
 
 
 def test_healthy_calls_classify_as_nothing():
@@ -268,3 +354,32 @@ def test_worker_is_invocable_as_a_module(tmp_path: Path):
     )
     assert proc.returncode == 2
     assert "exerciser functions" in proc.stderr
+
+
+def test_a_librarys_own_exception_is_a_refusal_not_a_crash():
+    # Verified against real smolagents: InterpreterError / AgentGenerationError
+    # are the package refusing input on purpose. A library that defines an
+    # exception class and raises it is stating an API contract.
+    row = {
+        "phase": "call",
+        "status": "error",
+        "module": "smolagents.local_python_executor",
+        "repo_packages": ["smolagents", "examples"],
+        "error_type": "InterpreterError",
+        "error_module": "smolagents.local_python_executor",
+        "error_mro": ["InterpreterError", "ValueError", "Exception"],
+    }
+    assert call_verdict(row) == "rejected"
+    assert classify_row(row) is None
+    # …but a genuine internal break still reports, wherever it is raised.
+    assert (
+        call_verdict(
+            {
+                **row,
+                "error_type": "UnboundLocalError",
+                "error_module": "builtins",
+                "error_mro": ["UnboundLocalError", "NameError", "Exception"],
+            }
+        )
+        == "defect"
+    )
