@@ -224,8 +224,16 @@ def functions_cmd(repo_path, service, max_targets, module_timeout, python, verbo
         "import — configure the target the way production does."
     ),
 )
+@click.option(
+    "--max-adjudications",
+    default=25,
+    show_default=True,
+    help="Cap on NEW refusal shapes queued for agentic adjudication per run.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
-def differential_cmd(repo_path, target, reference, timeout, python, call_kwargs, verbose):
+def differential_cmd(
+    repo_path, target, reference, timeout, python, call_kwargs, max_adjudications, verbose
+):
     _configure_logging(verbose)
     try:
         parsed_kwargs = json.loads(call_kwargs) if call_kwargs else None
@@ -238,6 +246,7 @@ def differential_cmd(repo_path, target, reference, timeout, python, call_kwargs,
             call_kwargs=parsed_kwargs,
             timeout_s=timeout,
             python=python,
+            max_adjudications=max_adjudications,
             logger=logging.getLogger("exerciser.differential"),
         )
     except Exception as exc:

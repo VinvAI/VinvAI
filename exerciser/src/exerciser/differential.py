@@ -74,24 +74,178 @@ _CODE_PARAM_NAMES = frozenset(
 # Refusal messages that mean "this sandbox deliberately does not do that" —
 # a documented limit, not a defect. Matched case-insensitively against the
 # target's error message. Extend per-entry via `policy_patterns`.
-POLICY_PATTERNS: tuple[str, ...] = (
-    "is not supported",
-    "are not supported",
-    "not among the explicitly allowed",
-    "forbidden function evaluation",
-    "forbidden access",
-    "is not allowed",
-    "not permitted",
-    "unauthorized",
-    "unsafe",
-    "disabled for security",
-)
+# =========================================================================
+# Policy vs defect: two layers, no phrase list
+# =========================================================================
+#
+# "Did the sandbox refuse on PURPOSE, or break?" cannot be answered by matching
+# English. A list of phrases encodes one project's prose and mis-scores every
+# other one — and the greedy version of exactly that list buried smolagents'
+# own filed issue #2552 ("NoneType is not supported") next to a genuine limit
+# ("Nonlocal is not supported"). So the question is answered in two layers:
+#
+# **Layer 1 — structural, high recall.** Two signals that are facts, not
+# wording, and that hold for any sandbox in any language-hosted evaluator:
+#
+#   * the refusal names a SYNTAX CONSTRUCT that the snippet actually contains
+#     (ast node type present in the source) — the sandbox is declining a
+#     language feature, which is a documented limit;
+#   * the refusal names an IDENTIFIER the snippet uses that was never granted
+#     to it (a builtin/tool absent from the configured toolset) — the sandbox
+#     is declining a capability.
+#
+#   Anything else is UNRESOLVED. Layer 1 deliberately never guesses: false
+#   positives on "policy" are how a real bug gets buried.
+#
+# **Layer 2 — agentic adjudication.** Unresolved refusals render a prompt (the
+# repo's established print-prompt -> harness -> JSON-reply contract, same as
+# plan.py's semantic prompts) asking whether this is a stated limit or a
+# defect. The verdict is folded into the LEARNED exception policy, so the
+# second time that message shape appears no model call is needed.
+#
+# Unresolved-and-unadjudicated refusals are reported as ``unadjudicated`` —
+# never silently classified either way.
+#
+# **Cost is bounded three ways**, because "ask a model about every refusal" is
+# not a design:
+#
+#   * refusals are deduplicated by SHAPE (``refusal_key`` normalises digits and
+#     whitespace), so a message that occurs sixty times is one question;
+#   * an answered shape is cached in ``adjudications.json`` and never re-asked,
+#     so steady-state cost is zero;
+#   * ``max_adjudications`` caps how many NEW questions one run may raise, and
+#     the overflow is reported rather than dropped silently.
+
+# Default ceiling on new adjudication questions per run.
+DEFAULT_MAX_ADJUDICATIONS = 25
 
 
-def is_policy_refusal(message: str, extra_patterns: tuple[str, ...] = ()) -> bool:
-    """Whether a refusal message states a deliberate sandbox limit."""
+def _snippet_constructs(snippet: str) -> set[str]:
+    """Lowercased ast node-type names appearing in a snippet."""
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(snippet)
+    except SyntaxError:
+        return set()
+    return {type(node).__name__.lower() for node in _ast.walk(tree)}
+
+
+def _snippet_identifiers(snippet: str) -> set[str]:
+    """Names the snippet references — what a capability refusal would cite."""
+    import ast as _ast
+
+    try:
+        tree = _ast.parse(snippet)
+    except SyntaxError:
+        return set()
+    out: set[str] = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Name):
+            out.add(node.id.lower())
+        elif isinstance(node, _ast.Attribute):
+            out.add(node.attr.lower())
+    return out
+
+
+def _ubiquity() -> dict[str, float]:
+    """How often each ast node type appears across the corpus.
+
+    A node type present in almost every snippet (``Name``, ``Assign``,
+    ``Expr``, ``Load``) carries no information: matching it means matching
+    ordinary prose. Which types those are is DERIVED from the corpus rather
+    than listed, so it stays correct as the corpus grows.
+    """
+    corpus = (*AST_CORPUS, *AST_CORPUS_RAISING)
+    counts: dict[str, int] = {}
+    for snippet in corpus:
+        for node in _snippet_constructs(snippet):
+            counts[node] = counts.get(node, 0) + 1
+    total = max(1, len(corpus))
+    return {k: v / total for k, v in counts.items()}
+
+
+# Node types appearing in more than this fraction of the corpus are treated as
+# uninformative — matching one proves nothing about the refusal.
+_UBIQUITY_CAP = 0.25
+
+
+def _discriminative_constructs(snippet: str) -> set[str]:
+    """Constructs in ``snippet`` that are rare enough to be evidence."""
+    ubiquity = _UBIQUITY
+    return {c for c in _snippet_constructs(snippet) if ubiquity.get(c, 0.0) <= _UBIQUITY_CAP}
+
+
+def _names_word(haystack: str, needle: str) -> bool:
+    """Word-bounded containment — 'name' must not match 'undefined_name_xyz'."""
+    import re as _re
+
+    return (
+        _re.search(rf"(?<![A-Za-z0-9_]){_re.escape(needle)}(?![A-Za-z0-9_])", haystack) is not None
+    )
+
+
+def policy_signal(message: str, snippet: str | None) -> tuple[str, str]:
+    """Layer 1: a HINT, never a verdict. ``(hint, reason)``.
+
+    Deliberately biased toward reporting. Three rounds of tuning this into a
+    precise classifier each buried a real filed bug behind a plausible-looking
+    structural rule — "Cannot unpack tuple of wrong size" names the construct
+    ``Tuple``; "The variable `x` is not defined" names an identifier the source
+    uses — so a structural match is now evidence to hand to layer 2, NOT a
+    decision. The asymmetry is intentional: a false "defect" costs an
+    adjudication, a false "policy" costs a missed bug.
+    """
     low = (message or "").lower()
-    return any(p in low for p in (*POLICY_PATTERNS, *extra_patterns))
+    if not low or snippet is None:
+        return "unresolved", "no message or no snippet to compare against"
+    constructs = _discriminative_constructs(snippet)
+    named_construct = sorted(c for c in constructs if _names_word(low, c))
+    if named_construct:
+        return (
+            "maybe-policy",
+            f"names syntax construct(s) present in the source: {named_construct}",
+        )
+    identifiers = _snippet_identifiers(snippet)
+    # Require the identifier to be quoted or word-bounded so a three-letter
+    # variable name cannot match a substring of ordinary prose.
+    named_ident = sorted(
+        i
+        for i in identifiers
+        if len(i) > 2 and (f"'{i}'" in low or f'"{i}"' in low or f"`{i}`" in low)
+        # The identifier must be QUOTED in the message: a sandbox citing a
+        # capability names it explicitly, whereas an error that merely echoes
+        # the failing source line proves nothing.
+    )
+    if named_ident:
+        return (
+            "maybe-policy",
+            f"names identifier(s) the source uses but was not granted: {named_ident}",
+        )
+    return "unresolved", "refusal names nothing structural in the source"
+
+
+def adjudication_prompt(target: str, snippet: str, message: str) -> str:
+    """Layer 2 prompt: is this refusal a stated limit, or a defect?
+
+    Follows the repo's print-prompt -> harness -> JSON-reply contract so the
+    extension dispatches it like any other authored decision.
+    """
+    return (
+        "A sandboxed evaluator was asked to run a snippet that CPython runs "
+        "successfully, and it refused. Decide whether the refusal is a "
+        "DELIBERATE, DOCUMENTED LIMIT of the sandbox, or a DEFECT wearing a "
+        "refusal message.\n\n"
+        "A deliberate limit declines a language feature or a capability the "
+        "sandbox never granted (a builtin it does not expose, a syntax form it "
+        "does not implement). A defect fails INSIDE a construct the sandbox "
+        "does claim to support — for example an internal type error while "
+        "evaluating an expression whose syntax it handles elsewhere.\n\n"
+        f"Evaluator: {target}\n"
+        f"Snippet:\n{snippet}\n\n"
+        f"Refusal message:\n{message}\n\n"
+        'Reply with exactly: {"verdict": "policy"|"defect", "why": "<one sentence>"}'
+    )
 
 
 # =========================================================================
@@ -145,6 +299,35 @@ AST_CORPUS: tuple[str, ...] = (
     "result = 0\nfor i in range(4):\n    if i == 2:\n        break\nelse:\n    result = 100\nresult",
     "result = []\nfor i in range(6):\n    if i == 2:\n        continue\n    if i == 4:\n        break\n    result.append(i)\nresult",
     "result = 'big' if 10 > 5 else 'small'\nresult",
+    # context managers: __exit__ must be called on the manager, NOT on whatever
+    # __enter__ returned — a distinction an interpreter re-implementation gets
+    # wrong silently, and only a manager whose __enter__ returns something else
+    # exposes it.
+    "class CM:\n"
+    "    def __init__(self):\n"
+    "        self.closed = False\n"
+    "    def __enter__(self):\n"
+    "        return 'inner'\n"
+    "    def __exit__(self, *a):\n"
+    "        self.closed = True\n"
+    "        return False\n"
+    "m = CM()\n"
+    "with m as v:\n"
+    "    pass\n"
+    "result = (v, m.closed)\n"
+    "result",
+    "log = []\n"
+    "class CM2:\n"
+    "    def __enter__(self):\n"
+    "        log.append('in')\n"
+    "        return self\n"
+    "    def __exit__(self, *a):\n"
+    "        log.append('out')\n"
+    "        return False\n"
+    "with CM2():\n"
+    "    log.append('body')\n"
+    "result = log\n"
+    "result",
     # exceptions
     "try:\n    1 / 0\nexcept ZeroDivisionError as e:\n    result = type(e).__name__\nresult",
     "try:\n    result = 'no-raise'\nexcept ValueError:\n    result = 'caught'\nelse:\n    result = result + '-else'\nfinally:\n    result = result + '-finally'\nresult",
@@ -266,6 +449,9 @@ def _extract_value(out: Any, extract: str) -> Any:
         if hasattr(out, "output"):
             return out.output
     return out
+
+
+_UBIQUITY: dict[str, float] = _ubiquity()
 
 
 def _worker_main(argv: list[str]) -> int:
@@ -393,7 +579,10 @@ def _emit(rows: list[dict[str, Any]]) -> None:
 
 
 def judge_row(
-    row: dict[str, Any], *, policy_patterns: tuple[str, ...] = ()
+    row: dict[str, Any],
+    *,
+    policy_patterns: tuple[str, ...] = (),
+    adjudications: dict[str, str] | None = None,
 ) -> dict[str, str] | None:
     """Verdict for one compare row, or None on agreement.
 
@@ -406,6 +595,20 @@ def judge_row(
         return None
     ref, got = row.get("reference") or {}, row.get("got") or {}
     got_msg = str(got.get("message") or "")
+    snippet = row.get("snippet")
+
+    def _refusal_verdict() -> tuple[str, str]:
+        """A stored layer-2 adjudication decides; layer 1 only supplies a hint.
+
+        Nothing is called a policy limit without an adjudication, because that
+        is the verdict that BURIES a finding.
+        """
+        stored = (adjudications or {}).get(refusal_key(str(row.get("target", "")), got_msg))
+        if stored in ("policy", "defect"):
+            return stored, "adjudicated by the harness"
+        _, reason = policy_signal(got_msg, snippet)
+        return "unresolved", reason
+
     if ref.get("ok") and got.get("ok"):
         if ref.get("value") != got.get("value"):
             return {
@@ -417,10 +620,19 @@ def judge_row(
             }
         return None
     if ref.get("ok") and not got.get("ok"):
-        if is_policy_refusal(got_msg, policy_patterns):
+        verdict, reason = _refusal_verdict()
+        if verdict == "policy":
             return {
                 "kind": "policy-limit",
-                "detail": f"deliberately refused: {got_msg[:200]}",
+                "detail": f"deliberately refused ({reason}): {got_msg[:180]}",
+            }
+        if verdict == "unresolved":
+            return {
+                "kind": "unadjudicated",
+                "detail": (
+                    f"refusal could not be classified structurally ({reason}); "
+                    f"awaiting adjudication: {got_msg[:160]}"
+                ),
             }
         return {
             "kind": "rejects-valid",
@@ -441,12 +653,13 @@ def judge_row(
     ref_exc = str(ref.get("exception") or "")
     blob = f"{got.get('exception', '')} {got_msg}"
     if ref_exc and ref_exc not in blob:
-        if is_policy_refusal(got_msg, policy_patterns):
+        verdict, reason = _refusal_verdict()
+        if verdict == "policy":
             # Both refuse; the target refuses for its own stated reason. That
             # is a policy difference, not a wrong answer.
             return {
                 "kind": "policy-limit",
-                "detail": f"deliberately refused: {got_msg[:200]}",
+                "detail": f"deliberately refused ({reason}): {got_msg[:180]}",
             }
         return {
             "kind": "wrong-exception",
@@ -458,8 +671,56 @@ def judge_row(
     return None
 
 
+def refusal_key(target: str, message: str) -> str:
+    """Stable id for one refusal SHAPE — digits normalised, so an adjudication
+    of "…'foo' is not among the allowed tools" covers every such message."""
+    import hashlib as _h
+    import re as _re
+
+    norm = _re.sub(r"\d+", "#", (message or "").lower())
+    norm = _re.sub(r"\s+", " ", norm).strip()[:300]
+    return _h.sha256(f"{target}|{norm}".encode()).hexdigest()[:16]
+
+
+def unadjudicated(
+    rows: list[dict[str, Any]],
+    *,
+    policy_patterns: tuple[str, ...] = (),
+    adjudications: dict[str, str] | None = None,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    """Refusals layer 1 could not classify — the layer-2 work queue.
+
+    Deduplicated by refusal SHAPE, so repeated occurrences of one message cost
+    a single question. ``limit`` caps the queue; the caller reports any
+    overflow rather than dropping it silently.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for row in rows:
+        verdict = judge_row(row, policy_patterns=policy_patterns, adjudications=adjudications)
+        if verdict is None or verdict["kind"] != "unadjudicated":
+            continue
+        target = str(row.get("target", "?"))
+        message = str((row.get("got") or {}).get("message") or "")
+        key = refusal_key(target, message)
+        if key not in out:
+            out[key] = {
+                "key": key,
+                "target": target,
+                "snippet": str(row.get("snippet", "")),
+                "message": message,
+                "prompt": adjudication_prompt(target, str(row.get("snippet", "")), message),
+                "layer1_hint": policy_signal(message, str(row.get("snippet", "")))[1],
+            }
+    ordered = sorted(out.values(), key=lambda e: e["key"])
+    return ordered if limit is None else ordered[:limit]
+
+
 def policy_limits(
-    rows: list[dict[str, Any]], *, policy_patterns: tuple[str, ...] = ()
+    rows: list[dict[str, Any]],
+    *,
+    policy_patterns: tuple[str, ...] = (),
+    adjudications: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Deliberate refusals, deduped — what this sandbox will not do.
 
@@ -469,7 +730,7 @@ def policy_limits(
     """
     seen: dict[str, dict[str, str]] = {}
     for row in rows:
-        verdict = judge_row(row, policy_patterns=policy_patterns)
+        verdict = judge_row(row, policy_patterns=policy_patterns, adjudications=adjudications)
         if verdict is None or verdict["kind"] != "policy-limit":
             continue
         key = verdict["detail"][:120]
@@ -483,12 +744,17 @@ def policy_limits(
 
 
 def cluster_mismatches(
-    rows: list[dict[str, Any]], *, policy_patterns: tuple[str, ...] = ()
+    rows: list[dict[str, Any]],
+    *,
+    policy_patterns: tuple[str, ...] = (),
+    adjudications: dict[str, str] | None = None,
 ) -> list[FailureCluster]:
     clusters: dict[str, FailureCluster] = {}
     for row in rows:
-        verdict = judge_row(row, policy_patterns=policy_patterns)
-        if verdict is None or verdict["kind"] == "policy-limit":
+        verdict = judge_row(row, policy_patterns=policy_patterns, adjudications=adjudications)
+        # policy-limit is a stated limit; unadjudicated is awaiting layer 2.
+        # Neither is reported as a defect, and both are surfaced separately.
+        if verdict is None or verdict["kind"] in ("policy-limit", "unadjudicated"):
             continue
         target = row.get("target", "?")
         detail = f"{verdict['kind']}: {verdict['detail']}"
@@ -529,6 +795,7 @@ def run_differential(
     call_kwargs: dict[str, Any] | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     python: str | None = None,
+    max_adjudications: int = DEFAULT_MAX_ADJUDICATIONS,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Run every configured (target, reference) pair; persist and summarise.
@@ -634,8 +901,42 @@ def run_differential(
     extra_policy = tuple(
         p for e in refs for p in (e.get("policy_patterns") or []) if isinstance(p, str)
     )
-    clusters = cluster_mismatches(rows, policy_patterns=extra_policy)
-    limits = policy_limits(rows, policy_patterns=extra_policy)
+    # Layer-2 adjudications the harness has already authored, keyed by refusal
+    # shape, plus the ones still outstanding.
+    adj_doc = store.read_json(store.exercise_dir(repo) / "adjudications.json") or {}
+    adjudications = {
+        k: str(v.get("verdict"))
+        for k, v in (adj_doc.get("verdicts") or {}).items()
+        if isinstance(v, dict) and v.get("verdict") in ("policy", "defect")
+    }
+    clusters = cluster_mismatches(rows, policy_patterns=extra_policy, adjudications=adjudications)
+    limits = policy_limits(rows, policy_patterns=extra_policy, adjudications=adjudications)
+    all_pending = unadjudicated(rows, policy_patterns=extra_policy, adjudications=adjudications)
+    pending = all_pending[:max_adjudications]
+    overflow = len(all_pending) - len(pending)
+    if pending:
+        # Write the queue with its prompts, preserving any replies already
+        # stored, so the extension can dispatch them like semantic prompts.
+        merged = dict(adj_doc.get("verdicts") or {})
+        for item in pending:
+            merged.setdefault(
+                item["key"],
+                {
+                    "target": item["target"],
+                    "snippet": item["snippet"],
+                    "message": item["message"],
+                    "prompt": item["prompt"],
+                    "verdict": None,
+                },
+            )
+        store.write_json(
+            store.exercise_dir(repo) / "adjudications.json",
+            {
+                "version": 1,
+                "reply_schema": '{"verdict": "policy"|"defect", "why": "<one sentence>"}',
+                "verdicts": merged,
+            },
+        )
     store.write_jsonl(store.exercise_dir(repo) / "differential_results.jsonl", rows)
     compared = sum(1 for r in rows if r.get("phase") == "compare")
     result: dict[str, Any] = {
@@ -650,17 +951,32 @@ def run_differential(
         # reporting a documented limit as a bug is how an oracle gets ignored.
         "policy_limits": limits,
         "policy_limit_count": len(limits),
+        # Layer 1 declined to guess on these; they are queued for agentic
+        # adjudication rather than silently called one thing or the other.
+        "unadjudicated": pending,
+        "unadjudicated_count": len(pending),
+        # Distinct refusal SHAPES, not occurrences — the real question count.
+        "unadjudicated_overflow": overflow,
         "timeouts": timeouts,
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "differential_results.jsonl"),
     }
     store.write_json(store.exercise_dir(repo) / "differential.json", result)
+    if overflow:
+        diagnostics.append(
+            f"{overflow} additional refusal shape(s) exceeded the "
+            f"max_adjudications={max_adjudications} budget and were not queued "
+            "this run — raise the budget or adjudicate the pending ones first."
+        )
     log.info(
-        "differential: %d pairs, %d comparisons, %d mismatch clusters, %d policy limits",
+        "differential: %d pairs, %d comparisons, %d mismatch clusters, "
+        "%d policy limits, %d awaiting adjudication (%d over budget)",
         len(refs),
         compared,
         len(clusters),
         len(limits),
+        len(pending),
+        overflow,
     )
     return result
 

@@ -122,15 +122,45 @@ def test_agreement_and_wrapped_exceptions_pass():
     )
 
 
+def test_an_unclassifiable_refusal_is_queued_not_guessed():
+    # Layer 1 is structural and never guesses: a refusal that names nothing in
+    # the source is UNADJUDICATED, not silently called a defect or a limit.
+    row = {
+        "phase": "compare",
+        "snippet": "result = 42\nresult",
+        "reference": {"ok": True, "value": "42"},
+        "got": {"ok": False, "exception": "InterpreterError", "message": "no"},
+    }
+    verdict = judge_row(row)
+    assert verdict and verdict["kind"] == "unadjudicated"
+    assert cluster_mismatches([row]) == [], "an unresolved refusal is not a finding"
+
+    # Layer 2's answer decides it, and is cached by refusal SHAPE.
+    from exerciser.differential import refusal_key
+
+    key = refusal_key("", "no")
+    decided = judge_row(row, adjudications={key: "defect"})
+    assert decided and decided["kind"] == "rejects-valid"
+    assert len(cluster_mismatches([row], adjudications={key: "defect"})) == 1
+    assert judge_row(row, adjudications={key: "policy"})["kind"] == "policy-limit"
+
+
 def test_reject_and_accept_asymmetries_are_mismatches():
     rejects = judge_row(
         {
             "phase": "compare",
+            "snippet": "result = divmod(9, 2)\nresult",
             "reference": {"ok": True, "value": "42"},
-            "got": {"ok": False, "exception": "InterpreterError", "message": "no"},
-        }
+            "got": {
+                "ok": False,
+                "exception": "InterpreterError",
+                "message": "internal failure",
+            },
+        },
+        adjudications={},
     )
-    assert rejects and rejects["kind"] == "rejects-valid"
+    # Structurally unclassifiable, so queued rather than reported.
+    assert rejects and rejects["kind"] == "unadjudicated"
     accepts = judge_row(
         {
             "phase": "compare",
@@ -188,21 +218,40 @@ def test_buggy_evaluator_is_caught_against_cpython(tmp_path: Path):
     assert result["comparisons"] == len(AST_CORPUS) + len(AST_CORPUS_RAISING)
     assert result["mismatch_clusters"] >= 2, "both planted bugs must surface"
     details = " ".join(c["title"] for c in result["clusters"])
-    assert "rejects-valid" in details, "the unexplained lambda refusal"
     assert "wrong-value" in details, "the // rewrite (silently wrong arithmetic)"
+    # The unexplained lambda refusal names nothing structural, so layer 1
+    # queues it for adjudication instead of guessing either way.
+    assert result["unadjudicated_count"] >= 1
+    queued = result["unadjudicated"][0]
+    assert "internal error" in queued["message"]
+    assert "policy" in queued["prompt"] and "defect" in queued["prompt"]
 
 
-def test_stated_policy_limits_are_reported_but_never_clustered(tmp_path: Path):
-    # A sandbox that says "Lambda is not supported" is enforcing a documented
-    # limit. Reporting that as a defect is noise, and noise gets oracles
-    # switched off — so it lands in policy_limits, not in the clusters.
+def test_a_refusal_is_queued_for_adjudication_not_assumed_to_be_policy(tmp_path: Path):
+    # A sandbox that says "Lambda is not supported" MAY be enforcing a
+    # documented limit — but assuming so is the verdict that buries a real
+    # bug, so nothing is called policy without an adjudication. Layer 1 only
+    # attaches a hint.
     repo = _make_repo(tmp_path, _POLICY_EVALUATOR)
 
     result = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
 
-    assert result["mismatch_clusters"] == 0, "a stated limit is not a defect"
-    assert result["policy_limit_count"] >= 1
-    assert any("not supported" in p["detail"] for p in result["policy_limits"])
+    assert result["mismatch_clusters"] == 0, "an unadjudicated refusal is not a finding"
+    assert result["policy_limit_count"] == 0, "nothing is policy without adjudication"
+    assert result["unadjudicated_count"] >= 1
+    queued = result["unadjudicated"][0]
+    assert "not supported" in queued["message"]
+    assert queued["layer1_hint"], "layer 1 supplies evidence for the adjudicator"
+
+    # Once adjudicated the verdict sticks, keyed by refusal SHAPE.
+    doc = store.read_json(store.exercise_dir(repo) / "adjudications.json")
+    for entry in doc["verdicts"].values():
+        entry["verdict"] = "policy"
+    store.write_json(store.exercise_dir(repo) / "adjudications.json", doc)
+
+    again = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
+    assert again["policy_limit_count"] >= 1
+    assert again["unadjudicated_count"] == 0, "an answered refusal is not re-asked"
 
 
 def test_call_kwargs_configure_the_target_as_production_does(tmp_path: Path):
@@ -284,3 +333,33 @@ def test_no_references_is_loudly_diagnosed(tmp_path: Path):
     result = run_differential(tmp_path)
     assert result["pairs"] == 0
     assert result["diagnostics"] and "0 differential references" in result["diagnostics"][0]
+
+
+def test_layer1_hints_are_structural_and_never_decide(tmp_path: Path):
+    # "Nonlocal is not supported" names an ast node in the source: a stated
+    # limit. "NoneType is not supported" names a runtime VALUE type — the
+    # sandbox failing INSIDE a construct it claims to support, which is a
+    # defect wearing a policy message. A greedy substring match buried
+    # smolagents' own filed issue #2552 behind exactly this confusion.
+    from exerciser.differential import policy_signal
+
+    nonlocal_snippet = "def f():\n    x = 1\n    def g():\n        nonlocal x\n    return g\nf()"
+    verdict, reason = policy_signal("Nonlocal is not supported.", nonlocal_snippet)
+    assert verdict == "maybe-policy", "a hint, never a verdict"
+    assert "syntax construct" in reason
+
+    dict_unpack = "d = {'x': 1}\nresult = {**d, 'y': 2}\nresult"
+    assert policy_signal("NoneType is not supported.", dict_unpack)[0] == "unresolved"
+
+    # A capability refusal naming an identifier the source uses is also a
+    # stated limit — structural, no wording matched.
+    assert (
+        policy_signal(
+            "Forbidden function evaluation: 'divmod' is not among the allowed tools",
+            "result = divmod(9, 2)\nresult",
+        )[0]
+        == "maybe-policy"
+    )
+    # Layer 1 never guesses: an unrecognisable refusal stays unresolved and is
+    # queued for adjudication instead of being called either thing.
+    assert policy_signal("something went wrong", "result = 1\nresult")[0] == "unresolved"
