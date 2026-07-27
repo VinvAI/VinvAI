@@ -110,13 +110,13 @@
   {
     "q": "What does Vinv do by tracing, joining, and serving runtime evidence?",
     "file": "README.md",
-    "symbol": "`// WHAT VINV DOES`",
+    "symbol": "What Vinv does",
     "category": "doc"
   },
   {
     "q": "How do users install the Vinv editor extension?",
-    "file": "README.md",
-    "symbol": "`// INSTALL`",
+    "file": "extension/README.md",
+    "symbol": "Getting Started",
     "category": "doc"
   },
   {
@@ -156,15 +156,15 @@
     "category": "doc"
   },
   {
-    "q": "Why is the eBPF trace stored separately instead of merged into trace.jsonl?",
-    "file": "tracelens/docs/adr/ADR-ebpf-second-trace.md",
-    "symbol": "Why a separate file, not merged into `trace.jsonl`",
+    "q": "Which tracelens commands turn a captured trace.jsonl into a report?",
+    "file": "tracelens/README.md",
+    "symbol": "`// 04 \u00b7 analyze the run`",
     "category": "doc"
   },
   {
-    "q": "How does the eBPF sidecar degrade gracefully without breaking the target?",
-    "file": "tracelens/docs/adr/ADR-ebpf-second-trace.md",
-    "symbol": "Graceful degradation (never break the target)",
+    "q": "Where is the verdict on an optimization attempt recorded?",
+    "file": "docs/optimization-ontology.md",
+    "symbol": "4. Verdict \u2014 the one engine, `.vinv/exercise/optimize.jsonl`",
     "category": "doc"
   },
   {
@@ -283,8 +283,8 @@
   },
   {
     "q": "Where is the repository layout of the monorepo documented?",
-    "file": "README.md",
-    "symbol": "`// REPO LAYOUT`",
+    "file": "CONTRIBUTING.md",
+    "symbol": "Where the code lives",
     "category": "doc"
   },
   {
