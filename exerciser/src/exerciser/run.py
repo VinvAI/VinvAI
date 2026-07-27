@@ -414,6 +414,31 @@ def run_exercise(
     )
     state.append_ledger(repo, creations)
 
+    # Terminal credit pass: a DEGRADED baseline is an oracle violation, but it
+    # is only knowable after the run (baselines are applied once, at the end),
+    # so the arm that produced the degrading probe is credited here rather than
+    # in the round loop. Without this the objective silently under-counts
+    # exactly the assert-shaped class the value digest exists to find —
+    # verified live: a 200 with an unchanged shape and a changed value scored
+    # zero violations for its arm.
+    degraded_probes = {
+        probe_id for probe_id, v in baseline_verdicts.items() if v["verdict"] == "degraded"
+    }
+    if degraded_probes:
+        by_probe = {o["probeId"]: o for o in observations}
+        credited = 0
+        for probe_id in degraded_probes:
+            obs = by_probe.get(probe_id)
+            if obs is None:
+                continue
+            api_id = obs.get("endpointId")
+            bandit = bandits.get(api_id)
+            strategy = _strategy_for_probe(executions, probe_id, api_id)
+            if bandit is not None and strategy:
+                bandit.update(strategy, Outcome(violations=1, cost=1.0))
+                credited += 1
+        log.info("baseline degradation credited to %d arm(s)", credited)
+
     # Bandit posteriors.
     summary = bandit_summary(bandits)
     store.write_json(store.bandit_path(repo), summary)
@@ -875,6 +900,31 @@ def _round_violations(executions: list[dict[str, Any]], api_id: str, round_no: i
         elif isinstance(status, int) and status >= 500:
             count += 1
     return count
+
+
+def _strategy_for_probe(
+    executions: list[dict[str, Any]], probe_id: str, api_id: str | None
+) -> str | None:
+    """The strategy whose probe produced a given baseline observation.
+
+    Baseline probe ids are derived from (endpoint, strategy, path_params), so
+    the newest execution matching this endpoint whose own derived id agrees is
+    the one to credit.
+    """
+    import hashlib
+    import json as _json
+
+    for ex in reversed(executions):
+        if ex.get("endpoint_id") != api_id:
+            continue
+        key = _json.dumps(
+            [ex["endpoint_id"], ex["strategy"], ex.get("input", {}).get("path_params", {})],
+            sort_keys=True,
+            default=str,
+        )
+        if hashlib.sha256(key.encode()).hexdigest()[:16] == probe_id:
+            return ex.get("strategy")
+    return None
 
 
 def _last_strategy(executions: list[dict[str, Any]], api_id: str, round_no: int) -> str | None:
