@@ -11,13 +11,20 @@ value" / "accepts what CPython rejects" defects.
 Two pieces:
 
 * **Reference-finder** (``propose_references``) — given the function-harness
-  target set, proposes a differential reference per symbol, by shape: a callable
-  whose first required parameter is a ``str`` named like code
-  (``code``/``source``/``src``/``expression``/``snippet``/``program``) in a
-  module that works on ``ast`` is proposed the ``cpython-exec`` reference and
-  the ast-corpus generator. Proposals land in
+  target set, proposes a differential reference per symbol, BY SHAPE, never by
+  name. A callable qualifies when it has exactly ONE required parameter, that
+  parameter is annotated ``str`` (or is unannotated), and its name is one of
+  ``_CODE_PARAM_NAMES`` (``code``/``source``/``src``/``expression``/``expr``/
+  ``snippet``/``program``/``code_action``). Shape is what the oracle actually
+  needs, because the runner calls ``fn(snippet)`` positionally: a name rule
+  arms ``metrics.evaluate_model(preds, labels)`` on an ML repo and floods the
+  adjudication budget with TypeErrors. The proposal is made from the SOURCE
+  signature (discovery imports nothing) and re-verified against the live
+  ``inspect.signature`` in the worker; an entry that fails verification is
+  DROPPED with a recorded reason rather than run. Proposals land in
   ``.vinv/exercise/references.json`` where a human (or agent) can add explicit
-  ``module:qualname`` references for anything the shape rules cannot see.
+  ``module:qualname`` references for anything the shape rule cannot see —
+  explicit entries are trusted and never shape-verified.
 * **Runner** (``run_differential``) — drives each (target, reference) pair over
   the corpus in an isolated worker subprocess (same discipline as
   ``functions.py``: imports of target code can do anything), compares outcomes,
@@ -53,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -62,7 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
-from .functions import detect_src_roots, discover_targets
+from .functions import annotation_base, detect_src_roots, discover_targets
 from .issues import FailureCluster, normalize_signature
 from .semantics_corpus import RAISING_CORPUS, SEMANTIC_CORPUS
 
@@ -330,6 +338,39 @@ def _names_word(haystack: str, needle: str) -> bool:
 # =========================================================================
 
 
+def code_shaped(params: list[dict[str, Any]] | None) -> tuple[bool, str]:
+    """Whether a callable has the shape this oracle can drive: ``(ok, why)``.
+
+    The runner calls ``fn(snippet)`` — one positional string — so the only
+    callables it can drive at all are the ones that ACCEPT that. Hence the rule:
+
+    * exactly one required parameter (extra required parameters mean every
+      snippet raises TypeError, which is noise, not evidence);
+    * annotated ``str``, or unannotated (a plain ``def run(code)`` is common);
+    * named in ``_CODE_PARAM_NAMES``, because a lone required ``str`` is also
+      the shape of ``slugify(text)`` and a thousand other functions that have
+      no business being fed Python programs.
+
+    ``why`` is the recorded reason when the shape does not qualify, so a drop is
+    auditable rather than silent.
+    """
+    records = list(params or [])
+    required = [p for p in records if not p.get("has_default")]
+    if len(required) != 1:
+        return False, f"expected exactly 1 required parameter, found {len(required)}"
+    param = required[0]
+    name = str(param.get("name") or "")
+    if name not in _CODE_PARAM_NAMES:
+        return False, f"required parameter {name!r} is not named like a code parameter"
+    annotation = param.get("annotation")
+    if annotation is None:
+        return True, f"one required, unannotated parameter named {name!r}"
+    base = annotation_base(str(annotation))
+    if base != "str":
+        return False, f"required parameter {name!r} is annotated {annotation!r}, not str"
+    return True, f"one required str parameter named {name!r}"
+
+
 def propose_references(repo: Path, *, logger: logging.Logger | None = None) -> dict[str, Any]:
     """Propose differential references for the discovered function targets.
 
@@ -352,13 +393,11 @@ def propose_references(repo: Path, *, logger: logging.Logger | None = None) -> d
     for t in targets:
         if t.id in entries:
             continue
-        # Discovery does not import; parameter shapes come from the worker at
-        # run time. The finder's cheap signal is the NAME: evaluator-shaped
-        # callables are proposed and verified (or dropped) by the runner.
-        low = t.qualname.lower()
-        if any(k in low for k in ("evaluate", "interpret", "execute")) and not any(
-            k in low for k in ("http", "request", "sql")
-        ):
+        # SHAPE, not name. Discovery does not import, but it does read the
+        # source signature, which is the same shape the worker will re-verify
+        # against the live object before a single snippet is sent.
+        qualifies, _why = code_shaped(t.params)
+        if qualifies:
             entries[t.id] = {
                 "target": t.id,
                 "reference": "cpython-exec",
@@ -409,6 +448,34 @@ def _extract_value(out: Any, extract: str) -> Any:
 _UBIQUITY: dict[str, float] = _ubiquity()
 
 
+def _live_params(fn: Any) -> list[dict[str, Any]] | None:
+    """Parameter records read from the LIVE callable, or None when unreadable.
+
+    Same record shape as the source-derived ones the finder proposes from, so
+    one ``code_shaped`` rule judges both sides.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    out: list[dict[str, Any]] = []
+    for name, p in sig.parameters.items():
+        if name in ("self", "cls") or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+            continue
+        annotation = None
+        if p.annotation is not p.empty:
+            annotation = getattr(p.annotation, "__name__", None) or str(p.annotation)
+        out.append(
+            {
+                "name": name,
+                "annotation": annotation,
+                "has_default": p.default is not p.empty,
+                "keyword_only": p.kind == p.KEYWORD_ONLY,
+            }
+        )
+    return out
+
+
 def _worker_main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="exerciser-differential-worker")
     ap.add_argument("--plan", required=True)
@@ -438,6 +505,28 @@ def _worker_main(argv: list[str]) -> int:
         )
         _emit(rows)
         return 0
+
+    # Shape verification against the LIVE object. The proposal was made from the
+    # source signature, which a decorator, a re-export or a runtime rebind can
+    # contradict; the worker is the only place that can see the real callable.
+    # Explicit (human/CLI) entries are trusted and never verified here.
+    if plan.get("verify_shape"):
+        live = _live_params(fn)
+        if live is None:
+            qualifies, why = False, "signature could not be read from the live object"
+        else:
+            qualifies, why = code_shaped(live)
+        if not qualifies:
+            rows.append(
+                {
+                    "target": plan["target"],
+                    "phase": "verify",
+                    "status": "dropped",
+                    "dropped_reason": why,
+                }
+            )
+            _emit(rows)
+            return 0
 
     reference = plan.get("reference", "cpython-exec")
     ref_fn = None
@@ -678,6 +767,8 @@ def unadjudicated(
                 "snippet": str(row.get("snippet", "")),
                 "message": message,
                 "prompt": adjudication_prompt(target, str(row.get("snippet", "")), message),
+                "exception": (row.get("got") or {}).get("exception"),
+                "exception_module": (row.get("got") or {}).get("module"),
                 "layer1_hint": policy_signal(message, str(row.get("snippet", "")))[1],
             }
     ordered = sorted(out.values(), key=lambda e: e["key"])
@@ -709,6 +800,45 @@ def policy_limits(
                 "detail": verdict["detail"],
             }
     return sorted(seen.values(), key=lambda e: e["detail"])
+
+
+# An evaluator that disagrees with CPython on essentially EVERY snippet of a
+# 378-case semantics corpus is not a buggy evaluator — it is not an evaluator.
+# Verified live: `fix_final_answer_code(code_action: str) -> str` satisfies the
+# shape rule (one required str parameter named like code) but merely REWRITES
+# the source text, so it "succeeds" on every snippet and differs on every one,
+# manufacturing 378 findings. A real evaluator agrees on the vast majority.
+DISAGREEMENT_DROP_RATIO = 0.9
+
+
+def implausible_evaluator(rows: list[dict[str, Any]], target: str) -> str | None:
+    """Why ``target`` should be dropped as not-an-evaluator, or None.
+
+    Structural and corpus-relative, so it transfers: it asks whether the target
+    behaved like an implementation of the language at all, not whether it
+    matches any particular project.
+    """
+    compares = [r for r in rows if r.get("phase") == "compare" and r.get("target") == target]
+    if len(compares) < 20:
+        return None  # too little evidence to judge
+    both_ran = [
+        r
+        for r in compares
+        if (r.get("reference") or {}).get("ok") and (r.get("got") or {}).get("ok")
+    ]
+    if not both_ran:
+        return None  # it refuses rather than answers — that is a real verdict
+    differing = [
+        r for r in both_ran if (r["reference"] or {}).get("value") != (r["got"] or {}).get("value")
+    ]
+    ratio = len(differing) / len(both_ran)
+    if ratio >= DISAGREEMENT_DROP_RATIO:
+        return (
+            f"answered {len(both_ran)} snippets and disagreed with CPython on "
+            f"{ratio:.0%} of them — this does not evaluate Python, so every "
+            "'mismatch' would be an artefact of driving the wrong function"
+        )
+    return None
 
 
 def cluster_mismatches(
@@ -826,6 +956,9 @@ def run_differential(
                 "call_kwargs": entry.get("call_kwargs") or {},
                 "corpus": corpus,
                 "src_roots": src_roots,
+                # Only the finder's own proposals are shape-verified; an entry a
+                # human or the CLI declared is an instruction, not a guess.
+                "verify_shape": str(entry.get("proposed_by") or "").startswith("reference-finder"),
             },
         )
         cmd = [
@@ -877,6 +1010,17 @@ def run_differential(
         for k, v in (adj_doc.get("verdicts") or {}).items()
         if isinstance(v, dict) and v.get("verdict") in ("policy", "defect")
     }
+    # Drop targets that answered the corpus but agree with CPython almost
+    # nowhere: they are not evaluators, and their "mismatches" are artefacts.
+    implausible: dict[str, str] = {}
+    for entry in refs:
+        reason = implausible_evaluator(rows, entry["target"])
+        if reason:
+            implausible[entry["target"]] = reason
+            log.warning("differential: dropping %s — %s", entry["target"], reason)
+    if implausible:
+        rows = [r for r in rows if r.get("target") not in implausible]
+
     clusters = cluster_mismatches(rows, policy_patterns=extra_policy, adjudications=adjudications)
     limits = policy_limits(rows, policy_patterns=extra_policy, adjudications=adjudications)
     all_pending = unadjudicated(rows, policy_patterns=extra_policy, adjudications=adjudications)
@@ -894,6 +1038,11 @@ def run_differential(
                     "snippet": item["snippet"],
                     "message": item["message"],
                     "prompt": item["prompt"],
+                    # The exception identity, so an answered verdict can be fed
+                    # back to the learned policy under the right signature
+                    # rather than being skipped for want of a type.
+                    "exception": item.get("exception"),
+                    "exception_module": item.get("exception_module"),
                     "verdict": None,
                 },
             )
@@ -907,6 +1056,14 @@ def run_differential(
         )
     store.write_jsonl(store.exercise_dir(repo) / "differential_results.jsonl", rows)
     compared = sum(1 for r in rows if r.get("phase") == "compare")
+    # Proposals whose live shape contradicted the source shape. Recorded, never
+    # adjudicated: a target the oracle cannot call produces TypeErrors, and
+    # TypeErrors from our own bad call are not evidence about the target.
+    dropped = [
+        {"target": r.get("target"), "reason": r.get("dropped_reason")}
+        for r in rows
+        if r.get("phase") == "verify" and r.get("status") == "dropped"
+    ]
     result: dict[str, Any] = {
         "status": "ok",
         "diagnostics": diagnostics,
@@ -917,6 +1074,7 @@ def run_differential(
         "mismatch_clusters": len(clusters),
         # Informational: what the sandbox deliberately refuses. NOT defects —
         # reporting a documented limit as a bug is how an oracle gets ignored.
+        "implausible_evaluators": implausible,
         "policy_limits": limits,
         "policy_limit_count": len(limits),
         # Layer 1 declined to guess on these; they are queued for agentic
@@ -925,10 +1083,35 @@ def run_differential(
         "unadjudicated_count": len(pending),
         # Distinct refusal SHAPES, not occurrences — the real question count.
         "unadjudicated_overflow": overflow,
+        # Shape-verification drops: proposed by the finder, refused by the
+        # worker once it could see the real callable.
+        "dropped": dropped,
+        "dropped_count": len(dropped),
         "timeouts": timeouts,
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "differential_results.jsonl"),
     }
+    # Close the learning loop even for a standalone run (the campaign does this
+    # too): disagreements are self-supervised evidence, and answered
+    # adjudications are real labels.
+    try:
+        from .exception_policy import (
+            ExceptionPolicy,
+            apply_feedback,
+            feedback_from_adjudications,
+            observe_differential_rows,
+        )
+
+        repo_pkgs = sorted({e["target"].partition(":")[0].partition(".")[0] for e in refs})
+        policy = ExceptionPolicy.load(repo, decay=1.0)
+        observe_differential_rows(policy, rows, repo_packages=repo_pkgs)
+        policy.save(repo, logger=log)
+        verdicts, _skipped = feedback_from_adjudications(adj_doc, repo_packages=repo_pkgs)
+        if verdicts:
+            apply_feedback(repo, verdicts, logger=log)
+    except Exception as exc:  # learning is never allowed to fail a run
+        log.debug("differential: policy feedback skipped (%s)", exc)
+
     store.write_json(store.exercise_dir(repo) / "differential.json", result)
     if overflow:
         diagnostics.append(

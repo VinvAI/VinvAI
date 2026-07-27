@@ -16,6 +16,7 @@ from exerciser.differential import (
     AST_CORPUS,
     AST_CORPUS_RAISING,
     cluster_mismatches,
+    code_shaped,
     judge_row,
     propose_references,
     run_differential,
@@ -53,7 +54,9 @@ def evaluate_code(code: str):
 """
 
 
-def _make_repo(tmp_path: Path, evaluator_src: str) -> Path:
+def _make_repo(
+    tmp_path: Path, evaluator_src: str, names: tuple[str, ...] = ("evaluate_code",)
+) -> Path:
     src = tmp_path / "src" / "engine"
     src.mkdir(parents=True)
     (src / "__init__.py").write_text("", encoding="utf-8")
@@ -61,19 +64,22 @@ def _make_repo(tmp_path: Path, evaluator_src: str) -> Path:
     index = tmp_path / ".vinv" / "index"
     index.mkdir(parents=True)
     (index / "chunks.jsonl").write_text(
-        json.dumps(
-            {
-                "id": "src/engine/sandbox.py:evaluate_code",
-                "file": "src/engine/sandbox.py",
-                "lang": "python",
-                "kind": "function",
-                "name": "evaluate_code",
-                "start_line": 1,
-                "end_line": 5,
-                "parent": None,
-            }
-        )
-        + "\n",
+        "".join(
+            json.dumps(
+                {
+                    "id": f"src/engine/sandbox.py:{name}",
+                    "file": "src/engine/sandbox.py",
+                    "lang": "python",
+                    "kind": "function",
+                    "name": name,
+                    "start_line": 1,
+                    "end_line": 5,
+                    "parent": None,
+                }
+            )
+            + "\n"
+            for name in names
+        ),
         encoding="utf-8",
     )
     return tmp_path
@@ -332,6 +338,104 @@ def test_reference_finder_proposes_evaluator_shaped_targets(tmp_path: Path):
     assert entry["reference"] == "other.mod:ref", "human-authored entries are never clobbered"
 
 
+# ---- arming the oracle: SHAPE, never the name -----------------------------
+
+
+def _params(*specs: tuple[str, str | None, bool]) -> list[dict]:
+    return [
+        {"name": n, "annotation": a, "has_default": d, "keyword_only": False} for n, a, d in specs
+    ]
+
+
+def test_the_shape_rule_is_about_the_signature_not_the_name():
+    # The runner calls fn(snippet) — one positional string — so that, and only
+    # that, is what qualifies a target.
+    assert code_shaped(_params(("code", "str", False)))[0]
+    assert code_shaped(_params(("source", None, False)))[0], "unannotated is common and fine"
+    assert code_shaped(_params(("code", "str", False), ("tools", "dict", True)))[0]
+    # Two required parameters: every snippet would raise TypeError from OUR bad
+    # call, which is noise, not evidence.
+    ok, why = code_shaped(_params(("preds", "list", False), ("labels", "list", False)))
+    assert not ok and "exactly 1 required parameter" in why
+    # A lone required str is also the shape of slugify(text); the parameter has
+    # to be NAMED like code.
+    ok, why = code_shaped(_params(("text", "str", False)))
+    assert not ok and "named like a code parameter" in why
+    # Right name, wrong type.
+    ok, why = code_shaped(_params(("code", "int", False)))
+    assert not ok and "not str" in why
+    assert not code_shaped([])[0]
+    assert not code_shaped(None)[0]
+
+
+_ML_METRICS = """\
+def evaluate_model(preds: list, labels: list) -> float:
+    return float(len(preds) == len(labels))
+
+
+def interpret_results(scores: list) -> str:
+    return "good" if scores else "empty"
+"""
+
+
+def test_ml_shaped_targets_are_not_armed_by_their_names(tmp_path: Path):
+    # `evaluate`/`interpret` in a name meant "evaluator" only in one framework.
+    # On an ML repo the old rule armed metrics code, fed it Python snippets
+    # positionally, and every call raised TypeError into the adjudication budget.
+    repo = _make_repo(tmp_path, _ML_METRICS, names=("evaluate_model", "interpret_results"))
+    doc = propose_references(repo)
+    assert doc["references"] == [], "no evaluator-shaped target here, so nothing is armed"
+
+    result = run_differential(repo)
+    assert result["pairs"] == 0
+    assert result["comparisons"] == 0
+    assert result["unadjudicated_count"] == 0, "no garbage in the adjudication budget"
+
+
+# A source signature the live object contradicts: the decorator replaces the
+# callable with a (*args, **kwargs) wrapper, so the proposal cannot survive
+# contact with the real thing.
+_REBOUND_EVALUATOR = """\
+def _passthrough(fn):
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_passthrough
+def evaluate_code(code: str):
+    ns = {}
+    exec(code, ns)
+    return (ns.get("result"), False)
+"""
+
+
+def test_a_proposal_the_live_signature_contradicts_is_dropped(tmp_path: Path):
+    repo = _make_repo(tmp_path, _REBOUND_EVALUATOR)
+    assert propose_references(repo)["references"], "the SOURCE shape qualifies"
+
+    result = run_differential(repo)
+
+    assert result["pairs"] == 1
+    assert result["comparisons"] == 0, "not one snippet was sent"
+    assert result["mismatch_clusters"] == 0
+    assert result["unadjudicated_count"] == 0
+    assert result["dropped_count"] == 1
+    dropped = result["dropped"][0]
+    assert dropped["target"] == "engine.sandbox:evaluate_code"
+    assert dropped["reason"], "a drop is recorded with its reason, never silent"
+
+
+def test_an_explicit_entry_is_trusted_and_never_shape_verified(tmp_path: Path):
+    # A human (or the CLI) declaring a reference is an instruction, not a guess:
+    # shape verification exists to police the FINDER's proposals.
+    repo = _make_repo(tmp_path, _FAITHFUL_EVALUATOR)
+    result = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
+    assert result["dropped_count"] == 0
+    assert result["comparisons"] > 0
+
+
 def test_no_references_is_loudly_diagnosed(tmp_path: Path):
     (tmp_path / ".vinv" / "exercise").mkdir(parents=True)
     result = run_differential(tmp_path)
@@ -367,3 +471,29 @@ def test_layer1_hints_are_structural_and_never_decide(tmp_path: Path):
     # Layer 1 never guesses: an unrecognisable refusal stays unresolved and is
     # queued for adjudication instead of being called either thing.
     assert policy_signal("something went wrong", "result = 1\nresult")[0] == "unresolved"
+
+
+def test_a_target_that_is_not_an_evaluator_is_dropped(tmp_path: Path):
+    # `fix_final_answer_code(code_action: str) -> str` satisfies the shape rule
+    # — one required str parameter named like code — but merely REWRITES the
+    # source text. Driving it manufactured 378 findings against real
+    # smolagents. An implementation of Python agrees with CPython on the vast
+    # majority of a semantics corpus; a text rewriter agrees on none.
+    rewriter = """\
+def fix_code(code_action: str) -> str:
+    return code_action.replace("result", "value")
+"""
+    repo = _make_repo(tmp_path, rewriter)
+
+    result = run_differential(repo, target="engine.sandbox:fix_code", reference="cpython-exec")
+
+    assert result["mismatch_clusters"] == 0, "artefacts of the wrong function are not findings"
+    assert "engine.sandbox:fix_code" in result["implausible_evaluators"]
+    assert "does not evaluate Python" in result["implausible_evaluators"]["engine.sandbox:fix_code"]
+
+
+def test_a_real_evaluator_with_real_bugs_is_not_dropped(tmp_path: Path):
+    repo = _make_repo(tmp_path, _BUGGY_EVALUATOR)
+    result = run_differential(repo, target="engine.sandbox:evaluate_code", reference="cpython-exec")
+    assert result["implausible_evaluators"] == {}, "a mostly-correct evaluator stays"
+    assert result["mismatch_clusters"] >= 1

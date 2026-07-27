@@ -185,3 +185,76 @@ def test_action_posteriors_warm_start_decayed():
 def test_empty_action_bandit_selects_nothing():
     assert ActionBandit().select(random.Random("e")) is None
     assert ActionBandit().preferred() is None
+
+
+# ---- the update rule, stated honestly ---------------------------------------
+
+
+def test_the_fractional_rule_is_tighter_than_the_bernoulli_one():
+    # The audited claim was "Beta/Bernoulli conjugate update". It is not: the
+    # fractional alpha += credit is the bounded-reward RELAXATION, and posting
+    # the mean instead of a draw removes the credit's own variance. The
+    # posterior is therefore strictly tighter at equal play counts, which
+    # narrows the Thompson draw and under-explores relative to the regret bound.
+    outcome = Outcome(new_coverage=1)  # credit == COVERAGE_BONUS == 0.25
+    fractional = BetaArm()
+    bernoulli = BetaArm()
+    rng = random.Random("variance")
+    for _ in range(400):
+        fractional.update(outcome)
+        bernoulli.update(outcome, rng=rng)
+
+    def spread(arm: BetaArm) -> float:
+        a, b = arm.alpha, arm.beta
+        return (a * b) / (((a + b) ** 2) * (a + b + 1.0))  # Beta variance
+
+    # Same evidence, same mean in expectation — but a strictly narrower belief.
+    assert abs(fractional.mean() - bernoulli.mean()) < 0.1
+    assert spread(fractional) < spread(bernoulli), "the relaxation explores less"
+
+
+def test_bernoulli_updates_post_whole_counts():
+    # The genuine conjugate update: the posterior only ever moves by whole
+    # observations, which is what Thompson's regret guarantee is proved for.
+    arm = BetaArm()
+    rng = random.Random("bits")
+    for _ in range(50):
+        arm.update(Outcome(new_coverage=1), rng=rng)
+    assert arm.alpha == int(arm.alpha), "alpha moved in whole counts"
+    assert arm.alpha + arm.beta == 2.0 + 50.0, "still one pseudo-count per play"
+
+
+def test_the_campaign_bandit_bernoulli_ises_by_default():
+    bandit = ActionBandit(actions=(Action("t", "tech", "oracle"),))
+    assert bandit.bernoulli is True
+    assert "bernoulli" in bandit.to_json()["update"]
+    # Without an rng it falls back to the relaxation, so the legacy per-endpoint
+    # callers keep their exact arithmetic.
+    plain = ActionBandit(actions=(Action("t", "tech", "oracle"),))
+    plain.update(Action("t", "tech", "oracle"), Outcome(new_coverage=1))
+    assert plain.arms["t|tech|oracle"].alpha == 1.0 + COVERAGE_BONUS
+
+
+# ---- the coverage bonus is a learnable prior, not a magic constant -----------
+
+
+def test_the_coverage_bonus_is_an_adjustable_persisted_prior():
+    a = Action("pkg:fn", "deterministic", "crash")
+    bandit = ActionBandit(actions=(a,), coverage_bonus=0.5)
+    bandit.update(a, Outcome(new_coverage=1))
+    assert bandit.arms[a.key].alpha == 1.5, "the bandit's own prior is used, not the constant"
+
+    doc = bandit.to_json()
+    assert doc["priors"]["coverage_bonus"] == 0.5
+    # And it travels with the posteriors to the next run.
+    restored = seed_actions_from_prior(ActionBandit(), doc, decay=0.5)
+    assert restored.coverage_bonus == 0.5
+
+
+def test_the_default_coverage_bonus_is_the_documented_exchange_rate():
+    # 0.25 is an exchange rate, not a dial: it sets the point at which a
+    # coverage-only arm ties an arm that violates on a quarter of its plays.
+    assert Outcome(new_coverage=1).credit() == COVERAGE_BONUS
+    tie = Outcome(violations=1).credit() * COVERAGE_BONUS
+    assert Outcome(new_coverage=1).credit() == tie / 1.0 * 1.0
+    assert 0.1 <= COVERAGE_BONUS <= 0.35

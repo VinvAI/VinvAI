@@ -22,27 +22,55 @@ Three deliberate design points:
 * **Deterministic arguments, with Hypothesis as an optional widener.** Values
   come from type hints via the same seeded generator the HTTP path uses; when
   ``hypothesis`` is installed, a property-based arm draws additional instances.
-* **Destructive names are never called.** A harness that calls ``delete_all`` or
-  ``drop_database`` because it was exported is not a testing tool. Names and
-  modules matching the deny patterns are catalogued and skipped, loudly.
+* **Destructive targets are never called.** A harness that calls ``delete_all``
+  or ``drop_database`` because it was exported is not a testing tool. Because
+  this harness IMPORTS target modules and CALLS their exported functions in
+  process, the guard is a SAFETY control, not a scoring detail, so it is layered
+  (see "Refusing to call" below): an AST purity pre-check on the function's own
+  source is the primary gate, a segment-matched destructive-verb vocabulary is
+  the backstop, and module/name scaffolding rules exclude what should never be
+  imported at all. Every refusal is recorded in ``skipped`` with its reason.
 
 Artifacts land beside the HTTP ones: ``.vinv/exercise/functions.json`` (the
 plan + summary) and ``function_results.jsonl`` (one row per call).
+
+Refusing to call
+----------------
+
+1. **AST purity pre-check (primary).** Before a target is ever imported or
+   called, its body is parsed out of the source and inspected for calls that
+   mutate the world outside the process: filesystem writes/removals, process
+   spawning, network clients, database ``execute``/``commit``/``drop``, and
+   interpreter exit. Same-module helpers it calls are inspected too (depth 1).
+   This scales to a repo nobody has read, because it judges what the code DOES
+   rather than what it is called.
+2. **Destructive-verb vocabulary (backstop).** For the cases source cannot be
+   read, or where the damage happens through a library the pre-check does not
+   know, the identifier is split into word segments (on ``_``/``.`` and
+   camelCase) and matched against a general vocabulary of destructive verbs —
+   never a raw substring, so ``remove_prefix`` is judged on ``remove`` rather
+   than on the accident of containing ``remove`` inside a longer word.
+3. **Scaffolding rules.** Test modules, ``conftest``, ``setup``, migrations and
+   ``__main__`` are never importable targets: importing them runs fixtures and
+   migrations against real state.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import inspect
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -50,37 +78,220 @@ from . import store
 from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
 from .issues import FailureCluster, normalize_signature
 
-# Call names/modules a harness must never invoke, however they were catalogued.
-# Substring match on the lowercased qualified name.
-_DENY_SUBSTRINGS = (
-    "delete",
-    "destroy",
-    "drop",
-    "truncate",
-    "purge",
-    "wipe",
-    "erase",
-    "remove",
-    "rmtree",
-    "unlink",
-    "shutdown",
-    "terminate",
-    "kill",
-    "exit",
-    "reboot",
-    "restart",
-    "format_disk",
-    "deploy",
-    "publish",
-    "send_email",
-    "charge",
-    "payment",
-    "transfer",
-    "migrate",
-    "upgrade",
-    "downgrade",
+# =========================================================================
+# The destructive-name vocabulary (backstop; the AST purity check is primary)
+# =========================================================================
+#
+# Matched against WORD SEGMENTS of the identifier, never as raw substrings: a
+# substring denylist both over- and under-blocks (it blocked `remove_prefix`
+# and `charge_density` while letting `nuke_everything` through).
+#
+# The vocabulary is a general one — the English/CS verbs for "destroy or
+# discard durable state" and "change the world outside this process" — not a
+# list harvested from any one codebase.
+
+# Tier A: verbs whose only reading is "destroy / discard existing state". A
+# single one of these anywhere in the identifier denies it, whatever it is
+# paired with. This is why `remove_prefix` stays denied: the cost of losing a
+# pure string helper is one target, and the cost of guessing wrong is a repo.
+_DESTRUCTIVE_VERBS = frozenset(
+    {
+        "abort",
+        "annihilate",
+        "clobber",
+        "decommission",
+        "delete",
+        "deprovision",
+        "deregister",
+        "destroy",
+        "discard",
+        "drop",
+        "erase",
+        "evict",
+        "expunge",
+        "halt",
+        "kill",
+        "nuke",
+        "obliterate",
+        "poweroff",
+        "prune",
+        "purge",
+        "quit",
+        "reboot",
+        "remove",
+        "restart",
+        "revert",
+        "revoke",
+        "rm",
+        "rmdir",
+        "rmtree",
+        "rollback",
+        "scrub",
+        "shutdown",
+        "teardown",
+        "terminate",
+        "trash",
+        "truncate",
+        "undo",
+        "uninstall",
+        "unlink",
+        "unpublish",
+        "unregister",
+        "wipe",
+        "zap",
+    }
 )
+
+# Tier B: verbs that are destructive IN CONTEXT but are also ordinary domain
+# nouns/verbs in scientific and mathematical code. Denied only when the
+# identifier also names something stateful (below), or when the verb IS the
+# whole identifier. This is the judgement call the substring list got wrong:
+# `transfer_matrix` and `charge_density` are now drivable again (coverage
+# regained), while `transfer_funds`, `charge_card` and `reset_database` stay
+# denied. The residual risk — a Tier-B verb over an object vocabulary does not
+# know — is what the AST purity pre-check is there to absorb.
+_STATEFUL_VERBS = frozenset(
+    {
+        "apply",
+        "archive",
+        "bill",
+        "charge",
+        "clear",
+        "close",
+        "commit",
+        "deactivate",
+        "deploy",
+        "disable",
+        "downgrade",
+        "expire",
+        "flush",
+        "format",
+        "install",
+        "invalidate",
+        "migrate",
+        "notify",
+        "overwrite",
+        "pay",
+        "provision",
+        "publish",
+        "push",
+        "refund",
+        "release",
+        "reset",
+        "seed",
+        "send",
+        "sync",
+        "transfer",
+        "upgrade",
+        "void",
+        "withdraw",
+    }
+)
+
+# Nouns that denote durable state or a blast radius. A Tier-B verb next to one
+# of these is a state-changing call, not a formula.
+_STATEFUL_OBJECTS = frozenset(
+    {
+        "account",
+        "accounts",
+        "all",
+        "backup",
+        "balance",
+        "branch",
+        "bucket",
+        "cache",
+        "card",
+        "cluster",
+        "collection",
+        "config",
+        "container",
+        "credential",
+        "credentials",
+        "customer",
+        "data",
+        "database",
+        "databases",
+        "db",
+        "deployment",
+        "dir",
+        "directory",
+        "disk",
+        "email",
+        "env",
+        "environment",
+        "everything",
+        "file",
+        "files",
+        "filesystem",
+        "fs",
+        "funds",
+        "git",
+        "host",
+        "image",
+        "instance",
+        "invoice",
+        "key",
+        "keys",
+        "log",
+        "logs",
+        "mail",
+        "machine",
+        "member",
+        "message",
+        "migration",
+        "money",
+        "namespace",
+        "node",
+        "notification",
+        "order",
+        "password",
+        "path",
+        "pod",
+        "prod",
+        "production",
+        "project",
+        "queue",
+        "record",
+        "records",
+        "release",
+        "repo",
+        "repository",
+        "row",
+        "rows",
+        "schema",
+        "secret",
+        "secrets",
+        "server",
+        "service",
+        "session",
+        "sessions",
+        "settings",
+        "sms",
+        "snapshot",
+        "state",
+        "storage",
+        "store",
+        "stream",
+        "subscription",
+        "table",
+        "tables",
+        "token",
+        "tokens",
+        "topic",
+        "transaction",
+        "tree",
+        "user",
+        "users",
+        "volume",
+        "wallet",
+        "workspace",
+    }
+)
+
 # Modules never worth importing (side effects at import, or not target code).
+# `test`/`tests`/`testing` are here because importing a test module runs its
+# collection-time fixtures, and its `test_*` functions are then called with
+# junk against whatever real database/tmpdir the fixtures wired up.
 _DENY_MODULE_PARTS = frozenset(
     {
         "setup",
@@ -88,6 +299,9 @@ _DENY_MODULE_PARTS = frozenset(
         "__main__",
         "migrations",
         "alembic",
+        "test",
+        "tests",
+        "testing",
     }
 )
 
@@ -132,10 +346,65 @@ class FunctionTarget:
         }
 
 
+_SEGMENT_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z0-9]*|[a-z0-9]+")
+
+
+def name_segments(name: str) -> list[str]:
+    """Lowercased word segments of an identifier.
+
+    Splits on non-alphanumerics AND on camelCase humps, so ``dropAllTables``,
+    ``drop_all_tables`` and ``db.drop_all`` all yield ``drop`` as a segment
+    while ``remove_prefix`` yields ``remove`` and ``prefix`` separately.
+    """
+    out: list[str] = []
+    for chunk in re.split(r"[^A-Za-z0-9]+", name or ""):
+        out.extend(m.group(0).lower() for m in _SEGMENT_RE.finditer(chunk))
+    return out
+
+
+def denial_reason(name: str) -> str | None:
+    """Why this qualified name must never be called, or None when it may be.
+
+    Word-boundary matching on identifier segments — see the vocabulary comments
+    above for the two tiers and the tradeoff each one makes.
+    """
+    segments = name_segments(name)
+    if not segments:
+        return None
+    seen = set(segments)
+    hit = sorted(seen & _DESTRUCTIVE_VERBS)
+    if hit:
+        return f"destructive verb {hit[0]!r} in the name"
+    stateful = sorted(seen & _STATEFUL_VERBS)
+    if stateful:
+        objects = sorted(seen & _STATEFUL_OBJECTS)
+        if objects:
+            return f"state-changing verb {stateful[0]!r} over {objects[0]!r}"
+        if len(segments) == 1:
+            return f"state-changing verb {stateful[0]!r} names the whole target"
+    return None
+
+
 def is_denied(name: str) -> bool:
     """Whether a qualified name must never be called by the harness."""
-    low = name.lower()
-    return any(s in low for s in _DENY_SUBSTRINGS)
+    return denial_reason(name) is not None
+
+
+def is_test_scaffolding(qualname: str) -> bool:
+    """Whether a callable is pytest/unittest scaffolding rather than target code.
+
+    A ``test_*`` function is collected and run by a test runner with fixtures;
+    calling it out of band with guessed arguments exercises the fixtures'
+    real side effects (databases, tmpdirs, network doubles), not the library.
+    """
+    low = (qualname or "").rpartition(".")[2].lower()
+    return low.startswith("test_") or low.endswith("_test") or low == "test"
+
+
+def _is_denied_module_part(part: str) -> bool:
+    """Whether one dotted module component makes the module unimportable here."""
+    low = part.lower()
+    return low in _DENY_MODULE_PARTS or low.startswith("test_") or low.endswith("_test")
 
 
 def module_name_for(rel_file: str, src_roots: list[str]) -> str | None:
@@ -167,7 +436,7 @@ def module_name_for(rel_file: str, src_roots: list[str]) -> str | None:
         return None
     if parts[-1] == "__init__":
         parts = parts[:-1]
-    if not parts or any(p in _DENY_MODULE_PARTS for p in parts):
+    if not parts or any(_is_denied_module_part(p) for p in parts):
         return None
     if not all(p.isidentifier() for p in parts):
         return None
@@ -183,6 +452,325 @@ def detect_src_roots(repo: Path) -> list[str]:
     if (repo / "src").is_dir():
         roots.insert(0, "src")
     return roots
+
+
+# =========================================================================
+# Static purity pre-check — the PRIMARY destructive-call guard
+# =========================================================================
+#
+# Verbs describe intent; this describes behaviour. Before a target is imported
+# or called, its body is read out of the source and inspected for calls that
+# change the world outside this process. The vocabularies below are the
+# general ones — the stdlib's own mutating surface, the standard client
+# libraries, and the DB-API method names — not anything harvested from a
+# particular repo.
+
+# Whole modules whose every call reaches outside the process.
+_IMPURE_MODULE_ROOTS = frozenset(
+    {
+        "aiohttp",
+        "asyncpg",
+        "boto3",
+        "botocore",
+        "ctypes",
+        "docker",
+        "ftplib",
+        "google",
+        "http",
+        "httpx",
+        "kubernetes",
+        "multiprocessing",
+        "mysqldb",
+        "paramiko",
+        "psycopg",
+        "psycopg2",
+        "pymongo",
+        "pymysql",
+        "redis",
+        "requests",
+        "shutil",
+        "signal",
+        "smtplib",
+        "socket",
+        "sqlalchemy",
+        "sqlite3",
+        "stripe",
+        "subprocess",
+        "telnetlib",
+        "urllib",
+        "urllib2",
+        "urllib3",
+        "webbrowser",
+    }
+)
+
+# Modules that are mostly harmless but have a mutating subset. Listing the
+# subset keeps `os.path.join` and `sys.version_info` drivable.
+_IMPURE_MODULE_ATTRS: dict[str, frozenset[str]] = {
+    "os": frozenset(
+        {
+            "_exit",
+            "abort",
+            "chmod",
+            "chown",
+            "execl",
+            "execv",
+            "execve",
+            "fork",
+            "kill",
+            "killpg",
+            "link",
+            "makedirs",
+            "mkdir",
+            "popen",
+            "putenv",
+            "remove",
+            "removedirs",
+            "rename",
+            "renames",
+            "replace",
+            "rmdir",
+            "spawnl",
+            "symlink",
+            "system",
+            "truncate",
+            "unlink",
+            "unsetenv",
+            "write",
+        }
+    ),
+    "sys": frozenset({"exit"}),
+    "atexit": frozenset({"register"}),
+}
+
+# Method names that mean the same thing on every receiver: a DB cursor/session
+# commit, a schema drop, a path being unlinked or written.
+_IMPURE_METHOD_NAMES = frozenset(
+    {
+        "commit",
+        "drop",
+        "drop_all",
+        "execute",
+        "executemany",
+        "executescript",
+        "kill",
+        "killpg",
+        "mkdir",
+        "popen",
+        "rmdir",
+        "rmtree",
+        "sendall",
+        "sendmail",
+        "sendto",
+        "system",
+        "terminate",
+        "touch",
+        "unlink",
+        "urlopen",
+        "write_bytes",
+        "write_text",
+    }
+)
+
+# Bare names that only ever come from `from subprocess import …`-style imports.
+_IMPURE_BARE_CALLS = frozenset(
+    {
+        "Popen",
+        "check_call",
+        "check_output",
+        "exit",
+        "getoutput",
+        "quit",
+        "removedirs",
+        "rmdir",
+        "rmtree",
+        "system",
+        "unlink",
+        "urlopen",
+    }
+)
+
+# `open(path, mode)` is a write when the mode says so.
+_WRITE_MODE_CHARS = frozenset({"w", "a", "x", "+"})
+_OPEN_NAMES = frozenset({"open"})
+
+
+def _call_root(node: ast.expr) -> str | None:
+    """Leftmost ``Name`` of an attribute chain: ``a.b.c(...)`` → ``a``."""
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        cur = cur.value
+    return cur.id if isinstance(cur, ast.Name) else None
+
+
+def _is_write_open(call: ast.Call) -> bool:
+    """Whether an ``open(...)`` call opens the file for writing.
+
+    An unreadable (non-literal) mode counts as a write: the guard refuses to
+    assume a computed mode is ``"r"``.
+    """
+    mode: ast.expr | None = None
+    if len(call.args) >= 2:
+        mode = call.args[1]
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return any(ch in _WRITE_MODE_CHARS for ch in mode.value)
+    return True
+
+
+def _direct_impurities(node: ast.AST) -> list[str]:
+    """World-changing calls made directly in one function body."""
+    reasons: list[str] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in _OPEN_NAMES and _is_write_open(child):
+                reasons.append("opens a file for writing")
+            elif name in _IMPURE_BARE_CALLS:
+                reasons.append(f"calls {name}()")
+            continue
+        if not isinstance(func, ast.Attribute):
+            continue
+        attr = func.attr
+        root = _call_root(func)
+        if root and root.lower() in _IMPURE_MODULE_ROOTS:
+            reasons.append(f"calls {root}.{attr}()")
+            continue
+        if root and attr in _IMPURE_MODULE_ATTRS.get(root, frozenset()):
+            reasons.append(f"calls {root}.{attr}()")
+            continue
+        if attr in _OPEN_NAMES and _is_write_open(child):
+            reasons.append("opens a file for writing")
+            continue
+        if attr in _IMPURE_METHOD_NAMES:
+            reasons.append(f"calls .{attr}()")
+    return sorted(dict.fromkeys(reasons))
+
+
+def _local_calls(node: ast.AST, known: set[str]) -> list[str]:
+    """Same-module helpers this body calls by bare name."""
+    out = {
+        child.func.id
+        for child in ast.walk(node)
+        if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+    }
+    return sorted(out & known)
+
+
+def module_function_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Module-level ``def``s of a Python source text, by name.
+
+    Nested and class-level definitions are deliberately absent: the harness can
+    only call module-level callables, so those are the only bodies to judge.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def impurity_reasons(
+    qualname: str,
+    defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    *,
+    depth: int = 1,
+) -> list[str]:
+    """Why calling ``qualname`` would change the world, or ``[]`` when it would not.
+
+    Transitive to ``depth`` through same-module helpers: a wrapper whose body is
+    one call to ``_really_delete()`` is exactly as destructive as the helper.
+    """
+    node = defs.get(qualname)
+    if node is None:
+        return []
+    reasons = list(_direct_impurities(node))
+    seen = {qualname}
+    frontier = [qualname]
+    for _ in range(max(0, depth)):
+        nxt: list[str] = []
+        for name in frontier:
+            current = defs.get(name)
+            if current is None:
+                continue
+            for callee in _local_calls(current, set(defs)):
+                if callee in seen:
+                    continue
+                seen.add(callee)
+                nxt.append(callee)
+                for reason in _direct_impurities(defs[callee]):
+                    reasons.append(f"{reason} via {callee}()")
+        frontier = nxt
+    return sorted(dict.fromkeys(reasons))
+
+
+def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, Any]]:
+    """Parameter records read from SOURCE (no import), same shape as the live ones."""
+    args = node.args
+    positional = [*args.posonlyargs, *args.args]
+    first_default = len(positional) - len(args.defaults)
+    out: list[dict[str, Any]] = []
+    for i, arg in enumerate(positional):
+        if arg.arg in ("self", "cls"):
+            continue
+        out.append(
+            {
+                "name": arg.arg,
+                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
+                "has_default": i >= first_default,
+                "keyword_only": False,
+            }
+        )
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=False):
+        out.append(
+            {
+                "name": arg.arg,
+                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
+                "has_default": default is not None,
+                "keyword_only": True,
+            }
+        )
+    return out
+
+
+@lru_cache(maxsize=512)
+def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
+    """Per-function ``{"params", "impurities"}`` for one module's source text."""
+    defs = module_function_defs(source)
+    return {
+        name: {"params": _ast_params(node), "impurities": impurity_reasons(name, defs)}
+        for name, node in defs.items()
+    }
+
+
+def source_facts(path: Path) -> dict[str, dict[str, Any]] | None:
+    """Static facts about one file's module-level functions, or None when the
+    source cannot be read or parsed.
+
+    None is NOT "nothing to worry about": a target whose source could not be
+    inspected has not passed the purity pre-check, and discovery skips it rather
+    than importing and calling it on trust.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    return _facts_from_source(source)
 
 
 def _param_records(fn: Any) -> list[dict[str, Any]] | None:
@@ -250,12 +838,41 @@ def discover_targets(
         tid = f"{module}:{qualname}"
         if tid in seen or len(targets) >= max_targets:
             return
-        if is_denied(qualname) or is_denied(module):
-            skipped.append({"id": tid, "reason": "destructive-name"})
-            seen.add(tid)
-            return
         seen.add(tid)
-        targets.append(FunctionTarget(module=module, qualname=qualname, file=rel, kind=kind))
+        # 1) Scaffolding: never call what a test runner owns.
+        if is_test_scaffolding(qualname):
+            skipped.append({"id": tid, "reason": "test-scaffolding"})
+            return
+        # 2) Backstop vocabulary, on identifier SEGMENTS.
+        reason = denial_reason(qualname) or denial_reason(module)
+        if reason is not None:
+            skipped.append({"id": tid, "reason": f"destructive-name: {reason}"})
+            return
+        # 3) Primary guard: what the body actually DOES, read from source.
+        facts = source_facts(repo / rel)
+        if facts is None:
+            skipped.append({"id": tid, "reason": "unverifiable-source — refusing to call unread"})
+            return
+        fact = facts.get(qualname)
+        if fact is None:
+            skipped.append(
+                {"id": tid, "reason": "no module-level definition in source — nothing to verify"}
+            )
+            return
+        if fact["impurities"]:
+            skipped.append(
+                {"id": tid, "reason": "impure-body: " + "; ".join(fact["impurities"][:4])}
+            )
+            return
+        targets.append(
+            FunctionTarget(
+                module=module,
+                qualname=qualname,
+                file=rel,
+                kind=kind,
+                params=list(fact["params"]),
+            )
+        )
 
     files_seen: set[str] = set()
     for ep in entrypoints:
@@ -344,39 +961,138 @@ _BY_ANNOTATION: dict[str, dict[str, Any]] = {
 }
 INPUT_CLASSES = ("valid", "boundary", "negative")
 
+# Typing ABCs a concrete family genuinely satisfies: a ``list`` IS a Sequence,
+# so supplying ``[1, 2]`` for ``Sequence[int]`` really does conform. Anything
+# NOT reducible to one of these families is unresolved — the harness must not
+# claim conformance for a value it invented.
+_ANNOTATION_ALIASES = {
+    "collection": "list",
+    "iterable": "list",
+    "mutablemapping": "dict",
+    "mutablesequence": "list",
+    "mapping": "dict",
+    "sequence": "list",
+}
+# Annotations that accept anything (so any value conforms) or only None.
+_WILDCARD_ANNOTATIONS = frozenset({"any", "object"})
+_NONE_ANNOTATIONS = frozenset({"none", "nonetype"})
+
+
+def _split_top_level(text: str, separators: str) -> list[str]:
+    """Split on ``separators`` that are not nested inside brackets."""
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in text:
+        if ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        if depth == 0 and ch in separators:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def annotation_base(annotation: str | None) -> str | None:
+    """Reduce an annotation to the base type name a value can be built for.
+
+    ``Optional[str]`` → ``str``; ``dict[str, int] | None`` → ``dict``;
+    ``pkg.Config`` → ``config`` (which is not a family, so it is unresolvable).
+    """
+    if annotation is None:
+        return None
+    text = str(annotation).strip()
+    if not text:
+        return None
+    if "|" in text:
+        members = [m for m in _split_top_level(text, "|") if m.lower() not in _NONE_ANNOTATIONS]
+        return annotation_base(members[0]) if members else "none"
+    head, bracket, rest = text.partition("[")
+    head = head.split(".")[-1].strip().lower()
+    if bracket and head in ("optional", "union"):
+        inner = rest.rsplit("]", 1)[0]
+        members = [m for m in _split_top_level(inner, ",") if m.lower() not in _NONE_ANNOTATIONS]
+        return annotation_base(members[0]) if members else "none"
+    return _ANNOTATION_ALIASES.get(head, head) or None
+
+
+def annotation_resolved(annotation: str | None) -> bool:
+    """Whether the harness can build a value that genuinely SATISFIES ``annotation``.
+
+    This is the honesty gate for ``conformant``: for ``cfg: Config`` there is no
+    such value, so passing the string family's ``"vinv"`` and then telling the
+    policy the value conformed to the declared type turns every defensive
+    ``assert isinstance(cfg, Config)`` into a reported defect.
+    """
+    base = annotation_base(annotation)
+    if base is None:
+        return False
+    return base in _BY_ANNOTATION or base in _WILDCARD_ANNOTATIONS or base in _NONE_ANNOTATIONS
+
+
+def resolved_value_for(annotation: str | None, cls: str) -> tuple[Any, bool]:
+    """``(value, resolved)`` for an annotation and input class.
+
+    ``resolved`` is False when the value is a GUESS: the annotation named a type
+    this harness cannot instantiate, so the string family stands in. The value
+    is still worth sending (a wrong-typed argument is a legitimate probe) but no
+    caller may treat it as conforming to the declared type.
+    """
+    base = annotation_base(annotation)
+    if base is not None:
+        table = _BY_ANNOTATION.get(base)
+        if table is not None:
+            return table[cls], True
+        if base in _WILDCARD_ANNOTATIONS:
+            return _BY_ANNOTATION["str"][cls], True
+        if base in _NONE_ANNOTATIONS:
+            return None, True
+    return _BY_ANNOTATION["str"][cls], False
+
 
 def value_for(annotation: str | None, cls: str) -> Any:
     """Deterministic argument value for an annotation and input class.
 
     Unknown annotations fall back to the string family — a wrong-typed argument
-    is itself a legitimate probe (the negative class exists to be rejected).
+    is itself a legitimate probe (the negative class exists to be rejected) —
+    but callers that need to know whether it was a GUESS must use
+    ``resolved_value_for``/``annotation_resolved``.
     """
-    if annotation:
-        base = annotation.split("[")[0].split(".")[-1].strip().lower()
-        table = _BY_ANNOTATION.get(base)
-        if table is not None:
-            return table[cls]
-        if base in ("any", "object"):
-            return _BY_ANNOTATION["str"][cls]
-        if base in ("none", "nonetype"):
-            return None
-    return _BY_ANNOTATION["str"][cls]
+    return resolved_value_for(annotation, cls)[0]
+
+
+def unresolvable_required(params: list[dict[str, Any]]) -> list[str]:
+    """Names of required parameters whose annotation cannot be satisfied."""
+    return [
+        str(p["name"])
+        for p in params
+        if not p.get("has_default") and not annotation_resolved(p.get("annotation"))
+    ]
 
 
 def arg_sets_for(params: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One argument map per input class for a target's parameters.
 
     Parameters with defaults are omitted from the ``valid`` set (exercising the
-    documented default path) and supplied in the others.
+    documented default path) and supplied in the others. Each set records
+    ``annotations_resolved``: whether EVERY argument it supplies was built from
+    an annotation the harness actually understood.
     """
     out: list[dict[str, Any]] = []
     for cls in INPUT_CLASSES:
         kwargs: dict[str, Any] = {}
+        resolved = True
         for p in params:
             if cls == "valid" and p.get("has_default"):
                 continue
-            kwargs[p["name"]] = value_for(p.get("annotation"), cls)
-        out.append({"class": cls, "kwargs": kwargs})
+            value, ok = resolved_value_for(p.get("annotation"), cls)
+            kwargs[p["name"]] = value
+            resolved = resolved and ok
+        out.append({"class": cls, "kwargs": kwargs, "annotations_resolved": resolved})
     return out
 
 
@@ -468,6 +1184,23 @@ def _worker_main(argv: list[str]) -> int:
                 }
             )
             continue
+        unresolvable = unresolvable_required(params)
+        if unresolvable:
+            # We could still send the string family and hope, but then the row
+            # would have to claim the value conformed to a type we never built.
+            rows.append(
+                {
+                    "module": module_name,
+                    "target_id": f"{module_name}:{qual}",
+                    "phase": "signature",
+                    "status": "skipped",
+                    "error": (
+                        f"unresolvable annotation on required parameter(s) "
+                        f"{', '.join(unresolvable)} — refusing to guess"
+                    ),
+                }
+            )
+            continue
         for arg_set in arg_sets_for(params):
             row = _call_once(module_name, qual, fn, arg_set)
             row["repo_packages"] = repo_packages
@@ -485,6 +1218,10 @@ def _call_once(module: str, qual: str, fn: Any, arg_set: dict[str, Any]) -> dict
         "qualname": qual,
         "phase": "call",
         "input_class": arg_set["class"],
+        # Whether every argument below was built from an annotation the harness
+        # actually understood. Without this the row cannot honestly claim the
+        # value CONFORMED to the declared type (see call_verdict).
+        "annotations_resolved": bool(arg_set.get("annotations_resolved", False)),
         "kwargs": {k: _summarize(v) for k, v in arg_set["kwargs"].items()},
     }
     try:
@@ -578,8 +1315,13 @@ def call_verdict(
     fam = family_of(row.get("error_mro") or [etype])
     key = signature(etype, prov)
     # valid/boundary values conform to the declared annotation (0 IS an int);
-    # negative values deliberately violate it.
-    conformant = str(row.get("input_class", "")) in ("valid", "boundary")
+    # negative values deliberately violate it. But "valid" only means conformant
+    # when the annotation was RESOLVED: for `cfg: Config` the harness has no
+    # Config to send, so the string it sends conforms to nothing and the target
+    # is entitled to reject it. Absent flag ⇒ not known to be resolved ⇒ False.
+    conformant = str(row.get("input_class", "")) in ("valid", "boundary") and bool(
+        row.get("annotations_resolved", False)
+    )
     return (
         "defect"
         if policy.is_defect(
@@ -720,6 +1462,7 @@ def run_functions(
     max_targets: int = 200,
     module_timeout_s: float = DEFAULT_MODULE_TIMEOUT_S,
     python: str | None = None,
+    only_targets: list[str] | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Drive every discovered function target in isolated workers. Persists all
@@ -732,6 +1475,13 @@ def run_functions(
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
     targets, skipped = discover_targets(repo, max_targets=max_targets, logger=log)
+    if only_targets is not None:
+        # Per-target selection: the campaign bandit allocates budget to ONE
+        # action, so it must be able to drive one function rather than sweeping
+        # the repo. Filtering here (not in discovery) keeps the skip reasons
+        # and the discovery cost shared across plays.
+        wanted = set(only_targets)
+        targets = [t for t in targets if t.id in wanted]
 
     diagnostics: list[str] = []
     if not targets:

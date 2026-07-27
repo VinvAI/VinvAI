@@ -20,6 +20,7 @@ from pathlib import Path
 import click
 
 from . import store
+from .campaign import run_campaign
 from .concurrency import run_concurrency
 from .differential import run_differential
 from .environment import run_environment
@@ -80,10 +81,14 @@ verify every endpoint of a service.
        Drive catalogued entry points and exported functions IN PROCESS
        (isolated workers, per-module deadline). Writes functions.json,
        function_results.jsonl. Needs no running service.
-  4. exerciser profile <repo>
+  4. exerciser campaign <repo> [--base-url URL] [--budget N]
+       Allocate ONE budget across every armed oracle by Thompson sampling over
+       (target x technique x oracle) — instead of driving each oracle
+       exhaustively. Writes campaign.json; reports which technique paid.
+  5. exerciser profile <repo>
        Build the behavioral profile + learned invariants.
        Writes profile.json, profile.md, invariants.json.
-  5. exerciser regress <repo> --base-url http://127.0.0.1:PORT
+  6. exerciser regress <repo> --base-url http://127.0.0.1:PORT
        Replay the accumulated behavior suite and report diffs.
 
 Requires identification's apis.json (run `identification consolidate` first) and,
@@ -369,6 +374,73 @@ def concurrency_cmd(
             call_timeout_s=call_timeout,
             python=python,
             logger=logging.getLogger("exerciser.concurrency"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("campaign")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option("--budget", default=20, show_default=True, help="Plays to allocate across oracles.")
+@click.option(
+    "--base-url",
+    default=None,
+    help="Live traced service base URL. Without it the HTTP oracle is not armed.",
+)
+@click.option("--seed", default=1729, show_default=True, help="Seed for Thompson sampling.")
+@click.option(
+    "--patience",
+    default=8,
+    show_default=True,
+    help="Stop after K consecutive plays that break nothing and cover nothing new.",
+)
+@click.option(
+    "--max-targets", default=50, show_default=True, help="Cap on targets armed per oracle."
+)
+@click.option(
+    "--include-environment",
+    is_flag=True,
+    help="Arm the environment resolution matrix (slow: minutes per play).",
+)
+@click.option("--python", default=None, help="Interpreter for oracle workers (TARGET's venv).")
+@click.option("--timeout", default=60.0, show_default=True, help="Seconds per oracle invocation.")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def campaign_cmd(
+    repo_path,
+    budget,
+    base_url,
+    seed,
+    patience,
+    max_targets,
+    include_environment,
+    python,
+    timeout,
+    verbose,
+):
+    """Allocate ONE budget across every armed oracle, by Thompson sampling.
+
+    Enumerates the (target x technique x oracle) action space from the existing
+    discovery functions, then spends each unit of budget on the action the
+    bandit draws — instead of driving every oracle exhaustively. Posteriors
+    warm-start from and persist to .vinv/exercise/campaign.json, so which
+    technique pays on THIS repo is learned across runs. Reports by_technique and
+    by_oracle.
+    """
+    _configure_logging(verbose)
+    try:
+        result = run_campaign(
+            Path(repo_path),
+            budget=budget,
+            base_url=base_url,
+            seed=seed,
+            patience=patience,
+            max_targets=max_targets,
+            include_environment=include_environment,
+            python=python,
+            timeout_s=timeout,
+            logger=logging.getLogger("exerciser.campaign"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})

@@ -158,8 +158,20 @@ class BetaArm:
     def mean(self) -> float:
         return self.alpha / (self.alpha + self.beta)
 
-    def update(self, outcome: Outcome | int) -> None:
-        """Fractional Beta update from a play's outcome.
+    def update(
+        self,
+        outcome: Outcome | int,
+        *,
+        coverage_bonus: float = COVERAGE_BONUS,
+        rng: random.Random | None = None,
+    ) -> None:
+        """Beta update from a play's outcome.
+
+        With ``rng`` the credit is BERNOULLI-ISED (``b ~ Bernoulli(credit)``),
+        which is the genuine conjugate update and the one Thompson sampling's
+        regret bound is proved for. Without it the fractional relaxation is used
+        (``α += credit``); see the module docstring for exactly how the two
+        differ and why the relaxation under-explores.
 
         An ``int`` is accepted as the legacy "newly covered symbols" signal and
         is treated as a coverage-only outcome, so callers that have not moved to
@@ -167,14 +179,15 @@ class BetaArm:
         """
         if isinstance(outcome, int):
             outcome = Outcome(new_coverage=max(0, outcome))
-        credit = outcome.credit()
+        credit = outcome.credit(coverage_bonus)
         self.plays += 1
         self.reward_sum += credit
         self.violations += outcome.violations
         self.coverage_sum += outcome.new_coverage
         self.cost_sum += outcome.cost
-        self.alpha += credit
-        self.beta += 1.0 - credit
+        posted = float(rng.random() < credit) if rng is not None else credit
+        self.alpha += posted
+        self.beta += 1.0 - posted
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -241,6 +254,12 @@ class ActionBandit:
 
     actions: tuple[Action, ...] = ()
     arms: dict[str, BetaArm] = field(default_factory=dict)
+    # The exploration exchange rate, as a PERSISTED, adjustable prior rather
+    # than a constant baked into the update — see ``COVERAGE_BONUS``.
+    coverage_bonus: float = COVERAGE_BONUS
+    # Bernoulli-ise the credit (the genuine conjugate update, and the one
+    # Thompson's regret bound is proved for) when an rng reaches ``update``.
+    bernoulli: bool = True
 
     def __post_init__(self) -> None:
         for a in self.actions:
@@ -264,10 +283,16 @@ class ActionBandit:
                 best = a
         return best
 
-    def update(self, action: Action, outcome: Outcome | int) -> None:
+    def update(
+        self, action: Action, outcome: Outcome | int, *, rng: random.Random | None = None
+    ) -> None:
         arm = self.arms.get(action.key)
         if arm is not None:
-            arm.update(outcome)
+            arm.update(
+                outcome,
+                coverage_bonus=self.coverage_bonus,
+                rng=rng if self.bernoulli else None,
+            )
 
     def preferred(self) -> Action | None:
         if not self.actions:
@@ -301,9 +326,20 @@ class ActionBandit:
         return {
             "objective": (
                 "oracle violations per unit cost; coverage is the exploration "
-                f"bonus (weight {COVERAGE_BONUS})"
+                f"bonus (weight {self.coverage_bonus})"
             ),
             "selection": "thompson: theta_a ~ Beta(alpha_a,beta_a), play argmax_a theta_a",
+            "update": (
+                "bernoulli: b ~ Bernoulli(credit), alpha += b (conjugate)"
+                if self.bernoulli
+                else "fractional: alpha += credit (bounded-reward relaxation, under-explores)"
+            ),
+            # The learnable priors, written out so the next run can restore them.
+            "priors": {
+                "alpha0": 1.0,
+                "beta0": 1.0,
+                "coverage_bonus": self.coverage_bonus,
+            },
             "action_space": "target x technique x oracle",
             "actions": len(self.actions),
             "preferred": preferred.to_json() if preferred else None,
@@ -320,7 +356,15 @@ def seed_actions_from_prior(
     prior: dict[str, Any] | None,
     decay: float = 0.5,
 ) -> ActionBandit:
-    """Warm-start action arms from a previous run's ``arms`` block, decayed."""
+    """Warm-start action arms from a previous run's ``arms`` block, decayed.
+
+    The learnable priors travel with the posteriors: a ``coverage_bonus`` the
+    previous run was operating under is restored, so the exploration exchange
+    rate is adjustable state rather than a recompiled constant.
+    """
+    stored_bonus = ((prior or {}).get("priors") or {}).get("coverage_bonus")
+    if isinstance(stored_bonus, int | float):
+        bandit.coverage_bonus = max(0.0, min(1.0, float(stored_bonus)))
     for key, arm_json in ((prior or {}).get("arms") or {}).items():
         if not isinstance(arm_json, dict):
             continue

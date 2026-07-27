@@ -17,12 +17,19 @@ import pytest
 
 from exerciser import store
 from exerciser.functions import (
+    annotation_base,
+    annotation_resolved,
     arg_sets_for,
     call_verdict,
     classify_row,
+    denial_reason,
     discover_targets,
+    impurity_reasons,
     is_denied,
+    module_function_defs,
     module_name_for,
+    name_segments,
+    resolved_value_for,
     run_functions,
     value_for,
 )
@@ -111,6 +118,126 @@ def test_destructive_names_are_denied():
     assert not is_denied("compute_total")
 
 
+def test_names_split_into_word_segments_not_substrings():
+    # The guard matches WORDS. A substring denylist is what let `nuke_everything`
+    # through while blocking `charge_density`.
+    assert name_segments("remove_prefix") == ["remove", "prefix"]
+    assert name_segments("dropAllTables") == ["drop", "all", "tables"]
+    assert name_segments("db.drop_all") == ["db", "drop", "all"]
+    assert name_segments("HTTPClient") == ["http", "client"]
+
+
+def test_the_guard_catches_the_destroyers_a_substring_list_missed():
+    # Every one of these was invisible to the old substring denylist.
+    for name in (
+        "nuke_everything",
+        "reset_database",
+        "clear_all",
+        "flush_all",
+        "revoke_token",
+        "rm_rf",
+        "prune_old",
+        "evict_entry",
+        "rollback_migration",
+        "revert_commit",
+        "void_invoice",
+    ):
+        assert is_denied(name), name
+
+
+def test_domain_nouns_are_drivable_again_but_real_verbs_are_not():
+    # Segment matching is a tradeoff, taken deliberately: a Tier-A verb denies
+    # unconditionally (so `remove_prefix` stays denied — a lost string helper is
+    # cheaper than a wrong guess), while an ambiguous Tier-B verb needs a
+    # stateful object beside it. That gives back the scientific-computing
+    # coverage the substring list was throwing away.
+    assert is_denied("remove_prefix"), "Tier-A verbs deny unconditionally"
+    for name in ("transfer_matrix", "charge_density", "transfer_function", "charge_carrier"):
+        assert not is_denied(name), name
+    # The tradeoff is not free and is not hidden: an ambiguous verb beside a
+    # genuinely stateful noun still denies, so physics' `charge_state` loses to
+    # `reset_state`/`clear_state`. Safety wins that tie; the AST purity check is
+    # what keeps the residual coverage loss small.
+    assert is_denied("charge_state")
+    for name in ("transfer_funds", "charge_card", "send_email", "reset_database"):
+        assert is_denied(name), name
+    # Bare Tier-B verbs are the whole identifier, so there is no noun to save them.
+    assert is_denied("deploy")
+    assert is_denied("publish")
+
+
+def test_every_denial_records_why():
+    reason = denial_reason("reset_database")
+    assert reason and "reset" in reason and "database" in reason
+    assert denial_reason("compute_total") is None
+
+
+def test_test_modules_are_never_importable_targets():
+    roots = ["src", "."]
+    # Importing a test module runs its fixtures against real state, and its
+    # `test_*` functions then get called with junk.
+    assert module_name_for("tests/test_foo.py", roots) is None
+    assert module_name_for("src/pkg/test/helpers.py", roots) is None
+    assert module_name_for("src/pkg/testing/util.py", roots) is None
+    assert module_name_for("test_foo.py", roots) is None
+    assert module_name_for("src/pkg/models_test.py", roots) is None
+    assert module_name_for("src/pkg/models.py", roots) == "pkg.models"
+
+
+# ---- unit: the AST purity pre-check ---------------------------------------
+
+
+def _impurities(source: str, name: str) -> list[str]:
+    return impurity_reasons(name, module_function_defs(source))
+
+
+def test_purity_check_sees_what_the_body_does_not_what_it_is_called():
+    # A perfectly innocent NAME over a body that deletes the filesystem. No
+    # verb vocabulary can catch this; reading the body can.
+    source = (
+        "import os\nimport shutil\nimport subprocess\nimport requests\n\n\n"
+        "def tidy(path: str) -> None:\n    os.remove(path)\n\n\n"
+        "def sweep(path: str) -> None:\n    shutil.rmtree(path)\n\n\n"
+        "def spawn(cmd: str) -> None:\n    subprocess.run(cmd)\n\n\n"
+        "def fetch(url: str) -> None:\n    requests.get(url)\n\n\n"
+        "def record(path: str) -> None:\n    open(path, 'w')\n\n\n"
+        "def query(conn) -> None:\n    conn.execute('DELETE FROM t')\n\n\n"
+        "def stop() -> None:\n    import sys\n\n    sys.exit(1)\n\n\n"
+        "def pure(a: int, b: int) -> int:\n    return a + b\n"
+    )
+    for name in ("tidy", "sweep", "spawn", "fetch", "record", "query", "stop"):
+        assert _impurities(source, name), name
+    assert _impurities(source, "pure") == [], "a pure body must stay drivable"
+
+
+def test_purity_check_follows_same_module_helpers_one_hop():
+    source = (
+        "import os\n\n\n"
+        "def tidy(path: str) -> None:\n    _really(path)\n\n\n"
+        "def _really(path: str) -> None:\n    os.remove(path)\n"
+    )
+    reasons = _impurities(source, "tidy")
+    assert reasons and "_really" in reasons[0]
+
+
+def test_reading_a_file_is_not_a_side_effect():
+    # Over-blocking costs coverage, so the check is about MUTATION: reads and
+    # path arithmetic stay drivable.
+    source = (
+        "import os\n\n\n"
+        "def load(path: str) -> str:\n"
+        "    full = os.path.join(path, 'x')\n"
+        "    with open(full) as fh:\n"
+        "        return fh.read()\n"
+    )
+    assert _impurities(source, "load") == []
+
+
+def test_an_unreadable_mode_is_treated_as_a_write():
+    source = "def save(path: str, mode: str) -> None:\n    open(path, mode)\n"
+    assert _impurities(source, "save"), "a computed mode is not assumed to be 'r'"
+
+
 def test_argument_sets_cover_the_input_classes():
     params = [
         {"name": "n", "annotation": "int", "has_default": False, "keyword_only": False},
@@ -131,8 +258,61 @@ def test_discovery_skips_private_and_destructive(tmp_path: Path):
     assert {"add", "halve", "greet", "untyped"} <= names
     assert "_private" not in names, "private by convention"
     assert "delete_everything" not in names
-    assert any(s["reason"] == "destructive-name" for s in skipped)
+    assert any(s["reason"].startswith("destructive-name") for s in skipped)
     assert all(t.module == "targetpkg.calc" for t in targets)
+
+
+_IMPURE_PKG = {
+    "__init__.py": "",
+    "calc.py": """\
+import os
+
+
+def total(values: list) -> int:
+    return sum(values)
+
+
+def tidy(path: str) -> None:
+    # An innocent NAME over a body that removes files. Only the purity
+    # pre-check stops this being imported and called with a guessed path.
+    os.remove(path)
+
+
+def housekeep(path: str) -> None:
+    _erase(path)
+
+
+def _erase(path: str) -> None:
+    os.remove(path)
+""",
+}
+
+
+def test_impure_bodies_are_skipped_with_a_recorded_reason(tmp_path: Path):
+    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
+    targets, skipped = discover_targets(repo)
+    names = {t.qualname for t in targets}
+    assert names == {"total"}, "only the pure function may be driven"
+    reasons = {s["id"]: s["reason"] for s in skipped}
+    assert "impure-body" in reasons["targetpkg.calc:tidy"]
+    assert "os.remove" in reasons["targetpkg.calc:tidy"]
+    # …including one reached only through a same-module helper.
+    assert "impure-body" in reasons["targetpkg.calc:housekeep"]
+    assert "_erase" in reasons["targetpkg.calc:housekeep"]
+
+
+def test_the_driver_never_calls_an_impure_target(tmp_path: Path):
+    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("still here", encoding="utf-8")
+
+    result = run_functions(repo, module_timeout_s=60.0)
+
+    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
+    assert not any("tidy" in r.get("target_id", "") for r in rows)
+    assert not any("housekeep" in r.get("target_id", "") for r in rows)
+    assert victim.read_text(encoding="utf-8") == "still here"
+    assert any("impure-body" in s["reason"] for s in result["skipped"])
 
 
 # ---- classification --------------------------------------------------------
@@ -198,6 +378,10 @@ def test_exceptions_no_input_can_justify_are_defects():
             "error_type": etype,
             "error_module": "builtins",
             "error_mro": mro,
+            # The harness really did supply a value OF THE DECLARED TYPE here —
+            # without that this row would be a guess, and a guess cannot be
+            # called conformant (see the unresolved-annotation test below).
+            "annotations_resolved": True,
         }
         assert call_verdict(row) == "defect", etype
         assert classify_row(row) == "function-crash"
@@ -255,6 +439,111 @@ def test_an_unknown_exception_is_scored_by_what_it_inherits():
 
 def test_healthy_calls_classify_as_nothing():
     assert classify_row({"phase": "call", "status": "ok"}) is None
+
+
+# ---- annotations the harness could not resolve ----------------------------
+
+
+def test_annotation_resolution_is_reported_not_assumed():
+    # Resolvable: a value really can be built that SATISFIES the annotation.
+    for ann in ("str", "int", "Optional[str]", "list[int]", "dict[str, int] | None", "Any"):
+        assert annotation_resolved(ann), ann
+        assert resolved_value_for(ann, "valid")[1] is True
+    # A typing ABC a concrete family genuinely satisfies.
+    assert annotation_base("Sequence[int]") == "list"
+    assert annotation_resolved("Sequence[int]")
+    # Unresolvable: there is no Config to send, and `value_for` says so instead
+    # of quietly handing over the string family's "vinv".
+    for ann in ("Config", "pkg.Config", None, "Callable[[int], int]"):
+        assert not annotation_resolved(ann), ann
+    value, resolved = resolved_value_for("Config", "valid")
+    assert value == "vinv" and resolved is False
+    assert value_for("Config", "valid") == "vinv", "the legacy accessor still returns a probe"
+
+
+def test_a_guessed_value_is_never_reported_as_conformant():
+    # `assert isinstance(cfg, Config)` is a repo defending its own contract. If
+    # the harness passes "vinv" for `cfg: Config` and then tells the policy the
+    # value CONFORMED, every such guard becomes a reported defect.
+    guessed = {
+        "phase": "call",
+        "status": "error",
+        "input_class": "valid",
+        "error_type": "AssertionError",
+        "error_module": "builtins",
+        "error_mro": ["AssertionError", "Exception"],
+        "annotations_resolved": False,
+    }
+    assert call_verdict(guessed) == "rejected"
+    assert classify_row(guessed) is None
+    # The same failure on a value we really did build to the declared type is
+    # still a defect — the fix narrows the claim, it does not disarm the oracle.
+    assert call_verdict({**guessed, "annotations_resolved": True}) == "defect"
+
+
+def test_argument_sets_carry_whether_the_annotations_resolved():
+    resolved = arg_sets_for(
+        [{"name": "n", "annotation": "int", "has_default": False, "keyword_only": False}]
+    )
+    assert all(s["annotations_resolved"] for s in resolved)
+    guessed = arg_sets_for(
+        [{"name": "cfg", "annotation": "Config", "has_default": False, "keyword_only": False}]
+    )
+    assert not any(s["annotations_resolved"] for s in guessed)
+    # A defaulted unresolvable parameter is omitted from `valid`, so THAT call
+    # is honest even though the others are guesses.
+    mixed = {
+        s["class"]: s["annotations_resolved"]
+        for s in arg_sets_for(
+            [
+                {"name": "n", "annotation": "int", "has_default": False, "keyword_only": False},
+                {"name": "cfg", "annotation": "Config", "has_default": True, "keyword_only": False},
+            ]
+        )
+    }
+    assert mixed == {"valid": True, "boundary": False, "negative": False}
+
+
+_UNRESOLVABLE_PKG = {
+    "__init__.py": "",
+    "calc.py": """\
+class Config:
+    pass
+
+
+def configure(cfg: Config) -> str:
+    assert isinstance(cfg, Config)
+    return "ok"
+
+
+def add(a: int, b: int) -> int:
+    return a + b
+""",
+}
+
+
+def test_unresolvable_annotations_are_skipped_not_guessed(tmp_path: Path):
+    repo = _make_repo(tmp_path, pkg=_UNRESOLVABLE_PKG)
+
+    result = run_functions(repo, module_timeout_s=60.0)
+
+    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
+    configure = [r for r in rows if "configure" in r.get("target_id", "")]
+    assert configure and all(r["status"] == "skipped" for r in configure)
+    assert "unresolvable annotation" in configure[0]["error"]
+    assert "refusing to guess" in configure[0]["error"]
+    assert result["issue_clusters"] == 0, "a defensive isinstance guard is not a defect"
+    # …and the resolvable neighbour is still driven for real.
+    assert any(r.get("qualname") == "add" and r.get("status") == "ok" for r in rows)
+
+
+def test_driven_rows_record_whether_the_annotations_resolved(tmp_path: Path):
+    repo = _make_repo(tmp_path)
+    run_functions(repo, module_timeout_s=60.0)
+    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
+    calls = [r for r in rows if r.get("phase") == "call"]
+    assert calls and all("annotations_resolved" in r for r in calls)
+    assert all(r["annotations_resolved"] for r in calls), "int/str targets resolve cleanly"
 
 
 # ---- the real driver -------------------------------------------------------

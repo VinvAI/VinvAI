@@ -29,16 +29,24 @@ clusters two failure kinds:
   UNTYPED exception (a typed rejection is correct handling, not a defect);
 * ``fault-divergence`` — a chunk-boundary sweep where different split points
   produced different aggregate results. The aggregator is order-dependent on
-  chunking, which is always a bug.
+  chunking, which is always a bug. Convergence is decided on a digest of the
+  FULL value (``value_digest``), not on the lossy ``_summarize`` rendering:
+  an aggregator returning a list of the right length with corrupted contents is
+  precisely the bug the sweep exists for, and comparing shapes misses it. A
+  split that RAISES while other splits succeed is a divergence too — the typed
+  rejections that mean "correct refusal" for a shape fault mean nothing here,
+  because every split carries the SAME payload.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -186,6 +194,11 @@ def chunk_boundary_cases(canonical: str) -> list[list[str]]:
 
 
 def _summarize(value: Any, cap: int = 200) -> Any:
+    """JSON-safe, bounded rendering of a value — for HUMANS reading the rows.
+
+    Lossy on purpose (list contents dropped, dicts truncated). Never use it to
+    decide whether two results are equal: see ``value_digest``.
+    """
     try:
         if value is None or isinstance(value, bool | int | float):
             return value
@@ -198,6 +211,75 @@ def _summarize(value: Any, cap: int = 200) -> Any:
         return {"type": type(value).__name__, "repr": repr(value)[:cap]}
     except Exception:
         return {"type": "unrenderable"}
+
+
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]+")
+_MAX_CANONICAL_DEPTH = 12
+
+
+def _canonical(value: Any, depth: int = 0, seen: frozenset[int] = frozenset()) -> str:
+    """Order-stable, FULL-content serialisation of an arbitrary value.
+
+    Everything ``_summarize`` throws away is kept: list and tuple contents in
+    order, every dict key, set members sorted by their own canonical form.
+    Objects are rendered by ``repr`` when they define one, and by their type
+    plus attributes when they do not — because the DEFAULT ``__repr__`` embeds
+    the instance address, which differs on every call and would make every
+    split point look divergent.
+    """
+    if depth > _MAX_CANONICAL_DEPTH:
+        return "<deep>"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return f"i:{value}"
+    if isinstance(value, float):
+        return f"f:{value!r}"
+    if isinstance(value, str):
+        return f"s:{value!r}"
+    if isinstance(value, bytes | bytearray):
+        return f"b:{bytes(value)!r}"
+    if id(value) in seen:
+        return "<cycle>"
+    seen = seen | {id(value)}
+    if isinstance(value, list | tuple):
+        inner = ",".join(_canonical(v, depth + 1, seen) for v in value)
+        return f"{type(value).__name__}[{inner}]"
+    if isinstance(value, set | frozenset):
+        inner = ",".join(sorted(_canonical(v, depth + 1, seen) for v in value))
+        return f"{type(value).__name__}{{{inner}}}"
+    if isinstance(value, dict):
+        items = sorted(
+            (_canonical(k, depth + 1, seen), _canonical(v, depth + 1, seen))
+            for k, v in value.items()
+        )
+        return "{" + ",".join(f"{k}={v}" for k, v in items) + "}"
+    if type(value).__repr__ is not object.__repr__:
+        return f"r:{_ADDRESS_RE.sub('0x?', repr(value))}"
+    attrs = getattr(value, "__dict__", None)
+    if isinstance(attrs, dict):
+        return f"o:{type(value).__name__}{_canonical(attrs, depth + 1, seen)}"
+    return f"o:{type(value).__name__}"
+
+
+def value_digest(value: Any) -> str:
+    """Stable hash of a value's FULL content — the chunk sweep's equality test.
+
+    The sweep exists to catch an aggregator whose output depends on where the
+    stream was split. Comparing ``_summarize`` output compares SHAPES, so an
+    aggregator returning a list of the right length with corrupted content
+    converges silently — which is exactly the bug being hunted.
+    """
+    try:
+        canonical = _canonical(value)
+    except Exception:
+        try:
+            canonical = f"!{_ADDRESS_RE.sub('0x?', repr(value))}"
+        except Exception:
+            canonical = f"!unrenderable:{type(value).__name__}"
+    return hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()[:32]
 
 
 def _resolve(target: str) -> Any:
@@ -271,29 +353,44 @@ def _worker_main(argv: list[str]) -> int:
             row["chunk_count"] = len(chunks)
             outcomes.append(row)
             rows.append(row)
-        # Convergence: every split that SUCCEEDED must agree on the result.
-        values = {
-            json.dumps(o.get("result"), sort_keys=True, default=str)
-            for o in outcomes
-            if o.get("status") == "ok"
-        }
+        # Convergence, on FULL values. `result` is a lossy human rendering; a
+        # digest of the whole value is what makes "same length, different
+        # contents" a divergence instead of a silent pass.
+        succeeded = [o for o in outcomes if o.get("status") == "ok"]
+        raised = [o for o in outcomes if o.get("status") != "ok"]
+        values = {str(o.get("result_digest")) for o in succeeded}
+        # A split that RAISED while another split succeeded is a divergence in
+        # its own right — the streaming parser that breaks on exactly one
+        # mid-token split is the canonical case, and its exception is typically
+        # a ValueError, which the typed-rejection rule would otherwise discard.
+        mixed = bool(raised) and bool(succeeded)
+        for outcome in raised:
+            outcome["sweep_divergent"] = mixed
+        diverged = len(values) > 1 or mixed
+        if len(values) > 1:
+            detail = (
+                f"{len(values)} distinct aggregate results across "
+                f"{len(outcomes)} split points — the aggregator is "
+                "chunk-boundary dependent"
+            )
+        elif mixed:
+            detail = (
+                f"{len(raised)} of {len(outcomes)} split points raised while "
+                f"{len(succeeded)} succeeded — the aggregator is chunk-boundary "
+                "dependent"
+            )
+        else:
+            detail = None
         rows.append(
             {
                 "boundary": plan["name"],
                 "target": target,
                 "phase": "chunk-convergence",
-                "status": "ok" if len(values) <= 1 else "error",
+                "status": "error" if diverged else "ok",
                 "distinct_results": len(values),
                 "splits": len(outcomes),
-                "error": (
-                    None
-                    if len(values) <= 1
-                    else (
-                        f"{len(values)} distinct aggregate results across "
-                        f"{len(outcomes)} split points — the aggregator is "
-                        "chunk-boundary dependent"
-                    )
-                ),
+                "raised_splits": len(raised),
+                "error": detail,
             }
         )
     _emit(rows)
@@ -320,6 +417,10 @@ def _call_once(
     try:
         out = fn(**payload)
         row.update(status="ok", result=_summarize(out))
+        if phase == "chunk-sweep":
+            # The sweep compares VALUES, so it needs a full-content digest —
+            # `result` above is a lossy rendering meant for a human reader.
+            row["result_digest"] = value_digest(out)
     except BaseException as exc:
         row.update(
             status="error",
@@ -366,6 +467,15 @@ def classify_row(row: dict[str, Any]) -> str | None:
         return "import-error"
     if row.get("status") != "error":
         return None
+    # _TYPED_REJECTIONS must NOT apply to a divergent sweep row. A streaming
+    # parser that raises ValueError on exactly the one mid-token split — and
+    # succeeds on every other — is not "refusing a shape": the shape is
+    # identical, only the chunking differs, so the exception IS the divergence.
+    # The worker marks the row (it is the only place that can see the other
+    # splits); a sweep where EVERY split raises is a consistent refusal and
+    # keeps the ordinary rules below.
+    if row.get("phase") == "chunk-sweep" and row.get("sweep_divergent"):
+        return "fault-divergence"
     # A typed rejection is the consumer correctly refusing the shape.
     return None if row.get("error_type") in _TYPED_REJECTIONS else "fault-crash"
 
@@ -377,7 +487,14 @@ def cluster_fault_failures(rows: list[dict[str, Any]]) -> list[FailureCluster]:
         if kind is None:
             continue
         target = row.get("target", "?")
-        if kind == "fault-divergence":
+        if kind == "fault-divergence" and row.get("phase") == "chunk-sweep":
+            # Deliberately omits the split index so every failing split of one
+            # aggregator collapses into ONE finding rather than N.
+            detail = (
+                f"{row.get('error_type', 'error')} raised on a chunk-boundary "
+                "split while other splits succeeded"
+            )
+        elif kind == "fault-divergence":
             detail = str(row.get("error"))
         else:
             detail = f"{row.get('error_type', 'error')} on {row.get('fault_label')}"
