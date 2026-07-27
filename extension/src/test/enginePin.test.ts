@@ -13,7 +13,6 @@ function pin(
 		head: 'aaaaaaa',
 		pinnedCommit: 'bbbbbbb',
 		managed: true,
-		dirty: false,
 		mode: 'prompt' as EngineUpdateMode,
 		force: false,
 		autoAttempts: 0,
@@ -86,12 +85,16 @@ suite('engines pin decision', () => {
 		}
 	});
 
-	test('local changes in our own clone stop the update', () => {
-		assert.strictEqual(decidePinAction(pin({ dirty: true, mode: 'auto' })).kind, 'dirty');
-		assert.strictEqual(
-			decidePinAction(pin({ dirty: true, force: true, mode: 'auto' })).kind,
-			'dirty',
+	test('the working tree is not an input — our own clone is forced onto the pin', () => {
+		// Regression guard for the shipped-and-broken 0.1.2 behaviour: `uv sync`
+		// rewrites the tracked uv.lock, so a clone that respected local changes
+		// disqualified itself from the update the first time it was installed.
+		// Anything reintroducing a working-tree input has to delete this test.
+		assert.ok(
+			!Object.keys(pin()).includes('dirty'),
+			'a dirty/local-changes input must not come back — it made the update unreachable',
 		);
+		assert.strictEqual(decidePinAction(pin({ mode: 'auto' })).kind, 'update');
 	});
 
 	test("'auto' updates without asking", () => {

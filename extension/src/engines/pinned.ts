@@ -27,9 +27,10 @@ export const ENGINE_REF = 'v0.1.2';
  * What an unconfigured install does when the stamped ref and the checkout
  * disagree. The `vinv.engines.autoUpdate` setting overrides it per user.
  *
- *   'auto'   — update without asking (chosen at build time for channels where
- *              the multi-minute `cargo build` is an acceptable surprise)
- *   'prompt' — offer it once per extension version (the shipped default)
+ *   'auto'   — update without asking (the shipped default: the extension forces
+ *              its own engines checkout onto the pin, and the multi-minute
+ *              `cargo build` is an accepted cost of not running skewed engines)
+ *   'prompt' — offer it once per extension version
  *   'never'  — leave the checkout alone
  */
 export const ENGINE_UPDATE_DEFAULT: 'auto' | 'prompt' | 'never' = 'auto';

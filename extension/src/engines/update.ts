@@ -17,8 +17,17 @@
  *
  * WHAT IT WILL NOT TOUCH: anything that is not the clone we made ourselves. A
  * dev checkout, or a root pointed at by `vinv.enginesPath`, is the user's
- * working tree — a checkout there could throw away work in progress. Same for
- * our own clone when it has tracked modifications. Both cases warn and stop.
+ * working tree — a checkout there could throw away work in progress, so it
+ * warns and stops.
+ *
+ * WHAT IT WILL OVERWRITE: our own clone, unconditionally. ~/.vinv/engines is an
+ * artifact directory this extension owns and forces onto the pin — it is not a
+ * tree anyone is meant to edit, so local modifications there are discarded
+ * rather than respected. That is deliberate, and it is also the only thing that
+ * works: `uv sync` rewrites the tracked `uv.lock` on every install, so treating
+ * a tracked edit as the user's work disqualified every clone Vinv creates from
+ * the update the moment it was first synced. Untracked files are left alone —
+ * .venv/ and index/target/ are expensive build output, not state to reset.
  */
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -82,16 +91,6 @@ async function resolveCommit(root: string, ref: string): Promise<string | null> 
 	}
 }
 
-/** True when the checkout has modifications to tracked files. */
-async function hasLocalChanges(root: string): Promise<boolean> {
-	// --untracked-files=no on purpose: a synced, built checkout is full of
-	// untracked-but-ignored output (.venv/, index/target/), and even a stray
-	// scratch file is not a reason to refuse. Tracked edits are the real risk,
-	// because those are what a checkout would overwrite.
-	const out = await git(root, ['status', '--porcelain', '--untracked-files=no']);
-	return out.trim().length > 0;
-}
-
 /** The clone this extension created and therefore owns. */
 function isManagedClone(root: string): boolean {
 	return path.resolve(root).toLowerCase() === path.resolve(defaultEnginesCloneDir()).toLowerCase();
@@ -141,8 +140,6 @@ export type EnginePinAction =
 	| { kind: 'up-to-date' }
 	/** A dev checkout or `vinv.enginesPath` root: warn, never modify. */
 	| { kind: 'foreign' }
-	/** Our clone, but with tracked edits: warn, never modify. */
-	| { kind: 'dirty' }
 	/** Offer the update first. */
 	| { kind: 'ask' }
 	/** Go straight to updating. */
@@ -151,15 +148,16 @@ export type EnginePinAction =
 /**
  * The pin decision, given everything known about the checkout.
  *
- * `managed` is the load-bearing one: it is the difference between updating an
- * artifact directory this extension owns and running `git checkout` over
- * someone's working tree.
+ * `managed` is the load-bearing one, and it is the ONLY thing standing between
+ * a forced overwrite and someone's working tree: our own clone is forced onto
+ * the pin regardless of what is in it, so nothing else may ever reach that
+ * path. The state of the working tree is deliberately not an input — see the
+ * module header on why respecting it made the update unreachable.
  */
 export function decidePinAction(input: {
 	head: string;
 	pinnedCommit: string | null;
 	managed: boolean;
-	dirty: boolean;
 	mode: EngineUpdateMode;
 	force: boolean;
 	autoAttempts: number;
@@ -169,9 +167,6 @@ export function decidePinAction(input: {
 	}
 	if (!input.managed) {
 		return { kind: 'foreign' };
-	}
-	if (input.dirty) {
-		return { kind: 'dirty' };
 	}
 	// 'auto' updates silently — until it has already relaunched a couple of
 	// times for this version, which means the build keeps failing and silently
@@ -203,7 +198,13 @@ function launchUpdate(
 		// Detached on purpose: this clone is an artifact directory pinned to a
 		// commit, not a branch anyone develops on. advice.detachedHead is off so
 		// the user watching the terminal sees the build, not git's warning wall.
-		`git -c advice.detachedHead=false checkout --detach ${target}`,
+		//
+		// --force is load-bearing, not belt-and-braces: `uv sync` rewrites the
+		// tracked uv.lock, and uv.lock differs between almost any two engine
+		// pins, so a plain checkout aborts with "local changes would be
+		// overwritten" on every clone that has ever been installed. Reaching
+		// here already means the clone is ours to overwrite (decidePinAction).
+		`git -c advice.detachedHead=false checkout --detach --force ${target}`,
 		'uv sync',
 		...(opts.rebuildIndex ? [cargoBuildCommand(root)] : []),
 	];
@@ -265,8 +266,6 @@ export async function maybeUpdateEngines(
 		head,
 		pinnedCommit: await resolveCommit(root, ENGINE_REF),
 		managed,
-		// Only meaningful for our own clone, and only asked for there.
-		dirty: managed ? await hasLocalChanges(root) : false,
 		mode,
 		force,
 		autoAttempts,
@@ -296,24 +295,11 @@ export async function maybeUpdateEngines(
 		return;
 	}
 
-	if (action.kind === 'dirty') {
-		settle();
-		const choice = await vscode.window.showWarningMessage(
-			`Vinv: the engines checkout at ${root} has local changes, so it was left alone — it is ${head.slice(0, 7)} and this build expects ${ENGINE_REF}.`,
-			'Open Folder',
-			'Dismiss',
-		);
-		if (choice === 'Open Folder') {
-			await vscode.env.openExternal(vscode.Uri.file(root));
-		}
-		return;
-	}
-
 	// Ask before spending the user's machine on it, unless this build (or the
 	// user) chose 'auto'.
 	if (action.kind === 'ask') {
 		const choice = await vscode.window.showInformationMessage(
-			`Vinv ${version} ships with engines ${ENGINE_REF}; yours are at ${head.slice(0, 7)}. Update them now? (Runs uv sync, and rebuilds the index engine if it changed.)`,
+			`Vinv ${version} ships with engines ${ENGINE_REF}; yours are at ${head.slice(0, 7)}. Update them now? (Resets Vinv's own engines checkout to ${ENGINE_REF}, runs uv sync, and rebuilds the index engine if it changed.)`,
 			'Update Now',
 			'Later',
 			'Never',
