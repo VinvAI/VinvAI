@@ -8,7 +8,7 @@ Coding agents know your code. They have never understood how it behaves when it 
 
 <sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
 
-<img src="https://images.vinv.ai/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn" width="820" />
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/.github/assets/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn" width="820" />
 
 <sub>One command starts it. Vinv drives the other eight stages.</sub>
 
