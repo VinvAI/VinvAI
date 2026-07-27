@@ -21,6 +21,7 @@ import click
 
 from . import store
 from .differential import run_differential
+from .environment import run_environment
 from .faults import run_faults
 from .functions import run_functions
 from .plan import build_plan
@@ -281,6 +282,33 @@ def faults_cmd(
             timeout_s=timeout,
             python=python,
             logger=logging.getLogger("exerciser.faults"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("environment")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--signature-target",
+    "signature_targets",
+    multiple=True,
+    help="Upstream symbol to watch as module:qualname. Repeatable.",
+)
+@click.option("--skip-matrix", is_flag=True, help="Skip the uv dependency-resolution matrix.")
+@click.option("--timeout", default=180.0, show_default=True, help="Seconds per resolution mode.")
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def environment_cmd(repo_path, signature_targets, skip_matrix, timeout, verbose):
+    _configure_logging(verbose)
+    try:
+        result = run_environment(
+            Path(repo_path),
+            targets=list(signature_targets) or None,
+            skip_matrix=skip_matrix,
+            timeout_s=timeout,
+            logger=logging.getLogger("exerciser.environment"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
