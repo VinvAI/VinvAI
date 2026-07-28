@@ -333,12 +333,30 @@ def enumerate_actions(
             # so in a note that no code path ever acted on. The drivable targets
             # are already catalogued and their annotations already declare a
             # domain, so derive from those instead of reporting the vacuum.
-            derived = faults.derive_boundaries(repo, function_targets[:max_targets], python)
+            #
+            # This is the one part of enumeration that IMPORTS the target: a
+            # signature cannot be read without loading the module that defines
+            # it. Batched into one subprocess for that reason — and it is why
+            # `python` is threaded in, so the import happens where the repo's
+            # dependencies are.
+            derived, refused = faults.derive_boundaries(
+                repo, function_targets[:max_targets], python
+            )
             if derived:
                 space.notes.append(
                     f"no boundaries.json — derived {len(derived)} boundary(ies) from the "
-                    "consumers' own annotations"
+                    f"consumers' own annotations, and refused {len(refused)}"
                 )
+            if refused:
+                # A refusal is a fact about the repo, and one it can act on:
+                # "annotate this parameter and the oracle arms here". Counting
+                # them without saying why is how the first cut of this armed 17
+                # boundaries that could never fire and said nothing.
+                by_reason: dict[str, int] = {}
+                for reason in refused.values():
+                    by_reason[reason] = by_reason.get(reason, 0) + 1
+                for reason, count in sorted(by_reason.items(), key=lambda kv: (-kv[1], kv[0])):
+                    space.notes.append(f"fault oracle skipped {count} target(s): {reason}")
             boundaries = derived
         for b in boundaries:
             space.boundaries[b.target] = b
@@ -399,6 +417,9 @@ class OracleConfig:
     # Cross-play state: HTTP issue clusters are cumulative in issues.json, so a
     # play's violations are the DELTA it caused.
     _http_clusters: int = 0
+    # target -> its annotated contract. Reading one costs a subprocess and a
+    # module import, and the bandit replays arms — see `_valid_kwargs_for`.
+    _signature_contracts: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def _cluster_signature(cluster: dict[str, Any]) -> str:
@@ -696,14 +717,23 @@ def _valid_kwargs_for(cfg: OracleConfig, target: str) -> dict[str, Any]:
     oracle did not merely miss the bug, it actively CERTIFIED the target as
     concurrency-safe. ``functions`` already knows how to build these; the
     signature is read out-of-process by the same helper the faults oracle uses.
+
+    Memoised on the config, because the bandit REPLAYS an arm: reading one
+    signature costs a subprocess and a module import, and the campaign paid it
+    again on every draw of the same target. The answer cannot change mid-run —
+    it is read from the same files enumeration already read.
     """
     from .faults import infer_contract_from_signature
     from .functions import resolved_value_for
 
-    try:
-        contract = infer_contract_from_signature(target, cfg.python, cfg.repo)
-    except Exception:  # a signature we cannot read is not worth failing a play
-        return {}
+    cached = cfg._signature_contracts.get(target)
+    if cached is None:
+        try:
+            cached = infer_contract_from_signature(target, cfg.python, cfg.repo)
+        except Exception:  # a signature we cannot read is not worth failing a play
+            cached = {}
+        cfg._signature_contracts[target] = cached
+    contract = cached
     kwargs: dict[str, Any] = {}
     for name, annotation in contract.items():
         value, _resolved = resolved_value_for(annotation, "valid")

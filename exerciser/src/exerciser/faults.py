@@ -553,6 +553,128 @@ def cluster_fault_failures(rows: list[dict[str, Any]]) -> list[FailureCluster]:
     )
 
 
+#: Runs in the TARGET's interpreter. Reads a JSON list of targets on stdin and
+#: answers with, per target, the annotated contract AND the required parameters
+#: no contract can describe. Batched because it is called once per catalogued
+#: target during action enumeration: one subprocess per target cost 0.35s each
+#: on a trivial module (17s for a campaign's 50) and re-imported the same modules
+#: 50 times, all of it before a single unit of budget was spent.
+_SIGNATURE_PROBE_SRC = r"""
+import importlib, inspect, json, sys
+
+def describe(annotation):
+    # `getattr(ann, '__name__')` is the usual "pretty type name" recipe and is
+    # right for a plain class — but for a typing alias `__name__` is the
+    # CONSTRUCTOR's name, so `Optional[str]` renders as bare "Optional" and every
+    # parameter of it lost 3 of its 4 faults (only `none` survived;
+    # empty/whitespace/surrogate never fired). `list[int]`/`dict[...]` survived
+    # only by accident, because the lowercased constructor name still starts with
+    # "list"/"dict". `str(ann)` keeps the parameters, so prefer it whenever the
+    # annotation is subscripted.
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", None)
+    if origin is not None or args:
+        return str(annotation)
+    return getattr(annotation, "__name__", None) or str(annotation)
+
+out = {}
+for target in json.loads(sys.stdin.read()):
+    mod_name, _, qual = target.partition(":")
+    try:
+        obj = importlib.import_module(mod_name)
+        for part in qual.split("."):
+            obj = getattr(obj, part)
+        sig = inspect.signature(obj)
+    except BaseException:
+        continue
+    contract, undescribable = {}, []
+    for name, p in sig.parameters.items():
+        if name in ("self", "cls") or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+            continue
+        if p.annotation is p.empty:
+            # A parameter with a default is optional: omitting it is legal, so
+            # it costs nothing. One with neither annotation nor default cannot
+            # be supplied at all, and every call that omits it dies in the
+            # signature before reaching the target's own code.
+            if p.default is p.empty:
+                undescribable.append(name)
+            continue
+        contract[name] = describe(p.annotation)
+    out[target] = {"contract": contract, "undescribable": undescribable}
+json.dump(out, sys.stdout)
+"""
+
+
+@dataclass(frozen=True)
+class SignatureFacts:
+    """What one consumer's signature says, and what it withholds."""
+
+    #: Annotated parameters and their rendered types.
+    contract: dict[str, str] = field(default_factory=dict)
+    #: REQUIRED parameters with no annotation. A contract cannot describe them
+    #: and `baseline_from_contract` cannot supply them, so any call built from
+    #: the contract alone is missing an argument before it starts.
+    undescribable: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Can a payload built from ``contract`` alone actually reach the target?"""
+        return bool(self.contract) and not self.undescribable
+
+
+def infer_signature_facts(
+    targets: Sequence[str], python: str | None = None, repo: Path | None = None
+) -> dict[str, SignatureFacts]:
+    """Signature facts for many targets, in ONE subprocess.
+
+    Reading a signature means importing the module that defines it, so this
+    executes target code — which is why it is batched: 50 separate processes
+    paid 50 interpreter startups and 50 sets of module imports for the same
+    answer one process gives.
+    """
+    import subprocess as _sp
+
+    wanted = list(dict.fromkeys(targets))
+    if not wanted:
+        return {}
+    roots = detect_src_roots(repo) if repo is not None else ["."]
+    base = repo.resolve() if repo is not None else Path.cwd()
+    sys_path = "".join(f"sys.path.insert(0, {str((base / r).resolve())!r})\n" for r in roots)
+    code = "import sys\n" + sys_path + _SIGNATURE_PROBE_SRC
+    try:
+        proc = _sp.run(  # noqa: S603 (fixed argv, no shell)
+            [python or sys.executable, "-c", code],
+            input=json.dumps(wanted),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Scales with the batch: the per-target budget is what it always was.
+            timeout=min(300.0, 30.0 + 2.0 * len(wanted)),
+            cwd=str(base),
+        )
+        data = json.loads((proc.stdout or "{}").strip() or "{}")
+    except (OSError, ValueError, _sp.TimeoutExpired):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, SignatureFacts] = {}
+    for target, doc in data.items():
+        if not isinstance(doc, dict):
+            continue
+        contract = doc.get("contract")
+        undescribable = doc.get("undescribable")
+        out[str(target)] = SignatureFacts(
+            contract={str(k): str(v) for k, v in contract.items()}
+            if isinstance(contract, dict)
+            else {},
+            undescribable=tuple(str(n) for n in undescribable or ())
+            if isinstance(undescribable, list)
+            else (),
+        )
+    return out
+
+
 def infer_contract_from_signature(
     target: str, python: str | None = None, repo: Path | None = None
 ) -> dict[str, str]:
@@ -564,59 +686,7 @@ def infer_contract_from_signature(
     parameter already DECLARES its admissible domain. Unannotated parameters
     are left out — they are what the agent channel is for.
     """
-    import subprocess as _sp
-
-    roots = detect_src_roots(repo) if repo is not None else ["."]
-    base = repo.resolve() if repo is not None else Path.cwd()
-    sys_path_lines = "".join(f"sys.path.insert(0, {str((base / r).resolve())!r})\n" for r in roots)
-    code = (
-        "import importlib, inspect, json, sys\n"
-        + sys_path_lines
-        + f"mod_name, _, qual = {target!r}.partition(':')\n"
-        "try:\n"
-        "    obj = importlib.import_module(mod_name)\n"
-        "    for part in qual.split('.'):\n"
-        "        obj = getattr(obj, part)\n"
-        "    sig = inspect.signature(obj)\n"
-        "except BaseException:\n"
-        "    print('{}'); sys.exit(0)\n"
-        "out = {}\n"
-        "for name, p in sig.parameters.items():\n"
-        "    if name in ('self', 'cls') or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):\n"
-        "        continue\n"
-        "    ann = p.annotation\n"
-        "    if ann is p.empty:\n"
-        "        continue\n"
-        # `getattr(ann, '__name__')` is the usual "pretty type name" recipe and
-        # is right for a plain class — but for a typing alias `__name__` is the
-        # CONSTRUCTOR's name, so `Optional[str]` renders as bare "Optional" and
-        # every parameter of it lost 3 of its 4 faults (only `none` survived;
-        # empty/whitespace/surrogate never fired). `list[int]`/`dict[...]`
-        # survived only by accident, because the lowercased constructor name
-        # still starts with "list"/"dict". `str(ann)` keeps the parameters, so
-        # prefer it whenever the annotation is subscripted.
-        "    origin = getattr(ann, '__origin__', None)\n"
-        "    args = getattr(ann, '__args__', None)\n"
-        "    if origin is not None or args:\n"
-        "        out[name] = str(ann)\n"
-        "    else:\n"
-        "        out[name] = getattr(ann, '__name__', None) or str(ann)\n"
-        "print(json.dumps(out))\n"
-    )
-    try:
-        proc = _sp.run(  # noqa: S603 (fixed argv, no shell)
-            [python or sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            cwd=str(base),
-        )
-        data = json.loads((proc.stdout or "{}").strip() or "{}")
-        return {k: str(v) for k, v in data.items()} if isinstance(data, dict) else {}
-    except (OSError, ValueError, _sp.TimeoutExpired):
-        return {}
+    return infer_signature_facts([target], python, repo).get(target, SignatureFacts()).contract
 
 
 def baseline_from_contract(contract: dict[str, str]) -> dict[str, Any]:
@@ -713,9 +783,22 @@ def load_boundaries(repo: Path) -> list[FaultBoundary]:
     return out
 
 
+#: Why a catalogued target did not become a derived boundary. Fixed strings so
+#: the campaign can group them without parsing prose back apart.
+SKIP_NO_ANNOTATION = "no annotated parameter to derive a contract from"
+SKIP_UNDESCRIBABLE = (
+    "a required parameter carries no annotation, so every fault would omit it "
+    "and die in the signature before reaching the target"
+)
+SKIP_UNSATISFIABLE = (
+    "no value the harness can build satisfies a declared type, and guessing one "
+    "fabricates the crash it would then report"
+)
+
+
 def derive_boundaries(
     repo: Path, targets: Sequence[str], python: str | None = None
-) -> list[FaultBoundary]:
+) -> tuple[list[FaultBoundary], dict[str, str]]:
     """Boundaries derived from consumers' own annotations, for a repo with no
     declaration.
 
@@ -734,21 +817,46 @@ def derive_boundaries(
     access raises ``AttributeError``, and the harness reports a defect it caused
     itself. ``annotation_resolved`` is the same honesty gate the function
     channel applies, and it exists for exactly this.
+
+    That gate is necessary and was not sufficient, because it only inspects the
+    annotations a contract HAS. ``infer_signature_facts`` drops unannotated
+    parameters, so ``def f(a: str, helper)`` derived the contract ``{"a": "str"}``
+    and passed — and then every fault built on it omitted ``helper``, raised
+    ``TypeError`` in the signature, and ``TypeError`` is a typed rejection, so
+    the whole boundary was 100% dead SILENTLY. That is the same shape as the
+    ``baseline={}`` bug ``baseline_from_contract`` was written to fix, and it
+    made the oracle anti-correlated with code quality again: the less annotated
+    a repo, the more certainly it reported clean. Measured on a 50-target mix,
+    17 boundaries were derived in that state. ``complete`` is the other half of
+    the gate — a contract that cannot reach the target is not a boundary.
+
+    Returns ``(boundaries, skipped)`` where ``skipped`` maps each refused target
+    to why, because a boundary the oracle declined to arm is a fact about the
+    repo and reporting nothing is how the first version of this hid 17 of them.
     """
     out: list[FaultBoundary] = []
+    skipped: dict[str, str] = {}
+    facts = infer_signature_facts(list(targets), python, repo)
     for target in targets:
-        contract = infer_contract_from_signature(target, python, repo)
-        if not contract or not all(annotation_resolved(a) for a in contract.values()):
+        fact = facts.get(target)
+        if fact is None or not fact.contract:
+            skipped[target] = SKIP_NO_ANNOTATION
+            continue
+        if fact.undescribable:
+            skipped[target] = SKIP_UNDESCRIBABLE
+            continue
+        if not all(annotation_resolved(a) for a in fact.contract.values()):
+            skipped[target] = SKIP_UNSATISFIABLE
             continue
         out.append(
             FaultBoundary(
                 name=target,
                 target=target,
-                contract=contract,
-                baseline=baseline_from_contract(contract),
+                contract=fact.contract,
+                baseline=baseline_from_contract(fact.contract),
             )
         )
-    return out
+    return out, skipped
 
 
 def run_faults(
