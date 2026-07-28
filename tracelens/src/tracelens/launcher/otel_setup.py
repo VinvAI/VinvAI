@@ -97,8 +97,17 @@ def load_contrib_instrumenters() -> dict[str, str]:
         for inst_mod in instrumenters:
             if importlib.util.find_spec(inst_mod) is None:
                 status[inst_mod] = "instrumenter_missing"
-                _log.info(
-                    "tracelens: %s installed but %s not present — `pip install %s`",
+                # WARNING, not info: the target IS using this library, so a
+                # missing instrumenter means a whole capability is silently
+                # absent — for a web framework, no server spans at all, hence no
+                # request_id and no route on anything the service serves. That
+                # reads downstream as "this app has no endpoints" rather than
+                # "tracelens could not see them", which is the kind of absence a
+                # user must be told about, not have logged below the default
+                # threshold.
+                _log.warning(
+                    "tracelens: %s is installed but its instrumenter %s is not — "
+                    "no spans will be captured for it. Fix: pip install %s",
                     lib,
                     inst_mod,
                     inst_mod.replace(".", "-"),
