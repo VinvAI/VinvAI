@@ -432,6 +432,23 @@ interface SpanSignal {
 	 * self-work, on calls whose wait is NOT explained as I/O. */
 	waitMs: number;
 	waitCount: number;
+	/** Summed wall time of this symbol's own calls (for the blocked share). */
+	wallMs: number;
+	/** Summed blocked (off-CPU) time of those same calls. */
+	blockedMs: number;
+}
+
+/**
+ * Fraction of a symbol's wall time actually spent ON the CPU, from tracelens'
+ * `blocked_ms`. 1 when the trace carries no blocked data (older captures), so
+ * this can only ever shrink an estimate on evidence, never invent one.
+ */
+function spanOnThreadFraction(ss: SpanSignal | undefined): number {
+	if (!ss || ss.wallMs <= 0 || ss.blockedMs <= 0) {
+		return 1;
+	}
+	const onThread = 1 - ss.blockedMs / ss.wallMs;
+	return Math.min(1, Math.max(0, onThread));
 }
 
 /** A callee is "repeated" (N+1) when it fires at least this many times under one parent in one request. */
@@ -466,6 +483,8 @@ function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
 				selfMs: 0,
 				waitMs: 0,
 				waitCount: 0,
+				wallMs: 0,
+				blockedMs: 0,
 			};
 			sig.set(row, s);
 		}
@@ -495,6 +514,10 @@ function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
 		// Self time: what this symbol spent in its own body, not its callees.
 		if (span.row !== null && !span.errored) {
 			get(span.row).selfMs += Math.max(0, span.durationMs - childSum);
+			// Blocked share, for the on-thread correction at ranking time.
+			const s = get(span.row);
+			s.wallMs += span.durationMs;
+			s.blockedMs += span.blockedMs;
 		}
 		// N+1: a child component repeated many times under this one parent call.
 		const byRow = new Map<number, { count: number; ms: number }>();
@@ -742,15 +765,33 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 			const perCall = cost / l.calls;
 			if (perCall > medianPerCall) {
 				const signal = 1 - medianPerCall / perCall;
-				const ms = cost * signal;
+				// ON-THREAD CORRECTION. "Slow per call" only implies removable
+				// work to the extent the symbol was actually ON the CPU. A
+				// symbol blocked on a network/subprocess call is slow for a
+				// reason no code change here can fix, and without this it
+				// dominates the ranking: in an LLM agent the top-level run() is
+				// ~99% blocked and ~90% of total predicted ms, which starves the
+				// Pareto head (see `coverage`) of every genuinely actionable
+				// candidate below it — and inflates the panel's headline
+				// "recoverable time" by the same factor.
+				//
+				// Deliberately scoped to this signal. serial-async and wait are
+				// NOT corrected: their whole premise is that the WAIT is the
+				// recoverable resource (overlap it / find the contention), so
+				// discounting blocked time there would zero out true findings.
+				const onThread = spanOnThreadFraction(ss);
+				const ms = cost * signal * onThread;
 				if (ms > bestMs) {
 					bestMs = ms;
 					bestKind = 'per-call';
+					const blockedPct = Math.round((1 - onThread) * 100);
 					bestReason = `${perCall.toFixed(1)}ms per call${
 						selfMs !== undefined ? ' (self)' : ''
 					} — ${(perCall / medianPerCall).toFixed(
 						1,
-					)}× the typical symbol; unexpectedly slow for the work it does`;
+					)}× the typical symbol; unexpectedly slow for the work it does${
+						blockedPct > 0 ? ` (${blockedPct}% of it blocked off-CPU, excluded)` : ''
+					}`;
 				}
 			}
 		}
