@@ -4,6 +4,46 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] — 2026-07-28
+
+### ✨ Added
+
+- **Five more oracles now reach you.** Vinv's crash, differential, fault,
+  concurrency and environment oracles were running and finding things, but each
+  wrote its own artifact while the panel and your coding agent read only one
+  (`issues.json`) — so their results went nowhere. Every runner now publishes its
+  clusters into that file, deduped, and the exercise pass gained the campaign
+  step that drives them. Each finding also points at the artifact holding its
+  evidence, instead of at the HTTP oracle's file regardless of kind.
+
+### 🐛 Fixed
+
+Driven against a real 18-module repository rather than the suite's own small,
+cleanly-typed fixtures, the harness broke in five ways that no fixture could
+reach. On that repository: calls **57 → 117**, issue clusters **20 → 1**,
+fabricated findings **18 → 0**, and the one survivor is a genuine bug.
+
+- **18 of 20 findings were fabricated, on Windows only.** The containment shim
+  replaced `subprocess.Popen` — a class — with a function, so any module doing
+  `class Popen(subprocess.Popen)` failed at import with a `TypeError` from the
+  standard library. `asyncio` does exactly that, so every module that imports it
+  failed, and each failure was reported as an import-error defect *in your repo*.
+- **Modern type annotations crashed discovery.** A nested union such as
+  `list[Step | None]` recursed forever, so no actions armed at all and the run
+  reported "oracles unavailable" — on any repository with current typing.
+- **`argparse` entry points were all false positives.** `SystemExit` was
+  classified as a crash, but `ArgumentParser.error` is documented to exit 2. A
+  `BaseException` that is not an `Exception` is a control-flow signal, not a
+  correctness claim.
+- **Slow imports were reported as hangs.** Import cost and call cost shared one
+  30-second deadline, so a module that takes 27 seconds to import cold was killed
+  mid-import and recorded as "a call hung" for a call that never happened. The
+  call budget now starts when the import finishes.
+- **The learner formed preferences it had never measured.** Every play claimed
+  coverage before doing any work, so a play whose worker never even imported the
+  target still earned its exploration bonus and updated the model. Those plays
+  are now inconclusive: billed, surfaced as a diagnostic, and excluded.
+
 ## [0.1.3] — 2026-07-28
 
 ### 🐛 Fixed
