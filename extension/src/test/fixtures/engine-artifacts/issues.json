@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "cluster_count": 1,
+  "clusters": [
+    {
+      "signature": "4f73c3ec3b975da40bc3c07d",
+      "kind": "import-error",
+      "title": "demo.settings_dump:region \u2014 ValueError: 1 validation error for Settings\nDEMO_REGION\n  Field required [type=missing, input_value={}]",
+      "endpoint_id": "demo.settings_dump:region",
+      "method": "CONC",
+      "path": "demo.settings_dump:region",
+      "count": 1,
+      "exemplar": {
+        "input": null,
+        "strategy": "concurrency/schedule",
+        "status": null,
+        "error": "ValueError: 1 validation error for Settings\nDEMO_REGION\n  Field required [type=missing, input_value={}]",
+        "detail": "ValueError: 1 validation error for Settings\nDEMO_REGION\n  Field required [type=missing, input_value={}]",
+        "expected": "concurrent calls agree with the serial baseline and all return"
+      },
+      "covered_frames": []
+    }
+  ]
+}

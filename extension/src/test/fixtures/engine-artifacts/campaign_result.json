@@ -1,0 +1,110 @@
+{
+  "status": "ok",
+  "own_packages_unimportable": [],
+  "diagnostics": [
+    "no --base-url \u2014 the HTTP oracle is not armed",
+    "no differential references proposed \u2014 the differential oracle is not armed",
+    "no boundaries.json \u2014 derived 3 boundary(ies) from the consumers' own annotations, and refused 2",
+    "fault oracle skipped 2 target(s): no annotated parameter to derive a contract from"
+  ],
+  "interpreter": {
+    "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+    "origin": "vinv's own interpreter",
+    "handed_off": false,
+    "python_version": "3.13.14",
+    "target_installed": false,
+    "repo_distributions": {
+      "declared": 1,
+      "present": 0
+    },
+    "third_party": {
+      "declared": 1,
+      "present": 1
+    },
+    "missing_sample": [
+      "demo-app"
+    ],
+    "considered": [
+      {
+        "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+        "origin": "vinv's own interpreter",
+        "detail": "fallback",
+        "ok": true,
+        "python_version": "3.13.14",
+        "repo_distributions_present": "0/1",
+        "third_party_present": "1/1",
+        "error": null
+      }
+    ]
+  },
+  "repo": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0",
+  "actions": 15,
+  "armed": {
+    "concurrency": 5,
+    "crash": 7,
+    "differential": 0,
+    "fault": 3
+  },
+  "budget": 4,
+  "plays_run": 4,
+  "inconclusive_plays": 0,
+  "issues_merged": 1,
+  "warm_started_arms": 4,
+  "violations": 1,
+  "repeat_violations": 0,
+  "credited_signatures": 1,
+  "new_ground": 3,
+  "stopped": "budget-exhausted",
+  "by_technique": {
+    "contract-faults": {
+      "plays": 2,
+      "violations": 0,
+      "coverage_sum": 2,
+      "cost_sum": 4.8897,
+      "posterior_mean": 0.375
+    },
+    "deterministic": {
+      "plays": 0,
+      "violations": 0,
+      "coverage_sum": 0,
+      "cost_sum": 0.0,
+      "posterior_mean": 0.4839
+    },
+    "schedule": {
+      "plays": 2,
+      "violations": 1,
+      "coverage_sum": 1,
+      "cost_sum": 7.5142,
+      "posterior_mean": 0.4
+    }
+  },
+  "by_oracle": {
+    "concurrency": {
+      "plays": 2,
+      "violations": 1,
+      "coverage_sum": 1,
+      "cost_sum": 7.5142,
+      "posterior_mean": 0.4
+    },
+    "crash": {
+      "plays": 0,
+      "violations": 0,
+      "coverage_sum": 0,
+      "cost_sum": 0.0,
+      "posterior_mean": 0.4839
+    },
+    "fault": {
+      "plays": 2,
+      "violations": 0,
+      "coverage_sum": 2,
+      "cost_sum": 4.8897,
+      "posterior_mean": 0.375
+    }
+  },
+  "preferred": {
+    "target": "demo.pure:add",
+    "technique": "deterministic",
+    "oracle": "crash"
+  },
+  "campaign_file": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0\\.vinv\\exercise\\campaign.json"
+}

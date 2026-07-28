@@ -349,6 +349,57 @@ export function runEngine(
 }
 
 /**
+ * Everything the pass does that reaches outside this module.
+ *
+ * A seam, not an abstraction: the pass ORCHESTRATES — which engine commands run,
+ * in what order, which failures are fatal, and whether findings are handed on —
+ * and none of that was reachable from a test, because every step went straight
+ * to a process spawn, the binary registry, or the episode dispatcher. So the
+ * orchestration was verified by reading it, which is exactly how the
+ * service-free pass shipped returning before the dispatch block it documented
+ * itself as reaching.
+ *
+ * Production wiring lives in `productionPorts`; a test supplies its own and gets
+ * to assert the SEQUENCE.
+ */
+export interface ExercisePassPorts {
+	binAvailable(name: string): boolean;
+	binPath(name: string): string;
+	handbookEnv(binDir: string, workspaceRoot: string): NodeJS.ProcessEnv;
+	runEngine(
+		bin: string,
+		args: string[],
+		cwd: string,
+		env: NodeJS.ProcessEnv,
+	): Promise<{ ok: boolean; error?: string }>;
+	pickTarget(workspaceRoot: string): { service: string; port: number } | null;
+	serviceRunning(name: string): boolean;
+	autoEpisodesEnabled(): boolean;
+	dispatch(
+		context: vscode.ExtensionContext,
+		workspaceRoot: string,
+		issues: ReadonlyArray<{ title: string; detail: string; rows?: number[] }>,
+		opts?: { trigger?: string; successCriteria?: string[] },
+	): Promise<boolean>;
+	drainChannels(workspaceRoot: string): Promise<DrainReport>;
+}
+
+/** The real effects. Every field is the function the pass used to call directly. */
+export function productionPorts(context: vscode.ExtensionContext): ExercisePassPorts {
+	return {
+		binAvailable: (name) => isBinAvailable(context, name),
+		binPath: (name) => getBinPath(context, name),
+		handbookEnv: (binDir, workspaceRoot) => getHandbookEnv(binDir, workspaceRoot),
+		runEngine,
+		pickTarget,
+		serviceRunning: isServiceRunning,
+		autoEpisodesEnabled: isAutoEpisodesEnabled,
+		dispatch: dispatchIssueEpisode,
+		drainChannels: drainChannelsAfterExercise,
+	};
+}
+
+/**
  * Runs one full behavioral-exercise pass: plan → run → profile → scorecard,
  * publishes the state, and dispatches NEW behavioral failure clusters as fix
  * episodes (signature-deduped, the same path probe failures use). Serialized;
@@ -363,7 +414,7 @@ export async function runExercisePass(
 	}
 	exerciseRunning = true;
 	try {
-		return await exercisePassOnce(context, workspaceRoot);
+		return await exercisePassOnce(context, workspaceRoot, productionPorts(context));
 	} catch (e) {
 		const error = e instanceof Error ? e.message : String(e);
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'exercise pass failed'));
@@ -400,12 +451,13 @@ async function recordDispatched(context: vscode.ExtensionContext, ids: Iterable<
  * library repo published findings that were never handed to anyone. Publishing
  * a cluster and acting on it are different things, and only the first was wired.
  */
-async function dispatchFreshClusters(
+export async function dispatchFreshClusters(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	issues: ExerciseIssuesDoc | null,
+	ports: ExercisePassPorts,
 ): Promise<void> {
-	if (!issues || issues.clusters.length === 0 || !isAutoEpisodesEnabled()) {
+	if (!issues || issues.clusters.length === 0 || !ports.autoEpisodesEnabled()) {
 		return;
 	}
 	const dispatched = readDispatched(context);
@@ -413,7 +465,7 @@ async function dispatchFreshClusters(
 	const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
 	const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));
 	if (errorShaped.length > 0) {
-		const handedOff = await dispatchIssueEpisode(
+		const handedOff = await ports.dispatch(
 			context, workspaceRoot, issueEpisodesFromClusters(errorShaped),
 		);
 		if (handedOff) {
@@ -421,7 +473,7 @@ async function dispatchFreshClusters(
 		}
 	}
 	if (assertShaped.length > 0) {
-		const handedOff = await dispatchIssueEpisode(
+		const handedOff = await ports.dispatch(
 			context, workspaceRoot, issueEpisodesFromClusters(assertShaped),
 			{ trigger: 'invariant-violation', successCriteria: [...ASSERT_SUCCESS_CRITERIA] },
 		);
@@ -444,11 +496,12 @@ async function runServiceFreePass(
 	bin: string,
 	env: NodeJS.ProcessEnv,
 	why: string,
+	ports: ExercisePassPorts,
 ): Promise<ExercisePassResult> {
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, null, 'running', `${why} — exercising functions and contracts…`),
 	);
-	const campaign = await runEngine(
+	const campaign = await ports.runEngine(
 		bin,
 		['campaign', workspaceRoot, '--budget', String(campaignBudget())],
 		workspaceRoot,
@@ -468,7 +521,7 @@ async function runServiceFreePass(
 	// channels and, if the harness answered anything, run once more with what it
 	// said. ONE extra pass: the answers are cached permanently, so a second
 	// re-run would re-drive the same evidence for nothing.
-	const drained = await drainChannelsAfterExercise(workspaceRoot);
+	const drained = await ports.drainChannels(workspaceRoot);
 	if (drained.answered > 0) {
 		publishExerciseState(
 			exerciseStateFromArtifacts(
@@ -478,7 +531,7 @@ async function runServiceFreePass(
 				`${why} — ${drained.detail}, re-running with the answers`,
 			),
 		);
-		const second = await runEngine(
+		const second = await ports.runEngine(
 			bin,
 			['campaign', workspaceRoot, '--budget', String(campaignBudget())],
 			workspaceRoot,
@@ -503,13 +556,13 @@ async function runServiceFreePass(
 	// can close. Opening the panel is the LAST step of the ladder, not a
 	// fallback for a failure — the engine derived what it could, induced what it
 	// could, asked the agent, and this is the remainder.
-	askUserForRemainingConfig(workspaceRoot, bin, env);
+	askUserForRemainingConfig(workspaceRoot, bin, env, ports);
 
 	const found = issues?.clusters?.length ?? 0;
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, issues, 'done', `${why} — ${engineVerdict(workspaceRoot, found)}`),
 	);
-	await dispatchFreshClusters(context, workspaceRoot, issues);
+	await dispatchFreshClusters(context, workspaceRoot, issues, ports);
 	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
 }
 
@@ -526,6 +579,7 @@ function askUserForRemainingConfig(
 	workspaceRoot: string,
 	bin: string,
 	env: NodeJS.ProcessEnv,
+	ports: ExercisePassPorts,
 ): void {
 	try {
 		openConfigRequestPanel(workspaceRoot, {
@@ -534,7 +588,7 @@ function askUserForRemainingConfig(
 				publishExerciseState(
 					exerciseStateFromArtifacts(null, null, 'running', 'configuration supplied — re-running…'),
 				);
-				await runEngine(
+				await ports.runEngine(
 					bin,
 					['campaign', workspaceRoot, '--budget', String(campaignBudget())],
 					workspaceRoot,
@@ -619,9 +673,10 @@ async function drainChannelsAfterExercise(workspaceRoot: string): Promise<DrainR
 	}
 }
 
-async function exercisePassOnce(
+export async function exercisePassOnce(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
+	ports: ExercisePassPorts,
 ): Promise<ExercisePassResult> {
 	const skip = (why: string): ExercisePassResult => {
 		publishExerciseState(exerciseStateFromArtifacts(
@@ -632,11 +687,11 @@ async function exercisePassOnce(
 		return { outcome: 'skipped', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: why };
 	};
 
-	if (!isBinAvailable(context, 'exerciser')) {
+	if (!ports.binAvailable('exerciser')) {
 		return skip('exerciser engine not installed');
 	}
-	const bin = getBinPath(context, 'exerciser');
-	const env = getHandbookEnv(path.dirname(bin), workspaceRoot);
+	const bin = ports.binPath('exerciser');
+	const env = ports.handbookEnv(path.dirname(bin), workspaceRoot);
 
 	// No live service is a reason to skip the HTTP oracle, not a reason to skip
 	// the pass. `campaign` still arms crash, differential, fault and concurrency
@@ -644,26 +699,26 @@ async function exercisePassOnce(
 	// and no traffic. Returning 'skipped' here is what made Vinv a no-op on
 	// every library repo: nothing was ever exercised because nothing was ever
 	// served.
-	const target = pickTarget(workspaceRoot);
-	if (!target || !isServiceRunning(target.service)) {
+	const target = ports.pickTarget(workspaceRoot);
+	if (!target || !ports.serviceRunning(target.service)) {
 		const why = target
 			? `service '${target.service}' is not running`
 			: 'no service with a recorded port';
-		return runServiceFreePass(context, workspaceRoot, bin, env, why);
+		return runServiceFreePass(context, workspaceRoot, bin, env, why, ports);
 	}
 
 	const baseUrl = `http://127.0.0.1:${target.port}`;
 	const slug = serviceSlug(target.service);
 
 	publishExerciseState(exerciseStateFromArtifacts(null, null, 'running', `planning inputs for ${target.service}…`));
-	let step = await runEngine(bin, ['plan', workspaceRoot, '--service', slug, '--base-url', baseUrl], workspaceRoot, env);
+	let step = await ports.runEngine(bin, ['plan', workspaceRoot, '--service', slug, '--base-url', baseUrl], workspaceRoot, env);
 	if (!step.ok) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'plan failed'));
 		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
 	}
 
 	publishExerciseState(exerciseStateFromArtifacts(null, null, 'running', `exercising ${target.service}…`));
-	step = await runEngine(bin, ['run', workspaceRoot, '--base-url', baseUrl, '--service', slug], workspaceRoot, env);
+	step = await ports.runEngine(bin, ['run', workspaceRoot, '--base-url', baseUrl, '--service', slug], workspaceRoot, env);
 	if (!step.ok) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'run failed'));
 		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
@@ -687,7 +742,7 @@ async function exercisePassOnce(
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, null, 'running', 'exercising functions, faults and contracts…'),
 	);
-	const campaign = await runEngine(
+	const campaign = await ports.runEngine(
 		bin,
 		['campaign', workspaceRoot, '--base-url', baseUrl, '--budget', String(campaignBudget())],
 		workspaceRoot,
@@ -701,13 +756,13 @@ async function exercisePassOnce(
 	// These two MUST be checked like plan/run above. Unchecked, a crashed profile
 	// is indistinguishable from a clean run: the reads below silently fall back to
 	// the PREVIOUS pass's artifacts and the pass reports 'done' with stale numbers.
-	step = await runEngine(bin, ['profile', workspaceRoot, '--service', slug], workspaceRoot, env);
+	step = await ports.runEngine(bin, ['profile', workspaceRoot, '--service', slug], workspaceRoot, env);
 	if (!step.ok) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'profile failed'));
 		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
 	}
 
-	step = await runEngine(bin, ['scorecard', workspaceRoot, '--service', slug], workspaceRoot, env);
+	step = await ports.runEngine(bin, ['scorecard', workspaceRoot, '--service', slug], workspaceRoot, env);
 	if (!step.ok) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'scorecard failed'));
 		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
@@ -722,7 +777,7 @@ async function exercisePassOnce(
 	);
 	publishExerciseState(state);
 
-	await dispatchFreshClusters(context, workspaceRoot, issues);
+	await dispatchFreshClusters(context, workspaceRoot, issues, ports);
 
 	return {
 		outcome: 'done',

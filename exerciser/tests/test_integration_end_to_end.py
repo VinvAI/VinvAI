@@ -391,3 +391,139 @@ def test_every_artifact_the_engine_writes_is_json_serialisable(demo_repo: Path) 
     it expected a number. Reading each one back is the check."""
     for artifact in sorted(store.exercise_dir(demo_repo).glob("*.json")):
         assert store.read_json(artifact) is not None, f"{artifact.name} is not readable JSON"
+
+
+# =========================================================================
+# The handshake: artifacts the extension's tests consume
+# =========================================================================
+
+#: Where the extension's `exercisePassEndToEnd.test.ts` looks for real artifacts.
+#: Committed, so the TypeScript side reads documents THIS engine produced rather
+#: than objects a TypeScript file invented — which is the failure mode a
+#: reader-side test cannot see: it passes against a shape the writer never emits.
+_FIXTURE_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "extension"
+    / "src"
+    / "test"
+    / "fixtures"
+    / "engine-artifacts"
+)
+
+#: The artifacts that cross the boundary. Anything the extension reads belongs
+#: here; anything here that the engine stops writing fails on the far side.
+_HANDSHAKE_ARTIFACTS = ("issues.json", "campaign_result.json", "functions.json")
+
+
+def test_the_artifacts_the_extension_reads_are_published_for_its_tests(
+    demo_repo: Path, functions_result: dict[str, Any]
+) -> None:
+    """Emit real artifacts into the extension's fixture directory.
+
+    Not a fixture written by hand on either side: this run produced them, and the
+    extension's suite consumes exactly these bytes. A field the engine stops
+    emitting therefore fails a TypeScript test, in CI, without anyone thinking to
+    look — which is the only mechanism that catches a producer/consumer break,
+    because both sides pass in isolation by construction.
+
+    A credential check runs first: these files are COMMITTED, so publishing one
+    that carries a secret would put it in the repository permanently.
+    """
+    from exerciser import interpreter
+
+    interpreter.reset_cache()
+    run_campaign(demo_repo, budget=4, patience=100, max_targets=6)
+
+    _FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    published: list[str] = []
+    for name in _HANDSHAKE_ARTIFACTS:
+        source = store.exercise_dir(demo_repo) / name
+        if not source.is_file():
+            continue
+        text = source.read_text(encoding="utf-8")
+        assert FAKE_KEY not in text, f"{name} carries a credential and must not be committed"
+        (_FIXTURE_DIR / name).write_text(text, encoding="utf-8")
+        published.append(name)
+
+    assert "issues.json" in published, published
+    assert "campaign_result.json" in published, published
+
+    # And the contract, asserted on what was just published rather than on what
+    # the writer intended: these are the fields the extension takes.
+    issues = json.loads((_FIXTURE_DIR / "issues.json").read_text(encoding="utf-8"))
+    assert "cluster_count" in issues, "`exerciseStateFromArtifacts` reads `cluster_count`"
+    assert isinstance(issues.get("clusters"), list)
+    verdict = json.loads((_FIXTURE_DIR / "campaign_result.json").read_text(encoding="utf-8"))
+    assert "status" in verdict and "diagnostics" in verdict, "`engineVerdict` reads both"
+
+
+# =========================================================================
+# The oracles the campaign allocates across
+# =========================================================================
+
+
+def test_the_differential_oracle_runs_against_the_real_repo(demo_repo: Path) -> None:
+    """Only `crash` and `campaign` had integration coverage; four oracles were
+    unit-tested only, so a break in how one is INVOKED was invisible."""
+    from exerciser.differential import run_differential
+
+    result = run_differential(demo_repo, timeout_s=60.0)
+
+    assert result["status"] in ("ok", "environment"), result.get("error")
+    assert "comparisons" in result
+    assert isinstance(result.get("clusters"), list)
+
+
+def test_the_concurrency_oracle_runs_against_a_real_target(demo_repo: Path) -> None:
+    from exerciser.concurrency import run_concurrency
+
+    result = run_concurrency(demo_repo, target="demo.pure:add", workers=2, repeats=2)
+
+    assert result["status"] in ("ok", "environment"), result.get("error")
+    assert isinstance(result.get("clusters"), list)
+    # `add` is deterministic and pure, so a divergence here would be the oracle's.
+    assert not [c for c in result["clusters"] if "divergence" in str(c.get("kind"))], result
+
+
+def test_the_fault_oracle_runs_from_a_derived_boundary(demo_repo: Path) -> None:
+    """Derivation and injection are separate halves and only the first had cover."""
+    from exerciser.faults import derive_boundaries, run_faults
+
+    derived, skipped = derive_boundaries(demo_repo, ["demo.pure:divide"])
+    assert derived, f"nothing derivable from an annotated target: {skipped}"
+
+    boundary = derived[0]
+    result = run_faults(
+        demo_repo,
+        target=boundary.target,
+        contract=dict(boundary.contract),
+        baseline=dict(boundary.baseline),
+        timeout_s=60.0,
+    )
+
+    assert result["status"] in ("ok", "environment"), result.get("error")
+    assert result.get("faults_injected", 0) > 0, "a derived boundary produced no faults"
+
+
+def test_the_environment_oracle_runs(demo_repo: Path) -> None:
+    from exerciser.environment import run_environment
+
+    result = run_environment(demo_repo, timeout_s=120.0)
+    assert result["status"] in ("ok", "skipped"), result
+
+
+def test_every_oracle_the_campaign_can_draw_has_a_runner(demo_repo: Path) -> None:
+    """The action space and the runner map must not drift apart.
+
+    An armed oracle with no runner drains budget into a no-op — the campaign
+    handles it, but only by dropping the actions and saying so, which is a
+    recovery rather than a design.
+    """
+    from exerciser.campaign import OracleConfig, default_runners, enumerate_actions
+
+    space = enumerate_actions(demo_repo, max_targets=6)
+    runners = default_runners(OracleConfig(repo=demo_repo))
+    armed = {a.oracle for a in space.actions}
+
+    assert armed, f"nothing armed on a repo with real targets: {space.notes}"
+    assert armed <= set(runners), f"armed with no runner: {armed - set(runners)}"
