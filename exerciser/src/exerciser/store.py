@@ -14,6 +14,23 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+#: Directories no scan of a repo should descend into: vendored code, build
+#: output and virtualenvs are not the repo's own source, and a match inside one
+#: is someone else's package.
+SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        "site-packages",
+        ".tox",
+        "build",
+        "dist",
+    }
+)
+
 
 def exercise_dir(repo: Path) -> Path:
     return repo / ".vinv" / "exercise"

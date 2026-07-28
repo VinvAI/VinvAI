@@ -38,23 +38,10 @@ from typing import Any
 
 from .agent_loop import AgentChannel, Question, question_key
 from .service_doubles import KV_MODULES, OBJECTSTORE_MODULES, PEP249_DRIVERS
+from .store import SKIP_DIRS
 
 log = logging.getLogger(__name__)
 
-#: Files to skip when scanning — vendored code is not this repo's requirement.
-_SKIP_DIRS = frozenset(
-    {
-        ".git",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        "site-packages",
-        ".tox",
-        "build",
-        "dist",
-    }
-)
 _MAX_SCAN_FILES = 3000
 
 SQL_FAMILY = "sql"
@@ -128,7 +115,7 @@ _scan_notes: list[str] = []
 def _python_files(repo: Path, limit: int = _MAX_SCAN_FILES) -> list[Path]:
     out: list[Path] = []
     for path in repo.rglob("*.py"):
-        if any(part in _SKIP_DIRS for part in path.parts):
+        if any(part in SKIP_DIRS for part in path.parts):
             continue
         out.append(path)
         if len(out) >= limit:
@@ -309,7 +296,7 @@ def discover_schema_sources(repo: Path) -> list[SchemaSource]:
         # Filter BEFORE bounding: 200 vendored files under .venv/ were
         # reproduced consuming the entire budget while the repo's own
         # schema.sql was never read.
-        if any(part in _SKIP_DIRS for part in path.parts):
+        if any(part in SKIP_DIRS for part in path.parts):
             continue
         sql_files.append(path)
         if len(sql_files) >= 200:
