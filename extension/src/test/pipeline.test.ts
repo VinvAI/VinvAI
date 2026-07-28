@@ -77,12 +77,24 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'done' });
 	});
 
-	test('no green service means nothing to analyze — straight to done', () => {
+	test('a workspace of libraries still exercises — nothing to serve is not nothing to drive', () => {
+		// insights and probes read what a live traced session recorded, so with
+		// nothing green they are correctly skipped. The exercise stage drives code
+		// in workers off the source and the index: no port, no traffic, no service.
+		// Gating it on `anyGreen` made Vinv a no-op on every library repo.
+		let ledger = initialPipelineLedger();
+		const libraries = [svc({ phase: 'library' }), svc({ name: 'b', phase: 'gave-up' })];
+		assert.deepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'exercise' });
+		ledger = applyStageOutcome(ledger, 'exercise', 'done');
+		assert.deepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'done' });
+	});
+
+	test('without a green service insights and probes stay skipped', () => {
 		const ledger = initialPipelineLedger();
-		assert.deepStrictEqual(
-			planPipelineAction(true, [svc({ phase: 'library' }), svc({ name: 'b', phase: 'gave-up' })], ledger),
-			{ kind: 'done' },
-		);
+		const libraries = [svc({ phase: 'library' })];
+		// Never 'insights' or 'probes' — they have no traced session to read.
+		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'insights' });
+		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'probes' });
 	});
 
 	test('skipped and failed stages are terminal for the run', () => {

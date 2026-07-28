@@ -376,6 +376,43 @@ async function recordDispatched(context: vscode.ExtensionContext, ids: Iterable<
 	await context.workspaceState.update(DISPATCHED_EXERCISE_KEY, [...merged].slice(-500));
 }
 
+/**
+ * The exercise pass for a repo with nothing serving: `campaign` alone, without
+ * `--base-url`, so the HTTP oracle stays unarmed and the four service-free
+ * oracles do the work. `plan`/`run`/`profile`/`scorecard` are all HTTP-shaped
+ * and are correctly absent here — findings land in issues.json exactly as they
+ * do on the served path, which is the file the dispatch path reads.
+ */
+async function runServiceFreePass(
+	workspaceRoot: string,
+	bin: string,
+	env: NodeJS.ProcessEnv,
+	why: string,
+): Promise<ExercisePassResult> {
+	publishExerciseState(
+		exerciseStateFromArtifacts(null, null, 'running', `${why} — exercising functions and contracts…`),
+	);
+	const campaign = await runEngine(
+		bin,
+		['campaign', workspaceRoot, '--budget', String(campaignBudget())],
+		workspaceRoot,
+		env,
+	);
+	const issues = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+	if (!campaign.ok) {
+		publishExerciseState(exerciseStateFromArtifacts(null, issues, 'failed', 'campaign failed'));
+		return {
+			outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0,
+			error: campaign.error,
+		};
+	}
+	const found = issues?.clusters?.length ?? 0;
+	publishExerciseState(
+		exerciseStateFromArtifacts(null, issues, 'done', `${why} — drove the service-free oracles`),
+	);
+	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
+}
+
 async function exercisePassOnce(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
@@ -392,16 +429,23 @@ async function exercisePassOnce(
 	if (!isBinAvailable(context, 'exerciser')) {
 		return skip('exerciser engine not installed');
 	}
-	const target = pickTarget(workspaceRoot);
-	if (!target) {
-		return skip('no service with a recorded port to exercise');
-	}
-	if (!isServiceRunning(target.service)) {
-		return skip(`service '${target.service}' is not running — start it to exercise`);
-	}
-
 	const bin = getBinPath(context, 'exerciser');
 	const env = getHandbookEnv(path.dirname(bin), workspaceRoot);
+
+	// No live service is a reason to skip the HTTP oracle, not a reason to skip
+	// the pass. `campaign` still arms crash, differential, fault and concurrency
+	// — they drive code in workers off the source and the index, with no port
+	// and no traffic. Returning 'skipped' here is what made Vinv a no-op on
+	// every library repo: nothing was ever exercised because nothing was ever
+	// served.
+	const target = pickTarget(workspaceRoot);
+	if (!target || !isServiceRunning(target.service)) {
+		const why = target
+			? `service '${target.service}' is not running`
+			: 'no service with a recorded port';
+		return runServiceFreePass(workspaceRoot, bin, env, why);
+	}
+
 	const baseUrl = `http://127.0.0.1:${target.port}`;
 	const slug = serviceSlug(target.service);
 

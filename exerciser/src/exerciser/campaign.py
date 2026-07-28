@@ -208,6 +208,7 @@ def enumerate_actions(
     base_url: str | None = None,
     max_targets: int = DEFAULT_MAX_TARGETS,
     include_environment: bool = False,
+    python: str | None = None,
     logger: logging.Logger | None = None,
 ) -> ActionSpace:
     """Every ``(target, technique, oracle)`` armed for this repo.
@@ -315,6 +316,20 @@ def enumerate_actions(
         from . import faults
 
         boundaries = faults.load_boundaries(repo)[:max_targets]
+        if not boundaries:
+            # A declaration is the preferred source, not the only one. Waiting
+            # for a hand-written boundaries.json meant this oracle armed zero
+            # actions on every repo nobody had prepared — and the campaign said
+            # so in a note that no code path ever acted on. The drivable targets
+            # are already catalogued and their annotations already declare a
+            # domain, so derive from those instead of reporting the vacuum.
+            derived = faults.derive_boundaries(repo, function_targets[:max_targets], python)
+            if derived:
+                space.notes.append(
+                    f"no boundaries.json — derived {len(derived)} boundary(ies) from the "
+                    "consumers' own annotations"
+                )
+            boundaries = derived
         for b in boundaries:
             space.boundaries[b.target] = b
         _arm(
@@ -326,8 +341,8 @@ def enumerate_actions(
         )
         if not boundaries:
             space.notes.append(
-                "no boundaries.json — the fault oracle is not armed (declare "
-                "boundaries or run `exerciser faults --auto-target` once)"
+                "the fault oracle is not armed: no boundaries.json, and no catalogued "
+                "target carries enough annotation to derive a contract from"
             )
     except Exception as exc:
         space.notes.append(f"fault oracle unavailable: {exc}")
@@ -795,6 +810,7 @@ def run_campaign(
             base_url=base_url,
             max_targets=max_targets,
             include_environment=include_environment,
+            python=python,
             logger=log,
         )
 

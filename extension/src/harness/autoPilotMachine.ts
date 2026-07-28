@@ -308,12 +308,22 @@ export type PipelineAction =
 	| { kind: 'exercise' };
 
 /**
- * The full-pipeline scheduler: services drain first (planNextAction), then —
- * only when at least one service actually went green (a workspace of
- * libraries/gave-ups has nothing to observe) — insights build, then probes
- * run. Terminal stage phases (done/failed/skipped) never re-enter; failures
- * are retried via decideOnStageFailure, which flips the stage back to
- * 'pending' while budget remains.
+ * The full-pipeline scheduler: services drain first (planNextAction), then the
+ * post-green stages.
+ *
+ * `insights` and `probes` genuinely require a live traced session — they read
+ * what a running service recorded, so with nothing green there is nothing to
+ * read. `exercise` does NOT: its crash, differential, fault and concurrency
+ * oracles drive code in workers from the source and the index, and need no
+ * port, no process and no traffic. Gating it on `anyGreen` too meant a
+ * workspace of libraries did nothing at all after discovery — on a clone of
+ * langchain, Auto-Pilot fired zero oracles, while the same repo yields 511
+ * targets and 1,944 calls when the exercise stage is allowed to run. A library
+ * is not "nothing to observe"; it is nothing to SERVE.
+ *
+ * Terminal stage phases (done/failed/skipped) never re-enter; failures are
+ * retried via decideOnStageFailure, which flips the stage back to 'pending'
+ * while budget remains.
  */
 export function planPipelineAction(
 	discovered: boolean,
@@ -325,13 +335,10 @@ export function planPipelineAction(
 		return serviceAction;
 	}
 	const anyGreen = services.some((s) => s.phase === 'green');
-	if (!anyGreen) {
-		return { kind: 'done' };
-	}
-	if (ledger.insights === 'pending') {
+	if (anyGreen && ledger.insights === 'pending') {
 		return { kind: 'insights' };
 	}
-	if (ledger.probes === 'pending') {
+	if (anyGreen && ledger.probes === 'pending') {
 		return { kind: 'probes' };
 	}
 	if (ledger.exercise === 'pending') {

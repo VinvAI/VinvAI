@@ -50,6 +50,7 @@ import re
 import subprocess
 import sys
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ from typing import Any
 from . import store
 from ._worker import worker_entrypoint
 from .agent_loop import AgentChannel, Question, question_key
-from .functions import detect_src_roots
+from .functions import annotation_resolved, detect_src_roots
 from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
 
@@ -707,6 +708,44 @@ def load_boundaries(repo: Path) -> list[FaultBoundary]:
                 target=str(entry["target"]),
                 contract=dict(entry.get("contract") or {}),
                 baseline=dict(entry.get("baseline") or {}),
+            )
+        )
+    return out
+
+
+def derive_boundaries(
+    repo: Path, targets: Sequence[str], python: str | None = None
+) -> list[FaultBoundary]:
+    """Boundaries derived from consumers' own annotations, for a repo with no
+    declaration.
+
+    ``boundaries.json`` is written by hand, and ``--auto-target`` has to be
+    pointed at a consumer by name — so on a repo nobody has prepared, the fault
+    oracle armed ZERO actions and the campaign said so in a note nothing acted
+    on. An annotated parameter already declares its admissible domain, and the
+    engine has a catalogue of drivable targets, so the declaration was never the
+    only possible source: it is the *preferred* one.
+
+    A target is skipped unless the harness can build a value that genuinely
+    SATISFIES every annotation in the derived contract. Deriving from a
+    signature it cannot satisfy is worse than deriving nothing: for
+    ``validate_hostname(hostname: str, policy: SSRFPolicy)`` the baseline would
+    carry the string family's ``"vinv"`` for ``policy``, the first attribute
+    access raises ``AttributeError``, and the harness reports a defect it caused
+    itself. ``annotation_resolved`` is the same honesty gate the function
+    channel applies, and it exists for exactly this.
+    """
+    out: list[FaultBoundary] = []
+    for target in targets:
+        contract = infer_contract_from_signature(target, python, repo)
+        if not contract or not all(annotation_resolved(a) for a in contract.values()):
+            continue
+        out.append(
+            FaultBoundary(
+                name=target,
+                target=target,
+                contract=contract,
+                baseline=baseline_from_contract(contract),
             )
         )
     return out
