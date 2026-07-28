@@ -683,6 +683,101 @@ def _ancestors_within(repo: Path, rel_file: str) -> list[Path]:
     return out
 
 
+#: Rounds the environment repair loop may run. Monotone — each round only ADDS
+#: names or advances one value along its ladder — so it terminates on its own;
+#: the cap bounds a target that keeps naming new variables forever.
+_MAX_ENV_INDUCTION_ROUNDS = 6
+
+
+def _import_error_text(stdout: str) -> str:
+    """The import failures a worker reported, joined — what the module asked for."""
+    parts: list[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("phase") == "import" and row.get("status") == "error":
+            parts.append(str(row.get("error") or ""))
+    return "\n".join(parts)
+
+
+def _induce_env(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    stdout: str,
+    timeout_s: float,
+) -> tuple[dict[str, str], Any]:
+    """Supply what the module's own failure says it wanted, until it imports.
+
+    The same loop ``service_doubles.induce`` runs for database schema: act, read
+    the failure, repair, retry. It never inspects WHICH configuration library
+    the repo uses, because it does not have to — every one of them raises, and
+    the message names the variable. That is an interface no registry can go
+    stale against.
+
+    Two ways a round makes progress, and both come from the target:
+
+    * a name the message says is MISSING gets a value;
+    * a name whose supplied value the message REJECTS moves one step along the
+      value ladder — the validator is the only thing that knows whether a field
+      wants a URL, an int or an email, so it is asked rather than guessed at
+      from the variable's name.
+
+    Mutates ``env`` in place with whatever it supplied, and returns that mapping
+    alongside the last worker result. An empty mapping means the failure named
+    nothing this could act on, which is the honest answer for a module that is
+    simply broken.
+    """
+    supplied: dict[str, str] = {}
+    last_proc: Any = None
+    text = _import_error_text(stdout)
+
+    for _ in range(_MAX_ENV_INDUCTION_ROUNDS):
+        progressed = False
+        for name in envconfig.missing_env_names(text):
+            if name not in supplied:
+                value = envconfig.next_value(None)
+                if value is not None:
+                    supplied[name] = value
+                    env[name] = value
+                    progressed = True
+        if not progressed:
+            # Nothing new was NAMED. The other way forward is that a value we
+            # already supplied was rejected — advance the ones the message still
+            # mentions, which is the validator telling us the shape was wrong.
+            for name, current in list(supplied.items()):
+                if name not in text:
+                    continue
+                nxt = envconfig.next_value(current)
+                if nxt is not None:
+                    supplied[name] = nxt
+                    env[name] = nxt
+                    progressed = True
+        if not progressed:
+            break
+        last_proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            cwd=str(cwd),
+            env=env,
+        )
+        if not _import_blocked(last_proc.stdout or ""):
+            return supplied, last_proc
+        text = _import_error_text(last_proc.stdout or "")
+
+    return supplied, last_proc
+
+
 def _repo_relative(repo: Path, path: Path) -> str:
     try:
         return path.resolve().relative_to(repo.resolve()).as_posix() or "."
@@ -3423,6 +3518,9 @@ def run_functions(
     # Modules that only imported once the working directory moved. Recorded so a
     # run says WHERE it decided to run each module from, and why.
     workdir_resolutions: list[dict[str, Any]] = []
+    # Modules that only imported once environment variables were supplied, and
+    # which ones. Never the values — some of them are credentials.
+    env_inductions: list[dict[str, Any]] = []
 
     for module, mod_targets in sorted(by_module.items()):
         plan_file = tmp_dir / f"{module.replace('.', '_')}.plan.json"
@@ -3454,6 +3552,13 @@ def run_functions(
         # below lets the IMPORT settle it.
         workdir_candidates = candidate_workdirs(repo, mod_targets[0].file)
         env = dict(os.environ)
+        # WHAT the module needs in its environment, from what the repo itself
+        # publishes — `.env`, `.env.example`, and the rest. A project that ships
+        # one has already written down every name its code needs and a plausible
+        # value for each, answered by the people who know. `setdefault`, because
+        # a developer who exported a value in this shell meant it.
+        for key, value in envconfig.declared_env(repo, workdir_candidates[0]).items():
+            env.setdefault(key, value)
         # The worker imports TARGET code; keep our own package importable too.
         env["PYTHONPATH"] = os.pathsep.join(
             [p for p in (env.get("PYTHONPATH"), *(str(Path(__file__).parents[1]),)) if p]
@@ -3499,6 +3604,42 @@ def run_functions(
                         "import_blocked": blocked,
                     }
                 )
+                if blocked and attempt == len(workdir_candidates) - 1:
+                    # No directory worked, so this is not a directory problem.
+                    # Before giving up, ask the module's own failure what it
+                    # wanted: a program that needs configuration SAYS SO, and
+                    # the message is written by whichever settings library the
+                    # repo actually uses — no registry of libraries required.
+                    induced, induced_proc = _induce_env(
+                        cmd,
+                        env=env,
+                        cwd=module_cwd,
+                        stdout=proc.stdout or "",
+                        timeout_s=module_timeout_s + call_budget_s + 5.0,
+                    )
+                    # Only adopt the retry's result when there WAS one. A module
+                    # whose failure named nothing actionable keeps the rows it
+                    # already earned — the original failure is the finding, and
+                    # discarding it for an empty result would lose it.
+                    if induced and induced_proc is not None:
+                        proc = induced_proc
+                        blocked = _import_blocked(proc.stdout or "")
+                        attempts.append(
+                            {
+                                "cwd": _repo_relative(repo, module_cwd),
+                                "import_blocked": blocked,
+                                "induced_env": sorted(induced),
+                            }
+                        )
+                        if not blocked:
+                            env_inductions.append({"module": module, "variables": sorted(induced)})
+                            log.info(
+                                "functions: %s imports once %d environment "
+                                "variable(s) are supplied: %s",
+                                module,
+                                len(induced),
+                                ", ".join(sorted(induced)),
+                            )
                 if not blocked or attempt == len(workdir_candidates) - 1:
                     if blocked and len(workdir_candidates) > 1:
                         # Every directory was tried and none of them imported, so
@@ -3744,6 +3885,9 @@ def run_functions(
         # Where each module was actually run from, for the ones the first guess
         # got wrong. Empty on a repo whose layout the first candidate matched.
         "workdir_resolutions": workdir_resolutions,
+        # Configuration the repo did not provide and the harness supplied from
+        # the module's own complaint. Names only, never values.
+        "env_inductions": env_inductions,
         "diagnostics": diagnostics,
         "repo": str(repo),
         "service": service,

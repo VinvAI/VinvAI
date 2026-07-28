@@ -323,3 +323,182 @@ def workdir_for(
         ):
             best = claim
     return best
+
+
+# =========================================================================
+# Environment: what the repo provides, then what its own failures ask for
+# =========================================================================
+#
+# Same discipline as the working directory, and as `service_doubles.induce`
+# before it: the repo's declarations are a STARTING POINT, and what settles the
+# question is running the code and reading its complaint.
+#
+# A list of config mechanisms to understand — pydantic-settings, environs,
+# django.conf, dynaconf, plain `os.environ` — is a list, and it goes stale the
+# week someone writes another one. But every one of them fails the same way:
+# the process raises, and the message names what it wanted. That message is the
+# interface, it is written by the library the repo actually uses, and it needs
+# no registry of libraries to read.
+
+#: Shapes in which a program says "I needed this and did not get it".
+#:
+#: Not a catalogue of config libraries — a catalogue of the ways a MISSING NAME
+#: appears in an exception message, which is a much smaller and much more stable
+#: set. `KeyError: 'X'` from `os.environ[...]` is the stdlib's spelling; the
+#: `field required` line is what a validating settings object prints above the
+#: offending name; the rest are the plain-English forms.
+_MISSING_ENV = (
+    # `KeyError: 'DATABASE_URL'` — os.environ subscript, the stdlib spelling.
+    re.compile(r"KeyError:?\s*['\"]([A-Z][A-Z0-9_]{2,})['\"]"),
+    # A validating settings object lists the field, then why, on the next line.
+    re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\s*$\n\s*(?:Field|Value) required", re.M),
+    # "environment variable X is not set" / "X environment variable not set"
+    re.compile(
+        r"(?:variable|env(?:ironment)?)\s+['\"]?([A-Z][A-Z0-9_]{2,})['\"]?\s+"
+        r"(?:is\s+)?(?:not\s+set|missing|required)",
+        re.I,
+    ),
+    re.compile(r"['\"]?([A-Z][A-Z0-9_]{2,})['\"]?\s+environment variable", re.I),
+    # "Missing X" / "X must be set"
+    re.compile(r"[Mm]issing\s+(?:required\s+)?['\"]?([A-Z][A-Z0-9_]{2,})['\"]?"),
+    re.compile(r"['\"]?([A-Z][A-Z0-9_]{2,})['\"]?\s+must be set", re.I),
+)
+
+#: Names that are the RUNTIME's, not the repo's. Setting these would change what
+#: the interpreter itself does, which is not configuration of the target.
+_NEVER_SYNTHESIZE = frozenset(
+    {
+        "PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "HOME",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "VIRTUAL_ENV",
+    }
+)
+
+#: The value ladder. A settings object does not merely want A value, it wants
+#: one its validator accepts, and the validator says so on the next round — so
+#: the shapes escalate on the target's own complaint rather than on a guess
+#: about what a name means. Name-based guessing ("it is called *_URL so give it
+#: a URL") is exactly the hardcoding this avoids: the same field is spelled
+#: `DSN`, `ENDPOINT`, `*_URI` and `SERVER` across four projects, and the
+#: validator is the only thing that knows.
+_VALUE_LADDER = (
+    "vinv-placeholder",
+    "0",
+    "http://127.0.0.1:1",
+    "vinv@example.invalid",
+    "postgresql://vinv:vinv@127.0.0.1:1/vinv",
+    "/tmp/vinv-placeholder",
+    "[]",
+)
+
+
+def missing_env_names(error_text: str) -> list[str]:
+    """Environment names an error message says were wanted and absent.
+
+    Deduplicated, order-preserving. Runtime names are never returned: a target
+    complaining about ``PATH`` is not asking to be configured.
+    """
+    found: list[str] = []
+    for pattern in _MISSING_ENV:
+        for match in pattern.finditer(error_text or ""):
+            name = match.group(1)
+            # The patterns spell the name as `[A-Z][A-Z0-9_]{2,}`, but the ones
+            # carrying `re.I` — needed so "Environment variable" matches
+            # "environment variable" — make that class case-insensitive too, and
+            # the surrounding English words start matching as names. Checked
+            # here rather than by dropping `re.I`, because the prose around the
+            # name genuinely varies in case and the NAME genuinely does not.
+            if not name.isupper():
+                continue
+            if name in _NEVER_SYNTHESIZE or name in found:
+                continue
+            found.append(name)
+    return found
+
+
+def next_value(current: str | None) -> str | None:
+    """The next shape to try for a value the target rejected, or None when spent."""
+    if current is None:
+        return _VALUE_LADDER[0]
+    try:
+        index = _VALUE_LADDER.index(current)
+    except ValueError:
+        return None
+    return _VALUE_LADDER[index + 1] if index + 1 < len(_VALUE_LADDER) else None
+
+
+#: Files a project uses to SHOW what its environment looks like. `.env` itself
+#: is included and ranked first: it is the real one, and a repo that ships it
+#: has already answered the question. The `.example`/`.template`/`.sample`
+#: variants exist precisely to be read by someone setting the project up, which
+#: is exactly what the harness is doing.
+_ENV_FILES = (
+    ".env",
+    ".env.local",
+    ".env.example",
+    ".env.template",
+    ".env.sample",
+    ".env.defaults",
+    ".env.test",
+    "env.example",
+)
+
+_ENV_LINE = re.compile(r"^\s*(?:export\s+)?(?P<k>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<v>.*?)\s*$")
+
+
+def _parse_env_file(text: str) -> dict[str, str]:
+    """``KEY=value`` pairs, comments and blanks dropped, quotes stripped."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        found = _ENV_LINE.match(line)
+        if not found:
+            continue
+        value = found.group("v")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        # An unexpanded reference (`${OTHER}`) is not a value.
+        if value.startswith("$"):
+            continue
+        out[found.group("k")] = value
+    return out
+
+
+def declared_env(repo: Path, workdir: Path | None = None) -> dict[str, str]:
+    """Environment the repo itself publishes, nearest the working directory first.
+
+    A repo that ships a ``.env.example`` has already written down every name its
+    code needs and a plausible value for each — which is the whole question,
+    answered by the people who know, at no cost and with no model call. Reading
+    it is not a substitute for the induction loop below; it is what usually makes
+    the loop unnecessary.
+
+    Values already present in the real environment always win: a developer who
+    exported ``DATABASE_URL`` meant it.
+    """
+    collected: dict[str, str] = {}
+    roots: list[Path] = []
+    if workdir is not None:
+        roots.append(workdir)
+        roots.append(workdir.parent)
+    roots.append(repo)
+    for root in roots:
+        for name in _ENV_FILES:
+            path = root / name
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for key, value in _parse_env_file(text).items():
+                collected.setdefault(key, value)
+    return collected
