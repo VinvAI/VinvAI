@@ -142,3 +142,57 @@ def test_a_substituted_answer_is_shaped_not_correct() -> None:
     first = LenientBody()["choices"][0]["message"]["content"]
     second = LenientBody()["choices"][0]["message"]["content"]
     assert str(first) == str(second) == "vinv-substituted"
+
+
+# =========================================================================
+# Reachability — the half that was dead on arrival
+# =========================================================================
+
+
+def test_an_http_client_declares_a_service_requirement() -> None:
+    """Without this the whole double is unreachable, and silently so.
+
+    `install()` is gated on the service plan carrying REQUIREMENTS, which come
+    from `discover_requirements` recognising a client library. No HTTP module
+    mapped to a family, so a repo whose only external dependency was a provider
+    produced no requirement, the doubles never installed, and every patcher in
+    this module was dead code — on exactly the repos it was written for.
+
+    Both ends reported success the whole time: the double had tests that passed
+    and the run had a plan that looked fine.
+    """
+    from exerciser.services import _FAMILY_BY_MODULE, HTTP_FAMILY
+
+    for module in HTTP_MODULES:
+        assert (
+            _FAMILY_BY_MODULE.get(module) == HTTP_FAMILY
+        ), f"{module} produces no requirement, so the double never installs"
+
+
+def test_the_family_is_keyed_on_the_transport_not_the_vendor() -> None:
+    """A vendor list needs sixteen entries for langchain alone.
+
+    `openai`/`anthropic`/the rest are NOT listed and must not be: they reach the
+    network through one of the transports, so they are covered without anyone
+    enumerating them — including providers that do not exist yet.
+    """
+    from exerciser.services import _FAMILY_BY_MODULE
+
+    for vendor in ("openai", "anthropic", "cohere", "mistralai", "groq"):
+        assert vendor not in _FAMILY_BY_MODULE
+
+
+def test_a_repo_that_calls_a_provider_is_recognised(tmp_path) -> None:
+    """End to end over discovery: source that imports httpx wants the http family."""
+    from exerciser.services import HTTP_FAMILY, discover_requirements
+
+    pkg = tmp_path / "provider"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "client.py").write_text(
+        "import httpx\n\n\ndef ask(t):\n    return httpx.Client().post('https://x/y').json()\n",
+        encoding="utf-8",
+    )
+
+    families = {r.family for r in discover_requirements(tmp_path)}
+    assert HTTP_FAMILY in families

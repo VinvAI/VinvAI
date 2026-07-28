@@ -37,7 +37,12 @@ from pathlib import Path
 from typing import Any
 
 from .agent_loop import AgentChannel, Question, question_key
-from .service_doubles import KV_MODULES, OBJECTSTORE_MODULES, PEP249_DRIVERS
+from .service_doubles import (
+    HTTP_MODULES,
+    KV_MODULES,
+    OBJECTSTORE_MODULES,
+    PEP249_DRIVERS,
+)
 from .store import SKIP_DIRS
 
 log = logging.getLogger(__name__)
@@ -47,6 +52,11 @@ _MAX_SCAN_FILES = 3000
 SQL_FAMILY = "sql"
 KV_FAMILY = "kv"
 OBJECTSTORE_FAMILY = "objectstore"
+#: A remote HTTP API — a model provider, a payments gateway, any REST
+#: dependency. Its substitute is cut at the TRANSPORT (see
+#: `service_doubles.HTTP_MODULES`) rather than per vendor, so this one family
+#: covers every provider a repo talks to, including ones that do not exist yet.
+HTTP_FAMILY = "http"
 
 _FAMILY_BY_MODULE: dict[str, str] = {}
 for _name in PEP249_DRIVERS:
@@ -57,6 +67,13 @@ for _name in KV_MODULES:
     _FAMILY_BY_MODULE[_name] = KV_FAMILY
 for _name in OBJECTSTORE_MODULES + ("botocore", "aioboto3", "minio"):
     _FAMILY_BY_MODULE[_name] = OBJECTSTORE_FAMILY
+# The transports every remote-API client is built on. Listing the TRANSPORT and
+# never the vendor is the whole point: `openai`, `anthropic` and the fourteen
+# other partner packages langchain vendors all reach the network through one of
+# these, so a repo using any of them declares this family without anyone having
+# enumerated it — including providers that do not exist yet.
+for _name in HTTP_MODULES:
+    _FAMILY_BY_MODULE[_name] = HTTP_FAMILY
 
 #: A DSN in a settings file or a default argument is direct evidence that the
 #: repo expects a server at that address, even when the import is indirect.
