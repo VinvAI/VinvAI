@@ -34,6 +34,9 @@ import {
 	type ExerciseState,
 } from './pipelineState';
 import { dispatchIssueEpisode } from './autoTrigger';
+import { drainAgentChannels, type DrainReport } from './agentChannel';
+import { runHarnessPrompt } from './harnessRunner';
+import { getHarnessId } from '../config/settings';
 import { isAutoEpisodesEnabled } from '../config/settings';
 
 /** .vinv/exercise/<file> */
@@ -458,12 +461,72 @@ async function runServiceFreePass(
 			error: campaign.error,
 		};
 	}
+	// The oracles have now raised whatever they could not answer structurally —
+	// a boundary's type contract, a fixture row, an environment variable. Those
+	// questions are only worth raising if something answers them, so drain the
+	// channels and, if the harness answered anything, run once more with what it
+	// said. ONE extra pass: the answers are cached permanently, so a second
+	// re-run would re-drive the same evidence for nothing.
+	const drained = await drainChannelsAfterExercise(workspaceRoot);
+	if (drained.answered > 0) {
+		publishExerciseState(
+			exerciseStateFromArtifacts(
+				null,
+				issues,
+				'running',
+				`${why} — ${drained.detail}, re-running with the answers`,
+			),
+		);
+		const second = await runEngine(
+			bin,
+			['campaign', workspaceRoot, '--budget', String(campaignBudget())],
+			workspaceRoot,
+			env,
+		);
+		if (second.ok) {
+			const reissued = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+			publishExerciseState(
+				exerciseStateFromArtifacts(null, reissued, 'done', `${why} — ${drained.detail}`),
+			);
+			return {
+				outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0,
+				issues: reissued?.clusters?.length ?? 0,
+			};
+		}
+		// The re-run failed. The FIRST pass's findings are still real and still
+		// earned, so they stand rather than being discarded for a retry that
+		// went wrong.
+	}
+
 	const found = issues?.clusters?.length ?? 0;
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, issues, 'done', `${why} — drove the service-free oracles`),
 	);
 	await dispatchFreshClusters(context, workspaceRoot, issues);
 	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
+}
+
+/**
+ * Ask the harness whatever the engine could not decide, and report what landed.
+ *
+ * Never throws and never fails the exercise pass: an unanswered question leaves
+ * the oracle exactly where it already was, which is where every run before this
+ * existed left it.
+ */
+async function drainChannelsAfterExercise(workspaceRoot: string): Promise<DrainReport> {
+	try {
+		const harnessId = getHarnessId();
+		return await drainAgentChannels(workspaceRoot, async (name, prompt) => {
+			const run = await runHarnessPrompt(harnessId, workspaceRoot, name, prompt);
+			return { ok: run.ok, stdout: run.stdout, detail: run.detail };
+		});
+	} catch (err) {
+		return {
+			pending: 0, answered: 0, topics: [],
+			detail: `channel dispatch skipped: ${err instanceof Error ? err.message : String(err)}`,
+			ok: false,
+		};
+	}
 }
 
 async function exercisePassOnce(
