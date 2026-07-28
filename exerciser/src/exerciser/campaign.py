@@ -101,6 +101,16 @@ def campaign_path(repo: Path) -> Path:
     return store.exercise_dir(repo) / "campaign.json"
 
 
+def result_path(repo: Path) -> Path:
+    """Where the last campaign's SUMMARY lands.
+
+    Distinct from ``campaign.json``, which is the bandit's persisted state and is
+    read back to warm-start the next run. This is the run's verdict, for whoever
+    reads artifacts rather than stdout.
+    """
+    return store.exercise_dir(repo) / "campaign_result.json"
+
+
 # =========================================================================
 # One play
 # =========================================================================
@@ -907,7 +917,7 @@ def run_campaign(
             "which oracle was missing what."
         )
         log.warning("campaign_empty %s", diagnostics[-1])
-        return {
+        empty: dict[str, Any] = {
             "status": "ok",
             # Same keys as the main return: a caller that reads `interpreter`
             # must not have to know which branch produced the document, and the
@@ -924,6 +934,11 @@ def run_campaign(
             "violations": 0,
             "stopped": "no-actions",
         }
+        # Persisted on this branch too: "no oracle could be armed" is a verdict
+        # about the run, and the reader must not have to guess from an absent
+        # file whether the campaign said nothing or never finished.
+        store.write_json(result_path(repo), {k: v for k, v in empty.items() if k != "plays"})
+        return empty
 
     # Warm start: last campaign's posteriors, decayed, restricted to the actions
     # that are STILL armed — a target that has since vanished must not keep a
@@ -1142,6 +1157,15 @@ def run_campaign(
         "plays": plays,
         "campaign_file": str(campaign_path(repo)),
     }
+    # PERSISTED, not only printed. `status`, `own_packages_unimportable` and the
+    # oracles' diagnostics describe the whole run, and they existed on stdout
+    # only — so the extension, which reads artifacts, fell back to
+    # `functions.json`. That file is rewritten by every crash play with
+    # `only_targets=[one]`, so the verdict it showed was ONE arm's, computed over
+    # a single module, presented as the run's — and stale from a previous run
+    # entirely when no crash play was drawn. Writing the summary is what lets a
+    # reader ask the run rather than the last play.
+    store.write_json(result_path(repo), {k: v for k, v in result.items() if k != "plays"})
     log.info(
         "campaign: %d/%d plays, %d new violations (%d repeats), stopped=%s, preferred=%s",
         len(plays),

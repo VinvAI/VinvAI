@@ -398,3 +398,75 @@ def test_the_inductions_reason_carries_no_credential() -> None:
     # The part that makes the entry worth reporting survives.
     assert "PROJECT_NAME" in cleaned
     assert "'postgres_server': 'localhost'" in cleaned
+
+
+def test_induction_does_not_strand_a_module_at_the_repo_root(tmp_path: Path) -> None:
+    """The two mechanisms have to compose, and they were ordered so they could not.
+
+    `candidate_workdirs` is ordered by likelihood and ends at the repo root — the
+    historical fallback — and induction fires only at that LAST entry. So a module
+    needing both a real working directory and a supplied variable resolved to
+    "repo root plus placeholders": it imported, so nothing failed, and it ran with
+    every relative path pointing at the wrong place. That is the failure
+    `candidate_workdirs` exists to remove, reached through the one path that
+    skipped it.
+
+    Here `backend/` is the right directory (it holds the data file the module
+    opens by a relative path) and `APP_TOKEN` is the missing variable. Only the
+    combination imports.
+    """
+    repo = tmp_path
+    backend = repo / "backend"
+    (backend / "app").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
+    (backend / "app" / "__init__.py").write_text("", encoding="utf-8")
+    # Relative to the WORKING DIRECTORY, so it only resolves from `backend/`.
+    (backend / "settings.dat").write_text("ok\n", encoding="utf-8")
+    (backend / "app" / "mod.py").write_text(
+        textwrap.dedent("""
+            import os
+
+            if not os.environ.get("APP_TOKEN"):
+                raise RuntimeError("APP_TOKEN environment variable is required")
+            with open("settings.dat") as fh:      # relative to the run directory
+                _SETTINGS = fh.read()
+
+
+            def describe(n: int) -> str:
+                return str(n)
+            """).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    index = repo / ".vinv" / "index"
+    index.mkdir(parents=True)
+    (index / "chunks.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "backend/app/mod.py:describe",
+                "file": "backend/app/mod.py",
+                "lang": "python",
+                "kind": "function",
+                "name": "describe",
+                "start_line": 1,
+                "end_line": 2,
+                "parent": None,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_functions(repo, max_targets=5)
+
+    inductions = result.get("env_inductions") or []
+    assert inductions, "the module's own complaint named APP_TOKEN and nothing induced it"
+    assert inductions[0]["resolved"] is True
+    assert inductions[0]["resolved_from"] == "backend"
+    resolutions = result.get("workdir_resolutions") or []
+    chosen = [r for r in resolutions if r.get("module", "").endswith("mod")]
+    assert chosen, f"no working directory was recorded: {resolutions}"
+    # The point: NOT the repo root, and reached only because the directory
+    # question was asked again once the environment answered.
+    assert chosen[0]["chosen"] == "backend", chosen[0]
+    assert any(a.get("reordered_after_induction") for a in chosen[0]["attempts"]), chosen[0]

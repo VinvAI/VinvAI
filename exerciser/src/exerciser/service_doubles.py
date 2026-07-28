@@ -2135,6 +2135,24 @@ class SubstitutedResponse:
         return False
 
 
+#: Hosts that are this machine, not a remote dependency. The substitution's whole
+#: justification is that the run cannot reach a provider; none of that applies to
+#: the repo's own service, and `.localhost` is reserved for loopback by RFC 6761.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"})
+
+
+def _is_loopback(url: str) -> bool:
+    """Whether ``url`` addresses this machine rather than a remote service."""
+    host = url.partition("://")[2].partition("/")[0].partition("?")[0]
+    host = host.rpartition("@")[2]
+    if host.startswith("["):  # bracketed IPv6 keeps its brackets to the close
+        host = host[: host.find("]") + 1] if "]" in host else host
+    else:
+        host = host.partition(":")[0]
+    host = host.lower()
+    return host in _LOOPBACK_HOSTS or host.endswith(".localhost") or host.startswith("127.")
+
+
 def _serve_http(method: str, url: str) -> SubstitutedResponse:
     """Answer one request from the double, and RECORD that the double answered.
 
@@ -2151,6 +2169,16 @@ def _serve_http(method: str, url: str) -> SubstitutedResponse:
     `.env`. The ledger is a file in the user's repository; the double answering
     the call is not a reason to write the key down.
     """
+    if _is_loopback(str(url)):
+        # NOT substituted. The cut is a REMOTE dependency the run cannot reach;
+        # a call to the repo's own service on loopback is the repo talking to
+        # itself, and answering it with a vivifying body turns a call that would
+        # have failed honestly into one that proceeds on fabricated data — every
+        # assertion after it becoming a "finding". Under containment the network
+        # is denied anyway, so refusing here is the behaviour that existed before
+        # the double and the one the row is already classified for.
+        _record("substitution-declined", "http", f"{method} {redact_url(str(url))} (loopback)")
+        raise ConnectionRefusedError(f"vinv: not substituting a loopback call to {url}")
     safe = redact_url(str(url))
     _record(SUBSTITUTED, "http", f"{method} {safe}", url=safe, method=method)
     return SubstitutedResponse(url=str(url), method=method)

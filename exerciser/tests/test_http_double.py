@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from exerciser import service_doubles
 from exerciser.service_doubles import HTTP_MODULES, LenientBody, SubstitutedResponse
 
 
@@ -196,3 +197,52 @@ def test_a_repo_that_calls_a_provider_is_recognised(tmp_path) -> None:
 
     families = {r.family for r in discover_requirements(tmp_path)}
     assert HTTP_FAMILY in families
+
+
+# =========================================================================
+# The cut is a REMOTE dependency
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8000/items",
+        "http://localhost:3000/api",
+        "https://[::1]:8443/x",
+        "http://api.localhost/v1",
+        "http://127.0.0.53/x",
+    ],
+)
+def test_a_loopback_call_is_not_substituted(url: str) -> None:
+    """The repo talking to its own service is not a provider it cannot reach.
+
+    Answering it with a vivifying body turns a call that would have failed
+    honestly into one that proceeds on fabricated data, and every assertion after
+    it becomes a "finding". Under containment the network is denied anyway, so
+    refusing is the behaviour that existed before the double.
+    """
+    service_doubles.reset()
+    with pytest.raises(ConnectionRefusedError):
+        service_doubles._serve_http("GET", url)
+    kinds = [e.get("kind") for e in service_doubles.events()]
+    assert "substituted" not in kinds
+    assert "substitution-declined" in kinds
+    service_doubles.reset()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.openai.com/v1/chat/completions",
+        "https://generativelanguage.googleapis.com/v1beta/models/x",
+        "http://localhost.evil.com/x",
+    ],
+)
+def test_a_remote_call_still_is(url: str) -> None:
+    """Including a host that merely CONTAINS 'localhost' — the check is on the
+    host, not on the string."""
+    service_doubles.reset()
+    assert service_doubles._serve_http("POST", url).status_code == 200
+    assert [e.get("kind") for e in service_doubles.events()] == ["substituted"]
+    service_doubles.reset()

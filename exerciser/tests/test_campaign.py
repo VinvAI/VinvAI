@@ -726,3 +726,53 @@ def test_the_empty_action_space_reports_the_same_keys(tmp_path: Path):
     assert result["stopped"] == "no-actions"
     assert result["interpreter"]["python"]
     assert result["own_packages_unimportable"] == []
+
+
+# ---- the run's verdict, persisted ------------------------------------------
+
+
+def test_the_campaigns_verdict_is_written_to_an_artifact(tmp_path: Path):
+    """`status` and the oracles' diagnostics existed on stdout only.
+
+    So the extension, which reads artifacts, fell back to `functions.json` — a
+    file every crash play rewrites with `only_targets=[one]`, whose `status` is
+    therefore computed over a SINGLE module. One arm's verdict, shown as the
+    run's. Writing the summary is what lets a reader ask the run.
+    """
+    from exerciser.campaign import result_path
+
+    def crash(action: Action) -> Play:
+        return Play(
+            violations=0,
+            covered=(action.target,),
+            subprocesses=1,
+            work=0,
+            status="environment",
+            diagnostics=("the repo's own package is not installed for this interpreter",),
+            detail={"own_packages_unimportable": ["acme_core"]},
+        )
+
+    result = run_campaign(
+        tmp_path, budget=3, patience=100, actions=[BARREN], runners={"crash": crash}
+    )
+
+    persisted = store.read_json(result_path(tmp_path))
+    assert persisted is not None, "the verdict was printed and not written"
+    assert persisted["status"] == result["status"] == "environment"
+    assert persisted["own_packages_unimportable"] == ["acme_core"]
+    assert any("not installed" in d for d in persisted["diagnostics"])
+    # The per-play detail is deliberately NOT in it: this file is the summary, and
+    # `plays` is what makes the campaign document large.
+    assert "plays" not in persisted
+
+
+def test_the_no_actions_branch_writes_one_too(tmp_path: Path):
+    """ "No oracle could be armed" is a verdict, and an absent file cannot say
+    whether the campaign concluded that or never finished."""
+    from exerciser.campaign import result_path
+
+    run_campaign(tmp_path, budget=4, actions=[], runners={})
+
+    persisted = store.read_json(result_path(tmp_path))
+    assert persisted is not None
+    assert persisted["stopped"] == "no-actions"

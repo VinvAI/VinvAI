@@ -430,3 +430,61 @@ def test_the_detected_mechanism_records_which_checks_it_actually_passed():
     assert "write-inside-root-allowed" in _HOST.checks
     assert _HOST.blocks_writes_outside_root is True
     assert _HOST.tool and Path(_HOST.tool).exists()
+
+
+# =========================================================================
+# A row that stood on invented data is not evidence about the repo
+# =========================================================================
+
+
+def _call_row(**over: object) -> dict:
+    row = {
+        "phase": "call",
+        "status": "error",
+        "target_id": "pkg.mod:fn",
+        "error_type": "TypeError",
+        "error": "unsupported operand",
+        "error_module": "builtins",
+        "input_class": "valid",
+    }
+    row.update(over)
+    return row
+
+
+def test_a_call_that_failed_on_a_substituted_response_is_not_a_defect() -> None:
+    """The HTTP double answers with a plausible SHAPE and never a correct value.
+
+    A target that then reads a field the real provider would have filled fails on
+    OUR value, not on its own logic. `sandbox` already drains the service ledger
+    per call and writes the evidence onto the row, under a comment saying
+    "so downstream consumers can down-weight it" — and until this, the flag had
+    exactly one write site and zero read sites, so the verdict path ran as if the
+    substitution had not happened.
+    """
+    from exerciser.functions import classify_row
+
+    assert classify_row(_call_row(substitution_dependent=True)) is None
+
+
+def test_a_call_that_failed_on_a_seeded_row_is_not_a_defect_either() -> None:
+    from exerciser.functions import classify_row
+
+    assert classify_row(_call_row(seed_dependent=True)) is None
+
+
+def test_an_ordinary_failure_is_untouched() -> None:
+    """The exemption must be narrow: no service event, no exemption."""
+    from exerciser.exception_policy import ExceptionPolicy
+    from exerciser.functions import classify_row
+
+    verdict = classify_row(_call_row(), ExceptionPolicy(), total_targets=1)
+    assert verdict != "not-a-defect-by-substitution"
+    # It travels the ordinary learned-policy path rather than being short-circuited.
+    assert verdict in (None, "function-crash")
+
+
+def test_a_substituted_call_that_SUCCEEDED_is_not_reported_at_all() -> None:
+    """Only failures are exempted; a success was never a finding."""
+    from exerciser.functions import classify_row
+
+    assert classify_row(_call_row(status="ok", substitution_dependent=True)) is None

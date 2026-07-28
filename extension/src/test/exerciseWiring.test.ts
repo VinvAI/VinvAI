@@ -282,3 +282,49 @@ suite('the engine verdict reaches the UI', () => {
 		assert.strictEqual(typeof engineVerdict(workspaceWith(null), 0), 'string');
 	});
 });
+
+suite('the verdict describes the run, not the last play', () => {
+	function workspace(files: Record<string, unknown>): string {
+		const root = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'vinv-verdict2-'));
+		fsx.mkdirSync(pathx.join(root, '.vinv', 'exercise'), { recursive: true });
+		for (const [name, doc] of Object.entries(files)) {
+			fsx.writeFileSync(
+				pathx.join(root, '.vinv', 'exercise', name),
+				JSON.stringify(doc),
+				'utf8',
+			);
+		}
+		return root;
+	}
+
+	test('campaign_result.json wins over functions.json', () => {
+		// `functions.json` is rewritten by every crash play with
+		// `only_targets=[one]`, so its `status` is computed over a SINGLE module.
+		// One unimportable target made the extension announce that the whole run
+		// never executed.
+		const root = workspace({
+			'functions.json': { status: 'environment', diagnostics: ['one target failed to import'] },
+			'campaign_result.json': { status: 'ok', diagnostics: [] },
+		});
+		assert.doesNotMatch(engineVerdict(root, 0), /could not be imported/);
+		assert.match(engineVerdict(root, 0), /no issues found/);
+	});
+
+	test('and states the campaign-level environment failure when there is one', () => {
+		const root = workspace({
+			'functions.json': { status: 'ok', diagnostics: [] },
+			'campaign_result.json': {
+				status: 'environment',
+				diagnostics: ['4/4 plays could not import the repo\'s own package(s) acme_core'],
+			},
+		});
+		assert.match(engineVerdict(root, 0), /could not import the repo/);
+	});
+
+	test('functions.json is still the fallback for a direct `exerciser functions` run', () => {
+		const root = workspace({
+			'functions.json': { status: 'environment', diagnostics: ['nothing imported'] },
+		});
+		assert.match(engineVerdict(root, 0), /nothing imported/);
+	});
+});

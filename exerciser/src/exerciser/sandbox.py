@@ -1942,6 +1942,17 @@ def _worker_main(argv: list[str]) -> int:
                     for e in service_events
                 ):
                     row["seed_dependent"] = True
+                # `substituted` belongs here too, and its absence was the whole
+                # gap. A seeded ROW is invented data the target then reads; a
+                # substituted HTTP call is an invented RESPONSE the target then
+                # reads — the same claim about the same verdict. It was left out
+                # because the other substitutes RAISE (and `mark_contained` keys
+                # on the raising module), while the HTTP double RETURNS a body:
+                # the failure surfaces later, in the target's own code, under the
+                # target's own exception type, where nothing can attribute it
+                # except this record.
+                if any(e.get("kind") == "substituted" for e in service_events):
+                    row["substitution_dependent"] = True
             rows.append(mark_contained(row, tier))
     fn._emit(rows)
     return 0

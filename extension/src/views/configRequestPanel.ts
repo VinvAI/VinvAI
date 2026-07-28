@@ -32,6 +32,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 
 import { VINV_BASE_CSS, VINV_FONT_MONO, VINV_FONT_SERIF } from './webviewTheme';
@@ -202,6 +203,13 @@ export async function handlePanelMessage(
 
 /** The panel's HTML, in the Vinv design system. */
 export function getConfigPanelHtml(cspSource: string, model: ConfigPanelModel): string {
+	// A nonce rather than `'unsafe-inline'` for scripts. The panel renders strings
+	// this process did not author — a variable name and description from a model,
+	// and the TARGET REPO's own error text under "why Vinv is asking". Escaping is
+	// what stops those becoming markup and it is applied at every interpolation;
+	// the nonce is the second wall, so a missed one is not immediately executable.
+	// Styles keep `'unsafe-inline'`: the stylesheet is a literal in this file.
+	const nonce = randomBytes(16).toString('base64');
 	const rows = model.requests
 		.map((r) => {
 			const kind = r.secret ? 'password' : 'text';
@@ -248,7 +256,7 @@ export function getConfigPanelHtml(cspSource: string, model: ConfigPanelModel): 
 
 	return `<!DOCTYPE html><html><head>
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src ${cspSource} 'unsafe-inline';">
+      content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
 ${VINV_BASE_CSS}
 body { font-family: ${VINV_FONT_MONO}; padding: 18px 20px; }
@@ -281,7 +289,7 @@ button.primary:hover { background: var(--accent-hover); }
 <div class="sub">${escapeHtml(model.repoLabel)} — Vinv derived everything it could from this
 repository and its own failures. These are what it could not.</div>
 ${body}
-<script>
+<script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const form = document.getElementById('form');
 if (form) {

@@ -3073,6 +3073,22 @@ def classify_row(
         # The sandbox refused an effect. Nothing about the target's own
         # correctness follows from that, at import or at call time.
         return None
+    if row.get("status") == "error" and (
+        row.get("substitution_dependent") or row.get("seed_dependent")
+    ):
+        # This call stood on data the harness invented — a doubled HTTP response
+        # or a seeded/induced row — so its failure is not attributable to the
+        # repo. The double answers with a plausibly-SHAPED body and never a
+        # correct one, and a target that then reads a field the real provider
+        # would have filled fails on OUR value, not its own logic.
+        #
+        # The row already carried the evidence: `sandbox` drains the service
+        # ledger per call and writes `service_events` onto it, under a comment
+        # saying "so downstream consumers can down-weight it". This is that
+        # consumer, and until it existed the flags had exactly one write site and
+        # zero read sites — the verdict path ran as if the substitution had not
+        # happened, and reported the gap as a defect in the repo.
+        return None
     if row.get("phase") == "import" and row.get("status") == "error":
         # Import supplies NO input, so nothing the harness did can explain the
         # failure. Two structural exemptions, and everything else is the
@@ -3685,6 +3701,65 @@ def run_functions(
                             ", ".join(sorted(induced)),
                             "imports now" if not blocked else "still blocked",
                         )
+                        if len(workdir_candidates) > 1:
+                            # The candidate list is ORDERED by likelihood and
+                            # induction fires at its LAST entry, which is the
+                            # repo root — the historical fallback. The two
+                            # mechanisms were therefore ordered so they could not
+                            # compose, and a module needing BOTH a real working
+                            # directory and a supplied variable had no reachable
+                            # answer: the directory sweep ran before the variable
+                            # existed, and the variable arrived only at the
+                            # directory the sweep had already given up on.
+                            #
+                            # Retried whether or not the root now imports, and
+                            # that is the case that matters. If it does, an
+                            # earlier candidate is still the likelier answer and
+                            # "imports at the root" is how a module ends up
+                            # running with every relative path pointing at the
+                            # wrong place while reporting success. If it does
+                            # not, the directory is the REMAINING blocker and
+                            # this is the only pass that can find it.
+                            env.update(induced)
+                            for better in workdir_candidates[:-1]:
+                                retry = subprocess.run(  # noqa: S603 (fixed argv, no shell)
+                                    cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    encoding="utf-8",
+                                    errors="replace",
+                                    timeout=module_timeout_s + call_budget_s + 5.0,
+                                    cwd=str(better),
+                                    env=env,
+                                )
+                                if _import_blocked(retry.stdout or ""):
+                                    continue
+                                proc, module_cwd, blocked = retry, better, False
+                                # The induction DID resolve it — the directory
+                                # was the other half. Recorded as resolved, or
+                                # the escalation would ask a human for a variable
+                                # that is already satisfied.
+                                if env_inductions:
+                                    env_inductions[-1]["resolved"] = True
+                                    env_inductions[-1]["unsatisfied"] = []
+                                    env_inductions[-1]["resolved_from"] = _repo_relative(
+                                        repo, better
+                                    )
+                                attempts.append(
+                                    {
+                                        "cwd": _repo_relative(repo, better),
+                                        "import_blocked": False,
+                                        "induced_env": sorted(induced),
+                                        "reordered_after_induction": True,
+                                    }
+                                )
+                                log.info(
+                                    "functions: %s imports from %s once its environment "
+                                    "is supplied — preferred over the repo root",
+                                    module,
+                                    _repo_relative(repo, better),
+                                )
+                                break
                 if not blocked or attempt == len(workdir_candidates) - 1:
                     if blocked and len(workdir_candidates) > 1:
                         # Every directory was tried and none of them imported, so
@@ -3890,6 +3965,39 @@ def run_functions(
     if sandbox_report.get("enabled"):
         sandbox_report["verdicts"] = dict(sorted(sandbox_verdicts.items()))
 
+    # Calls that failed on data the harness invented. `classify_row` declines to
+    # blame the repo for these, and declining silently is what the rest of this
+    # module refuses to do: an exempted row is COUNTED, always. The number is
+    # also the honest measure of the substitution's reach — a repo where most
+    # calls land here was made reachable, not exercised.
+    substitution_gaps = [
+        {
+            "target_id": r.get("target_id"),
+            "error_type": r.get("error_type"),
+            "kind": "substitution" if r.get("substitution_dependent") else "seeded-data",
+            "services": sorted(
+                {
+                    str(e.get("service"))
+                    for e in (r.get("service_events") or [])
+                    if isinstance(e, dict) and e.get("service")
+                }
+            ),
+        }
+        for r in rows
+        if r.get("phase") == "call"
+        and r.get("status") == "error"
+        and (r.get("substitution_dependent") or r.get("seed_dependent"))
+    ]
+    if substitution_gaps:
+        detail = (
+            f"{len(substitution_gaps)} call(s) failed on data the harness supplied "
+            "(a doubled response or a seeded row), so they are reported as substitution "
+            "gaps rather than as defects — the double answers with a plausible SHAPE and "
+            "never a correct value"
+        )
+        diagnostics.append(detail)
+        log.info("functions_substitution_gaps %s", detail)
+
     # Configuration the ladder could not satisfy: ask the harness, and publish
     # whatever only a human can answer. Done AFTER the run, from what actually
     # failed, exactly as `services.fixture_questions` asks from what induction
@@ -3988,6 +4096,9 @@ def run_functions(
         # is usually the function working, and a `contained` outcome is the
         # sandbox working — but they are counted, never hidden.
         "verdicts": dict(sorted(verdicts.items())),
+        # Calls whose failure is attributable to a substituted response or a
+        # seeded row rather than to the repo. Never silently dropped.
+        "substitution_gaps": substitution_gaps[:50],
         # What the LEARNED policy currently believes — the DECISION probability
         # (structural priors blended with accumulated evidence), not the raw
         # posterior, so a run is auditable rather than an oracle handing down

@@ -555,8 +555,8 @@ function askUserForRemainingConfig(
 	}
 }
 
-/** The `functions.json` shape this file reads — status and diagnostics only. */
-interface FunctionsVerdict {
+/** The status/diagnostics shape both engine summaries share. */
+interface EngineVerdictDoc {
 	status?: string;
 	diagnostics?: string[];
 }
@@ -576,7 +576,14 @@ interface FunctionsVerdict {
  * whether or not the reading end exists. This is the reading end.
  */
 export function engineVerdict(workspaceRoot: string, clusters: number): string {
-	const doc = readExerciseJson<FunctionsVerdict>(workspaceRoot, 'functions.json');
+	// `campaign_result.json` FIRST, because it describes the run. `functions.json`
+	// is rewritten by every crash play with `only_targets=[one]`, so its `status`
+	// is computed over a single module — one arm's verdict, shown as the run's,
+	// and stale from a previous run entirely when no crash play was drawn. It
+	// stays as the fallback: `exerciser functions` run directly writes only that.
+	const doc =
+		readExerciseJson<EngineVerdictDoc>(workspaceRoot, 'campaign_result.json') ??
+		readExerciseJson<EngineVerdictDoc>(workspaceRoot, 'functions.json');
 	const diagnostics = doc?.diagnostics ?? [];
 	if (doc?.status === 'environment') {
 		// The strongest thing the engine can say: it could not load the code, so
