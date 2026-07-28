@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import {
 	decideInstallAction,
 	decidePinAction,
+	pinStateStamp,
 	shouldRunPinCheck,
 	type EngineUpdateMode,
 } from '../engines/update';
@@ -59,6 +60,35 @@ suite('engines pin check gating', () => {
 			shouldRunPinCheck({ ref: 'v1', mode: 'prompt', force: false, settled: false }),
 			true,
 		);
+	});
+
+	test('a marker written by older pin logic under the same version is stale', () => {
+		// The trap 0.1.2 fell into: it settled itself on every affected machine,
+		// then was fixed in place under the same version — so the fix could never
+		// fire, because the check was skipped as already-settled on exactly the
+		// installs that needed it. The stamp carries the logic revision, so an
+		// in-place fix invalidates its predecessor's markers.
+		const settledByOldLogic = '0.1.2';
+		assert.notStrictEqual(
+			pinStateStamp('0.1.2'),
+			settledByOldLogic,
+			'a bare-version marker must not satisfy the current stamp',
+		);
+		assert.strictEqual(
+			shouldRunPinCheck({
+				ref: 'v0.1.2',
+				mode: 'auto',
+				force: false,
+				settled: pinStateStamp('0.1.2') === settledByOldLogic,
+			}),
+			true,
+			'an install carrying the stale marker must re-check, not stay quiet',
+		);
+	});
+
+	test('the stamp is stable for one version and distinct across versions', () => {
+		assert.strictEqual(pinStateStamp('0.1.2'), pinStateStamp('0.1.2'));
+		assert.notStrictEqual(pinStateStamp('0.1.2'), pinStateStamp('0.1.3'));
 	});
 });
 

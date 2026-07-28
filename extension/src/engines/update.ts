@@ -44,15 +44,41 @@ import { ENGINE_REF, ENGINE_UPDATE_DEFAULT } from './pinned';
 export type EngineUpdateMode = 'auto' | 'prompt' | 'never';
 
 /**
- * Extension version whose pin check is already settled — set when the user
- * declines, or when the checkout is up to date or not ours to move. Deliberately
- * NOT set when an update is launched: the terminal is fire-and-forget, so a
- * failed build simply leaves HEAD where it was and the next window re-offers,
- * while a successful one goes quiet on its own because HEAD now matches.
+ * Bumped whenever this module's decisions change in a way that has to re-run for
+ * users who already settled on the CURRENT extension version.
+ *
+ * Both persisted markers below are keyed by extension version, on the assumption
+ * that changed behaviour arrives with a new version number. 0.1.2 broke that
+ * assumption: it shipped, settled itself on every machine whose checkout had a
+ * modified uv.lock (which is every machine, since `uv sync` writes it), and then
+ * was fixed in place under the same version. Without this revision the fix could
+ * never fire — the check would be skipped as already-settled on exactly the
+ * installs that need it.
+ *
+ * Raise this, not the package version, when the logic changes but the release
+ * does not.
+ */
+const PIN_LOGIC_REV = 2;
+
+/**
+ * Identity a persisted marker is valid for: the extension version AND the
+ * decision logic that wrote it. A marker written by different logic is stale and
+ * simply does not match, so the check re-runs.
+ */
+export function pinStateStamp(version: string): string {
+	return `${version}#${PIN_LOGIC_REV}`;
+}
+
+/**
+ * Stamp whose pin check is already settled — set when the user declines, or when
+ * the checkout is up to date or not ours to move. Deliberately NOT set when an
+ * update or install is launched: the terminal is fire-and-forget, so a failed
+ * build simply leaves HEAD where it was and the next window re-offers, while a
+ * successful one goes quiet on its own because HEAD now matches.
  */
 const SETTLED_KEY = 'vinv.engines.pinSettledFor';
 
-/** `<version>:<count>` — how many times 'auto' has launched for this build. */
+/** `<stamp>:<count>` — how many times 'auto' has launched for this build. */
 const ATTEMPTS_KEY = 'vinv.engines.autoAttempts';
 
 /** After this many silent auto-updates for one version, start asking instead. */
@@ -113,10 +139,10 @@ export function engineUpdateMode(): EngineUpdateMode {
 	return ENGINE_UPDATE_DEFAULT;
 }
 
-function attemptsFor(context: vscode.ExtensionContext, version: string): number {
+function attemptsFor(context: vscode.ExtensionContext, stamp: string): number {
 	const raw = context.globalState.get<string>(ATTEMPTS_KEY) ?? '';
-	const [storedVersion, count] = raw.split(':');
-	return storedVersion === version ? (Number(count) || 0) : 0;
+	const [storedStamp, count] = raw.split(':');
+	return storedStamp === stamp ? (Number(count) || 0) : 0;
 }
 
 /**
@@ -269,7 +295,10 @@ export async function maybeUpdateEngines(
 	const force = opts.force === true;
 	const mode = engineUpdateMode();
 	const version = String(context.extension.packageJSON.version ?? '');
-	const settled = context.globalState.get<string>(SETTLED_KEY) === version;
+	// Stamped, not bare-versioned: a marker left by an older revision of this
+	// logic under the same version must not count as settled. See PIN_LOGIC_REV.
+	const stamp = pinStateStamp(version);
+	const settled = context.globalState.get<string>(SETTLED_KEY) === stamp;
 	if (!shouldRunPinCheck({ ref: ENGINE_REF, mode, force, settled })) {
 		if (force && !ENGINE_REF) {
 			// Unstamped dev build — nothing to compare against, and the
@@ -281,8 +310,8 @@ export async function maybeUpdateEngines(
 		return;
 	}
 
-	const settle = (): void => void context.globalState.update(SETTLED_KEY, version);
-	const autoAttempts = attemptsFor(context, version);
+	const settle = (): void => void context.globalState.update(SETTLED_KEY, stamp);
+	const autoAttempts = attemptsFor(context, stamp);
 
 	const root = resolveEnginesRoot(context);
 	if (!root) {
@@ -316,7 +345,7 @@ export async function maybeUpdateEngines(
 		// Deliberately NOT settled — a successful install goes quiet by itself,
 		// because the next window resolves a root and finds it already on the pin.
 		if (action.kind === 'install') {
-			await context.globalState.update(ATTEMPTS_KEY, `${version}:${autoAttempts + 1}`);
+			await context.globalState.update(ATTEMPTS_KEY, `${stamp}:${autoAttempts + 1}`);
 		}
 		await installEngines(context);
 		return;
@@ -421,7 +450,7 @@ export async function maybeUpdateEngines(
 	// failing stops silently reopening a terminal on every window, and a user
 	// who clicked "Update Now" is not the case it guards against.
 	if (action.kind === 'update') {
-		await context.globalState.update(ATTEMPTS_KEY, `${version}:${autoAttempts + 1}`);
+		await context.globalState.update(ATTEMPTS_KEY, `${stamp}:${autoAttempts + 1}`);
 	}
 	launchUpdate(root, target ?? ENGINE_REF, { fetched, rebuildIndex });
 	void vscode.window.showInformationMessage(
