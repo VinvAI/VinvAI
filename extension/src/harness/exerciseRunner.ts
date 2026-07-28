@@ -152,6 +152,13 @@ export function evidenceFileForKind(kind: string): string {
 	switch (kind) {
 		case 'function-crash':
 		case 'function-sandboxed':
+		// An import failure is produced by the FUNCTION oracle and its rows live
+		// in that oracle's artifact, like every other kind here. Missing from
+		// this switch, it fell through to the HTTP oracle's `results.jsonl` —
+		// the exact "points a fixing agent at an empty file" failure this
+		// function was written to stop, reproduced for the one kind that fires
+		// most on an unconfigured repo.
+		case 'import-error':
 			return 'function_results.jsonl';
 		case 'differential-mismatch':
 			return 'differential_results.jsonl';
