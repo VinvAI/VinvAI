@@ -35,6 +35,7 @@ const entries = {
 	'out/extension.js': 'src/extension.ts',
 	'out/mcp/indexServer.js': 'src/mcp/indexServer.ts',
 	'out/mcp/runtimeServer.js': 'src/mcp/runtimeServer.ts',
+	'out/mcp/exerciseServer.js': 'src/mcp/exerciseServer.ts',
 };
 
 await Promise.all(

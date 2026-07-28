@@ -37,6 +37,8 @@ import * as fs from 'fs';
 
 const INDEX_KEY = 'vinv-index';
 const RUNTIME_KEY = 'vinv-runtime';
+/** The write half: reports an external endpoint-test run back into .vinv. */
+const EXERCISE_KEY = 'vinv-exercise';
 /** Server keys written by older extension versions, stripped on every write. */
 const LEGACY_KEYS = ['vinv-ahsi'];
 
@@ -55,6 +57,7 @@ export function buildServerSpecs(
 ): McpServerSpec[] {
 	const indexScript = path.join(context.extensionPath, 'out', 'mcp', 'indexServer.js');
 	const runtimeScript = path.join(context.extensionPath, 'out', 'mcp', 'runtimeServer.js');
+	const exerciseScript = path.join(context.extensionPath, 'out', 'mcp', 'exerciseServer.js');
 
 	// Neither server carries secrets in its launch spec: the API key would
 	// otherwise be serialized into repo-tracked config (.mcp.json, .cursor/mcp.json)
@@ -69,6 +72,12 @@ export function buildServerSpecs(
 			key: RUNTIME_KEY,
 			command: process.execPath,
 			args: [runtimeScript, workspaceRoot],
+			env: { ELECTRON_RUN_AS_NODE: '1' },
+		},
+		{
+			key: EXERCISE_KEY,
+			command: process.execPath,
+			args: [exerciseScript, workspaceRoot],
 			env: { ELECTRON_RUN_AS_NODE: '1' },
 		},
 	];

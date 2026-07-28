@@ -72,12 +72,15 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(`${manifest.publisher}.${manifest.name}`, 'VinvAI.VinvAI');
 	});
 
-	test('MCP registration exposes index and runtime servers without secrets', () => {
+	test('MCP registration exposes index, runtime and exercise servers without secrets', () => {
 		const context = { extensionPath: path.join(path.sep, 'opt', 'vinv-vs') } as vscode.ExtensionContext;
 		const specs = buildServerSpecs(context, path.join(path.sep, 'workspace'));
+		// vinv-exercise is the WRITE half (reporting an external run back in); it
+		// is a separate server so write access can be granted independently of
+		// the two read-only ones.
 		assert.deepStrictEqual(
 			specs.map((spec) => spec.key),
-			['vinv-index', 'vinv-runtime'],
+			['vinv-index', 'vinv-runtime', 'vinv-exercise'],
 		);
 		for (const spec of specs) {
 			assert.strictEqual(spec.env.ELECTRON_RUN_AS_NODE, '1');
