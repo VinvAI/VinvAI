@@ -1891,6 +1891,8 @@ def install(
         patchers[name] = _patch_kv
     for name in OBJECTSTORE_MODULES:
         patchers[name] = _patch_objectstore
+    for name in HTTP_MODULES:
+        patchers[name] = _HTTP_PATCHERS[name]
     patchers["sqlalchemy"] = _patch_sqlalchemy
     _pending.clear()
     _pending.update(patchers)
@@ -1972,3 +1974,288 @@ def summary() -> dict[str, Any]:
         "substitution_gaps": by_kind.get(FIDELITY_GAP, 0),
         "events": _events[:200],
     }
+
+
+# ---------------------------------------------------------------------------
+# HTTP — one seam for every remote API, including the model providers
+# ---------------------------------------------------------------------------
+#
+# Under containment the network is denied, so every target that reaches a remote
+# API lands as `contained`: correctly not a defect, and correctly not exercised.
+# That is most of the interesting surface on any repo that talks to a provider.
+#
+# The obvious substitution is a double per provider — an `openai` stand-in, an
+# `anthropic` stand-in. That does not scale and is already wrong: langchain
+# vendors sixteen partner packages in ONE repository, so the list needs sixteen
+# entries for a single target and is still wrong for the seventeenth.
+#
+# So the cut is HTTP, which is where every one of them bottoms out, and which is
+# a standard rather than a vendor — the same reasoning that makes PEP 249 the
+# right cut for databases instead of a psycopg double and a pymysql double.
+#
+# The response BODY is the part that looks like it needs per-API knowledge, and
+# does not. A client reads a body by ACCESS PATH — `r["choices"][0]["message"]
+# ["content"]` — so a body that satisfies any access path satisfies every API
+# without knowing one of them. `LenientBody` is that: it auto-vivifies on
+# lookup, indexes as a one-element sequence, and renders as a placeholder
+# string. No schema, no induction round-trip, no registry.
+#
+# What it CANNOT do is be correct. A doubled provider returns a plausibly-shaped
+# answer, never a right one, so anything asserting on model output is a
+# SUBSTITUTION GAP and never a defect in the repo. The four-value discipline the
+# rest of this module keeps — ok / rejected / defect / substitution-gap — is what
+# stops "the double answered and the target then failed" being reported as
+# "the repo is broken".
+
+#: HTTP clients worth substituting. Small and stable, unlike a vendor list:
+#: these are the transports every Python API client is built on.
+HTTP_MODULES: tuple[str, ...] = ("httpx", "requests", "aiohttp")
+
+#: Rendered where a client expects a string it will not parse further.
+_HTTP_PLACEHOLDER = "vinv-substituted"
+
+
+class LenientBody(dict):
+    """A JSON body that satisfies any access path a client happens to use.
+
+    Clients read responses positionally and by key, several levels deep, and
+    which keys depends entirely on the API. Rather than model each one, this
+    answers whatever is asked: a missing key vivifies into another
+    ``LenientBody``, indexing yields the same body back (so ``[0]`` on what the
+    caller believes is a list works), and coercion produces a placeholder.
+
+    Deliberately a ``dict`` subclass so ``isinstance(body, dict)`` — which real
+    client code branches on — stays true.
+    """
+
+    def __missing__(self, key: Any) -> LenientBody:
+        child = LenientBody()
+        self[key] = child
+        return child
+
+    def __getitem__(self, key: Any) -> Any:
+        # An integer index means the caller believes this is a sequence. Give
+        # back the body itself rather than inventing an element, so a chain like
+        # `["choices"][0]["message"]` keeps descending.
+        if isinstance(key, int):
+            return self
+        return super().__getitem__(key)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return self[name]
+
+    def __iter__(self) -> Any:
+        # Iterating an unpopulated body yields ONE element, so `for choice in
+        # r["choices"]` runs its body exactly once instead of not at all. An
+        # already-populated body iterates its real keys.
+        #
+        # `super().__len__()`, NOT `not self`: `__bool__` below is always True
+        # (a response body must not read as falsy to a client guarding on it),
+        # so the truthiness test never fired and every loop over a substituted
+        # collection ran zero times — the exact "not exercised" outcome the
+        # substitution exists to remove.
+        if super().__len__() == 0:
+            return iter([self])
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        return super().__len__() or 1
+
+    def __str__(self) -> str:
+        return _HTTP_PLACEHOLDER
+
+    def __contains__(self, key: Any) -> bool:
+        # A client guarding with `if "error" in body` must not be told yes —
+        # that would hand it an error path it never had a reason to take.
+        return super().__contains__(key)
+
+    def __bool__(self) -> bool:
+        return True
+
+
+class SubstitutedResponse:
+    """A response object shaped like the ones httpx/requests hand back."""
+
+    def __init__(self, url: str = "", method: str = "GET", status_code: int = 200):
+        self.status_code = status_code
+        self.status = status_code  # aiohttp's spelling
+        self.url = url
+        self.request_method = method
+        self.headers: dict[str, str] = {"content-type": "application/json"}
+        self.reason_phrase = "OK"
+        self.reason = "OK"
+        self.encoding = "utf-8"
+        self._body = LenientBody()
+
+    def json(self, **_kwargs: Any) -> LenientBody:
+        return self._body
+
+    @property
+    def text(self) -> str:
+        return _HTTP_PLACEHOLDER
+
+    @property
+    def content(self) -> bytes:
+        return _HTTP_PLACEHOLDER.encode()
+
+    def read(self) -> bytes:
+        return self.content
+
+    def iter_lines(self, *_a: Any, **_k: Any) -> Any:
+        return iter([])
+
+    def iter_content(self, *_a: Any, **_k: Any) -> Any:
+        return iter([self.content])
+
+    def raise_for_status(self) -> SubstitutedResponse:
+        return self
+
+    @property
+    def is_success(self) -> bool:
+        return True
+
+    @property
+    def ok(self) -> bool:
+        return True
+
+    def __enter__(self) -> SubstitutedResponse:
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    async def __aenter__(self) -> SubstitutedResponse:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        return False
+
+
+def _serve_http(method: str, url: str) -> SubstitutedResponse:
+    """Answer one request from the double, and RECORD that the double answered.
+
+    The recording is the load-bearing part. A parent inferring participation
+    from an error message is guessing, and a guess misattributes a genuine
+    defect — a `NameError` inside a repo's own fake-embeddings class has no
+    provider anywhere near it, and would be blamed on the substitution by any
+    rule that reads the text. Only the double knows whether the double answered.
+    """
+    _record(SUBSTITUTED, "http", f"{method} {url}", url=str(url), method=method)
+    return SubstitutedResponse(url=str(url), method=method)
+
+
+def _patch_httpx(module: types.ModuleType) -> None:
+    """Substitute httpx at the CLIENT, which is what every SDK builds on."""
+
+    def request(_self: Any, method: str, url: Any = "", *_a: Any, **_k: Any) -> SubstitutedResponse:
+        return _serve_http(str(method).upper(), url)
+
+    def verb(name: str) -> Any:
+        def call(_self: Any, url: Any = "", *_a: Any, **_k: Any) -> SubstitutedResponse:
+            return _serve_http(name, url)
+
+        return call
+
+    async def arequest(
+        _self: Any, method: str, url: Any = "", *_a: Any, **_k: Any
+    ) -> SubstitutedResponse:
+        return _serve_http(str(method).upper(), url)
+
+    async def averb_call(_self: Any, url: Any = "", *_a: Any, **_k: Any) -> SubstitutedResponse:
+        return _serve_http("GET", url)
+
+    for client_name in ("Client", "AsyncClient"):
+        client = getattr(module, client_name, None)
+        if client is None:
+            continue
+        is_async = client_name.startswith("Async")
+        client.request = arequest if is_async else request  # type: ignore[attr-defined]
+        client.send = arequest if is_async else request  # type: ignore[attr-defined]
+        for name in ("get", "post", "put", "patch", "delete", "head", "options"):
+            setattr(client, name, averb_call if is_async else verb(name.upper()))
+        # `with httpx.Client() as c:` and the async form.
+        client.__enter__ = lambda self: self  # type: ignore[attr-defined]
+        client.__exit__ = lambda self, *a: False  # type: ignore[attr-defined]
+        client.close = lambda self: None  # type: ignore[attr-defined]
+
+    for name in ("get", "post", "put", "patch", "delete", "head", "options", "request"):
+        if hasattr(module, name):
+            setattr(
+                module,
+                name,
+                (lambda n: lambda url="", *a, **k: _serve_http(n.upper(), url))(name),
+            )
+
+
+def _patch_requests(module: types.ModuleType) -> None:
+    """Substitute requests at both the module verbs and `Session`."""
+
+    def call(name: str) -> Any:
+        def outer(url: Any = "", *_a: Any, **_k: Any) -> SubstitutedResponse:
+            return _serve_http(name.upper(), url)
+
+        return outer
+
+    for name in ("get", "post", "put", "patch", "delete", "head", "options"):
+        setattr(module, name, call(name))
+    if hasattr(module, "request"):
+        module.request = lambda method="GET", url="", *a, **k: _serve_http(  # type: ignore[attr-defined]
+            str(method).upper(), url
+        )
+
+    session = getattr(module, "Session", None)
+    if session is not None:
+        session.request = lambda self, method="GET", url="", *a, **k: _serve_http(  # type: ignore[attr-defined]
+            str(method).upper(), url
+        )
+        for name in ("get", "post", "put", "patch", "delete", "head", "options"):
+            setattr(
+                session,
+                name,
+                (lambda n: lambda self, url="", *a, **k: _serve_http(n.upper(), url))(name),
+            )
+        session.__enter__ = lambda self: self  # type: ignore[attr-defined]
+        session.__exit__ = lambda self, *a: False  # type: ignore[attr-defined]
+
+
+def _patch_aiohttp(module: types.ModuleType) -> None:
+    session = getattr(module, "ClientSession", None)
+    if session is None:
+        return
+
+    def call(name: str) -> Any:
+        def outer(_self: Any, url: Any = "", *_a: Any, **_k: Any) -> SubstitutedResponse:
+            return _serve_http(name.upper(), url)
+
+        return outer
+
+    for name in ("get", "post", "put", "patch", "delete", "head", "options"):
+        setattr(session, name, call(name))
+    session.request = lambda self, method="GET", url="", *a, **k: _serve_http(  # type: ignore[attr-defined]
+        str(method).upper(), url
+    )
+    session.close = _noop_close  # type: ignore[attr-defined]
+    session.__aenter__ = _self_async  # type: ignore[attr-defined]
+    session.__aexit__ = _false_async  # type: ignore[attr-defined]
+
+
+async def _noop_close(_self: Any) -> None:
+    return None
+
+
+async def _self_async(self: Any) -> Any:
+    return self
+
+
+async def _false_async(_self: Any, *_exc: Any) -> bool:
+    return False
+
+
+#: Which patcher serves which HTTP client.
+_HTTP_PATCHERS = {
+    "httpx": _patch_httpx,
+    "requests": _patch_requests,
+    "aiohttp": _patch_aiohttp,
+}
