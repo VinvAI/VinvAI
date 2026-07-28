@@ -58,8 +58,11 @@ import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import store
+from .agent_loop import AgentChannel, Question, question_key
+from .redact import is_secret_key, redact_text
 
 log = logging.getLogger(__name__)
 
@@ -519,3 +522,193 @@ def unsatisfied_names(error_text: str, supplied: dict[str, str]) -> list[str]:
     module as broken — the code is fine, one value is not.
     """
     return sorted(name for name in supplied if name in (error_text or ""))
+
+
+# =========================================================================
+# Escalation — the harness first, the human last
+# =========================================================================
+#
+# The ladder is deliberately shallow. It exists to get past a validator that
+# wants *a* well-shaped value, not to invent a value that is CORRECT — and
+# there are two failures it can never resolve on its own:
+#
+#   * a value with real-world meaning (an account id, a region, a project slug)
+#     that only the repo's own documentation or its author knows;
+#   * a credential, which nothing may synthesise, ever.
+#
+# Both escalate, and in that order. The coding harness goes first because it can
+# read the README, the docs and the provider's own site, and answering from
+# those costs the user nothing. Only what the harness cannot supply reaches a
+# human, and it reaches them as a described field rather than a stack trace.
+
+CONFIG_TOPIC = "config"
+
+
+def config_question(name: str, *, modules: list[str], reason: str, tried: list[str]) -> Question:
+    """One cached, budgeted question asking the harness for a value.
+
+    Keyed by the VARIABLE, not by the failure text, so the same answer is reused
+    across every module that needs it and across later runs — the whole point of
+    the channel. A repo needing eight variables asks eight questions once, not
+    eight per module per run.
+    """
+    return Question(
+        key=question_key(CONFIG_TOPIC, name),
+        topic=CONFIG_TOPIC,
+        subject=name,
+        prompt=(
+            f"The environment variable `{name}` has to be set before this repo's code "
+            f"can be imported — {len(modules)} module(s) fail without it, including "
+            f"{', '.join(modules[:3])}. The harness supplied placeholder values "
+            f"({', '.join(tried) or 'none'}) and the target rejected them:\n\n"
+            f"{reason[:600]}\n\n"
+            "Read the repo's own README, .env.example, settings class or docs and give a "
+            "value that is VALID for local, offline use — it will run inside a sandbox "
+            "with no network. Never invent a real credential: if this variable is a "
+            "secret, say so and leave `value` null, and the user will be asked instead."
+        ),
+        reply_schema=(
+            '{"value": "<string>"|null, "is_secret": true|false, '
+            '"description": "<what this variable is, in one sentence>", '
+            '"example": "<a well-formed example>"|null}'
+        ),
+        context={"variable": name, "modules": modules[:20], "tried": tried},
+    )
+
+
+def _describe(name: str, answer: Any) -> dict[str, Any]:
+    """Whatever the harness managed to say about a variable, defensively read."""
+    if not isinstance(answer, dict):
+        return {}
+    return {
+        k: answer.get(k)
+        for k in ("value", "is_secret", "description", "example")
+        if answer.get(k) is not None
+    }
+
+
+def build_config_requests(
+    repo: Path,
+    unresolved: dict[str, dict[str, Any]],
+    *,
+    channel: AgentChannel | None = None,
+    max_new: int = 25,
+) -> tuple[AgentChannel, dict[str, str], list[dict[str, Any]]]:
+    """Ask the harness for every unresolved variable; escalate what it cannot give.
+
+    Returns ``(channel, answered, requests)``:
+
+    * ``answered`` — values the harness supplied, ready to feed straight back
+      into the next run's environment;
+    * ``requests`` — the ones a human has to provide, each carrying enough to
+      RENDER an input rather than to debug a stack trace: what it is, an example
+      of a well-formed value, whether it is a secret (so the field masks and the
+      value never reaches a log), which modules are blocked, and what was already
+      tried.
+
+    A credential is never in ``answered`` even if the harness returned one:
+    ``is_secret`` routes it to the human unconditionally. A model that helpfully
+    hallucinates an API key must not be able to get it used.
+    """
+    channel = channel or AgentChannel(repo, CONFIG_TOPIC, max_new=max_new)
+    answered: dict[str, str] = {}
+    requests: list[dict[str, Any]] = []
+
+    for name, detail in sorted(unresolved.items()):
+        modules = [str(m) for m in (detail.get("modules") or [])]
+        reason = redact_text(str(detail.get("reason") or ""))
+        tried = [str(t) for t in (detail.get("tried") or [])]
+        answer = channel.ask(config_question(name, modules=modules, reason=reason, tried=tried))
+        described = _describe(name, answer)
+        secret = bool(described.get("is_secret")) or is_secret_key(name)
+        value = described.get("value")
+
+        if value is not None and not secret:
+            answered[name] = str(value)
+            continue
+
+        requests.append(
+            {
+                "variable": name,
+                # Everything a field needs to render itself.
+                "secret": secret,
+                "description": described.get("description")
+                or f"Required before {modules[0] if modules else 'this repo'} can be imported.",
+                "example": described.get("example"),
+                "blocked_modules": modules[:20],
+                "blocked_count": len(modules),
+                "tried": tried,
+                "reason": reason[:400],
+                "status": "awaiting-harness" if not described else "awaiting-user",
+            }
+        )
+    return channel, answered, requests
+
+
+def config_requests_path(repo: Path) -> Path:
+    return store.exercise_dir(repo) / "config_requests.json"
+
+
+def answers_path(repo: Path) -> Path:
+    return store.exercise_dir(repo) / "config_answers.json"
+
+
+def write_config_requests(repo: Path, requests: list[dict[str, Any]]) -> Path:
+    """Publish what a human still has to supply, for the extension to render.
+
+    Written even when EMPTY, so the UI can distinguish "nothing is being asked
+    of you" from "the last run never got this far" — a stale prompt asking for a
+    variable that is now satisfied is worse than no prompt.
+    """
+    path = config_requests_path(repo)
+    store.write_json(
+        path,
+        {
+            "version": 1,
+            "repo": str(repo),
+            "answers_path": str(answers_path(repo)),
+            "requests": requests,
+        },
+    )
+    return path
+
+
+def read_config_answers(repo: Path) -> dict[str, str]:
+    """Values a human supplied, read back on the next run.
+
+    The write-back file is the contract with the UI: the extension collects the
+    fields, writes ``{"answers": {"NAME": "value"}}``, and re-runs. Values are
+    read into the worker's environment and never copied into any artifact —
+    ``config_requests.json`` carries the QUESTION, never the answer.
+    """
+    doc = store.read_json(answers_path(repo)) or {}
+    answers = doc.get("answers")
+    if not isinstance(answers, dict):
+        return {}
+    return {str(k): str(v) for k, v in answers.items() if v is not None}
+
+
+def answered_config(repo: Path) -> dict[str, str]:
+    """Values the HARNESS answered on the config channel, without asking anything new.
+
+    Read at the start of a run, the way ``services.answered_fixtures`` is: the
+    asking happens after the run, from what actually failed, and the answers are
+    picked up by the run after that.
+    """
+    doc = store.read_json(store.exercise_dir(repo) / f"agent_{CONFIG_TOPIC}.json") or {}
+    out: dict[str, str] = {}
+    for entry in (doc.get("questions") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        answer = entry.get("answer")
+        name = (entry.get("context") or {}).get("variable")
+        if not isinstance(answer, dict) or not name:
+            continue
+        # A secret never comes back through the agent channel, whatever the
+        # model said — those go to the human and arrive via `config_answers`.
+        if answer.get("is_secret") or is_secret_key(str(name)):
+            continue
+        value = answer.get("value")
+        if value is not None:
+            out[str(name)] = str(value)
+    return out

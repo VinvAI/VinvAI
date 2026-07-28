@@ -3521,6 +3521,11 @@ def run_functions(
     # Modules that only imported once environment variables were supplied, and
     # which ones. Never the values — some of them are credentials.
     env_inductions: list[dict[str, Any]] = []
+    # Values already answered — by a human through the extension, or by the
+    # harness on the config channel — so a question is asked once, not once per
+    # run forever.
+    supplied_config: dict[str, str] = dict(envconfig.read_config_answers(repo))
+    supplied_config.update(envconfig.answered_config(repo))
 
     for module, mod_targets in sorted(by_module.items()):
         plan_file = tmp_dir / f"{module.replace('.', '_')}.plan.json"
@@ -3559,6 +3564,12 @@ def run_functions(
         # a developer who exported a value in this shell meant it.
         for key, value in envconfig.declared_env(repo, workdir_candidates[0]).items():
             env.setdefault(key, value)
+        # Values a human supplied through the extension on a previous run, and
+        # values the harness answered on the channel. These OVERRIDE the
+        # declared file: they were given specifically because the declared ones
+        # were not enough, so losing them to a `setdefault` would ask the same
+        # question forever.
+        env.update(supplied_config)
         # The worker imports TARGET code; keep our own package importable too.
         env["PYTHONPATH"] = os.pathsep.join(
             [p for p in (env.get("PYTHONPATH"), *(str(Path(__file__).parents[1]),)) if p]
@@ -3648,6 +3659,9 @@ def run_functions(
                                 )
                                 if blocked
                                 else [],
+                                "reason": _import_error_text(proc.stdout or "")[:400]
+                                if blocked
+                                else "",
                             }
                         )
                         log.info(
@@ -3862,6 +3876,40 @@ def run_functions(
     if sandbox_report.get("enabled"):
         sandbox_report["verdicts"] = dict(sorted(sandbox_verdicts.items()))
 
+    # Configuration the ladder could not satisfy: ask the harness, and publish
+    # whatever only a human can answer. Done AFTER the run, from what actually
+    # failed, exactly as `services.fixture_questions` asks from what induction
+    # actually saw — asking before there is evidence is how a channel fills with
+    # questions nobody needed.
+    unresolved: dict[str, dict[str, Any]] = {}
+    for entry in env_inductions:
+        if entry.get("resolved"):
+            continue
+        for name in entry.get("unsatisfied") or []:
+            record = unresolved.setdefault(
+                name, {"modules": [], "tried": [], "reason": entry.get("reason", "")}
+            )
+            record["modules"].append(entry["module"])
+            record["tried"] = sorted(set(record["tried"]) | set(entry.get("variables") or []))
+    config_channel, harness_answers, config_requests = envconfig.build_config_requests(
+        repo, unresolved
+    )
+    channel_report = config_channel.save(logger=log)
+    envconfig.write_config_requests(repo, config_requests)
+    if config_requests:
+        awaiting_user = [r["variable"] for r in config_requests if r["status"] == "awaiting-user"]
+        diagnostics.append(
+            f"{len(config_requests)} environment variable(s) could not be synthesised and "
+            f"were escalated: {', '.join(r['variable'] for r in config_requests[:8])}. "
+            + (
+                f"{len(awaiting_user)} need a value only you can give "
+                f"({', '.join(awaiting_user[:5])}) — answer them in Vinv and re-run."
+                if awaiting_user
+                else "The coding harness has been asked; re-run once it answers."
+            )
+        )
+        log.warning("functions_config_escalated %s", diagnostics[-1])
+
     canary = import_canary(rows, len(by_module))
     if canary["own_packages_unimportable"]:
         names = ", ".join(canary["own_packages_unimportable"])
@@ -3905,6 +3953,13 @@ def run_functions(
         # Configuration the repo did not provide and the harness supplied from
         # the module's own complaint. Names only, never values.
         "env_inductions": env_inductions,
+        # Configuration the harness could not synthesise. `requests` is what a
+        # human is being asked for — described fields, never values — and
+        # `harness_answers` is what the coding agent supplied without troubling
+        # anyone. `config_channel` is the queue's own accounting.
+        "config_requests": config_requests,
+        "config_supplied_by_harness": sorted(harness_answers),
+        "config_channel": channel_report,
         "diagnostics": diagnostics,
         "repo": str(repo),
         "service": service,
