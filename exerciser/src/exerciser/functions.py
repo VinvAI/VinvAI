@@ -115,7 +115,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import store
+from . import envconfig, store
 from ._worker import worker_entrypoint
 from .exception_policy import DECAY, ExceptionPolicy, family_of, provenance_of, signature
 from .interpreter import resolve_cached
@@ -573,6 +573,171 @@ def detect_src_roots(repo: Path) -> list[str]:
     # root, so it only applies to files no distribution claims.
     roots.append(".")
     return roots
+
+
+def _rel_dir(repo: Path, rel: str) -> Path | None:
+    """A repo-relative directory as an absolute path, or None when it is gone."""
+    try:
+        resolved = (repo / rel).resolve()
+    except OSError:  # pragma: no cover - a hostile path
+        return None
+    return resolved if resolved.is_dir() else None
+
+
+def distribution_cwd(repo: Path, rel_file: str) -> Path:
+    """The directory a module's own distribution is run from.
+
+    Every worker was spawned with ``cwd=repo``, and that is not a neutral
+    choice: a repo's relative paths resolve against the process working
+    directory, so choosing it wrong silently changes what the code under test
+    reads.
+
+    Found on demo-fastapi, a repo that was correctly configured the whole time.
+    Its settings declare ``env_file="../.env"`` — relative, because the app is
+    meant to run from ``backend/`` and the file sits at the repo root. Started
+    from the repo root instead, ``../.env`` resolves OUTSIDE the repo, every
+    required setting was missing, and 14 of 15 modules failed to import. Run
+    from ``backend/``, the same code loads a 37-line ``.env`` and imports
+    cleanly. The engine reported that as fifteen defects in someone's clean
+    repo, and the cause was its own choice of directory.
+
+    This returns the FIRST candidate to try. It is not the answer — the answer
+    is decided by whether the import actually succeeds, in
+    ``candidate_workdirs``/the retry loop, because no amount of reading a repo's
+    automation proves the code runs from where it says.
+    """
+    ordered = candidate_workdirs(repo, rel_file)
+    return ordered[0] if ordered else repo
+
+
+def candidate_workdirs(repo: Path, rel_file: str) -> list[Path]:
+    """Working directories worth TRYING for ``rel_file``, most likely first.
+
+    A list of places to read declarations from — CI files, Dockerfiles,
+    Procfiles, pytest config — is a list, and a list only ever covers the build
+    systems someone thought of. Bazel, Nix, Earthly, a shell script or a line in
+    a README are all equally valid ways for a project to say where it runs, and
+    enumerating them does not converge.
+
+    So declarations do not DECIDE here; they only ORDER. What decides is whether
+    the module imports, which the harness finds out by running it — the same
+    discipline ``containment`` uses for its mechanisms ("the answer comes from a
+    PROBE, never from the presence of a binary on PATH"), ``interpreter`` uses
+    for candidate interpreters, and ``service_doubles.induce`` uses for schema:
+    act, read the failure, try the next thing, converge.
+
+    The list is short and always ends at the repo root, so the retry is bounded
+    and its last element is the historical behaviour.
+    """
+    ordered: list[Path] = []
+
+    def _push(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve()
+        if resolved not in ordered:
+            ordered.append(resolved)
+
+    # 1. Anything the repo's own automation states, best source first. A hint,
+    #    and hints are allowed to be incomplete because they are not the ruling.
+    for claim in envconfig.workdir_claims_for(repo, rel_file):
+        _push(_rel_dir(repo, claim.path))
+    # 2. The distribution that owns the file — the unit `detect_src_roots`
+    #    already uses for imports, and the right guess for a repo that automates
+    #    nothing.
+    _push(_owning_distribution(repo, rel_file))
+    # 3. Every directory BETWEEN the repo and the module, shallowest first.
+    #
+    #    Without this the search space is only "somewhere that declared itself",
+    #    so a package living in a plain subdirectory that nothing declares and no
+    #    manifest claims has no reachable answer at all — the retry runs out of
+    #    candidates while the directory that works was never a candidate. These
+    #    are the directories a relative path could resolve from and still land
+    #    inside the repo, which is the whole space worth searching, and it is
+    #    bounded by the file's own depth.
+    for ancestor in _ancestors_within(repo, rel_file):
+        _push(ancestor)
+    # 4. The repo root: previously the only choice, now the last resort.
+    _push(repo)
+    return ordered
+
+
+#: Cap on the between-repo-and-module walk. Deeply nested packages exist; paying
+#: a worker per level for one is not worth it, and the answer is nearly always
+#: within a level or two of the distribution.
+_MAX_ANCESTOR_CANDIDATES = 4
+
+
+def _ancestors_within(repo: Path, rel_file: str) -> list[Path]:
+    """Directories from just below the repo down to the module's own, shallowest first.
+
+    Shallowest first because run directories are shallow in practice — a repo
+    runs from ``backend/``, not from ``backend/app/core/``.
+    """
+    parts = Path(rel_file).parent.parts
+    out: list[Path] = []
+    for depth in range(1, min(len(parts), _MAX_ANCESTOR_CANDIDATES) + 1):
+        candidate = repo.joinpath(*parts[:depth])
+        if candidate.is_dir():
+            out.append(candidate)
+    return out
+
+
+def _repo_relative(repo: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(repo.resolve()).as_posix() or "."
+    except (OSError, ValueError):  # pragma: no cover - outside the repo
+        return str(path)
+
+
+def _import_blocked(stdout: str) -> bool:
+    """True when a worker's rows say EVERY target failed at import.
+
+    The signal a working-directory retry needs, read off the worker protocol
+    that already exists rather than by inspecting the filesystem. Partial
+    success is not blocked: a module where one target imports and another does
+    not has a per-target problem, and re-running it from elsewhere would trade
+    the successes away for a guess.
+    """
+    imports = 0
+    failures = 0
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("phase") != "import":
+            continue
+        imports += 1
+        if row.get("status") == "error":
+            failures += 1
+    return imports > 0 and failures == imports
+
+
+def _owning_distribution(repo: Path, rel_file: str) -> Path | None:
+    """Deepest directory declaring itself a distribution that contains ``rel_file``."""
+    candidates = [d for d in _distribution_dirs(repo)]
+    if not candidates:
+        return repo
+    try:
+        target = (repo / rel_file).resolve()
+    except OSError:  # pragma: no cover - a hostile path
+        return repo
+    best: Path | None = None
+    for directory in candidates:
+        try:
+            resolved = directory.resolve()
+        except OSError:  # pragma: no cover
+            continue
+        if resolved == target or resolved in target.parents:
+            # Deepest wins: in a monorepo `libs/core` owns its files, not the
+            # repo root that also carries a manifest.
+            if best is None or len(resolved.parts) > len(best.parts):
+                best = resolved
+    return best or repo
 
 
 def _distribution_dirs(repo: Path) -> list[Path]:
@@ -3255,6 +3420,9 @@ def run_functions(
     tmp_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     timeouts: list[str] = []
+    # Modules that only imported once the working directory moved. Recorded so a
+    # run says WHERE it decided to run each module from, and why.
+    workdir_resolutions: list[dict[str, Any]] = []
 
     for module, mod_targets in sorted(by_module.items()):
         plan_file = tmp_dir / f"{module.replace('.', '_')}.plan.json"
@@ -3278,6 +3446,13 @@ def run_functions(
             "--repo",
             str(repo),
         ]
+        # WHERE to run this module from is decided by trying, not by reading.
+        # A repo's relative paths resolve against the working directory, so the
+        # choice changes what the code under test reads — and no list of build
+        # systems to parse ever covers them all. `candidate_workdirs` orders a
+        # short list using whatever the repo happens to declare, and the loop
+        # below lets the IMPORT settle it.
+        workdir_candidates = candidate_workdirs(repo, mod_targets[0].file)
         env = dict(os.environ)
         # The worker imports TARGET code; keep our own package importable too.
         env["PYTHONPATH"] = os.pathsep.join(
@@ -3289,24 +3464,67 @@ def run_functions(
         # target printing an emoji or any CJK text raised UnicodeEncodeError in
         # the worker and cost that module all of its rows.
         env["PYTHONIOENCODING"] = "utf-8"
+
+        # Try each candidate directory until the module actually imports. The
+        # cost is paid ONLY on failure: a module that imports from the first
+        # candidate — every module in a healthy repo — runs exactly one worker,
+        # as before. A module that cannot import anywhere ends on the last
+        # candidate's rows, which is the repo root, which is what it used to do.
+        proc = None
+        attempts: list[dict[str, Any]] = []
         try:
-            proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                # OUTER backstop only: import allowance plus the call budget the
-                # worker enforces itself, plus slack for interpreter startup. The
-                # worker stops on its own budget and reports why; reaching this
-                # deadline means it could not even do that — wedged in import, or
-                # in a call that ignores the clock (a C-level spin, a SIGKILL-only
-                # hang). Setting it AT the call budget is what made every slow
-                # import look like a hung call.
-                timeout=module_timeout_s + call_budget_s + 5.0,
-                cwd=str(repo),
-                env=env,
-            )
+            for attempt, module_cwd in enumerate(workdir_candidates):
+                proc = subprocess.run(  # noqa: S603 (fixed argv, no shell)
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    # OUTER backstop only: import allowance plus the call budget
+                    # the worker enforces itself, plus slack for interpreter
+                    # startup. The worker stops on its own budget and reports
+                    # why; reaching this deadline means it could not even do
+                    # that — wedged in import, or in a call that ignores the
+                    # clock (a C-level spin, a SIGKILL-only hang). Setting it AT
+                    # the call budget is what made every slow import look like a
+                    # hung call.
+                    timeout=module_timeout_s + call_budget_s + 5.0,
+                    cwd=str(module_cwd),
+                    env=env,
+                )
+                blocked = _import_blocked(proc.stdout or "")
+                attempts.append(
+                    {
+                        "cwd": _repo_relative(repo, module_cwd),
+                        "import_blocked": blocked,
+                    }
+                )
+                if not blocked or attempt == len(workdir_candidates) - 1:
+                    if blocked and len(workdir_candidates) > 1:
+                        # Every directory was tried and none of them imported, so
+                        # this is not a directory problem. Said out loud rather
+                        # than left as an unexplained failure.
+                        log.info(
+                            "functions: %s failed to import from all %d candidate "
+                            "directories — not a working-directory problem",
+                            module,
+                            len(workdir_candidates),
+                        )
+                    elif attempt > 0:
+                        workdir_resolutions.append(
+                            {
+                                "module": module,
+                                "chosen": _repo_relative(repo, module_cwd),
+                                "attempts": attempts,
+                            }
+                        )
+                        log.info(
+                            "functions: %s imports from %s, not from %s",
+                            module,
+                            attempts[-1]["cwd"],
+                            attempts[0]["cwd"],
+                        )
+                    break
         except subprocess.TimeoutExpired:
             timeouts.append(module)
             # PARENT side — collected, never written to stdout (stdout here is
@@ -3523,6 +3741,9 @@ def run_functions(
         # Withheld from `clusters` because they are not per-module defects, and
         # stated here because they are not nothing either.
         "import_preconditions": preconditions,
+        # Where each module was actually run from, for the ones the first guess
+        # got wrong. Empty on a repo whose layout the first candidate matched.
+        "workdir_resolutions": workdir_resolutions,
         "diagnostics": diagnostics,
         "repo": str(repo),
         "service": service,

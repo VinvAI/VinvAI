@@ -1509,6 +1509,9 @@ def run_sandboxed_targets(
                 ),
                 encoding="utf-8",
             )
+            from .functions import distribution_cwd
+
+            module_cwd = distribution_cwd(sandbox.repo_copy, module_refusals[0].target.file)
             cmd = sandbox.mechanism.wrap(
                 [
                     python or sys.executable,
@@ -1532,7 +1535,14 @@ def run_sandboxed_targets(
                     encoding="utf-8",
                     errors="replace",
                     timeout=module_timeout_s,
-                    cwd=str(sandbox.repo_copy),
+                    # The distribution's own directory INSIDE the jail, for the
+                    # same reason the ordinary worker uses it: a repo's relative
+                    # paths resolve against the working directory, so starting
+                    # every module at the tree root silently changes what the
+                    # code under test reads. Containment is unaffected — this is
+                    # a directory within `sandbox.root`, which is what the
+                    # mechanism confines.
+                    cwd=str(module_cwd),
                     env=env,
                     preexec_fn=preexec,  # noqa: PLW1509 (POSIX rlimits, guarded)
                 )
