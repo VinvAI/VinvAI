@@ -388,11 +388,17 @@ _NEVER_SYNTHESIZE = frozenset(
 #: a URL") is exactly the hardcoding this avoids: the same field is spelled
 #: `DSN`, `ENDPOINT`, `*_URI` and `SERVER` across four projects, and the
 #: validator is the only thing that knows.
+#: The email is deliberately NOT at an RFC 2606 reserved domain. `.invalid`,
+#: `.test` and `example.com` read as the obviously-fake choice, and
+#: `email-validator` — what pydantic's `EmailStr` uses — REFUSES special-use
+#: domains outright. Found live on demo-fastapi: the ladder reached the email
+#: rung, `vinv@example.invalid` was rejected as "a special-use or reserved
+#: name", and the run stalled one step from succeeding.
 _VALUE_LADDER = (
     "vinv-placeholder",
     "0",
     "http://127.0.0.1:1",
-    "vinv@example.invalid",
+    "vinv@vinvharness.com",
     "postgresql://vinv:vinv@127.0.0.1:1/vinv",
     "/tmp/vinv-placeholder",
     "[]",
@@ -502,3 +508,14 @@ def declared_env(repo: Path, workdir: Path | None = None) -> dict[str, str]:
             for key, value in _parse_env_file(text).items():
                 collected.setdefault(key, value)
     return collected
+
+
+def unsatisfied_names(error_text: str, supplied: dict[str, str]) -> list[str]:
+    """Of the values the harness supplied, which the target is still rejecting.
+
+    The precise thing an agent or a human has to be asked for. A run that stalls
+    with "FIRST_SUPERUSER is not a valid email address" knows exactly which
+    variable defeated the ladder, and passing that on beats reporting the whole
+    module as broken — the code is fine, one value is not.
+    """
+    return sorted(name for name in supplied if name in (error_text or ""))

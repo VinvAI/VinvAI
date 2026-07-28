@@ -3631,15 +3631,32 @@ def run_functions(
                                 "induced_env": sorted(induced),
                             }
                         )
-                        if not blocked:
-                            env_inductions.append({"module": module, "variables": sorted(induced)})
-                            log.info(
-                                "functions: %s imports once %d environment "
-                                "variable(s) are supplied: %s",
-                                module,
-                                len(induced),
-                                ", ".join(sorted(induced)),
-                            )
+                        # Recorded whether or not it WORKED. An induction that
+                        # got partway and stalled is the most useful record
+                        # there is: it names the variables this repo needs, and
+                        # the one value the harness could not satisfy — which is
+                        # exactly what has to be asked of an agent or a human.
+                        # Reporting only the successes made the harness look
+                        # idle on precisely the runs where it had done the most.
+                        env_inductions.append(
+                            {
+                                "module": module,
+                                "variables": sorted(induced),
+                                "resolved": not blocked,
+                                "unsatisfied": envconfig.unsatisfied_names(
+                                    _import_error_text(proc.stdout or ""), induced
+                                )
+                                if blocked
+                                else [],
+                            }
+                        )
+                        log.info(
+                            "functions: %s — supplied %d environment variable(s): %s (%s)",
+                            module,
+                            len(induced),
+                            ", ".join(sorted(induced)),
+                            "imports now" if not blocked else "still blocked",
+                        )
                 if not blocked or attempt == len(workdir_candidates) - 1:
                     if blocked and len(workdir_candidates) > 1:
                         # Every directory was tried and none of them imported, so
