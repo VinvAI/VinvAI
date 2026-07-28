@@ -492,14 +492,32 @@ def declared_env(repo: Path, workdir: Path | None = None) -> dict[str, str]:
 
     Values already present in the real environment always win: a developer who
     exported ``DATABASE_URL`` meant it.
+
+    Bounded to the repo, and that bound is load-bearing. ``workdir.parent`` is
+    the right place to look when the workdir is ``backend/`` — but the repo root
+    is itself a workdir candidate, and there ``.parent`` is the directory
+    CONTAINING the checkout. A developer whose projects live side by side under
+    one folder, or whose repo sits in their home directory, would have had an
+    unrelated project's ``.env`` — or their own — read and exported into the
+    worker. "Environment the repo itself publishes" has to mean the repo.
     """
     collected: dict[str, str] = {}
     roots: list[Path] = []
+    try:
+        base = repo.resolve()
+    except OSError:  # pragma: no cover - a hostile path
+        base = repo
     if workdir is not None:
         roots.append(workdir)
         roots.append(workdir.parent)
     roots.append(repo)
     for root in roots:
+        try:
+            inside = root.resolve() == base or root.resolve().is_relative_to(base)
+        except (OSError, ValueError):  # pragma: no cover - a hostile path
+            inside = False
+        if not inside:
+            continue
         for name in _ENV_FILES:
             path = root / name
             if not path.is_file():

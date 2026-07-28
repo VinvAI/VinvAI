@@ -21,6 +21,7 @@ import * as path from 'path';
 import {
 	buildAnswers,
 	buildModel,
+	configAnswersPath,
 	getConfigPanelHtml,
 	handlePanelMessage,
 	readConfigRequests,
@@ -249,5 +250,43 @@ suite('the rendered form', () => {
 		const html = getConfigPanelHtml('vscode-resource://abc', { requests: [], repoLabel: 'd' });
 		assert.match(html, /Content-Security-Policy/);
 		assert.match(html, /vscode-resource:\/\/abc/);
+	});
+});
+
+suite('the answers file holds credentials, so it is owner-only', () => {
+	// `config_answers.json` is the one file under `.vinv/` whose entire content is
+	// secrets a human typed. The default 0644 makes it readable by every account
+	// on the machine; the standard other tools hold plaintext credentials to is
+	// 0600 (`~/.aws/credentials`, `~/.netrc`, which ssh and curl refuse when it is
+	// group-readable). Skipped on Windows, which has no POSIX mode bits.
+	const posix = process.platform !== 'win32';
+
+	test('a newly created answers file is 0600', function () {
+		if (!posix) {this.skip();}
+		const root = workspace([request('OPENAI_API_KEY', { secret: true })]);
+		writeAnswers(root, { OPENAI_API_KEY: 'sk-not-a-real-key' });
+		const mode = fs.statSync(configAnswersPath(root)).mode & 0o777;
+		assert.strictEqual(mode.toString(8), '600');
+	});
+
+	test('an answers file that already exists is tightened too', function () {
+		if (!posix) {this.skip();}
+		// `mode` on writeFileSync only applies when the file is CREATED, so a file
+		// left world-readable by an older version stays that way without the
+		// explicit chmod.
+		const root = workspace([request('OPENAI_API_KEY', { secret: true })]);
+		const target = configAnswersPath(root);
+		fs.mkdirSync(path.dirname(target), { recursive: true });
+		fs.writeFileSync(target, JSON.stringify({ version: 1, answers: {} }), { mode: 0o644 });
+
+		writeAnswers(root, { OPENAI_API_KEY: 'sk-not-a-real-key' });
+
+		assert.strictEqual((fs.statSync(target).mode & 0o777).toString(8), '600');
+	});
+
+	test('the value still round-trips', () => {
+		const root = workspace([request('OPENAI_API_KEY', { secret: true })]);
+		writeAnswers(root, { OPENAI_API_KEY: 'sk-not-a-real-key' });
+		assert.deepStrictEqual(readAnswers(root), { OPENAI_API_KEY: 'sk-not-a-real-key' });
 	});
 });

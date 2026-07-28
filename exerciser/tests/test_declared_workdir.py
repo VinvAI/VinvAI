@@ -29,7 +29,7 @@ import re
 import textwrap
 from pathlib import Path
 
-from exerciser.envconfig import declared_workdirs, workdir_claims_for
+from exerciser.envconfig import declared_env, declared_workdirs, workdir_claims_for
 from exerciser.functions import candidate_workdirs, run_functions
 
 
@@ -323,3 +323,78 @@ def test_a_module_that_imports_nowhere_is_not_blamed_on_the_directory(
 
     assert result["workdir_resolutions"] == []
     assert result["calls"] == 0
+
+
+# =========================================================================
+# What "the repo itself publishes" has to mean
+# =========================================================================
+
+
+def test_declared_env_never_reads_outside_the_repo(tmp_path: Path) -> None:
+    """`workdir.parent` is right for `backend/` and wrong for the repo root.
+
+    The repo root is itself a workdir candidate — it is the last one on every
+    list — and there `.parent` is the directory CONTAINING the checkout. A
+    developer whose projects sit side by side under one folder, or whose repo
+    sits in their home directory, would have had an unrelated project's `.env`
+    read and its values exported into the worker running this one.
+    """
+    outside = tmp_path / ".env"
+    outside.write_text("UNRELATED_PROJECT_TOKEN=ghp_REAL_TOKEN\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".env.example").write_text("PROJECT_NAME=demo\n", encoding="utf-8")
+
+    supplied = declared_env(repo, repo)
+
+    assert supplied == {"PROJECT_NAME": "demo"}
+    assert "UNRELATED_PROJECT_TOKEN" not in supplied
+
+
+def test_a_nested_workdir_still_reads_the_repo_root(tmp_path: Path) -> None:
+    """The bound is the REPO, not the workdir — the reason `.parent` is consulted
+    at all is a `backend/` that declares `env_file="../.env"`."""
+    repo = tmp_path / "repo"
+    (repo / "backend").mkdir(parents=True)
+    (repo / ".env").write_text("SHARED=root\n", encoding="utf-8")
+    (repo / "backend" / ".env").write_text("NEAR=backend\n", encoding="utf-8")
+
+    supplied = declared_env(repo, repo / "backend")
+
+    assert supplied == {"NEAR": "backend", "SHARED": "root"}
+
+
+def test_a_workdir_outside_the_repo_contributes_nothing(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ".env").write_text("STRAY=1\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert declared_env(repo, elsewhere) == {}
+
+
+def test_the_inductions_reason_carries_no_credential() -> None:
+    """`env_inductions` sits under a comment saying "names only, never values".
+
+    That is true of `variables` and was not of `reason`, which quotes the
+    target's own complaint — and the induction fires precisely when a settings
+    object rejects its configuration, which is when a settings object renders its
+    whole input dict into the message. The values in that dict are the ones
+    `declared_env` just loaded out of the repo's real `.env` and the ones a human
+    typed into `config_answers.json`.
+    """
+    from exerciser.redact import PLACEHOLDER, redact_text
+
+    complaint = (
+        "1 validation error for Settings\nPROJECT_NAME\n  Field required "
+        "[type=missing, input_value={'openai_api_key': 'sk-proj-EXAMPLE-NOT-REAL', "
+        "'postgres_server': 'localhost'}]"
+    )
+    cleaned = redact_text(complaint)
+
+    assert "sk-proj-EXAMPLE-NOT-REAL" not in cleaned
+    assert PLACEHOLDER in cleaned
+    # The part that makes the entry worth reporting survives.
+    assert "PROJECT_NAME" in cleaned
+    assert "'postgres_server': 'localhost'" in cleaned

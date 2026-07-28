@@ -570,8 +570,12 @@ def detect_src_roots(repo: Path) -> list[str]:
     if (repo / "src").is_dir() and "src" not in roots:
         roots.append("src")
     # The repo root stays last: `module_name_for` prefers the longest matching
-    # root, so it only applies to files no distribution claims.
-    roots.append(".")
+    # root, so it only applies to files no distribution claims. Appended only if
+    # it is not already there — a single-distribution repo whose manifest sits at
+    # the root yields `.` from the loop above, and `['.', '.']` was reaching the
+    # worker, which inserts each root onto `sys.path`.
+    if "." not in roots:
+        roots.append(".")
     return roots
 
 
@@ -3659,7 +3663,17 @@ def run_functions(
                                 )
                                 if blocked
                                 else [],
-                                "reason": _import_error_text(proc.stdout or "")[:400]
+                                # REDACTED, because of what this field is. The
+                                # induction fires when a settings object rejects
+                                # its configuration, and a settings object that
+                                # fails validation renders its whole input dict
+                                # into the message — including the values
+                                # `declared_env` just loaded out of the repo's
+                                # real `.env` and whatever a human typed into
+                                # `config_answers.json`. `variables` beside it is
+                                # names only; this was the exception to the
+                                # comment that claims the whole entry is.
+                                "reason": redact_text(_import_error_text(proc.stdout or ""))[:400]
                                 if blocked
                                 else "",
                             }
@@ -3951,7 +3965,9 @@ def run_functions(
         # got wrong. Empty on a repo whose layout the first candidate matched.
         "workdir_resolutions": workdir_resolutions,
         # Configuration the repo did not provide and the harness supplied from
-        # the module's own complaint. Names only, never values.
+        # the module's own complaint. Variable NAMES only — and the target's
+        # complaint is redacted before it is quoted here, because the complaint
+        # is a settings object rendering the very values it was given.
         "env_inductions": env_inductions,
         # Configuration the harness could not synthesise. `requests` is what a
         # human is being asked for — described fields, never values — and

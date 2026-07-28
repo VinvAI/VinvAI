@@ -126,7 +126,23 @@ export function writeAnswers(
 	}
 	const merged = { ...existing, ...answers };
 	fs.mkdirSync(path.dirname(target), { recursive: true });
-	fs.writeFileSync(target, JSON.stringify({ version: 1, answers: merged }, null, 2), 'utf8');
+	// OWNER-ONLY. This is the one file in `.vinv/` whose entire content is
+	// credentials a human typed, and the default 0644 makes it readable by every
+	// account on the machine — the standard other tools hold plaintext secrets to
+	// is 0600 (`~/.aws/credentials`, `~/.netrc`, which ssh and curl refuse when
+	// it is group-readable). `mode` on writeFileSync only applies when the file
+	// is CREATED, so an existing file is chmod-ed explicitly; both are no-ops on
+	// Windows, which is why they are not a substitute for `.vinv/` being
+	// gitignored.
+	fs.writeFileSync(target, JSON.stringify({ version: 1, answers: merged }, null, 2), {
+		encoding: 'utf8',
+		mode: 0o600,
+	});
+	try {
+		fs.chmodSync(target, 0o600);
+	} catch {
+		// A filesystem without POSIX modes is not a reason to fail the save.
+	}
 	return Object.keys(answers).length;
 }
 

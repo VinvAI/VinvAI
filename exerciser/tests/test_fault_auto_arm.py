@@ -197,9 +197,9 @@ def test_every_derived_boundary_can_actually_reach_its_target(tmp_path: Path):
     assert len(derived) + len(skipped) == len(_ALL_TARGETS), "every target is accounted for"
     assert derived, "the gate must not be so tight that nothing arms"
     for boundary in derived:
-        assert _reaches_target(repo, boundary.target, boundary.baseline), (
-            f"{boundary.target} cannot be called with its own baseline"
-        )
+        assert _reaches_target(
+            repo, boundary.target, boundary.baseline
+        ), f"{boundary.target} cannot be called with its own baseline"
 
 
 # =========================================================================

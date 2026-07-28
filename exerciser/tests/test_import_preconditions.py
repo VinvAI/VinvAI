@@ -120,8 +120,7 @@ def test_a_shared_cause_is_still_reachable_by_the_dispatch_path() -> None:
     extension does not read, and dispatched nothing.
     """
     rows = [
-        _import_row(m, "TypeError", "somelib.core", "unsupported operand type(s)")
-        for m in _MODULES
+        _import_row(m, "TypeError", "somelib.core", "unsupported operand type(s)") for m in _MODULES
     ]
     kept, preconditions = shared_import_preconditions(rows, _clusters(rows))
 
@@ -200,9 +199,7 @@ def test_two_distinct_preconditions_are_reported_separately() -> None:
     assert len(kept) == 2
     assert {p["error_type"] for p in preconditions} == {"ValidationError", "OperationalError"}
     assert all(p["clusters_withheld"] == 5 for p in preconditions)
-    assert {p["reported_as"] for p in preconditions} == {
-        c.to_json()["endpoint_id"] for c in kept
-    }
+    assert {p["reported_as"] for p in preconditions} == {c.to_json()["endpoint_id"] for c in kept}
 
 
 def test_a_clean_run_is_untouched() -> None:

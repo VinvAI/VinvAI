@@ -59,6 +59,8 @@ import sys
 import types
 from typing import Any
 
+from .redact import redact_url
+
 # ---------------------------------------------------------------------------
 # Ledger — every substitution and every fidelity gap is written down
 # ---------------------------------------------------------------------------
@@ -2141,8 +2143,16 @@ def _serve_http(method: str, url: str) -> SubstitutedResponse:
     defect — a `NameError` inside a repo's own fake-embeddings class has no
     provider anywhere near it, and would be blamed on the substitution by any
     rule that reads the text. Only the double knows whether the double answered.
+
+    The recorded URL is REDACTED and the live one is not. A provider that
+    authenticates by query parameter — ``?key=…`` is Gemini's spelling, and it is
+    not alone — puts the credential in the request line, and the target builds
+    that line from the real key `declared_env` loaded out of the repo's own
+    `.env`. The ledger is a file in the user's repository; the double answering
+    the call is not a reason to write the key down.
     """
-    _record(SUBSTITUTED, "http", f"{method} {url}", url=str(url), method=method)
+    safe = redact_url(str(url))
+    _record(SUBSTITUTED, "http", f"{method} {safe}", url=safe, method=method)
     return SubstitutedResponse(url=str(url), method=method)
 
 

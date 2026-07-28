@@ -303,3 +303,65 @@ class TestSecretsInsideFreeText:
 
         assert redact_text("PASSWORD=x") == f"PASSWORD={PLACEHOLDER}"
         assert redact_text("'password': 'x'") == f"'password': '{PLACEHOLDER}'"
+
+
+# =========================================================================
+# SEC-4: a credential carried in a URL the engine writes down
+# =========================================================================
+
+
+class TestSecretsInsideUrls:
+    """`is_id_shaped` already refuses to SPLICE a credential into a URL.
+
+    The same credential arrives the other way round once the HTTP double records
+    the request line it answered: plenty of providers authenticate by query
+    parameter rather than by header (`?key=` is Gemini's spelling), and the
+    target builds that URL from the real key `declared_env` loaded out of the
+    repo's own `.env`. The ledger is a file inside the user's repository.
+    """
+
+    def test_a_key_in_a_query_parameter_is_removed(self) -> None:
+        from exerciser.redact import redact_url
+
+        cleaned = redact_url(
+            "https://generativelanguage.googleapis.com/v1beta/models/x:go?key=AIzaSyREAL&alt=sse"
+        )
+        assert "AIzaSyREAL" not in cleaned
+        # What the request WAS is the whole point of recording it.
+        assert "generativelanguage.googleapis.com" in cleaned
+        assert "alt=sse" in cleaned
+        assert "key=" in cleaned
+
+    def test_a_password_in_the_authority_is_removed(self) -> None:
+        from exerciser.redact import redact_url
+
+        cleaned = redact_url("postgresql://admin:hunter2@db.internal:5432/app")
+        assert "hunter2" not in cleaned
+        assert "admin" in cleaned and "db.internal:5432/app" in cleaned
+
+    def test_a_jwt_under_any_parameter_name_is_removed(self) -> None:
+        from exerciser.redact import redact_url
+
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig"
+        assert jwt not in redact_url(f"https://api.example.com/v1/x?t={jwt}")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://api.openai.com/v1/chat/completions",
+            "https://example.com/items?page=2&sort=name",
+            "https://example.com/a/b#frag",
+            "",
+        ],
+    )
+    def test_an_ordinary_url_is_untouched(self, url: str) -> None:
+        from exerciser.redact import redact_url
+
+        assert redact_url(url) == url
+
+    def test_the_fragment_survives(self) -> None:
+        from exerciser.redact import redact_url
+
+        cleaned = redact_url("https://h/p?api_key=SECRET#section")
+        assert "SECRET" not in cleaned
+        assert cleaned.endswith("#section")

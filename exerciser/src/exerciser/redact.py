@@ -118,6 +118,59 @@ def is_id_shaped(value: str) -> bool:
     return not any(c in value for c in " \t\r\n/?#&=")
 
 
+#: ``user:password@host`` in a URL's authority. Whether or not the password is
+#: named anything, its POSITION says what it is.
+_URL_USERINFO = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<user>[^/@\s:]+):[^/@\s]*@")
+
+#: Query-parameter names that mean "credential" in a URL and do NOT mean it as a
+#: field name — so this list is scoped to `redact_url` and deliberately not added
+#: to `_SECRET_KEY_NOUNS`.
+#:
+#: `key` is the case that forces the distinction. As a query parameter it is how
+#: Google authenticates (`?key=AIza…`) and is a credential essentially always; as
+#: a field name it is `sort_key`, `cache_key`, `partition_key`, `primary_key`,
+#: and redacting those would corrupt the observations the invariant oracle learns
+#: from — the over-redaction this module treats as an oracle bug. `sig` is Azure
+#: SAS, `signature` is AWS presigned. Position is the discriminator, which is the
+#: same reason `is_id_shaped` exists.
+_URL_SECRET_PARAMS = frozenset({"key", "sig", "signature", "auth"})
+
+
+def redact_url(url: str) -> str:
+    """Redact credentials carried in a URL, keeping the URL readable.
+
+    A recorded request line is one of the places a key most reliably ends up:
+    plenty of providers authenticate by query parameter (``?key=…``,
+    ``?access_token=…``) rather than by header, and a connection string carries
+    its password in the authority. ``is_id_shaped`` already refuses to SPLICE a
+    credential into a URL for exactly this reason — this is the same rule applied
+    to a URL the target built itself and the engine is about to write down.
+
+    Only values are touched: the scheme, host, path and parameter NAMES survive,
+    because what the URL was is the whole diagnostic value of recording it.
+    """
+    if not url:
+        return url
+    out = _URL_USERINFO.sub(rf"\g<scheme>\g<user>:{PLACEHOLDER}@", url)
+    head, sep, query = out.partition("?")
+    if not sep:
+        return out
+    query, frag_sep, fragment = query.partition("#")
+    pairs: list[str] = []
+    for part in query.split("&"):
+        name, eq, value = part.partition("=")
+        secret = (
+            is_secret_key(name)
+            or _normalize_key(name) in _URL_SECRET_PARAMS
+            or looks_like_jwt(value)
+        )
+        if eq and value and secret:
+            pairs.append(f"{name}={PLACEHOLDER}")
+        else:
+            pairs.append(part)
+    return f"{head}?{'&'.join(pairs)}{frag_sep}{fragment}"
+
+
 #: ``key:`` / ``"key" =`` / ``KEY=`` — the LEFT half of a pair in free text. The
 #: key is captured so the existing ``is_secret_key`` predicate decides; this
 #: adds a place to look, never a second vocabulary of what is secret.
