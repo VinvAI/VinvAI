@@ -4,6 +4,44 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-07-28
+
+### 🐛 Fixed
+
+0.1.2 introduced the engines pin — each build knows the engines commit it was
+cut against, and moves your checkout onto it. On real installs it never fired.
+Four separate reasons, each of which alone was enough to stop it:
+
+- **The update refused to touch the checkout it owns.** Any tracked
+  modification made Vinv leave `~/.vinv/engines` alone and warn instead. But
+  `uv sync` — which Vinv's own install runs — rewrites the tracked `uv.lock`, so
+  every checkout disqualified itself the first time it was installed. That
+  directory is an artifact directory the extension owns, not a working tree, and
+  it is now forced onto the pin regardless of what is in it. A checkout you point
+  at with `vinv.enginesPath`, or a monorepo you cloned yourself, is still never
+  modified.
+- **The checkout would have failed even without that guard.** It ran without
+  `--force`, and `uv.lock` differs between almost any two pins, so git aborted
+  with "local changes would be overwritten."
+- **A machine with no engines installed nothing.** Activation returned before the
+  update mode was even read, so the engines only ever arrived by clicking a
+  button. Vinv now installs them itself when they are missing, cloning straight
+  to the pinned version.
+- **A checkout on the right commit was assumed ready.** The commit is not what
+  makes the engines runnable — `uv sync` and `cargo build` are, and neither is
+  implied by a checkout. A checkout moved by hand sat on the correct commit with
+  an environment built for a different one. Vinv now re-syncs when the
+  environment predates the checkout.
+
+Also: an in-place fix can no longer be swallowed by its predecessor. The
+"already handled this version" markers now record which logic wrote them, so a
+fix shipped without a version bump still runs on the installs that need it.
+
+### 🔧 Maintenance
+
+- The engines-update default is documented as what it actually is (`auto`), and
+  the update prompt now says it resets Vinv's own engines checkout.
+
 ## [0.1.2] — 2026-07-28
 
 ### ✨ Added

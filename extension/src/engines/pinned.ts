@@ -11,8 +11,8 @@
  * talking to a moving engine, and the contracts between them are versioned
  * (the index store format, the MCP payload shapes, the recorded start
  * commands). Stamping the ref at package time makes "extension version" ⇒
- * "engine commit" a reproducible 1:1 pair: every user on 0.1.2 runs the same
- * engines, and updating the vsix is what moves them.
+ * "engine commit" a reproducible 1:1 pair: every user on a given extension
+ * version runs the same engines, and updating the vsix is what moves them.
  */
 
 /**
@@ -21,7 +21,7 @@
  * which is what a local `npm run bundle` dev build wants — the developer's
  * checkout is theirs to move.
  */
-export const ENGINE_REF = 'v0.1.2';
+export const ENGINE_REF = 'v0.1.3';
 
 /**
  * What an unconfigured install does when the stamped ref and the checkout
