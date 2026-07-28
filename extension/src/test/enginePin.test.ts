@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import {
+	decideInstallAction,
 	decidePinAction,
 	shouldRunPinCheck,
 	type EngineUpdateMode,
@@ -120,6 +121,43 @@ suite('engines pin decision', () => {
 		assert.strictEqual(
 			decidePinAction(pin({ mode: 'auto', force: true, autoAttempts: 9 })).kind,
 			'update',
+		);
+	});
+});
+
+suite('engines install decision (no checkout on the machine)', () => {
+	test("'auto' installs without asking", () => {
+		// The gap this closes: activation used to return when no checkout existed,
+		// which is BEFORE the mode is consulted at all — so "force the engines
+		// onto the pin" silently did not cover putting them there.
+		assert.strictEqual(decideInstallAction({ mode: 'auto', force: false, autoAttempts: 0 }).kind, 'install');
+	});
+
+	test("'prompt' asks first", () => {
+		assert.strictEqual(
+			decideInstallAction({ mode: 'prompt', force: false, autoAttempts: 0 }).kind,
+			'ask-install',
+		);
+	});
+
+	test('the same circuit breaker as the update path applies', () => {
+		assert.strictEqual(decideInstallAction({ mode: 'auto', force: false, autoAttempts: 1 }).kind, 'install');
+		assert.strictEqual(
+			decideInstallAction({ mode: 'auto', force: false, autoAttempts: 2 }).kind,
+			'ask-install',
+			'a clone that keeps failing must stop relaunching a terminal every window',
+		);
+	});
+
+	test('the explicit command installs on auto and asks otherwise', () => {
+		assert.strictEqual(decideInstallAction({ mode: 'auto', force: true, autoAttempts: 9 }).kind, 'install');
+		assert.strictEqual(
+			decideInstallAction({ mode: 'prompt', force: true, autoAttempts: 0 }).kind,
+			'ask-install',
+		);
+		assert.strictEqual(
+			decideInstallAction({ mode: 'never', force: true, autoAttempts: 0 }).kind,
+			'ask-install',
 		);
 	});
 });

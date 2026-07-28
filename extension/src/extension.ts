@@ -97,10 +97,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	registerEnginesCommands(context);
 	registerEngineUpdate(context);
 
-	// The engines live outside the vsix, so updating the extension does not move
-	// them. Once per extension version, compare the checkout against the engines
-	// ref this build was cut against and offer to close the gap. Fire-and-forget:
-	// it is a couple of git reads and never blocks activation.
+	// The engines live outside the vsix, so installing or updating the extension
+	// does not bring them with it. Once per extension version, force the checkout
+	// onto the engines ref this build was cut against — installing it first when
+	// the machine has none. Fire-and-forget: it is a couple of git reads, and the
+	// clone/build itself runs in a terminal, so activation never blocks.
 	void maybeUpdateEngines(context);
 
 	// Engines present? Offer the one-time embedding-model warmup so the first

@@ -11,9 +11,14 @@
  *
  * So each build stamps the ref it was cut against (./pinned) and, once per
  * extension version, this compares that ref against the checkout's HEAD and
- * offers to move it: fetch, `checkout --detach <ref>`, `uv sync`, and — only
+ * moves it: fetch, `checkout --detach --force <ref>`, `uv sync`, and — only
  * when index/ actually changed between the two commits — `cargo build
  * --release`, which is the multi-minute step worth skipping.
+ *
+ * When there is no checkout at all, this installs one (./install) rather than
+ * leaving it to a button the user has to find. Forcing the engines onto a pin
+ * is not much use if getting them onto the machine in the first place is still
+ * manual.
  *
  * WHAT IT WILL NOT TOUCH: anything that is not the clone we made ourselves. A
  * dev checkout, or a root pointed at by `vinv.enginesPath`, is the user's
@@ -33,7 +38,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
 import { defaultEnginesCloneDir } from './resolve';
-import { cargoBuildCommand, resolveEnginesRoot, runInEnginesTerminal } from './install';
+import { cargoBuildCommand, installEngines, resolveEnginesRoot, runInEnginesTerminal } from './install';
 import { ENGINE_REF, ENGINE_UPDATE_DEFAULT } from './pinned';
 
 export type EngineUpdateMode = 'auto' | 'prompt' | 'never';
@@ -180,6 +185,43 @@ export function decidePinAction(input: {
 	return { kind: 'ask' };
 }
 
+/** What to do when there is no engines checkout on the machine at all. */
+export type EngineInstallAction =
+	/** Clone and build it without asking. */
+	| { kind: 'install' }
+	/** Offer it first. */
+	| { kind: 'ask-install' };
+
+/**
+ * The decision for a machine with NO engines checkout.
+ *
+ * Deliberately mirrors decidePinAction's mode semantics, because "the extension
+ * forces its engines onto the pin" has to include putting them there in the
+ * first place. Until this existed, activation simply returned when the checkout
+ * was missing, so the flag never got a say: it governs decidePinAction, which is
+ * downstream of that return. The engines then only ever arrived by a click, and
+ * a fresh machine sat unusable until the user found the button.
+ *
+ * Mode 'never' is not handled here for the same reason decidePinAction does not
+ * handle it — shouldRunPinCheck is the gate, and an unforced 'never' never
+ * reaches either function.
+ */
+export function decideInstallAction(input: {
+	mode: EngineUpdateMode;
+	force: boolean;
+	autoAttempts: number;
+}): EngineInstallAction {
+	if (input.force) {
+		return input.mode === 'auto' ? { kind: 'install' } : { kind: 'ask-install' };
+	}
+	// Same circuit breaker as the update path: a clone that keeps failing must
+	// not reopen a terminal on every window for the rest of the version.
+	if (input.mode === 'auto' && input.autoAttempts < MAX_AUTO_ATTEMPTS) {
+		return { kind: 'install' };
+	}
+	return { kind: 'ask-install' };
+}
+
 /**
  * Moves the managed clone onto the pinned ref, in a visible terminal.
  *
@@ -212,8 +254,9 @@ function launchUpdate(
 }
 
 /**
- * Compares the checkout against this build's pinned ref and, depending on the
- * update mode, updates it, offers to, or warns.
+ * Brings the engines to this build's pinned ref: installs them when they are
+ * absent, and otherwise updates the checkout, offers to, or warns — depending
+ * on the update mode.
  *
  * Called on activation (gated to once per extension version) and by the
  * "Vinv: Update Engines" command, which passes `force` to re-run the check and
@@ -238,10 +281,44 @@ export async function maybeUpdateEngines(
 		return;
 	}
 
+	const settle = (): void => void context.globalState.update(SETTLED_KEY, version);
+	const autoAttempts = attemptsFor(context, version);
+
 	const root = resolveEnginesRoot(context);
 	if (!root) {
-		// Nothing installed yet — the next-step ladder already points at
-		// "Install Engines", and that clone lands on the pin by itself.
+		// Nothing installed yet. Install it here rather than leaving it to the
+		// next-step ladder: an extension that forces the engines onto its pin has
+		// to be able to put them there in the first place, or a fresh machine
+		// stays unusable until the user happens to find the button. The clone
+		// lands directly on ENGINE_REF (see installEngines).
+		const action = decideInstallAction({ mode, force, autoAttempts });
+		if (action.kind === 'ask-install') {
+			const choice = await vscode.window.showInformationMessage(
+				`Vinv ${version} needs the Vinv engines (${ENGINE_REF}) — they are not on this machine. Install them now? (Clones the monorepo to ~/.vinv/engines, runs uv sync, and builds the index engine.)`,
+				'Install Now',
+				'Later',
+				'Never',
+			);
+			if (choice === 'Never') {
+				await vscode.workspace
+					.getConfiguration('vinv')
+					.update('engines.autoUpdate', 'never', vscode.ConfigurationTarget.Global);
+				settle();
+				return;
+			}
+			if (choice !== 'Install Now') {
+				settle();
+				return;
+			}
+		}
+		// Counted like an unattended update: installEngines is fire-and-forget in
+		// a terminal, so a clone that keeps failing must stop relaunching itself.
+		// Deliberately NOT settled — a successful install goes quiet by itself,
+		// because the next window resolves a root and finds it already on the pin.
+		if (action.kind === 'install') {
+			await context.globalState.update(ATTEMPTS_KEY, `${version}:${autoAttempts + 1}`);
+		}
+		await installEngines(context);
 		return;
 	}
 
@@ -259,9 +336,7 @@ export async function maybeUpdateEngines(
 		return;
 	}
 
-	const settle = (): void => void context.globalState.update(SETTLED_KEY, version);
 	const managed = isManagedClone(root);
-	const autoAttempts = attemptsFor(context, version);
 	const action = decidePinAction({
 		head,
 		pinnedCommit: await resolveCommit(root, ENGINE_REF),
