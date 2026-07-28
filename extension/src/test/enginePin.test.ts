@@ -2,6 +2,7 @@ import * as assert from 'assert';
 import {
 	decideInstallAction,
 	decidePinAction,
+	environmentNeedsSync,
 	pinStateStamp,
 	shouldRunPinCheck,
 	type EngineUpdateMode,
@@ -151,6 +152,45 @@ suite('engines pin decision', () => {
 		assert.strictEqual(
 			decidePinAction(pin({ mode: 'auto', force: true, autoAttempts: 9 })).kind,
 			'update',
+		);
+	});
+});
+
+suite('engines environment freshness', () => {
+	test('never built is always stale', () => {
+		assert.strictEqual(
+			environmentNeedsSync({ synced: false, venvMtimeMs: 9, headMtimeMs: 1 }),
+			true,
+			'a checkout with no venv needs a sync no matter what the mtimes say',
+		);
+	});
+
+	test('a venv older than the checkout was built for a different commit', () => {
+		// The observed case: the checkout was moved to the pin by hand at 05:14
+		// while the venv dated from 02:58, so HEAD matched, the pin check reported
+		// up-to-date, and the engines ran v0.1.2 code against a v0.1.1 environment
+		// — 878 lines of uv.lock and two pyprojects apart.
+		assert.strictEqual(
+			environmentNeedsSync({ synced: true, venvMtimeMs: 2_58, headMtimeMs: 5_14 }),
+			true,
+		);
+	});
+
+	test('a venv newer than the checkout is current', () => {
+		assert.strictEqual(
+			environmentNeedsSync({ synced: true, venvMtimeMs: 5_15, headMtimeMs: 5_14 }),
+			false,
+		);
+	});
+
+	test('unreadable mtimes never churn a terminal on a guess', () => {
+		assert.strictEqual(
+			environmentNeedsSync({ synced: true, venvMtimeMs: null, headMtimeMs: 5_14 }),
+			false,
+		);
+		assert.strictEqual(
+			environmentNeedsSync({ synced: true, venvMtimeMs: 5_14, headMtimeMs: null }),
+			false,
 		);
 	});
 });

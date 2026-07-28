@@ -34,10 +34,11 @@
  * the update the moment it was first synced. Untracked files are left alone —
  * .venv/ and index/target/ are expensive build output, not state to reset.
  */
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import { defaultEnginesCloneDir } from './resolve';
+import { defaultEnginesCloneDir, enginesSynced, pythonEnginePath } from './resolve';
 import { cargoBuildCommand, installEngines, resolveEnginesRoot, runInEnginesTerminal } from './install';
 import { ENGINE_REF, ENGINE_UPDATE_DEFAULT } from './pinned';
 
@@ -120,6 +121,53 @@ async function resolveCommit(root: string, ref: string): Promise<string | null> 
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Whether the checkout's environment was built for the commit currently on disk.
+ *
+ * HEAD matching the pin is NOT enough to call the engines ready, which is the
+ * hole this closes: `uv sync` and `cargo build` are what actually materialise
+ * them, and neither is implied by a git commit. Between v0.1.1 and v0.1.2 alone
+ * uv.lock moved 878 lines and two workspace pyprojects changed their
+ * dependencies — so a checkout moved by hand, or by an older build that only ran
+ * the checkout step, sits on exactly the right commit with a venv resolved for a
+ * different one. That reads as "up to date" and is precisely the version skew
+ * the pin exists to prevent.
+ *
+ * Pure so the decision is testable; `environmentIsStale` supplies the facts.
+ */
+export function environmentNeedsSync(input: {
+	synced: boolean;
+	venvMtimeMs: number | null;
+	headMtimeMs: number | null;
+}): boolean {
+	if (!input.synced) {
+		return true; // never built at all
+	}
+	if (input.venvMtimeMs === null || input.headMtimeMs === null) {
+		return false; // cannot tell — never churn a terminal on a guess
+	}
+	// `git checkout` rewrites .git/HEAD, so a venv older than it was built for a
+	// different commit. Erring toward syncing again is safe: uv sync is
+	// idempotent and cargo build is incremental.
+	return input.venvMtimeMs < input.headMtimeMs;
+}
+
+/** environmentNeedsSync against the real filesystem. */
+function environmentIsStale(root: string): boolean {
+	const mtime = (p: string): number | null => {
+		try {
+			return fs.statSync(p).mtimeMs;
+		} catch {
+			return null;
+		}
+	};
+	return environmentNeedsSync({
+		synced: enginesSynced(root),
+		venvMtimeMs: mtime(pythonEnginePath(root, 'tracelens')),
+		headMtimeMs: mtime(path.join(root, '.git', 'HEAD')),
+	});
 }
 
 /** The clone this extension created and therefore owns. */
@@ -375,10 +423,24 @@ export async function maybeUpdateEngines(
 		autoAttempts,
 	});
 
-	// Up to date: settling skips the git reads on every window reload until the
-	// next extension update.
+	// The commit is right — but reaching here means this is the first activation
+	// for this build, and a matching commit does not mean a materialised
+	// environment (see environmentNeedsSync). Sync before going quiet, so
+	// installing the extension is what makes the engines usable rather than
+	// something the user has to notice and do. Settling either way: the git reads
+	// are skipped on every window reload until the next build.
 	if (action.kind === 'up-to-date') {
 		settle();
+		if (environmentIsStale(root)) {
+			runInEnginesTerminal('Vinv Engines Sync', [
+				`cd "${root}"`,
+				'uv sync',
+				cargoBuildCommand(root),
+			]);
+			void vscode.window.showInformationMessage(
+				`Vinv: the engines are at ${ENGINE_REF}, but their environment was built for a different commit — syncing it in the terminal.`,
+			);
+		}
 		return;
 	}
 
