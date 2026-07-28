@@ -561,6 +561,11 @@ def unsatisfied_names(error_text: str, supplied: dict[str, str]) -> list[str]:
 
 CONFIG_TOPIC = "config"
 
+#: Modules whose import failure named nothing any pattern could read. A separate
+#: topic from `config` because the QUESTION is different: not "what is this
+#: variable" but "what does this module need".
+BLOCKED_TOPIC = "blocked-import"
+
 
 def config_question(name: str, *, modules: list[str], reason: str, tried: list[str]) -> Question:
     """One cached, budgeted question asking the harness for a value.
@@ -730,3 +735,83 @@ def answered_config(repo: Path) -> dict[str, str]:
         if value is not None:
             out[str(name)] = str(value)
     return out
+
+
+def blocked_module_question(module: str, reason: str) -> Question:
+    """Ask the harness what a module needs, when no pattern recognised the failure.
+
+    ``missing_env_names`` reads the shapes in which a program says "I needed
+    this and did not get it", and that set is finite while the ways to say it
+    are not. A repo that raises its own ``NeedsSetup("the widget registry has
+    not been provisioned")`` names no variable in any form a regex anticipates,
+    so nothing is induced, nothing is unsatisfied, and — before this — nothing
+    escalated either. The module simply stayed blocked and no one was asked.
+
+    That is the case the agent channel exists for. A pattern that fails should
+    hand the question on, not end the ladder: the harness can read the module,
+    find what it reaches for, and answer in the same cached, budgeted way it
+    answers everything else. The regexes stay because they are free and settle
+    the common shapes without a model call; this is what happens when they miss.
+    """
+    return Question(
+        key=question_key(BLOCKED_TOPIC, module),
+        topic=BLOCKED_TOPIC,
+        subject=module,
+        prompt=(
+            f"The module `{module}` cannot be imported, and the harness could not "
+            "tell from the error what it is missing:\n\n"
+            f"{reason[:800]}\n\n"
+            "Read this module and whatever it imports at module scope. If it needs "
+            "environment variables to import, name them and give values valid for "
+            "local, offline use inside a sandbox with no network. If it cannot be "
+            "imported without something else entirely — a file on disk, a running "
+            "service, a build step — say so in `blocker` and leave `variables` "
+            "empty. Never invent a real credential."
+        ),
+        reply_schema=(
+            '{"variables": {"<NAME>": "<value>"}, ' '"blocker": "<what else is needed>"|null}'
+        ),
+        context={"module": module},
+    )
+
+
+def blocked_module_answers(repo: Path) -> dict[str, str]:
+    """Variables the harness supplied for modules whose failure was unrecognised."""
+    doc = store.read_json(store.exercise_dir(repo) / f"agent_{BLOCKED_TOPIC}.json") or {}
+    out: dict[str, str] = {}
+    for entry in (doc.get("questions") or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        answer = entry.get("answer")
+        if not isinstance(answer, dict):
+            continue
+        variables = answer.get("variables")
+        if not isinstance(variables, dict):
+            continue
+        for name, value in variables.items():
+            # A secret never returns through the agent channel, whatever the
+            # model said — those go to the human via `config_answers`.
+            if value is None or is_secret_key(str(name)):
+                continue
+            out[str(name)] = str(value)
+    return out
+
+
+def ask_about_blocked_modules(
+    repo: Path,
+    blocked: dict[str, str],
+    *,
+    max_new: int = 25,
+) -> tuple[AgentChannel, list[dict[str, Any]]]:
+    """Raise one cached question per module the patterns could not read.
+
+    Returns the channel and a report of what is now pending, so a run says it
+    handed the question on rather than appearing to have given up.
+    """
+    channel = AgentChannel(repo, BLOCKED_TOPIC, max_new=max_new)
+    pending: list[dict[str, Any]] = []
+    for module, reason in sorted(blocked.items()):
+        answer = channel.ask(blocked_module_question(module, redact_text(reason)))
+        if answer is None:
+            pending.append({"module": module, "reason": redact_text(reason)[:300]})
+    return channel, pending

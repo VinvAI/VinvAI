@@ -927,15 +927,27 @@ def write_shim(directory: Path) -> Path:
 
     The service doubles ship alongside it as ``_vinv_service_doubles`` — a COPY
     of :mod:`exerciser.service_doubles`, not an import of it, because the worker
-    has only the standard library and the repo on its path. The module is
-    dependency-free precisely so this copy is a copy and nothing more.
+    has only the standard library and the repo on its path.
+
+    ``redact`` ships the same way, as ``_vinv_redact``. The doubles redact the
+    request lines they record — a provider URL carries the key in `?key=`/`?sig=`
+    and a connection string carries its password in the authority — and that
+    logic must not be duplicated just to satisfy the copy. Shipping the module
+    beside it keeps ONE implementation and keeps the copy free of package
+    imports, which is the constraint that makes it work at all: a relative
+    import here raises `attempted relative import with no known parent package`
+    inside the jail and takes down every double, not only the one that needed it.
     """
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "sitecustomize.py"
     path.write_text(_SITECUSTOMIZE_SOURCE, encoding="utf-8")
-    doubles = Path(__file__).with_name("service_doubles.py")
-    if doubles.is_file():
-        shutil.copy2(doubles, directory / "_vinv_service_doubles.py")
+    for source, target in (
+        ("service_doubles.py", "_vinv_service_doubles.py"),
+        ("redact.py", "_vinv_redact.py"),
+    ):
+        module = Path(__file__).with_name(source)
+        if module.is_file():
+            shutil.copy2(module, directory / target)
     return path
 
 

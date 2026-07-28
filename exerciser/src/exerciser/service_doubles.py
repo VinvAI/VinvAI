@@ -59,7 +59,10 @@ import sys
 import types
 from typing import Any
 
-from .redact import redact_url
+try:  # inside the package
+    from .redact import redact_url
+except ImportError:  # the standalone copy in the jail — see `sandbox.write_shim`
+    from _vinv_redact import redact_url  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Ledger — every substitution and every fidelity gap is written down

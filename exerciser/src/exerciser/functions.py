@@ -694,7 +694,16 @@ _MAX_ENV_INDUCTION_ROUNDS = 6
 
 
 def _import_error_text(stdout: str) -> str:
-    """The import failures a worker reported, joined — what the module asked for."""
+    """The import failures a worker reported, joined — what the module asked for.
+
+    Rendered as ``TypeName: message``, because the worker stores the two apart
+    and the TYPE carries most of the meaning. ``os.environ["DATABASE_URL"]``
+    raises a ``KeyError`` whose ``str()`` is just ``'DATABASE_URL'`` — a bare
+    quoted word. Without the class name in front, the stdlib's own spelling of
+    "this variable is missing" is unrecognisable, so the most common way a
+    Python program says it needs configuration was the one shape the induction
+    could not read.
+    """
     parts: list[str] = []
     for line in stdout.splitlines():
         line = line.strip()
@@ -705,7 +714,9 @@ def _import_error_text(stdout: str) -> str:
         except ValueError:
             continue
         if row.get("phase") == "import" and row.get("status") == "error":
-            parts.append(str(row.get("error") or ""))
+            kind = str(row.get("error_type") or "").strip()
+            message = str(row.get("error") or "")
+            parts.append(f"{kind}: {message}" if kind else message)
     return "\n".join(parts)
 
 
@@ -3541,11 +3552,16 @@ def run_functions(
     # Modules that only imported once environment variables were supplied, and
     # which ones. Never the values — some of them are credentials.
     env_inductions: list[dict[str, Any]] = []
+    # Modules that stayed blocked while the patterns extracted NOTHING. Their
+    # failure is unreadable to a regex, which is precisely when the agent
+    # channel earns its keep — so they are handed on rather than dropped.
+    unreadable_blocks: dict[str, str] = {}
     # Values already answered — by a human through the extension, or by the
     # harness on the config channel — so a question is asked once, not once per
     # run forever.
     supplied_config: dict[str, str] = dict(envconfig.read_config_answers(repo))
     supplied_config.update(envconfig.answered_config(repo))
+    supplied_config.update(envconfig.blocked_module_answers(repo))
 
     for module, mod_targets in sorted(by_module.items()):
         plan_file = tmp_dir / f"{module.replace('.', '_')}.plan.json"
@@ -3652,6 +3668,11 @@ def run_functions(
                     # whose failure named nothing actionable keeps the rows it
                     # already earned — the original failure is the finding, and
                     # discarding it for an empty result would lose it.
+                    if not induced:
+                        # The patterns read nothing out of this failure. Keep the
+                        # message so the harness can be asked what the regexes
+                        # could not tell.
+                        unreadable_blocks[module] = _import_error_text(proc.stdout or "")
                     if induced and induced_proc is not None:
                         proc = induced_proc
                         blocked = _import_blocked(proc.stdout or "")
@@ -4016,6 +4037,15 @@ def run_functions(
     config_channel, harness_answers, config_requests = envconfig.build_config_requests(
         repo, unresolved
     )
+    blocked_channel, blocked_pending = envconfig.ask_about_blocked_modules(repo, unreadable_blocks)
+    blocked_report = blocked_channel.save(logger=log)
+    if blocked_pending:
+        diagnostics.append(
+            f"{len(blocked_pending)} module(s) could not be imported and the failure named "
+            "nothing recognisable — asked the coding harness what they need: "
+            + ", ".join(entry["module"] for entry in blocked_pending[:5])
+        )
+        log.warning("functions_blocked_asked %s", diagnostics[-1])
     channel_report = config_channel.save(logger=log)
     envconfig.write_config_requests(repo, config_requests)
     if config_requests:
@@ -4084,6 +4114,11 @@ def run_functions(
         "config_requests": config_requests,
         "config_supplied_by_harness": sorted(harness_answers),
         "config_channel": channel_report,
+        # Modules whose import failure no pattern could read, handed to the
+        # harness. A regex that misses must pass the question on, not end the
+        # ladder.
+        "blocked_imports_asked": blocked_pending,
+        "blocked_channel": blocked_report,
         "diagnostics": diagnostics,
         "repo": str(repo),
         "service": service,
