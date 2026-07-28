@@ -105,7 +105,67 @@ export function exerciseStateFromArtifacts(
  * success criteria; "no longer produces these errors" would be vacuous.
  */
 export function isAssertShapedKind(kind: string): boolean {
-	return kind === 'invariant-violation' || kind === 'baseline-degraded';
+	return ASSERT_SHAPED_KINDS.has(kind);
+}
+
+/**
+ * Kinds where the code ANSWERED and the answer was wrong — no exception, no 5xx.
+ *
+ * The HTTP oracle contributes two. The five newer oracles contribute three more,
+ * and getting them into this set is not cosmetic: an error-shaped dispatch tells
+ * the fixing agent "these calls no longer raise", which is VACUOUS against a
+ * silent wrong value — the target never raised in the first place, so the
+ * criterion is satisfied by changing nothing.
+ */
+const ASSERT_SHAPED_KINDS: ReadonlySet<string> = new Set([
+	'invariant-violation', // learned invariant broken on a 2xx
+	'baseline-degraded', // value changed against a value-stable golden
+	'differential-mismatch', // computed a different value than the reference
+	'fault-divergence', // aggregate differs by chunk-split point
+	'concurrency-divergence', // concurrent results collapse vs the serial baseline
+]);
+
+/**
+ * Kinds that are DIAGNOSTICS about the environment, never defects in this repo —
+ * so they must never become a fix episode.
+ *
+ * `signature-drift` is an upstream dependency changing its own API. There is no
+ * edit to this repo that "fixes" it, and dispatching an agent at it burns a fix
+ * budget on something it cannot resolve. It still belongs in issues.json as
+ * evidence; it just must not be actioned.
+ */
+const NON_DISPATCHABLE_KINDS: ReadonlySet<string> = new Set(['signature-drift']);
+
+/** Whether a cluster kind should become a fix episode at all. */
+export function isDispatchableKind(kind: string): boolean {
+	return !NON_DISPATCHABLE_KINDS.has(kind);
+}
+
+/**
+ * Where the evidence for a cluster kind actually lives.
+ *
+ * The dispatch text used to hardcode "results.jsonl" for everything, which is
+ * the HTTP oracle's artifact. Pointing a fixing agent at an empty file is worse
+ * than pointing it nowhere — it reads the miss as "no evidence exists".
+ */
+export function evidenceFileForKind(kind: string): string {
+	switch (kind) {
+		case 'function-crash':
+		case 'function-sandboxed':
+			return 'function_results.jsonl';
+		case 'differential-mismatch':
+			return 'differential_results.jsonl';
+		case 'fault-crash':
+		case 'fault-divergence':
+			return 'fault_results.jsonl';
+		case 'concurrency-divergence':
+		case 'concurrency-hang':
+			return 'concurrency_results.jsonl';
+		case 'signature-drift':
+			return 'signatures.json';
+		default:
+			return 'results.jsonl';
+	}
 }
 
 /** Success criteria for an assert-shaped (silent wrong-value) dispatch. */
@@ -125,19 +185,27 @@ export const ASSERT_SUCCESS_CRITERIA: readonly string[] = [
 export function issueEpisodesFromClusters(
 	clusters: ExerciseIssuesDoc['clusters'],
 ): Array<{ title: string; detail: string; rows?: number[] }> {
-	return clusters.map((c) => ({
-		title: `Behavior: ${c.title}`,
-		detail: isAssertShapedKind(c.kind)
-			? `The behavioral exerciser drove ${c.method} ${c.path}: the service answered ` +
-				`without raising, but its output violated a learned assertion (${c.kind}).\n` +
-				`Failure signature: ${c.signature}\n` +
-				`See .vinv/exercise/issues.json (cluster ${c.signature}), invariants.json for ` +
-				`the learned assertion, and baselines/ for the golden entry it regressed against.`
-			: `The behavioral exerciser drove ${c.method} ${c.path} and hit a ${c.kind}.\n` +
-				`Failure signature: ${c.signature}\n` +
-				`See .vinv/exercise/issues.json (cluster ${c.signature}) and results.jsonl for the ` +
-				`failing input, expected-vs-got, and covered frames.`,
-	}));
+	return clusters.filter((c) => isDispatchableKind(c.kind)).map((c) => {
+		// `method` is the ORACLE for a non-HTTP cluster (CALL/DIFF/FAULT/CONC/ENV)
+		// and `path` is its target, so "drove CALL pkg.mod:fn" reads correctly for
+		// both families without a second template.
+		const where = `${c.method} ${c.path}`;
+		const evidence = evidenceFileForKind(c.kind);
+		return {
+			title: `Behavior: ${c.title}`,
+			detail: isAssertShapedKind(c.kind)
+				? `The behavioral exerciser drove ${where}: the code answered ` +
+					`without raising, but its output violated a learned assertion (${c.kind}).\n` +
+					`Failure signature: ${c.signature}\n` +
+					`See .vinv/exercise/issues.json (cluster ${c.signature}), ${evidence} for the ` +
+					`failing case, invariants.json for the learned assertion, and baselines/ for ` +
+					`the golden entry it regressed against.`
+				: `The behavioral exerciser drove ${where} and hit a ${c.kind}.\n` +
+					`Failure signature: ${c.signature}\n` +
+					`See .vinv/exercise/issues.json (cluster ${c.signature}) and ${evidence} for the ` +
+					`failing input, expected-vs-got, and covered frames.`,
+		};
+	});
 }
 
 /** The service to exercise: prefer a live session with a known port. */
@@ -171,6 +239,19 @@ let exerciseRunning = false;
 /** True while an exercise pass is in flight. */
 export function isExerciseRunning(): boolean {
 	return exerciseRunning;
+}
+
+/**
+ * Plays the campaign may spend per pass (VINV_CAMPAIGN_BUDGET, default 12).
+ *
+ * Kept well under the engine's own default of 20 because each play can fork a
+ * worker that imports and calls target code: the step timeout has to cover the
+ * whole campaign, and an unbounded one would simply be SIGKILLed halfway with
+ * its posteriors half-updated.
+ */
+function campaignBudget(): number {
+	const raw = Number.parseInt(process.env.VINV_CAMPAIGN_BUDGET ?? '', 10);
+	return Number.isFinite(raw) && raw > 0 ? raw : 12;
 }
 
 /** Per-engine-step timeout (VINV_EXERCISE_TIMEOUT_S, default 180s). */
@@ -336,6 +417,34 @@ async function exercisePassOnce(
 	if (!step.ok) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'run failed'));
 		return { outcome: 'failed', endpointsCovered: 0, total: 0, invariants: 0, issues: 0, error: step.error };
+	}
+
+	// The non-HTTP oracles: crash (function harness), differential, fault,
+	// concurrency, environment. Until this step existed they were complete,
+	// tested, and unreachable — five oracles whose output no code in this
+	// extension read, because only `plan/run/profile/scorecard` were ever
+	// invoked. `campaign` allocates one budget across them by Thompson sampling
+	// and publishes what they find into issues.json, which is the single file
+	// the dispatch path below consumes.
+	//
+	// It runs AFTER `run` deliberately: `run` rewrites issues.json wholesale, so
+	// merging first would be overwritten. Its own budget bounds it, because
+	// `campaign` has no wall-clock deadline of its own and the step timer would
+	// otherwise be the only thing stopping it.
+	//
+	// A campaign failure is NOT fatal to the pass — the HTTP findings from `run`
+	// are already earned and worth publishing. It degrades to a diagnostic.
+	publishExerciseState(
+		exerciseStateFromArtifacts(null, null, 'running', 'exercising functions, faults and contracts…'),
+	);
+	const campaign = await runEngine(
+		bin,
+		['campaign', workspaceRoot, '--base-url', baseUrl, '--budget', String(campaignBudget())],
+		workspaceRoot,
+		env,
+	);
+	if (!campaign.ok) {
+		console.warn(`Vinv: campaign step failed (HTTP findings still published): ${campaign.error}`);
 	}
 
 	publishExerciseState(exerciseStateFromArtifacts(null, null, 'running', 'profiling behavior…'));

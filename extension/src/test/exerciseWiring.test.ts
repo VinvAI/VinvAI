@@ -13,6 +13,8 @@ import {
 	type ExerciseIssuesDoc,
 	type ExerciseProfile,
 	isAssertShapedKind,
+	isDispatchableKind,
+	evidenceFileForKind,
 	ASSERT_SUCCESS_CRITERIA,
 } from '../harness/exerciseRunner';
 import { computeFlowModel, type FlowFacts } from '../views/flowModel';
@@ -120,6 +122,72 @@ suite('exercise state derivation (pure)', () => {
 		assert.ok(ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('golden baseline')));
 		assert.ok(ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('does not delete or weaken')));
 		assert.ok(!ASSERT_SUCCESS_CRITERIA.some((c) => c.includes('no longer produce these errors')));
+	});
+
+	// The five non-HTTP oracles publish into issues.json now, so this path sees
+	// kinds it never saw before. Each needs the right evidence file, and the one
+	// kind that is not a defect must not be dispatched as one.
+	test('every oracle kind points at the artifact that holds its evidence', () => {
+		const kinds: Array<[string, string]> = [
+			['function-crash', 'function_results.jsonl'],
+			['import-error', 'function_results.jsonl'],
+			['differential-mismatch', 'differential_results.jsonl'],
+			['fault-divergence', 'fault_results.jsonl'],
+			['concurrency-divergence', 'concurrency_results.jsonl'],
+			['concurrency-hang', 'concurrency_results.jsonl'],
+			['server-error', 'results.jsonl'],
+		];
+		for (const [kind, file] of kinds) {
+			assert.strictEqual(
+				evidenceFileForKind(kind),
+				file,
+				`${kind} must point a developer at ${file}`,
+			);
+			const eps = issueEpisodesFromClusters([
+				{ signature: `sig-${kind}`, kind,
+				  title: `pkg.m:f — something went wrong`,
+				  endpoint_id: 'pkg.m:f', method: 'CALL', path: 'pkg.m:f' },
+			]);
+			assert.strictEqual(eps.length, 1, `${kind} must dispatch`);
+			assert.ok(
+				eps[0].detail.includes(file),
+				`${kind} detail must name ${file}, got: ${eps[0].detail}`,
+			);
+		}
+	});
+
+	test('signature-drift is reported but never dispatched as a defect', () => {
+		// It is an observation about a signature CHANGING, not a claim that
+		// anything is broken — there is no failing behaviour for an agent to fix,
+		// so dispatching it would spend a whole episode discovering that.
+		assert.strictEqual(isDispatchableKind('signature-drift'), false);
+		assert.strictEqual(isDispatchableKind('function-crash'), true);
+		const eps = issueEpisodesFromClusters([
+			{ signature: 'drift1', kind: 'signature-drift',
+			  title: 'pkg.m:f — signature changed', endpoint_id: 'pkg.m:f',
+			  method: 'CALL', path: 'pkg.m:f' },
+			{ signature: 'crash1', kind: 'function-crash',
+			  title: 'pkg.m:g — ValueError', endpoint_id: 'pkg.m:g',
+			  method: 'CALL', path: 'pkg.m:g' },
+		]);
+		assert.strictEqual(eps.length, 1, 'only the crash is dispatchable');
+		assert.ok(eps[0].detail.includes('pkg.m:g'));
+	});
+
+	test('an unknown kind still dispatches, against the default artifact', () => {
+		// Failing closed here would mean a future oracle silently surfaces
+		// nothing — the exact failure this whole connector exists to end.
+		assert.strictEqual(isDispatchableKind('some-future-kind'), true);
+		assert.strictEqual(evidenceFileForKind('some-future-kind'), 'results.jsonl');
+	});
+
+	test('the non-HTTP oracles describe their location as a callable, not a route', () => {
+		const eps = issueEpisodesFromClusters([
+			{ signature: 'c1', kind: 'function-crash',
+			  title: 'pkg.m:f — PatternError', endpoint_id: 'pkg.m:f',
+			  method: 'CALL', path: 'pkg.m:f' },
+		]);
+		assert.ok(eps[0].detail.includes('CALL pkg.m:f'));
 	});
 });
 

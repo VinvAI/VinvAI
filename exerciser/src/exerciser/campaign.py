@@ -121,11 +121,58 @@ class Play:
     # signatures never credited before. A runner that reports no signatures keeps
     # its own `violations` (there is nothing to dedupe on).
     signatures: tuple[str, ...] = ()
+    # Units of work the oracle actually performed — calls made, inputs compared,
+    # faults injected. ``None`` means the oracle reports no such counter, which
+    # is NOT the same as zero: unknown work is treated as conclusive, zero work
+    # is not.
+    #
+    # Every runner claims ``covered=(action.target,)`` the moment it is invoked,
+    # so a play whose worker never imported the target — the target's own
+    # dependencies missing, the wrong ``--python``, a module that dies on import
+    # — still collected the exploration bonus and still posted a Bernoulli
+    # update. The bandit was learning a preference over arms it had never
+    # measured, and the report said ``status: ok`` for a campaign that exercised
+    # nothing. Distinguishing "ran and found nothing" from "never ran" is the
+    # difference between evidence and noise.
+    work: int | None = None
+    # The cluster OBJECTS behind those signatures.
+    #
+    # Counting findings and being able to REPORT them are different things, and
+    # only the first was ever wired: every oracle wrote its clusters to its own
+    # artifact (functions.json, differential.json, …) and the campaign kept just
+    # the signatures for credit accounting. Nothing merged them anywhere the
+    # extension reads, and `exerciseStateFromArtifacts` reads exactly one file —
+    # `issues.json`. So five complete oracles could run, find real defects, and
+    # surface nothing: the dispatch path had no document to look at.
+    clusters: tuple[dict[str, Any], ...] = ()
 
 
 # A runner is bound to its repo/config by ``default_runners``; the campaign
 # only ever hands it the action it drew.
 OracleRunner = Callable[[Action], Play]
+
+
+def _as_count(value: Any) -> int | None:
+    """A work counter as a non-negative int, or ``None`` when the oracle omitted it.
+
+    A missing key and a zero mean opposite things here — see ``Play.work`` — so
+    ``None`` is preserved rather than coerced to 0. A negative or non-numeric
+    value is treated as unreported for the same reason: it cannot support the
+    claim that work happened.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def is_inconclusive(play: Play) -> bool:
+    """The play produced no evidence either way, so it must not teach the bandit.
+
+    Zero work AND nothing found. Either alone is not enough: an oracle that
+    reports no work counter is unknown-not-zero, and a play that found a
+    violation plainly ran whatever its counter says.
+    """
+    return play.work == 0 and play.violations == 0 and not play.signatures
 
 
 def probe_equivalents(elapsed_s: float, subprocesses: int = 0) -> float:
@@ -376,6 +423,77 @@ def _findings(
     return len(sigs), tuple(sigs)
 
 
+def _merge_into_issues(
+    repo: Path,
+    clusters: dict[str, dict[str, Any]],
+    *,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Publish the oracles' clusters into ``issues.json``. Returns how many were new.
+
+    This is the step that was missing, and without it the five newer oracles
+    were unreachable in practice however correct they were. Each writes its own
+    artifact (``functions.json``, ``differential.json``, …), and the campaign
+    kept only signatures for credit accounting — but the extension's dispatch
+    path (``exerciseStateFromArtifacts`` → ``clustersToEpisodes`` →
+    ``dispatchIssueEpisode``) reads exactly ONE file: ``issues.json``. So a
+    campaign could find real defects and surface none of them.
+
+    Merging rather than overwriting, keyed on signature, because ``run`` owns
+    this file for the HTTP oracle and both sets of findings are real. The
+    extension already dedupes dispatches by signature, so a cluster appearing
+    here twice across passes costs nothing.
+
+    ORDERING REQUIREMENT: the campaign must run AFTER ``run`` in a pass, since
+    ``run`` rewrites this file wholesale. ``exerciseRunner`` invokes it last.
+    """
+    log = logger or logging.getLogger(__name__)
+    if not clusters:
+        return 0
+    path = store.issues_path(repo)
+    doc = store.read_json(path)
+    existing = doc.get("clusters") if isinstance(doc, dict) else None
+    by_sig: dict[str, dict[str, Any]] = {}
+    if isinstance(existing, list):
+        for c in existing:
+            if isinstance(c, dict):
+                by_sig[_cluster_signature(c)] = c
+    before = len(by_sig)
+    for sig, cluster in clusters.items():
+        by_sig.setdefault(sig, cluster)
+    ordered = sorted(by_sig.values(), key=lambda c: (str(c.get("kind")), str(c.get("path"))))
+    store.write_json(
+        path,
+        {"version": 1, "cluster_count": len(ordered), "clusters": ordered},
+    )
+    added = len(by_sig) - before
+    log.info(
+        "campaign: published %d oracle cluster(s) into issues.json (%d new, %d total)",
+        len(clusters),
+        added,
+        len(ordered),
+    )
+    return added
+
+
+def _clusters_of(
+    result: dict[str, Any], *, target: str | None = None
+) -> tuple[dict[str, Any], ...]:
+    """The cluster objects one oracle reported, filtered to ``target``.
+
+    Same selection rule as ``_findings`` so the objects a play carries and the
+    signatures it is credited for cannot disagree.
+    """
+    clusters = result.get("clusters")
+    if not isinstance(clusters, list):
+        return ()
+    return tuple(
+        c
+        for c in clusters
+        if isinstance(c, dict) and (target is None or c.get("endpoint_id") == target)
+    )
+
+
 def _functions_runner(cfg: OracleConfig) -> OracleRunner:
     from .functions import run_functions
 
@@ -404,11 +522,14 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
         # occasionally surfaces a thinly-labelled signature so the differential
         # oracle and the adjudication channel can put a real label on it.
         violations, signatures = _findings(result, target=action.target)
+        clusters = _clusters_of(result, target=action.target)
         return Play(
+            clusters=clusters,
             violations=violations,
             signatures=signatures,
             covered=(action.target,),
             subprocesses=subprocesses,
+            work=_as_count(result.get("calls")),
             detail={"calls": result.get("calls"), "verdicts": result.get("verdicts")},
         )
 
@@ -433,11 +554,14 @@ def _differential_runner(cfg: OracleConfig) -> OracleRunner:
         except Exception as exc:
             cfg.logger.warning("campaign: differential self-supervision skipped: %s", exc)
         violations, signatures = _findings(result)
+        clusters = _clusters_of(result)
         return Play(
+            clusters=clusters,
             violations=violations,
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            work=_as_count(result.get("comparisons")),
             detail={
                 "comparisons": result.get("comparisons"),
                 "policy_limits": result.get("policy_limit_count"),
@@ -494,11 +618,14 @@ def _faults_runner(cfg: OracleConfig) -> OracleRunner:
             logger=cfg.logger,
         )
         violations, signatures = _findings(result)
+        clusters = _clusters_of(result)
         return Play(
+            clusters=clusters,
             violations=violations,
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            work=_as_count(result.get("faults_injected")),
             detail={"faults_injected": result.get("faults_injected")},
         )
 
@@ -543,7 +670,9 @@ def _concurrency_runner(cfg: OracleConfig) -> OracleRunner:
             logger=cfg.logger,
         )
         violations, signatures = _findings(result)
+        clusters = _clusters_of(result)
         return Play(
+            clusters=clusters,
             violations=violations,
             signatures=signatures,
             covered=(action.target,),
@@ -584,6 +713,7 @@ def _http_runner(cfg: OracleConfig) -> OracleRunner:
             signatures=signatures,
             covered=(action.target,),
             subprocesses=0,
+            work=_as_count(result.get("probes_spent")),
             detail={"probes_spent": result.get("probes_spent")},
         )
 
@@ -596,7 +726,9 @@ def _environment_runner(cfg: OracleConfig) -> OracleRunner:
     def run(action: Action) -> Play:
         result = run_environment(cfg.repo, timeout_s=cfg.timeout_s, logger=cfg.logger)
         violations, signatures = _findings(result)
+        clusters = _clusters_of(result)
         return Play(
+            clusters=clusters,
             violations=violations,
             signatures=signatures,
             covered=(action.target,),
@@ -715,10 +847,13 @@ def run_campaign(
     rng = random.Random(seed)
     covered_ground: set[str] = set()
     plays: list[dict[str, Any]] = []
+    # signature -> cluster object, for the issues document written at the end.
+    reported_clusters: dict[str, dict[str, Any]] = {}
     stale = 0
     stopped = "budget-exhausted"
     total_violations = 0
     repeat_violations = 0
+    inconclusive_plays = 0
 
     while len(plays) < budget:
         action = bandit.select(rng)
@@ -745,7 +880,12 @@ def run_campaign(
             log.warning("campaign: %s raised %s", action.key, exc)
         elapsed = time.perf_counter() - started
 
-        fresh = [c for c in play.covered if c not in covered_ground]
+        # An inconclusive play measured nothing, so it claims no ground and posts
+        # no posterior update — it is billed for the time it burned (the budget
+        # unit is spent either way) and counted, so the report can say plainly
+        # that N plays never reached their target.
+        inconclusive = is_inconclusive(play)
+        fresh = [] if inconclusive else [c for c in play.covered if c not in covered_ground]
         covered_ground.update(fresh)
         # An oracle re-run on the same arm re-reports the same deterministic
         # defect. Only signatures never credited before are this play's finding;
@@ -764,12 +904,20 @@ def run_campaign(
         else:
             violations, repeats = play.violations, 0
         repeat_violations += repeats
+        # Keep the cluster OBJECTS for the report, keyed by signature so a
+        # signature re-found by a later play does not appear twice. Credit is
+        # paid once; the finding is still worth SHOWING once.
+        for cluster in play.clusters:
+            reported_clusters.setdefault(_cluster_signature(cluster), cluster)
 
         cost = probe_equivalents(elapsed, play.subprocesses)
         outcome = Outcome(violations=violations, new_coverage=len(fresh), cost=cost)
-        # rng is threaded in so the credit is BERNOULLI-ISED — the genuine
-        # conjugate update, and the one Thompson's regret bound is proved for.
-        bandit.update(action, outcome, rng=rng)
+        if inconclusive:
+            inconclusive_plays += 1
+        else:
+            # rng is threaded in so the credit is BERNOULLI-ISED — the genuine
+            # conjugate update, and the one Thompson's regret bound is proved for.
+            bandit.update(action, outcome, rng=rng)
         total_violations += violations
 
         plays.append(
@@ -783,7 +931,8 @@ def run_campaign(
                 "new_coverage": len(fresh),
                 "elapsed_s": round(elapsed, 4),
                 "cost_probe_equivalents": round(cost, 4),
-                "credit": round(outcome.credit(bandit.coverage_bonus), 4),
+                "credit": 0.0 if inconclusive else round(outcome.credit(bandit.coverage_bonus), 4),
+                "inconclusive": inconclusive,
                 "error": play.error,
                 "detail": play.detail,
             }
@@ -813,6 +962,15 @@ def run_campaign(
         "credited_signatures": list(credited_signatures)[-MAX_CREDITED_SIGNATURES:],
     }
     store.write_json(campaign_path(repo), doc)
+    merged = _merge_into_issues(repo, reported_clusters, logger=log)
+
+    if inconclusive_plays:
+        diagnostics.append(
+            f"{inconclusive_plays}/{len(plays)} plays reached no target and were not "
+            "scored — the oracle worker could not import the code under test. Point "
+            "--python at the interpreter where the target's own dependencies are "
+            "installed."
+        )
 
     result: dict[str, Any] = {
         "status": "ok",
@@ -822,6 +980,14 @@ def run_campaign(
         "armed": dict(sorted(space.armed.items())),
         "budget": budget,
         "plays_run": len(plays),
+        # Plays that never reached their target: budget spent, no evidence
+        # produced, no posterior updated. Reported so `status: ok` cannot read as
+        # "your code was exercised" when it was not.
+        "inconclusive_plays": inconclusive_plays,
+        # Oracle clusters published into issues.json — the file the extension's
+        # dispatch path reads. Without this the five non-HTTP oracles surface
+        # nothing however much they find.
+        "issues_merged": merged,
         "warm_started_arms": warm_started,
         # NEW findings only. `repeat_violations` is the re-discovery this loop
         # refused to pay for — the number that used to be silently added in.

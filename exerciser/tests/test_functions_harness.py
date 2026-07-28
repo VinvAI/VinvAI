@@ -1059,11 +1059,19 @@ def test_exceptions_no_input_can_justify_are_defects():
 
 
 def test_environment_failures_are_not_defects():
-    for etype, mro in (
-        ("ModuleNotFoundError", ["ModuleNotFoundError", "ImportError", "Exception"]),
-        ("EOFError", ["EOFError", "Exception"]),
-        ("FileNotFoundError", ["FileNotFoundError", "OSError", "Exception"]),
-        ("SystemExit", ["SystemExit", "BaseException"]),
+    """None of these is the target's fault. What this test guards is unchanged.
+
+    ``SystemExit`` now reports the more precise ``control-flow`` rather than
+    ``rejected``: "the function asked the process to exit" and "the function
+    refused my made-up input" are different facts, and the verdict tally is shown
+    to users. Both are equally non-reportable, which is what the assertion on
+    ``classify_row`` pins.
+    """
+    for etype, mro, verdict in (
+        ("ModuleNotFoundError", ["ModuleNotFoundError", "ImportError", "Exception"], "rejected"),
+        ("EOFError", ["EOFError", "Exception"], "rejected"),
+        ("FileNotFoundError", ["FileNotFoundError", "OSError", "Exception"], "rejected"),
+        ("SystemExit", ["SystemExit", "BaseException"], "control-flow"),
     ):
         row = {
             "phase": "call",
@@ -1073,8 +1081,8 @@ def test_environment_failures_are_not_defects():
             "error_module": "builtins",
             "error_mro": mro,
         }
-        assert call_verdict(row) == "rejected", etype
-        assert classify_row(row) is None
+        assert call_verdict(row) == verdict, etype
+        assert classify_row(row) is None, etype
 
 
 def test_a_call_the_harness_botched_is_never_the_targets_fault():

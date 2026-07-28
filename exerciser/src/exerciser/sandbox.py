@@ -749,6 +749,62 @@ def _blocker(kind, what, message):
     return patched
 
 
+def _blocker_class(kind, what, message, original):
+    """A class-shaped blocker, for replacing a name that WAS a class.
+
+    Replacing a class with a function breaks every subclasser: ``class X(Popen)``
+    resolves its metaclass as ``type(Popen)``, which for a function is
+    ``function`` — so Python calls ``function('X', bases, namespace)`` and raises
+    ``TypeError: function() argument 'code' must be code, not str`` from the
+    ``class`` statement itself. On Windows ``asyncio.windows_utils`` does exactly
+    ``class Popen(subprocess.Popen)`` at module scope, and ``asyncio`` is imported
+    by most of the ecosystem (any ``tqdm.auto``, any HTTP client), so every module
+    that transitively touched it failed to import under the shim — and the harness
+    attributed each failure to the REPO as an ``import-error`` defect. Eighteen
+    fabricated findings on a clean third-party codebase, all of them ours, and
+    invisible to CI because there is no Windows job.
+
+    Pre-importing the known subclasser (as this shim already does for ``ssl``,
+    which subclasses ``socket.socket``) only covers subclassers you thought of,
+    and never the lazily-imported ones. Staying class-shaped covers all of them.
+
+    Inherits from the original so ``issubclass``/``isinstance`` still hold and a
+    subclass body referring to inherited attributes still builds. Blocking in
+    ``__new__`` means subclasses are blocked too, which is the point.
+    """
+    def _blocked_new(cls, *args, **kwargs):
+        detail = what
+        if args:
+            try:
+                detail = "%s %s" % (what, repr(args[0])[:160])
+            except Exception:
+                pass
+        _ledger.record(kind, detail, True)
+        raise SandboxBlocked(message)
+
+    name = getattr(original, "__name__", what.replace(".", "_"))
+    try:
+        blocked = type(name, (original,), {"__new__": _blocked_new})
+    except Exception:
+        # A type that refuses subclassing (final, or a C type with an
+        # incompatible layout). Still a CLASS — the `class X(...)` statement is
+        # what must keep working — just without the inheritance relationship.
+        blocked = type(name, (object,), {"__new__": _blocked_new})
+    blocked.__qualname__ = name
+    return blocked
+
+
+def _install_blocker(module, name, kind, what, message):
+    """Replace ``module.name``, preserving whether it was a class or a function."""
+    original = getattr(module, name, None)
+    if original is None:
+        return
+    if isinstance(original, type):
+        setattr(module, name, _blocker_class(kind, what, message, original))
+    else:
+        setattr(module, name, _blocker(kind, what, message))
+
+
 if _BLOCK_NET:
     # `ssl` subclasses `socket.socket`, so it must be imported BEFORE the class
     # is replaced or its module body raises at class-creation time.
@@ -769,16 +825,15 @@ if _BLOCK_NET:
             "getaddrinfo",
             "gethostbyname",
         ):
-            if hasattr(_socket, _name):
-                setattr(
-                    _socket,
-                    _name,
-                    _blocker(
-                        "network",
-                        "socket." + _name + "()",
-                        "network access is blocked by the Vinv execution sandbox",
-                    ),
-                )
+            # `socket.socket` is a CLASS and `create_connection` etc. are
+            # functions; `_install_blocker` keeps each one's shape.
+            _install_blocker(
+                _socket,
+                _name,
+                "network",
+                "socket." + _name + "()",
+                "network access is blocked by the Vinv execution sandbox",
+            )
     if _ssl is not None and hasattr(_ssl, "wrap_socket"):
         _ssl.wrap_socket = _blocker(
             "network",
@@ -795,7 +850,8 @@ if _BLOCK_PROC:
     if _subprocess is not None:
         # `run`/`call`/`check_call`/`check_output` all construct a Popen through
         # the module global, so replacing that one name covers the family.
-        _subprocess.Popen = _blocker("subprocess", "subprocess.Popen", _PROC_MSG)
+        # Class-shaped: `asyncio.windows_utils` subclasses this at import time.
+        _install_blocker(_subprocess, "Popen", "subprocess", "subprocess.Popen", _PROC_MSG)
     for _name in (
         "system",
         "popen",

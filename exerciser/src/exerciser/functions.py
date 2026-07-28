@@ -109,6 +109,7 @@ import subprocess
 import sys
 import time
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -116,7 +117,7 @@ from typing import Any
 
 from . import store
 from ._worker import worker_entrypoint
-from .exception_policy import ExceptionPolicy, family_of, provenance_of, signature
+from .exception_policy import DECAY, ExceptionPolicy, family_of, provenance_of, signature
 from .issues import FailureCluster, build_clusters
 from .sandbox import SandboxPolicy, run_sandboxed_targets
 
@@ -347,8 +348,24 @@ _DENY_MODULE_PARTS = frozenset(
     }
 )
 
-# Wall-clock deadline for one worker (all calls for one module).
+# How long a module's IMPORT may take. Import cost is a property of the target's
+# dependency graph, not of the code under test, and on real repos it dominates:
+# `import smolagents.local_python_executor` takes ~27s cold.
 DEFAULT_MODULE_TIMEOUT_S = 30.0
+
+# How long the CALLS for one module may take, measured from the moment its import
+# returned — enforced inside the worker, which is the only place that knows when
+# that was.
+#
+# These were one number. A single deadline over import-plus-calls means a heavy
+# dependency graph consumes the entire budget before the first call is made: the
+# worker is killed mid-import, the parent records `ModuleTimeout` and blames "a
+# call hung", and the harness reports zero calls for a module whose code was
+# never reached. That is the whole crash oracle silently contributing nothing on
+# exactly the codebases most worth exercising (torch, pandas, transformers — any
+# repo whose import graph is seconds deep), and it is indistinguishable in the
+# output from a module with no defects.
+DEFAULT_CALL_BUDGET_S = 30.0
 
 
 # =========================================================================
@@ -1134,8 +1151,8 @@ def _is_pure_container_annotation(annotation: str | None) -> str | None:
     text = str(annotation).strip()
     if not text:
         return None
-    if "|" in text:
-        members = [m for m in _split_top_level(text, "|") if m.strip().lower() not in ("none",)]
+    members = _union_members(text)
+    if members is not None:
         bases = {_is_pure_container_annotation(m) for m in members}
         if not bases or None in bases or len(bases) != 1:
             return None
@@ -2198,7 +2215,11 @@ def _split_top_level(text: str, separators: str) -> list[str]:
         if ch in "[(":
             depth += 1
         elif ch in "])":
-            depth -= 1
+            # Clamped: an unbalanced closer (a truncated or malformed annotation)
+            # would otherwise drive depth negative, and every later separator
+            # would look nested — the splitter goes blind for the rest of the
+            # string rather than merely mis-handling the bad character.
+            depth = max(0, depth - 1)
         if depth == 0 and ch in separators:
             parts.append("".join(current))
             current = []
@@ -2206,6 +2227,29 @@ def _split_top_level(text: str, separators: str) -> list[str]:
             current.append(ch)
     parts.append("".join(current))
     return [p.strip() for p in parts if p.strip()]
+
+
+def _union_members(text: str) -> list[str] | None:
+    """Members of a TOP-LEVEL ``|`` union, or ``None`` if this is not one.
+
+    ``"|" in text`` is not the same question. In ``list[ChatMessage | dict]`` the
+    bar is nested, so a top-level split returns the string unchanged — and both
+    callers below recurse on their first member, which means recursing on the
+    identical string forever. On real modern-typed code (``list[Step | None]``,
+    ``dict[str, str | bool]``) that ``RecursionError`` propagated out of
+    ``discover_targets``, where ``campaign`` caught it as "function oracles
+    unavailable" and armed ZERO actions: five working oracles silently
+    contributing nothing, on exactly the repos most likely to be worth running.
+
+    Returning ``None`` here sends the caller to its bracket-head path, which
+    reads the outer constructor — the correct answer for a nested union.
+    """
+    if "|" not in text:
+        return None
+    members = _split_top_level(text, "|")
+    if len(members) < 2:
+        return None  # nested, not a union: let the caller inspect the head
+    return [m for m in members if m.strip().lower() not in _NONE_ANNOTATIONS]
 
 
 def annotation_base(annotation: str | None) -> str | None:
@@ -2219,8 +2263,8 @@ def annotation_base(annotation: str | None) -> str | None:
     text = str(annotation).strip()
     if not text:
         return None
-    if "|" in text:
-        members = [m for m in _split_top_level(text, "|") if m.lower() not in _NONE_ANNOTATIONS]
+    members = _union_members(text)
+    if members is not None:
         return annotation_base(members[0]) if members else "none"
     head, bracket, rest = text.partition("[")
     head = head.split(".")[-1].strip().lower()
@@ -2345,6 +2389,7 @@ def _worker_main(argv: list[str]) -> int:
     module_name = plan["module"]
     repo_packages = plan.get("repo_packages") or []
     rows: list[dict[str, Any]] = []
+    import_started = time.monotonic()
     try:
         mod = importlib.import_module(module_name)
     except BaseException as exc:  # target import can raise anything, incl. SystemExit
@@ -2366,7 +2411,45 @@ def _worker_main(argv: list[str]) -> int:
 
     for row in rows:  # the import-failure row, if any
         row.setdefault("repo_packages", repo_packages)
+
+    # The call clock starts HERE, not at process start: whatever the import cost,
+    # the calls get their full budget. Emitted as evidence so a slow import is
+    # visible as a slow import rather than inferred from a missing row.
+    import_s = time.monotonic() - import_started
+    calls_started = time.monotonic()
+    call_budget_s = float(plan.get("call_budget_s") or DEFAULT_CALL_BUDGET_S)
+    _emit_one(
+        {
+            "module": module_name,
+            "target_id": module_name,
+            "phase": "import",
+            "status": "ok",
+            "duration_ms": round(import_s * 1000.0, 3),
+            "repo_packages": repo_packages,
+        }
+    )
+
     for target in plan["targets"]:
+        if time.monotonic() - calls_started > call_budget_s:
+            # Stop cleanly and SAY SO. Being killed by the parent's outer
+            # backstop instead would discard the remaining plan silently and
+            # attribute the whole module to a hang.
+            rows.append(
+                _emit_one(
+                    {
+                        "module": module_name,
+                        "target_id": f"{module_name}:{target['qualname']}",
+                        "phase": "call",
+                        "status": "skipped",
+                        "error_type": "CallBudgetExhausted",
+                        "error": (
+                            f"module's {call_budget_s}s call budget spent before this "
+                            "target; earlier targets in the same module consumed it"
+                        ),
+                    }
+                )
+            )
+            continue
         qual = target["qualname"]
         try:
             fn = getattr(mod, qual, None)
@@ -2529,6 +2612,36 @@ _MALFORMED_CALL_MARKERS = (
 )
 
 
+def is_control_flow_signal(mro: Sequence[Any]) -> bool:
+    """A ``BaseException`` that is not an ``Exception`` — a process-level signal.
+
+    Not a list of exception NAMES, which this module deliberately refuses to
+    keep: it is the language's own structural distinction. ``SystemExit``,
+    ``KeyboardInterrupt`` and ``GeneratorExit`` descend from ``BaseException``
+    rather than ``Exception`` precisely so that ``except Exception`` does not
+    catch them — they request that control leave, they do not claim something is
+    wrong.
+
+    This is the third non-learned rule, for the same reason as ``malformed-call``
+    and ``contained``: the exception is not evidence about the target's
+    correctness. ``smolagents.cli:parse_arguments`` is the case that forced it —
+    an argparse entry point called with no argv raises ``SystemExit(2)`` because
+    ``ArgumentParser.error`` is DOCUMENTED to exit 2, and the harness reported it
+    as ``function-crash: SystemExit: 2``. Every CLI in every repo has such an
+    entry point, so this was a false positive per CLI, on first contact, in the
+    one file the extension surfaces.
+
+    A library that calls ``sys.exit()` deep inside business logic is arguably a
+    real defect, and this rule declines to report it. That is the precision
+    doctrine working as intended: the two cases are indistinguishable from the
+    outside, the harness supplied the arguments, and a finding that might be
+    argparse behaving correctly is not one worth a developer's attention. The row
+    is still recorded and still counted in the verdict tally — never dropped.
+    """
+    names = [str(n) for n in mro]
+    return "Exception" not in names and "BaseException" in names
+
+
 def call_verdict(
     row: dict[str, Any],
     policy: ExceptionPolicy | None = None,
@@ -2568,6 +2681,8 @@ def call_verdict(
     message = str(row.get("error", ""))
     if etype == "TypeError" and any(m in message for m in _MALFORMED_CALL_MARKERS):
         return "malformed-call"
+    if is_control_flow_signal(row.get("error_mro") or [etype]):
+        return "control-flow"
     policy = policy or ExceptionPolicy()
     prov = provenance_of(
         str(row.get("error_module", "")), {str(n) for n in (row.get("repo_packages") or [])}
@@ -2628,6 +2743,12 @@ def classify_row(
         )
         # Membership in the MRO, not the most-specific family: ModuleNotFoundError
         # IS an ImportError, and both mean "this machine lacks a dependency".
+        #
+        # A control-flow signal is deliberately NOT exempt here, unlike at call
+        # time (`is_control_flow_signal`). A module whose BODY calls `sys.exit()`
+        # takes the importing process down with it, which is a real defect in a
+        # library however ordinary it is in a script — see
+        # `test_a_module_that_exits_on_import_is_reported_not_fatal`.
         if "ImportError" in mro or prov == "repo":
             return None
         return "import-error"
@@ -2741,6 +2862,7 @@ def run_functions(
     service: str | None = None,
     max_targets: int = 200,
     module_timeout_s: float = DEFAULT_MODULE_TIMEOUT_S,
+    call_budget_s: float = DEFAULT_CALL_BUDGET_S,
     python: str | None = None,
     only_targets: list[str] | None = None,
     seed: int | None = None,
@@ -2887,6 +3009,7 @@ def run_functions(
                 "module": module,
                 "src_roots": src_roots,
                 "repo_packages": repo_packages,
+                "call_budget_s": call_budget_s,
                 "targets": [t.to_json() for t in mod_targets],
             },
         )
@@ -2918,7 +3041,14 @@ def run_functions(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=module_timeout_s,
+                # OUTER backstop only: import allowance plus the call budget the
+                # worker enforces itself, plus slack for interpreter startup. The
+                # worker stops on its own budget and reports why; reaching this
+                # deadline means it could not even do that — wedged in import, or
+                # in a call that ignores the clock (a C-level spin, a SIGKILL-only
+                # hang). Setting it AT the call budget is what made every slow
+                # import look like a hung call.
+                timeout=module_timeout_s + call_budget_s + 5.0,
                 cwd=str(repo),
                 env=env,
             )
@@ -3042,7 +3172,18 @@ def run_functions(
     # Learn from the WHOLE run before judging any of it: dispersion and
     # class-invariance are run-level properties, so a first-pass over every
     # sighting has to happen before the first verdict.
-    policy = ExceptionPolicy.load(repo)
+    #
+    # `decay` is applied ONLY when this is a whole-repo sweep. `ExceptionPolicy.
+    # load` ages accumulated evidence toward the uninformative prior on every
+    # load, which is right once per harness invocation — but the campaign calls
+    # `run_functions(only_targets=[one])` once PER PLAY, so the decay clock
+    # started ticking on play count instead. Measured: a seeded alpha-1 of 20
+    # reaches 0.625 by play 5, 0.0196 by play 10, and 0.0 by play 20
+    # (0.5**20 = 9.5e-7). Because the decayed state is then SAVED, each campaign
+    # strip-mined the evidence future runs depend on — and human adjudication
+    # feedback, the scarcest input this policy has, was destroyed by ~20
+    # automated plays.
+    policy = ExceptionPolicy.load(repo, decay=1.0 if only_targets is not None else DECAY)
     learn_exception_policy(rows, policy, total_targets)
     policy.save(repo, logger=log)
 
