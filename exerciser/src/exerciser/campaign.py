@@ -146,6 +146,16 @@ class Play:
     # `issues.json`. So five complete oracles could run, find real defects, and
     # surface nothing: the dispatch path had no document to look at.
     clusters: tuple[dict[str, Any], ...] = ()
+    # What the oracle said about the RUN rather than about a target. An oracle
+    # that could not import the code under test reports it, and the campaign
+    # dropped it on the floor: `_functions_runner` kept clusters, violations and
+    # a two-key detail, so `status: "environment"` and the import canary died at
+    # the runner boundary and the campaign still answered `status: "ok"` with
+    # zero findings — the exact ambiguity the canary exists to remove, on the
+    # command the extension actually runs.
+    diagnostics: tuple[str, ...] = ()
+    #: Non-"ok" only when the oracle says the run itself was not valid.
+    status: str = "ok"
 
 
 # A runner is bound to its repo/config by ``default_runners``; the campaign
@@ -510,6 +520,21 @@ def _clusters_of(
     )
 
 
+def _diagnostics_of(result: dict[str, Any]) -> tuple[str, ...]:
+    """What an oracle said about the RUN, carried up to the campaign's report.
+
+    Every oracle already produced these and every runner threw them away, so a
+    finding about the apparatus — no importable target, an interpreter without
+    the repo installed, a shared unmet precondition — reached `functions.json`
+    and stopped there. The campaign's own summary is what the CLI prints and
+    what a human reads, and it said nothing.
+    """
+    found = result.get("diagnostics")
+    if not isinstance(found, list):
+        return ()
+    return tuple(str(d) for d in found if isinstance(d, str) and d)
+
+
 def _functions_runner(cfg: OracleConfig) -> OracleRunner:
     from .functions import run_functions
 
@@ -539,6 +564,7 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
         # oracle and the adjudication channel can put a real label on it.
         violations, signatures = _findings(result, target=action.target)
         clusters = _clusters_of(result, target=action.target)
+        canary = result.get("import_canary") or {}
         return Play(
             clusters=clusters,
             violations=violations,
@@ -546,7 +572,16 @@ def _functions_runner(cfg: OracleConfig) -> OracleRunner:
             covered=(action.target,),
             subprocesses=subprocesses,
             work=_as_count(result.get("calls")),
-            detail={"calls": result.get("calls"), "verdicts": result.get("verdicts")},
+            diagnostics=_diagnostics_of(result),
+            status=str(result.get("status") or "ok"),
+            detail={
+                "calls": result.get("calls"),
+                "verdicts": result.get("verdicts"),
+                # The one fact that decides whether this play's zero means
+                # anything: a worker that never imported the target found
+                # nothing BECAUSE it never ran it.
+                "own_packages_unimportable": list(canary.get("own_packages_unimportable") or ()),
+            },
         )
 
     return run
@@ -577,6 +612,8 @@ def _differential_runner(cfg: OracleConfig) -> OracleRunner:
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            diagnostics=_diagnostics_of(result),
+            status=str(result.get("status") or "ok"),
             work=_as_count(result.get("comparisons")),
             detail={
                 "comparisons": result.get("comparisons"),
@@ -641,6 +678,8 @@ def _faults_runner(cfg: OracleConfig) -> OracleRunner:
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            diagnostics=_diagnostics_of(result),
+            status=str(result.get("status") or "ok"),
             work=_as_count(result.get("faults_injected")),
             detail={"faults_injected": result.get("faults_injected")},
         )
@@ -693,6 +732,8 @@ def _concurrency_runner(cfg: OracleConfig) -> OracleRunner:
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            diagnostics=_diagnostics_of(result),
+            status=str(result.get("status") or "ok"),
             detail={"worker_timed_out": result.get("worker_timed_out")},
         )
 
@@ -749,6 +790,8 @@ def _environment_runner(cfg: OracleConfig) -> OracleRunner:
             signatures=signatures,
             covered=(action.target,),
             subprocesses=1,
+            diagnostics=_diagnostics_of(result),
+            status=str(result.get("status") or "ok"),
             detail={"status": result.get("status")},
         )
 
@@ -836,7 +879,13 @@ def run_campaign(
         log.warning("campaign_empty %s", diagnostics[-1])
         return {
             "status": "ok",
+            # Same keys as the main return: a caller that reads `interpreter`
+            # must not have to know which branch produced the document, and the
+            # empty-action case is exactly when "which environment was this?" is
+            # the question being asked.
+            "own_packages_unimportable": [],
             "diagnostics": diagnostics,
+            "interpreter": interpreter_choice.to_json(),
             "repo": str(repo),
             "actions": 0,
             "budget": budget,
@@ -870,6 +919,11 @@ def run_campaign(
     rng = random.Random(seed)
     covered_ground: set[str] = set()
     plays: list[dict[str, Any]] = []
+    # An oracle's run-level findings, deduped: the campaign replays the same arm
+    # many times, and one unimportable repo repeated twenty times is one fact.
+    oracle_diagnostics: dict[str, None] = {}
+    unimportable: dict[str, None] = {}
+    environment_plays = 0
     # signature -> cluster object, for the issues document written at the end.
     reported_clusters: dict[str, dict[str, Any]] = {}
     stale = 0
@@ -902,6 +956,16 @@ def run_campaign(
             play = Play(error=f"{type(exc).__name__}: {exc}")
             log.warning("campaign: %s raised %s", action.key, exc)
         elapsed = time.perf_counter() - started
+
+        # What the oracle said about the run itself, kept once however many plays
+        # repeat it. Dropping this is how a campaign over a repo it could not
+        # import still answered `status: "ok"` with an empty `diagnostics`.
+        for diag in play.diagnostics:
+            oracle_diagnostics[diag] = None
+        if play.status == "environment":
+            environment_plays += 1
+        for name in play.detail.get("own_packages_unimportable") or ():
+            unimportable[str(name)] = None
 
         # An inconclusive play measured nothing, so it claims no ground and posts
         # no posterior update — it is billed for the time it burned (the budget
@@ -994,9 +1058,27 @@ def run_campaign(
             "--python at the interpreter where the target's own dependencies are "
             "installed."
         )
+    diagnostics.extend(oracle_diagnostics)
+
+    # A campaign that could not load the code under test found nothing BECAUSE it
+    # never ran it, and that is not the claim `status: "ok"` makes. The oracles
+    # already decided this per play; until now the answer stopped at the runner
+    # boundary and the campaign — the command the extension runs — reported a
+    # clean zero anyway, which is the whole failure this branch exists to fix.
+    blocked = bool(unimportable) and environment_plays > 0
+    if blocked:
+        diagnostics.append(
+            f"{environment_plays}/{len(plays)} plays could not import the repo's own "
+            f"package(s) {', '.join(sorted(unimportable))} under {python}. This run "
+            "measured the environment, not the code — its zero is not a clean result."
+        )
+        log.warning("campaign_environment %s", diagnostics[-1])
 
     result: dict[str, Any] = {
-        "status": "ok",
+        "status": "environment" if blocked else "ok",
+        # The repo's own packages no play could import, empty on a healthy run.
+        # `status` alone cannot be acted on; this says what to install where.
+        "own_packages_unimportable": sorted(unimportable),
         "diagnostics": diagnostics,
         # The interpreter every oracle's workers ran under. `inconclusive_plays`
         # says budget reached no target; this says which environment it was spent

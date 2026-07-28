@@ -382,7 +382,13 @@ class FunctionTarget:
     module: str
     qualname: str
     file: str
-    kind: str  # "entrypoint" | "exported"
+    #: "entrypoint" (a decorated handler) | "exported" (a public module-level
+    #: function) | "internal" (one whose name leads with a single underscore).
+    #: Reported, never filtered on: the underscore states API stability, and
+    #: what may be CALLED is decided by the purity guard and the destructive-name
+    #: vocabulary. It does order discovery, so the published surface claims the
+    #: target budget first — see `discover_with_refusals`.
+    kind: str
     is_async: bool = False
     params: list[dict[str, Any]] = field(default_factory=list)
 
@@ -570,22 +576,15 @@ def detect_src_roots(repo: Path) -> list[str]:
 
 
 def _distribution_dirs(repo: Path) -> list[Path]:
-    """Every directory in the tree that declares itself an installable package."""
-    found: list[Path] = []
-    for marker in _DIST_MARKERS:
-        for path in repo.rglob(marker):
-            parent = path.parent
-            try:
-                depth = len(parent.relative_to(repo).parts)
-            except ValueError:
-                continue
-            if depth > _MAX_DIST_DEPTH:
-                continue
-            if any(part in store.SKIP_DIRS for part in parent.relative_to(repo).parts):
-                continue
-            if parent not in found:
-                found.append(parent)
-    return found
+    """Every directory in the tree that declares itself an installable package.
+
+    One pruned walk rather than three ``rglob``s: the pattern form cannot stop a
+    descent, so each marker was matched against the whole tree — ``.venv`` and
+    its ``site-packages`` included — and filtered afterwards, three times, on
+    every call.
+    """
+    dirs, _venvs = store.walk_source_dirs(repo, max_depth=_MAX_DIST_DEPTH)
+    return [d for d, names in dirs if any(m in names for m in _DIST_MARKERS)]
 
 
 # =========================================================================
@@ -2102,6 +2101,17 @@ def discover_with_refusals(
     refused: list[Refusal] = []
     seen: set[str] = set()
 
+    # One parse per FILE, not one per target. `_add` runs once per callable and
+    # a module contributes many, so re-reading and re-`ast.parse`-ing the file
+    # each time was already the bulk of discovery — and the exported-then-
+    # internal ordering above walks every file twice.
+    facts_by_file: dict[str, dict[str, dict[str, Any]] | None] = {}
+
+    def _facts_for(rel: str) -> dict[str, dict[str, Any]] | None:
+        if rel not in facts_by_file:
+            facts_by_file[rel] = source_facts(repo / rel)
+        return facts_by_file[rel]
+
     def _add(module: str, qualname: str, rel: str, kind: str) -> None:
         tid = f"{module}:{qualname}"
         if tid in seen or len(targets) >= max_targets:
@@ -2117,7 +2127,7 @@ def discover_with_refusals(
             skipped.append({"id": tid, "reason": f"destructive-name: {reason}"})
             return
         # 3) Primary guard: what the body actually DOES, read from source.
-        facts = source_facts(repo / rel)
+        facts = _facts_for(rel)
         if facts is None:
             skipped.append({"id": tid, "reason": "unverifiable-source — refusing to call unread"})
             return
@@ -2174,22 +2184,31 @@ def discover_with_refusals(
     # handful of decorated entry points — for a LIBRARY that is the whole
     # surface. Names are read from source (no import) via the code index.
     index_syms = _index_functions_by_file(repo)
-    for rel in sorted(index_syms if not files_seen else (files_seen | set(index_syms))):
-        module = module_name_for(rel, src_roots)
-        if module is None:
-            continue
-        for name in index_syms.get(rel, []):
-            # A leading underscore is a statement about API STABILITY, not about
-            # whether calling the function is safe or worth doing — and it is
-            # where the parsing, merging and normalising helpers live, which is
-            # where input-shaped defects concentrate. Safety is decided by the
-            # purity guard, the destructive-name vocabulary and containment, all
-            # of which apply here unchanged. Dunders stay out: they are the
-            # interpreter's protocol, driven through the operation that invokes
-            # them rather than by name.
-            if name.startswith("__"):
+    # TWO passes, exported before internal. `_add` stops at `max_targets` and the
+    # walk is alphabetical by file, so a single pass spent the budget in file
+    # order: with private functions now eligible they are the majority of a real
+    # repo's module-level definitions (851 of langchain's 1,365), and `_helper`
+    # in `a.py` took the slot that the public API in `z.py` never got. Which
+    # functions are driven should not depend on their filename.
+    for internal_pass in (False, True):
+        for rel in sorted(index_syms if not files_seen else (files_seen | set(index_syms))):
+            module = module_name_for(rel, src_roots)
+            if module is None:
                 continue
-            _add(module, name, rel, "internal" if name.startswith("_") else "exported")
+            for name in index_syms.get(rel, []):
+                # A leading underscore is a statement about API STABILITY, not
+                # about whether calling the function is safe or worth doing — and
+                # it is where the parsing, merging and normalising helpers live,
+                # which is where input-shaped defects concentrate. Safety is
+                # decided by the purity guard, the destructive-name vocabulary
+                # and containment, all of which apply here unchanged. Dunders
+                # stay out: they are the interpreter's protocol, driven through
+                # the operation that invokes them rather than by name.
+                if name.startswith("__"):
+                    continue
+                if name.startswith("_") is not internal_pass:
+                    continue
+                _add(module, name, rel, "internal" if internal_pass else "exported")
 
     log.info(
         "functions: %d targets, %d skipped (%d sandboxable) (roots=%s)",
@@ -2945,13 +2964,18 @@ def shared_import_preconditions(
 
     Provenance cannot separate these: the exception belongs to pydantic, not to
     the repo, so the "package stating its own precondition" exemption misses it.
-    DISPERSION can, and it is a fact about the run rather than a vocabulary: one
-    error taking out every module is a single unmet precondition, because a
-    genuine defect in one module does not stop the others from importing.
+    DISPERSION can, and it is a fact about the run rather than a vocabulary.
 
-    Returns ``(clusters_to_report, preconditions)``. Nothing is discarded — the
-    withheld group comes back described, so the caller reports it as the
-    environment finding it is instead of as silence.
+    What dispersion establishes is that the group has ONE cause — not that the
+    cause is benign. A broken shared ``__init__`` takes out every module that
+    imports it and is a real defect, so collapsing the group to zero clusters
+    would trade fifteen fabricated findings for one missed one. The group is
+    therefore collapsed to a single REPRESENTATIVE cluster: the count stops being
+    per-module, the finding stays on ``clusters`` — which is what reaches
+    ``issues.json``, the dispatch path, and the extension — and the rest of the
+    group is summarised under ``import_preconditions``.
+
+    Returns ``(clusters_to_report, preconditions)``. Nothing is discarded.
     """
     imports = [r for r in rows if r.get("phase") == "import" and r.get("status") == "error"]
     attempted = {str(r.get("module", "")) for r in rows if r.get("phase") == "import"}
@@ -2994,17 +3018,25 @@ def shared_import_preconditions(
 
     kept: list[FailureCluster] = []
     withheld_by_signature: dict[tuple[str, str], int] = {}
+    represented: dict[tuple[str, str], str] = {}
     for cluster in clusters:
         doc = cluster.to_json()
         endpoint = str(doc.get("endpoint_id") or "")
         signature = blocked.get(endpoint)
-        if doc.get("kind") == "import-error" and signature is not None:
-            withheld_by_signature[signature] = withheld_by_signature.get(signature, 0) + 1
-        else:
+        if doc.get("kind") != "import-error" or signature is None:
             kept.append(cluster)
+            continue
+        if signature not in represented:
+            # The first is the group's representative and stays reportable. The
+            # rest are the same cause counted again.
+            represented[signature] = endpoint
+            kept.append(cluster)
+            continue
+        withheld_by_signature[signature] = withheld_by_signature.get(signature, 0) + 1
     for finding in findings:
         key = (finding["error_type"], finding["error_module"])
         finding["clusters_withheld"] = withheld_by_signature.get(key, 0)
+        finding["reported_as"] = represented.get(key)
     return kept, findings
 
 
@@ -3382,6 +3414,18 @@ def run_functions(
                 log.warning("functions_sandbox_unobservable %s", classes)
     total_targets = len(targets) + len(refusals)
 
+    # ONE chokepoint, upstream of every consumer. A target's exception message is
+    # quoted into `function_results.jsonl`, into a cluster's title, into its
+    # exemplar, into `issues.json` and onto stdout — and a settings object that
+    # fails validation renders its whole input dict, API keys included, into that
+    # message. Redacting at one report field left the credential in all the other
+    # copies; redacting the rows before anything reads them covers the lot, and
+    # the placeholder is a constant so cluster signatures stay stable.
+    for row in rows:
+        message = row.get("error")
+        if isinstance(message, str) and message:
+            row["error"] = redact_text(message)
+
     # Ctrl-C must not destroy the evidence. Every row below this point was
     # already paid for — a subprocess was spawned, a target was called, an
     # effect may have been left behind — and until this write happened, the
@@ -3420,9 +3464,9 @@ def run_functions(
         diagnostics.append(
             f"{precondition['modules_blocked']}/{precondition['modules_attempted']} module(s) "
             f"failed to import with the SAME {precondition['error_type']} from "
-            f"{precondition['error_module']} — one unmet precondition, not "
-            f"{precondition['clusters_withheld']} defects, so it is reported here rather than "
-            f"clustered: {precondition['detail'][:200]}"
+            f"{precondition['error_module']} — one cause, so it is reported once (as "
+            f"{precondition['reported_as']}) and {precondition['clusters_withheld']} duplicate "
+            f"cluster(s) were folded into it: {precondition['detail'][:200]}"
         )
         log.warning("functions_shared_precondition %s", diagnostics[-1])
     store.write_jsonl(store.exercise_dir(repo) / "function_results.jsonl", rows)

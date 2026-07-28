@@ -1541,3 +1541,69 @@ def test_blocking_needs_a_majority_of_modules_not_a_single_one():
 
     assert import_canary([row("acme_core.a")], 10)["blocking"] is False
     assert import_canary([row(f"acme_core.{c}") for c in "abcdef"], 10)["blocking"] is True
+
+
+# ---- the published surface claims the target budget first -------------------
+
+
+def test_the_public_api_is_not_crowded_out_by_private_helpers(tmp_path: Path):
+    """`_add` stops at `max_targets`, and the walk is alphabetical by file.
+
+    A single pass therefore spent the budget in FILE order — and with private
+    functions now eligible they are the majority of a real repo's module-level
+    definitions (851 of langchain's 1,365), so `_helper` in `a.py` took the slot
+    that the public API in `z.py` never got. Which functions are driven must not
+    depend on their filename.
+    """
+    body_a = "\n".join(f"def _helper_{n}(x: int) -> int:\n    return x\n" for n in range(6))
+    body_z = "\n".join(f"def public_{n}(x: int) -> int:\n    return x\n" for n in range(6))
+    repo = _make_repo(tmp_path, pkg={"a_mod.py": body_a, "z_mod.py": body_z})
+
+    targets, _skipped = discover_targets(repo, max_targets=6)
+    kinds = {t.kind for t in targets}
+
+    assert len(targets) == 6
+    assert kinds == {"exported"}, f"private helpers took the budget: {sorted(kinds)}"
+    assert all(t.qualname.startswith("public_") for t in targets)
+
+
+def test_internals_are_still_driven_when_there_is_room(tmp_path: Path):
+    """Ordering is a priority, not a filter — the whole point of driving them."""
+    body_a = "def _helper(x: int) -> int:\n    return x\n"
+    body_z = "def public(x: int) -> int:\n    return x\n"
+    repo = _make_repo(tmp_path, pkg={"a_mod.py": body_a, "z_mod.py": body_z})
+
+    targets, _skipped = discover_targets(repo, max_targets=50)
+
+    assert {t.qualname: t.kind for t in targets} == {"_helper": "internal", "public": "exported"}
+
+
+# ---- one redaction chokepoint, upstream of every consumer -------------------
+
+
+def test_a_credential_in_an_import_error_never_reaches_a_cluster(tmp_path: Path):
+    """The message that motivated `redact_text` is quoted into FOUR artifacts.
+
+    `function_results.jsonl`, the cluster title, the cluster exemplar and
+    `issues.json` all carry a target's exception verbatim, and a settings object
+    that fails validation renders its whole input dict — API keys included — into
+    that exception. Redacting one report field left the credential in every other
+    copy, so the redaction has to happen to the ROWS, before anything reads them.
+    """
+    leaked = "sk-proj-EXAMPLE-NOT-A-REAL-KEY"
+    body = (
+        "raise ValueError(\n"
+        f"    \"1 validation error for Settings [input_value={{'openai_api_key': '{leaked}'}}]\"\n"
+        ")\n"
+        "def unreachable(x: int) -> int:\n"
+        "    return x\n"
+    )
+    repo = _make_repo(tmp_path, pkg={"boom.py": body})
+
+    result = run_functions(repo, max_targets=10)
+
+    persisted = (store.exercise_dir(repo) / "function_results.jsonl").read_text(encoding="utf-8")
+    assert leaked not in persisted, "the credential reached the persisted rows"
+    assert leaked not in json.dumps(result), "and the run summary the CLI prints"
+    # The diagnostic value of the message survives — only the value is gone.
+    assert "validation error for Settings" in persisted

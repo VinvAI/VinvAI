@@ -15,9 +15,15 @@ only problem was an unset environment variable. Provenance cannot separate
 that: the exception belongs to pydantic, so "the repo stating its own
 precondition" does not apply.
 
-Dispersion can, and it is a fact about the run rather than a vocabulary. These
-tests pin both directions — the shared precondition is withheld and described,
-and a genuine defect that happens to occur during import is NOT.
+Dispersion can, and it is a fact about the run rather than a vocabulary. What it
+establishes is that the group has ONE cause — not that the cause is harmless — so
+the group collapses to a single REPRESENTATIVE cluster rather than to none: a
+broken shared ``__init__`` blocks every module that imports it and is a real
+defect, and trading fifteen fabricated findings for one missed one is not a fix.
+
+These tests pin all three directions — the group is collapsed to one, the
+collapse is described, and a genuine defect that happens to occur during import
+keeps its own cluster.
 """
 
 from __future__ import annotations
@@ -85,19 +91,42 @@ def _settings_failure(module: str) -> dict[str, Any]:
 # =========================================================================
 
 
-def test_one_error_across_every_module_is_withheld_and_described() -> None:
+def test_one_error_across_every_module_is_reported_once_not_fourteen_times() -> None:
     rows = [_settings_failure(m) for m in _MODULES]
     kept, preconditions = shared_import_preconditions(rows, _clusters(rows))
 
-    assert kept == []
+    # ONE cluster, not fourteen and not zero. `clusters` is what reaches
+    # issues.json and the dispatch path, so a group that leaves nothing behind
+    # here is a finding the extension can never show or act on.
+    assert len(kept) == 1
+    assert kept[0].to_json()["kind"] == "import-error"
     assert len(preconditions) == 1
     found = preconditions[0]
     assert found["error_type"] == "ValidationError"
     assert found["modules_blocked"] == 14
     assert found["modules_attempted"] == 14
-    assert found["clusters_withheld"] == 14
-    # Withheld is not discarded: the cause has to be readable from the summary.
+    assert found["clusters_withheld"] == 13
+    assert found["reported_as"] == kept[0].to_json()["endpoint_id"]
+    # Folded is not discarded: the cause has to be readable from the summary.
     assert "PROJECT_NAME" in found["detail"]
+
+
+def test_a_shared_cause_is_still_reachable_by_the_dispatch_path() -> None:
+    """The regression this guards against.
+
+    An earlier form withheld the whole group. On a repo whose every module fails
+    to import because ONE shared module is broken — a real defect, and the most
+    consequential kind — the run then reported it in a summary field the
+    extension does not read, and dispatched nothing.
+    """
+    rows = [
+        _import_row(m, "TypeError", "somelib.core", "unsupported operand type(s)")
+        for m in _MODULES
+    ]
+    kept, preconditions = shared_import_preconditions(rows, _clusters(rows))
+
+    assert [c.to_json()["kind"] for c in kept] == ["import-error"]
+    assert preconditions[0]["clusters_withheld"] == 13
 
 
 def test_the_reported_detail_carries_no_credential() -> None:
@@ -126,7 +155,11 @@ def test_a_defect_in_one_module_is_still_a_defect() -> None:
     kept, preconditions = shared_import_preconditions(rows, _clusters(rows))
 
     assert len(preconditions) == 1
-    assert [c.to_json()["endpoint_id"] for c in kept] == ["app.broken"]
+    # The lone defect keeps its own cluster, and the shared group keeps exactly
+    # one — they are separate findings and both are reportable.
+    endpoints = [c.to_json()["endpoint_id"] for c in kept]
+    assert "app.broken" in endpoints
+    assert len(endpoints) == 2
 
 
 def test_a_minority_of_modules_is_not_a_precondition() -> None:
@@ -163,9 +196,13 @@ def test_two_distinct_preconditions_are_reported_separately() -> None:
     ]
     kept, preconditions = shared_import_preconditions(rows, _clusters(rows))
 
-    assert kept == []
+    # One representative EACH: two causes are two findings.
+    assert len(kept) == 2
     assert {p["error_type"] for p in preconditions} == {"ValidationError", "OperationalError"}
-    assert all(p["clusters_withheld"] == 6 for p in preconditions)
+    assert all(p["clusters_withheld"] == 5 for p in preconditions)
+    assert {p["reported_as"] for p in preconditions} == {
+        c.to_json()["endpoint_id"] for c in kept
+    }
 
 
 def test_a_clean_run_is_untouched() -> None:
@@ -185,7 +222,7 @@ def test_no_import_rows_is_not_an_error(rows: list[dict[str, Any]]) -> None:
     assert kept == []
 
 
-def test_only_import_error_clusters_are_ever_withheld() -> None:
+def test_only_import_error_clusters_are_ever_folded() -> None:
     """The rule is scoped to IMPORT.
 
     A crash cluster is built here directly rather than through
@@ -209,4 +246,5 @@ def test_only_import_error_clusters_are_ever_withheld() -> None:
     kept, preconditions = shared_import_preconditions(rows, [*_clusters(rows), crash])
 
     assert preconditions and preconditions[0]["modules_blocked"] == 6
-    assert [c.kind for c in kept] == ["function-crash"]
+    # The crash is untouched; the import group contributed its one representative.
+    assert sorted(c.kind for c in kept) == ["function-crash", "import-error"]

@@ -377,13 +377,58 @@ async function recordDispatched(context: vscode.ExtensionContext, ids: Iterable<
 }
 
 /**
+ * Hand NEW behavioral failure clusters to the coding agent as fix episodes
+ * (signature-deduped). Error-shaped and assert-shaped clusters dispatch
+ * separately: a silent wrong-value violation needs value-shaped success
+ * criteria and its own trigger, not "no longer produces these errors". One
+ * episode runs at a time — whichever batch dispatches first wins this pass, the
+ * other stays eligible (dispatchIssueEpisode returns false while busy).
+ *
+ * Shared by both passes, and that is the point: this lived INLINE at the end of
+ * the served path, so the service-free pass returned before reaching it and a
+ * library repo published findings that were never handed to anyone. Publishing
+ * a cluster and acting on it are different things, and only the first was wired.
+ */
+async function dispatchFreshClusters(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	issues: ExerciseIssuesDoc | null,
+): Promise<void> {
+	if (!issues || issues.clusters.length === 0 || !isAutoEpisodesEnabled()) {
+		return;
+	}
+	const dispatched = readDispatched(context);
+	const fresh = issues.clusters.filter((c) => !dispatched.has(c.signature));
+	const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
+	const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));
+	if (errorShaped.length > 0) {
+		const handedOff = await dispatchIssueEpisode(
+			context, workspaceRoot, issueEpisodesFromClusters(errorShaped),
+		);
+		if (handedOff) {
+			await recordDispatched(context, errorShaped.map((c) => c.signature));
+		}
+	}
+	if (assertShaped.length > 0) {
+		const handedOff = await dispatchIssueEpisode(
+			context, workspaceRoot, issueEpisodesFromClusters(assertShaped),
+			{ trigger: 'invariant-violation', successCriteria: [...ASSERT_SUCCESS_CRITERIA] },
+		);
+		if (handedOff) {
+			await recordDispatched(context, assertShaped.map((c) => c.signature));
+		}
+	}
+}
+
+/**
  * The exercise pass for a repo with nothing serving: `campaign` alone, without
  * `--base-url`, so the HTTP oracle stays unarmed and the four service-free
  * oracles do the work. `plan`/`run`/`profile`/`scorecard` are all HTTP-shaped
  * and are correctly absent here — findings land in issues.json exactly as they
- * do on the served path, which is the file the dispatch path reads.
+ * do on the served path, and go to the SAME dispatch path from there.
  */
 async function runServiceFreePass(
+	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	bin: string,
 	env: NodeJS.ProcessEnv,
@@ -410,6 +455,7 @@ async function runServiceFreePass(
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, issues, 'done', `${why} — drove the service-free oracles`),
 	);
+	await dispatchFreshClusters(context, workspaceRoot, issues);
 	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
 }
 
@@ -443,7 +489,7 @@ async function exercisePassOnce(
 		const why = target
 			? `service '${target.service}' is not running`
 			: 'no service with a recorded port';
-		return runServiceFreePass(workspaceRoot, bin, env, why);
+		return runServiceFreePass(context, workspaceRoot, bin, env, why);
 	}
 
 	const baseUrl = `http://127.0.0.1:${target.port}`;
@@ -516,35 +562,7 @@ async function exercisePassOnce(
 	);
 	publishExerciseState(state);
 
-	// Dispatch NEW behavioral failure clusters as fix episodes (signature-deduped).
-	// Error-shaped and assert-shaped clusters dispatch separately: a silent
-	// wrong-value violation needs value-shaped success criteria and its own
-	// trigger, not "no longer produces these errors". One episode runs at a
-	// time — whichever batch dispatches first wins this pass, the other stays
-	// eligible (dispatchIssueEpisode returns false while busy).
-	if (issues && issues.clusters.length > 0 && isAutoEpisodesEnabled()) {
-		const dispatched = readDispatched(context);
-		const fresh = issues.clusters.filter((c) => !dispatched.has(c.signature));
-		const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
-		const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));
-		if (errorShaped.length > 0) {
-			const handedOff = await dispatchIssueEpisode(
-				context, workspaceRoot, issueEpisodesFromClusters(errorShaped),
-			);
-			if (handedOff) {
-				await recordDispatched(context, errorShaped.map((c) => c.signature));
-			}
-		}
-		if (assertShaped.length > 0) {
-			const handedOff = await dispatchIssueEpisode(
-				context, workspaceRoot, issueEpisodesFromClusters(assertShaped),
-				{ trigger: 'invariant-violation', successCriteria: [...ASSERT_SUCCESS_CRITERIA] },
-			);
-			if (handedOff) {
-				await recordDispatched(context, assertShaped.map((c) => c.signature));
-			}
-		}
-	}
+	await dispatchFreshClusters(context, workspaceRoot, issues);
 
 	return {
 		outcome: 'done',

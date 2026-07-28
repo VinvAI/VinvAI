@@ -31,6 +31,60 @@ SKIP_DIRS = frozenset(
     }
 )
 
+#: The marker the interpreter itself writes at the root of a virtualenv. A venv
+#: is recognised by this and never by its directory NAME — the one that exposed
+#: the interpreter bug was called ``.venv-target``.
+VENV_MARKER = "pyvenv.cfg"
+
+#: Pruned during the walk but NOT name-matched as venvs: descending is the only
+#: way to find the marker, so ``.venv``/``venv`` are walked one level and then
+#: stopped by the marker instead of by their name.
+_WALK_PRUNE = (SKIP_DIRS - {".venv", "venv"}) | {".vinv"}
+
+
+def walk_source_dirs(
+    repo: Path, *, max_depth: int = 4
+) -> tuple[list[tuple[Path, frozenset[str]]], list[Path]]:
+    """One bounded, pruned walk of a repo. Returns ``(source dirs, venv roots)``.
+
+    Every scan in this engine used to be its own ``rglob``, which cannot prune:
+    the pattern is matched against the whole tree and the filter runs afterwards,
+    so each one descended through ``.venv/**/site-packages`` in full — six times
+    per run, on a tree where that is most of the files. ``os.walk`` lets the skip
+    list stop the descent instead of the match.
+
+    ``followlinks`` stays off, deliberately: ``Path.rglob`` follows directory
+    symlinks on 3.12 (``recurse_symlinks`` only arrived in 3.13), so a repo with
+    a symlink cycle hung the walk rather than being scanned.
+
+    A venv is reported separately and never descended: it is a candidate
+    INTERPRETER, and its ``site-packages`` holds every other project's manifests
+    — reading those as the repo's own measured every candidate against pandas'
+    dependency list.
+    """
+    repo = Path(repo)
+    dirs: list[tuple[Path, frozenset[str]]] = []
+    venvs: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(repo, followlinks=False):
+        here = Path(dirpath)
+        try:
+            parts = here.relative_to(repo).parts
+        except ValueError:  # pragma: no cover - os.walk cannot leave its root
+            dirnames[:] = []
+            continue
+        names = frozenset(filenames)
+        if VENV_MARKER in names:
+            venvs.append(here)
+            dirnames[:] = []
+            continue
+        if not any(p in SKIP_DIRS for p in parts):
+            dirs.append((here, names))
+        if len(parts) >= max_depth:
+            dirnames[:] = []
+            continue
+        dirnames[:] = sorted(d for d in dirnames if d not in _WALK_PRUNE)
+    return dirs, venvs
+
 
 def exercise_dir(repo: Path) -> Path:
     return repo / ".vinv" / "exercise"

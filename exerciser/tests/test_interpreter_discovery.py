@@ -77,9 +77,27 @@ def _make_venv(root: Path, dists: list[str]) -> str:
         (info / "METADATA").write_text(
             f"Metadata-Version: 2.1\nName: {dist}\nVersion: 1.0\n", encoding="utf-8"
         )
-    exe = next((p for p in (root / "bin/python3", root / "Scripts/python.exe") if p.exists()), None)
-    assert exe is not None, "venv produced no interpreter"
-    return str(exe)
+    return str(_venv_exe(root))
+
+
+def _site_packages(root: Path) -> Path:
+    """This venv's ``site-packages``, on either platform layout.
+
+    POSIX is ``lib/python3.X/site-packages`` and Windows is ``Lib/site-packages``
+    — hardcoding the first is how a test that has nothing to do with platforms
+    fails on one of them.
+    """
+    found = next(root.glob("lib/python*/site-packages"), None) or (root / "Lib/site-packages")
+    assert found.is_dir(), f"no site-packages under {root}"
+    return found
+
+
+def _venv_exe(root: Path) -> Path:
+    """This venv's interpreter, on either platform layout."""
+    layouts = (root / "bin/python3", root / "Scripts/python.exe")
+    found = next((p for p in layouts if p.exists()), None)
+    assert found is not None, f"no interpreter under {root}"
+    return found
 
 
 def _pyproject(directory: Path, name: str, deps: list[str]) -> None:
@@ -261,20 +279,38 @@ def test_two_venvs_built_from_one_base_python_are_not_one_candidate(
     same Python into a single entry. The target's venv and Vinv's own venv then
     look like one candidate — with entirely different ``site-packages`` — and
     whichever was discovered first silently won.
+
+    The symlink, and therefore the trap, is POSIX-only: Windows COPIES the
+    interpreter into the venv, so ``realpath`` separates them there for a reason
+    that has nothing to do with the fix. Asserting the shared base
+    unconditionally made this fail on Windows for the fixture's reasons rather
+    than the code's. The key must separate the two either way, which is the
+    claim; the trap is pinned only where it exists.
     """
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     a = _make_venv(tmp_path / "a", [])
     b = _make_venv(tmp_path / "b", [])
 
-    assert Path(a).resolve() == Path(b).resolve(), "fixture assumes a shared base interpreter"
-    assert Candidate(a, "test").key() != Candidate(b, "test").key()
+    shared_base = Path(a).resolve() == Path(b).resolve()
+    why = " — off ONE base interpreter, which is what realpath keying gets wrong"
+    assert Candidate(a, "test").key() != Candidate(b, "test").key(), (
+        "two venvs collapsed into one candidate" + (why if shared_base else "")
+    )
 
 
 def test_the_two_names_for_one_venvs_interpreter_collapse(tmp_path: Path) -> None:
+    """``python`` and ``python3`` in one venv are one candidate.
+
+    Both spellings are asked for by their real directory, so this says something
+    on Windows (``Scripts/``) as well as on POSIX (``bin/``) — naming the POSIX
+    layout unconditionally made both sides fall through to the venv-prefix
+    branch and the test passed without testing anything.
+    """
     root = tmp_path / "env"
     _make_venv(root, [])
-    assert Candidate(str(root / "bin" / "python"), "x").key() == (
-        Candidate(str(root / "bin" / "python3"), "x").key()
+    bin_dir = _venv_exe(root).parent
+    assert Candidate(str(bin_dir / "python"), "x").key() == (
+        Candidate(str(bin_dir / "python3"), "x").key()
     )
 
 
@@ -336,7 +372,7 @@ def test_the_probe_does_not_import_the_target(tmp_path: Path) -> None:
     whose import would raise, hang, or write to disk is still counted correctly.
     """
     exe = _make_venv(tmp_path / "env", ["demo-core"])
-    site = next((tmp_path / "env").glob("lib/python*/site-packages"))
+    site = _site_packages(tmp_path / "env")
     (site / "demo_core.py").write_text("raise SystemExit('imported!')\n", encoding="utf-8")
 
     probe = probe_candidate(Candidate(exe, "test"), Requirements(own=("demo-core",)))
@@ -585,3 +621,139 @@ def test_the_report_is_json_serialisable(monorepo: Path) -> None:
     """It lands in the run summary, which is written to disk and printed."""
     _make_venv(monorepo / ".venv-target", ["demo-root"])
     json.dumps(resolve_interpreter(monorepo).to_json())
+
+
+# =========================================================================
+# The fallback keeps a reserved slot
+# =========================================================================
+
+
+def _stub_venv(root: Path) -> None:
+    """A venv-SHAPED directory. Never executed — only the discovery walk sees it."""
+    (root / "Scripts").mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
+    (root / "pyvenv.cfg").write_text("home = /nowhere\n", encoding="utf-8")
+    for rel in ("Scripts/python.exe", "bin/python3"):
+        exe = root / rel
+        exe.write_text("", encoding="utf-8")
+        exe.chmod(0o755)
+
+
+def test_the_fallback_survives_a_repo_with_more_venvs_than_the_cap(tmp_path: Path) -> None:
+    """The cap truncates the TAIL, and the fallback is last.
+
+    A monorepo with a venv per package therefore dropped ``sys.executable`` off
+    the end of its own candidate list — after which ``resolve_interpreter``
+    scored it (0, 0) WITHOUT PROBING IT, which both fabricates the baseline the
+    handoff diagnostic quotes and lets a candidate with one third-party package
+    beat an interpreter that may have the whole repo installed.
+    """
+    repo = tmp_path / "repo"
+    _pyproject(repo, "demo", [])
+    for n in range(interpreter.MAX_CANDIDATES + 2):
+        _stub_venv(repo / f"pkg{n:02d}" / ".venv")
+
+    candidates = discover_candidates(repo)
+    self_key = Candidate(sys.executable, "").key()
+
+    assert len(candidates) == interpreter.MAX_CANDIDATES
+    assert any(c.key() == self_key for c in candidates), "the fallback was truncated away"
+    assert candidates[-1].key() == self_key, "and it is still last"
+
+
+def test_an_explicit_flag_survives_the_cap_too(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _pyproject(repo, "demo", [])
+    for n in range(interpreter.MAX_CANDIDATES + 2):
+        _stub_venv(repo / f"pkg{n:02d}" / ".venv")
+
+    candidates = discover_candidates(repo, explicit="/somewhere/python")
+    assert candidates[0].origin == "--python"
+
+
+# =========================================================================
+# setup.cfg
+# =========================================================================
+
+
+def test_a_setuptools_repo_declares_its_own_distribution(tmp_path: Path) -> None:
+    """``setup.cfg`` was in ``_MANIFESTS`` from the start and nothing parsed it.
+
+    So a setuptools-configured repo declared no OWN distribution, and the
+    ranking fell back to the flat third-party count that this module exists to
+    say is too weak to trust.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "setup.cfg").write_text(
+        textwrap.dedent("""
+            [metadata]
+            name = Demo_Pkg
+
+            [options]
+            install_requires =
+                requests>=2
+                pydantic
+            """).strip(),
+        encoding="utf-8",
+    )
+    reqs = declared_requirements(repo)
+    assert reqs.own == ("demo-pkg",)
+    assert set(reqs.third_party) == {"requests", "pydantic"}
+
+
+# =========================================================================
+# An answer handed back is not a flag
+# =========================================================================
+
+
+def test_the_campaigns_own_answer_is_not_re_probed_as_an_explicit_flag(
+    monorepo: Path, monkeypatch
+) -> None:
+    """The campaign resolves once and passes the ANSWER to every oracle.
+
+    Each oracle then offers it here as ``explicit`` — a different cache key, so
+    it re-probed, and worse took the explicit branch and reported ``--python
+    <path> has NONE of the distributions this repo publishes`` about a flag
+    nobody passed.
+    """
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    _make_venv(monorepo / ".venv-target", ["demo-root", "demo-core"])
+
+    first = interpreter.resolve_cached(monorepo)
+    calls: list[list[str]] = []
+    real = interpreter.probe_candidate
+    monkeypatch.setattr(
+        interpreter,
+        "probe_candidate",
+        lambda cand, reqs, **kw: (calls.append([cand.python]), real(cand, reqs, **kw))[1],
+    )
+
+    again = interpreter.resolve_cached(monorepo, explicit=first.python)
+
+    assert again is first, "the repo's own answer coming back round is the same answer"
+    assert calls == [], "and it is not re-probed"
+    # No diagnostic ACCUSING a flag. The handoff notice legitimately mentions
+    # `--python` as the override; what must not appear is the explicit branch's
+    # "--python <path> has NONE of …", which leads with the flag it is blaming.
+    assert not any(d.startswith("--python") for d in again.diagnostics)
+
+
+def test_a_different_explicit_flag_still_resolves(monorepo: Path, monkeypatch) -> None:
+    """The short-circuit must not swallow a flag that names something else.
+
+    The prior answer here is the repo's venv (it has the repo installed), so
+    pointing the flag back at Vinv's own interpreter is the case that has to get
+    through: it disagrees with what resolution chose, which is exactly when a
+    human's flag matters most.
+    """
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    venv = _make_venv(monorepo / ".venv-target", ["demo-root", "demo-core"])
+
+    first = interpreter.resolve_cached(monorepo)
+    assert first.python == venv, "fixture assumes resolution prefers the repo's venv"
+
+    chosen = interpreter.resolve_cached(monorepo, explicit=sys.executable)
+
+    assert chosen.python == sys.executable
+    assert chosen.origin == "--python"

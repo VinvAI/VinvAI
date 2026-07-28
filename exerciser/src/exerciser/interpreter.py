@@ -31,10 +31,22 @@ The resolution here is EVIDENCE, not a name convention:
 
 The explicit ``--python`` is never overridden. It is still probed, because a
 human who points the flag at the wrong venv deserves to be told.
+
+TRUST BOUNDARY, stated because this module moves one. Choosing the interpreter
+that has the target installed means EXECUTING a binary that lives inside the
+target repo — ``<repo>/.venv/bin/python`` is the repo's file, and a probe runs
+it before any sandbox exists. That is not incidental; it is what "run the code
+under test in the environment it was built for" requires, and no design that
+resolves an interpreter by evidence can avoid it. What is bounded is the blast
+radius: the probe is ``-I``-isolated, reads ``.dist-info`` only, imports no
+target code, installs nothing, and is killed on a timeout. ``_ENV_TOOLS``
+likewise only runs commands that REPORT. A repo you would not run is still a
+repo you should not exercise.
 """
 
 from __future__ import annotations
 
+import configparser
 import json
 import logging
 import os
@@ -126,47 +138,28 @@ def _requirement_name(spec: str) -> str | None:
     return normalize_dist(head)
 
 
-def _venv_roots(repo: Path) -> list[Path]:
-    """Every virtualenv root in the tree, by ``pyvenv.cfg``.
+def _scan(repo: Path) -> tuple[list[Path], list[Path]]:
+    """``(directories carrying a manifest, virtualenv roots)`` from ONE walk.
 
-    Used both to nominate interpreters and to PRUNE: a venv's site-packages is
-    full of other projects' manifests, and reading those as the repo's own
-    declarations would measure every candidate against pandas' dependencies.
-    Pruning by marker rather than by directory name is the same decision made
-    twice for the same reason — the venv that exposed this bug was called
+    Both answers come off the same traversal because they are the same
+    traversal: a venv is pruned from the manifest scan for exactly the reason it
+    is nominated as an interpreter. Discovery is by ``pyvenv.cfg`` rather than by
+    directory name — the venv that exposed the bug this module fixes was called
     ``.venv-target``, and a name list would have walked straight into it.
     """
-    roots: list[Path] = []
-    for cfg in repo.rglob("pyvenv.cfg"):
-        try:
-            if len(cfg.parent.relative_to(repo).parts) > _MAX_MANIFEST_DEPTH:
-                continue
-        except ValueError:
-            continue
-        roots.append(cfg.parent)
-    return roots
+    dirs, venvs = store.walk_source_dirs(repo, max_depth=_MAX_MANIFEST_DEPTH)
+    manifests = [d for d, names in dirs if any(m in names for m in _MANIFESTS)]
+    return sorted(manifests, key=lambda p: (len(p.parts), str(p))), venvs
+
+
+def _venv_roots(repo: Path) -> list[Path]:
+    """Every virtualenv root in the tree, by ``pyvenv.cfg``."""
+    return _scan(repo)[1]
 
 
 def _manifest_dirs(repo: Path) -> list[Path]:
     """Directories carrying a packaging manifest, vendored trees and venvs pruned."""
-    venvs = _venv_roots(repo)
-    found: list[Path] = []
-    for marker in _MANIFESTS:
-        for path in repo.rglob(marker):
-            parent = path.parent
-            try:
-                parts = parent.relative_to(repo).parts
-            except ValueError:
-                continue
-            if len(parts) > _MAX_MANIFEST_DEPTH:
-                continue
-            if any(p in store.SKIP_DIRS for p in parts):
-                continue
-            if any(parent == v or v in parent.parents for v in venvs):
-                continue
-            if parent not in found:
-                found.append(parent)
-    return sorted(found, key=lambda p: (len(p.parts), str(p)))
+    return _scan(repo)[0]
 
 
 def _from_pyproject(path: Path) -> tuple[str | None, list[str]]:
@@ -208,6 +201,26 @@ def _from_pyproject(path: Path) -> tuple[str | None, list[str]]:
             if isinstance(table, dict):
                 for key in table:
                     names.append(_requirement_name(str(key)) or "")
+    return own, [n for n in names if n]
+
+
+def _from_setup_cfg(path: Path) -> tuple[str | None, list[str]]:
+    """``(this distribution's own name, its install_requires)`` from setup.cfg.
+
+    ``setup.cfg`` was in ``_MANIFESTS`` from the start but nothing ever parsed
+    it, so a setuptools-configured repo declared no OWN distribution — and the
+    ranking silently fell back to the flat third-party count that this module's
+    own docstring says is too weak to trust.
+    """
+    parser = configparser.ConfigParser()
+    try:
+        parser.read_string(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, configparser.Error):
+        return None, []
+    declared = parser.get("metadata", "name", fallback="").strip()
+    own = normalize_dist(declared) if declared else None
+    requires = parser.get("options", "install_requires", fallback="")
+    names = [_requirement_name(line) for line in requires.splitlines()]
     return own, [n for n in names if n]
 
 
@@ -263,6 +276,12 @@ def declared_requirements(repo: Path) -> Requirements:
         pyproject = directory / "pyproject.toml"
         if pyproject.is_file():
             name, requires = _from_pyproject(pyproject)
+            if name:
+                own.append(name)
+            deps.extend(requires)
+        cfg = directory / "setup.cfg"
+        if cfg.is_file():
+            name, requires = _from_setup_cfg(cfg)
             if name:
                 own.append(name)
             deps.extend(requires)
@@ -433,7 +452,8 @@ def discover_candidates(repo: Path, explicit: str | None = None) -> list[Candida
 
     out.extend(_in_repo_venvs(repo))
     out.extend(_tool_venvs(repo))
-    out.append(Candidate(sys.executable, "vinv's own interpreter", "fallback"))
+    fallback = Candidate(sys.executable, "vinv's own interpreter", "fallback")
+    out.append(fallback)
 
     seen: set[str] = set()
     unique: list[Candidate] = []
@@ -443,7 +463,18 @@ def discover_candidates(repo: Path, explicit: str | None = None) -> list[Candida
             continue
         seen.add(k)
         unique.append(cand)
-    return unique[:MAX_CANDIDATES]
+    if len(unique) <= MAX_CANDIDATES:
+        return unique
+    # The cap truncates the TAIL, and the fallback is last — so a monorepo with
+    # a venv per package dropped `sys.executable` off the end of its own list.
+    # `resolve_interpreter` then scored it (0, 0) without ever probing it, which
+    # both fabricates the baseline the handoff diagnostic quotes and lets a
+    # candidate with one third-party package beat an interpreter that may have
+    # the whole repo installed. The fallback keeps a reserved slot.
+    self_key = fallback.key()
+    kept = [c for c in unique if c.key() != self_key][: MAX_CANDIDATES - 1]
+    kept.append(next((c for c in unique if c.key() == self_key), fallback))
+    return kept
 
 
 # =========================================================================
@@ -760,6 +791,13 @@ def _cached(repo_key: str, explicit: str | None, timeout: float) -> InterpreterC
     return resolve_interpreter(Path(repo_key), explicit=explicit, probe_timeout_s=timeout)
 
 
+#: The FIRST answer reached for a repo in this process, by resolved path. See
+#: `resolve_cached` — this is what tells an answer coming back round from the
+#: campaign apart from a human naming an interpreter.
+_ANSWERED: dict[str, InterpreterChoice] = {}
+_LOGGED: set[tuple[str, str]] = set()
+
+
 def resolve_cached(
     repo: Path,
     *,
@@ -772,9 +810,26 @@ def resolve_cached(
     The campaign resolves the same answer for five oracles in one run, and a
     fan-out of probe subprocesses per oracle is pure cost — the filesystem it
     reads does not change mid-run.
+
+    An answer HANDED BACK is not a flag. The campaign resolves once and passes
+    the result to every oracle as its ``python`` argument, which each oracle then
+    offers here as ``explicit`` — a different cache key, so it re-probed, and
+    worse, took the explicit branch and reported ``--python <path> has NONE of
+    the distributions this repo publishes`` about a flag nobody passed. When the
+    request names the interpreter this repo has already resolved to, the prior
+    choice IS the answer.
     """
-    choice = _cached(str(repo.resolve()), explicit, probe_timeout_s)
-    if logger and choice.diagnostics:
+    key = str(repo.resolve())
+    prior = _ANSWERED.get(key)
+    if prior is not None and explicit == prior.python:
+        choice = prior
+    else:
+        choice = _cached(key, explicit, probe_timeout_s)
+        _ANSWERED.setdefault(key, choice)
+    if logger and choice.diagnostics and (key, choice.python) not in _LOGGED:
+        # Once per repo per interpreter: five oracles repeating one handoff
+        # notice reads as five handoffs.
+        _LOGGED.add((key, choice.python))
         for diag in choice.diagnostics:
             logger.info("interpreter: %s", diag)
     return choice
@@ -783,3 +838,5 @@ def resolve_cached(
 def reset_cache() -> None:
     """Drop the memo — tests build a fresh tree per case."""
     _cached.cache_clear()
+    _ANSWERED.clear()
+    _LOGGED.clear()

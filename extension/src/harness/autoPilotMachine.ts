@@ -317,9 +317,11 @@ export type PipelineAction =
  * oracles drive code in workers from the source and the index, and need no
  * port, no process and no traffic. Gating it on `anyGreen` too meant a
  * workspace of libraries did nothing at all after discovery — on a clone of
- * langchain, Auto-Pilot fired zero oracles, while the same repo yields 511
- * targets and 1,944 calls when the exercise stage is allowed to run. A library
- * is not "nothing to observe"; it is nothing to SERVE.
+ * langchain, Auto-Pilot fired zero oracles. (The 511-target/1,944-call figure
+ * quoted for that repo comes from the standalone `functions` command with a
+ * raised `--max-targets`; this stage runs `campaign`, whose per-oracle cap is
+ * 50. The point is the same and the scale is not.) A library is not "nothing to
+ * observe"; it is nothing to SERVE.
  *
  * Terminal stage phases (done/failed/skipped) never re-enter; failures are
  * retried via decideOnStageFailure, which flips the stage back to 'pending'
@@ -345,6 +347,34 @@ export function planPipelineAction(
 		return { kind: 'exercise' };
 	}
 	return { kind: 'done' };
+}
+
+/**
+ * Settle the stages this workspace can never reach.
+ *
+ * `insights` and `probes` need a live traced session, so on a workspace of
+ * libraries they are not "still to do" — they are decided. Leaving them
+ * 'pending' let the scheduler reach 'done' with two stages that read, to
+ * anything displaying the ledger, as outstanding work that never arrives. A
+ * stage nothing will run is 'skipped', which is a phase the ledger already has.
+ *
+ * Idempotent, and never downgrades a stage that actually ran: only 'pending' is
+ * rewritten.
+ */
+export function settleUnreachableStages(
+	services: ServiceState[],
+	ledger: PipelineLedger,
+): PipelineLedger {
+	if (services.some((s) => s.phase === 'green')) {
+		return ledger;
+	}
+	let next = ledger;
+	for (const stage of ['insights', 'probes'] as const) {
+		if (next[stage] === 'pending') {
+			next = { ...next, [stage]: 'skipped' };
+		}
+	}
+	return next;
 }
 
 /** The post-green stages, in the order the scheduler drains them. */

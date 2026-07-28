@@ -17,6 +17,7 @@ import {
 	initialPipelineLedger,
 	initialServiceState,
 	planPipelineAction,
+	settleUnreachableStages,
 	type PipelineLedger,
 	type ServiceState,
 } from '../harness/autoPilotMachine';
@@ -95,6 +96,31 @@ suite('pipeline machine: scheduling', () => {
 		// Never 'insights' or 'probes' — they have no traced session to read.
 		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'insights' });
 		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'probes' });
+	});
+
+	test('a stage no service will ever feed is settled, not left pending forever', () => {
+		// Leaving them 'pending' reached 'done' with two stages that read, to
+		// anything showing the ledger, as work still to come.
+		const libraries = [svc({ phase: 'library' }), svc({ name: 'b', phase: 'gave-up' })];
+		const settled = settleUnreachableStages(libraries, initialPipelineLedger());
+		assert.strictEqual(settled.insights, 'skipped');
+		assert.strictEqual(settled.probes, 'skipped');
+		// The one stage that CAN run on a library repo is untouched.
+		assert.strictEqual(settled.exercise, 'pending');
+		assert.deepStrictEqual(planPipelineAction(true, libraries, settled), { kind: 'exercise' });
+	});
+
+	test('settling is idempotent and never overwrites a stage that ran', () => {
+		const green = [svc({ phase: 'green' })];
+		const ledger = initialPipelineLedger();
+		// A green service means both stages are reachable — nothing is settled.
+		assert.deepStrictEqual(settleUnreachableStages(green, ledger), ledger);
+
+		const libraries = [svc({ phase: 'library' })];
+		const ran = applyStageOutcome(initialPipelineLedger(), 'insights', 'done');
+		const settled = settleUnreachableStages(libraries, ran);
+		assert.strictEqual(settled.insights, 'done');
+		assert.deepStrictEqual(settleUnreachableStages(libraries, settled), settled);
 	});
 
 	test('skipped and failed stages are terminal for the run', () => {

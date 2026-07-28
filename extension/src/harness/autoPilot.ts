@@ -34,6 +34,7 @@ import {
 	markNotAService,
 	noteSetupAttempt,
 	planPipelineAction,
+	settleUnreachableStages,
 	summarize,
 	type AutoPilotBudgets,
 	type PilotStep,
@@ -339,6 +340,8 @@ async function drive(
 			finishSummary(services, true);
 			return;
 		}
+		// A stage no live service will ever feed is decided, not outstanding.
+		ledger = settleUnreachableStages(services, ledger);
 		const action = planPipelineAction(discovered, services, ledger);
 
 		if (action.kind === 'done') {

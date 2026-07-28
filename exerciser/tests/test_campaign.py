@@ -647,3 +647,82 @@ def test_the_http_adapter_refuses_to_run_without_a_base_url(tmp_path):
 
     play = _http_runner(OracleConfig(repo=tmp_path))(HTTP)
     assert play.error == "no base_url" and play.violations == 0
+
+
+# ---- what the oracles say about the RUN ------------------------------------
+
+
+def test_an_oracles_run_level_diagnostic_reaches_the_campaigns_report(tmp_path: Path):
+    """Every oracle produced diagnostics and every runner dropped them.
+
+    So a finding about the APPARATUS — no importable target, an interpreter
+    without the repo installed, a shared unmet precondition — reached
+    `functions.json` and stopped there, while the campaign's own summary (what
+    the CLI prints and the extension's pass runs) said nothing.
+    """
+
+    def crash(action: Action) -> Play:
+        return Play(
+            violations=0,
+            covered=(action.target,),
+            subprocesses=1,
+            work=1,
+            diagnostics=("containment disabled by the caller — 3 target(s) stay refused",),
+        )
+
+    result = run_campaign(
+        tmp_path, budget=6, patience=100, actions=[BARREN], runners={"crash": crash}
+    )
+
+    assert any("stay refused" in d for d in result["diagnostics"])
+    # Six plays repeating one fact is one fact.
+    assert sum("stay refused" in d for d in result["diagnostics"]) == 1
+
+
+def test_a_campaign_that_could_not_import_the_repo_does_not_report_ok(tmp_path: Path):
+    """The headline claim, on the command that actually runs it.
+
+    `run_functions` decides this per play and used to be the only place that
+    knew: `status: "environment"` and the import canary died at the runner
+    boundary, so a campaign over a repo it could not load still answered
+    `status: "ok"` with zero findings — which is exactly what a clean repo
+    looks like, and the ambiguity the canary exists to remove.
+    """
+
+    def crash(action: Action) -> Play:
+        return Play(
+            violations=0,
+            covered=(action.target,),
+            subprocesses=1,
+            work=0,
+            status="environment",
+            detail={"own_packages_unimportable": ["acme_core"]},
+        )
+
+    result = run_campaign(
+        tmp_path, budget=4, patience=100, actions=[BARREN], runners={"crash": crash}
+    )
+
+    assert result["status"] == "environment"
+    assert result["own_packages_unimportable"] == ["acme_core"]
+    assert any("not a clean result" in d for d in result["diagnostics"])
+
+
+def test_a_healthy_campaign_is_still_ok(tmp_path: Path):
+    result = run_campaign(
+        tmp_path, budget=4, patience=100, actions=[PAYING, BARREN], runners=_runners()
+    )
+    assert result["status"] == "ok"
+    assert result["own_packages_unimportable"] == []
+
+
+def test_the_empty_action_space_reports_the_same_keys(tmp_path: Path):
+    """A caller reading `interpreter` must not have to know which branch ran.
+
+    The no-actions case is exactly when "which environment was this?" is the
+    question being asked, and it was the one return that omitted the answer.
+    """
+    result = run_campaign(tmp_path, budget=4, actions=[], runners={})
+    assert result["stopped"] == "no-actions"
+    assert result["interpreter"]["python"]
+    assert result["own_packages_unimportable"] == []

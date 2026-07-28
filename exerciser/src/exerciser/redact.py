@@ -48,10 +48,19 @@ PLACEHOLDER = "[redacted]"
 #: (whose value is the literal "bearer" — metadata an enum invariant legitimately
 #: learns) while still missing ``X-Api-Key`` (dash, not underscore). Over-
 #: redaction is an oracle bug, so the rule has to be tighter than "contains".
+#:
+#: ``secretkey``/``accesskey`` are listed even though ``secret`` already is:
+#: the suffix rule reads the LAST noun, and ``SECRET_KEY`` normalises to
+#: ``secretkey``, which ends in "key" rather than "secret". Django's and
+#: Flask's canonical setting name, and ``AWS_SECRET_ACCESS_KEY`` with it, were
+#: therefore not recognised at all.
 _SECRET_KEY_NOUNS = (
     "password",
     "passwd",
+    "passphrase",
     "secret",
+    "secretkey",
+    "accesskey",
     "token",
     "apikey",
     "authorization",
@@ -109,19 +118,38 @@ def is_id_shaped(value: str) -> bool:
     return not any(c in value for c in " \t\r\n/?#&=")
 
 
-#: ``key: 'value'`` / ``"key" = "value"`` / ``KEY=value`` inside FREE TEXT.
-#: The key is captured so the existing ``is_secret_key`` predicate decides —
-#: this adds a place to look, never a second vocabulary of what is secret.
-#: The bare-value branch deliberately excludes quotes and openers. Without that
-#: exclusion ``input_value={'openai_api_key': 'sk-…'}`` matched as the pair
-#: ``input_value`` → ``{'openai_api_key':`` — a non-secret key whose "value"
-#: swallowed the real one, so the credential a character later was never even
-#: looked at. The nested pair has to stay reachable.
-_TEXT_PAIR = re.compile(
-    r"""(?P<kq>['"]?)(?P<key>[A-Za-z_][A-Za-z0-9_.\- ]{0,60})(?P=kq)"""
-    r"""(?P<sep>\s*[:=]\s*)"""
-    r"""(?:(?P<vq>['"])(?P<quoted>(?:(?!(?P=vq)).)*)(?P=vq)|(?P<bare>[^\s,;:=)}\]'"{\[(]+))"""
+#: ``key:`` / ``"key" =`` / ``KEY=`` — the LEFT half of a pair in free text. The
+#: key is captured so the existing ``is_secret_key`` predicate decides; this
+#: adds a place to look, never a second vocabulary of what is secret.
+_TEXT_KEY = re.compile(
+    r"""(?P<kq>['"]?)(?P<key>[A-Za-z_][A-Za-z0-9_.\- ]{0,60})(?P=kq)(?P<sep>\s*[:=]\s*)"""
 )
+
+#: A quoted value. Same shape whoever owns the key.
+_TEXT_QUOTED = re.compile(r"""(?P<vq>['"])(?P<quoted>(?:(?!(?P=vq)).)*)(?P=vq)""")
+
+#: An unquoted value under a NON-secret key. Deliberately short: it stops at
+#: quotes, openers and ``=`` so that ``input_value={'api_key': …}`` and
+#: ``Traceback: token=sk-…`` leave the inner pair intact for the scan to reach.
+_TEXT_BARE_SHORT = re.compile(r"""[^\s,;:=)}\]'"{\[(]+""")
+
+#: An unquoted value under a SECRET key, which is a different question: ``=`` is
+#: part of the value, not a new pair. ``Set-Cookie: session=abc; Path=/`` broke
+#: under the short form — it stopped at the ``=``, redacted the cookie's NAME
+#: and left the value in the text.
+_TEXT_BARE_SECRET = re.compile(r"""[^\s\r\n,;&)}\]]+""")
+
+#: An auth SCHEME is not the credential, it introduces one. ``Authorization:
+#: Bearer eyJ…`` redacted the word "Bearer" and published the token, because a
+#: value that stops at whitespace stops one word early here — and only here, so
+#: the rest of an ordinary message ("token=… in file") keeps its prose.
+_AUTH_SCHEMES = frozenset({"bearer", "basic", "digest", "token", "jwt", "apikey", "key"})
+_TEXT_NEXT_WORD = re.compile(r"""[ \t]+(?P<word>[^\s\r\n,;&)}\]]+)""")
+
+#: A JWT with no key at all — a bearer token pasted bare into a traceback. Rule
+#: 2 of this module says the shape is enough under ANY key name, and "no key"
+#: is the limiting case of that.
+_BARE_JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*")
 
 
 def redact_text(text: str) -> str:
@@ -138,22 +166,57 @@ def redact_text(text: str) -> str:
     — and that message is persisted to ``.vinv/`` and printed to stdout. The
     engine has to be able to quote a target's error without becoming a way to
     exfiltrate the target's keys.
+
+    Scanned rather than ``re.sub``-ed, because a substitution consumes its whole
+    match and the value of one pair is routinely the KEY of the next. A single
+    pattern therefore let an innocent key swallow the credential behind it:
+    ``Traceback: token=sk-…`` matched as ``Traceback`` → ``token`` and the scan
+    resumed past the real pair. On a non-secret key this resumes INSIDE the
+    value, so every nested pair is examined on its own terms.
     """
     if not text:
         return text
 
-    def _sub(match: re.Match[str]) -> str:
+    out: list[str] = []
+    pos = 0
+    while pos < len(text):
+        match = _TEXT_KEY.search(text, pos)
+        if match is None:
+            break
         key = match.group("key")
-        value = match.group("quoted")
-        if value is None:
-            value = match.group("bare") or ""
-        if not (is_secret_key(key) or looks_like_jwt(value)):
-            return match.group(0)
-        quote = match.group("vq") or ""
-        kq = match.group("kq")
-        return f"{kq}{key}{kq}{match.group('sep')}{quote}{PLACEHOLDER}{quote}"
-
-    return _TEXT_PAIR.sub(_sub, text)
+        secret = is_secret_key(key)
+        value_at = match.end()
+        quoted = _TEXT_QUOTED.match(text, value_at)
+        if quoted is not None:
+            if not (secret or looks_like_jwt(quoted.group("quoted"))):
+                # Keep it verbatim and resume after it: a quoted value cannot
+                # itself be a key, so there is nothing inside to reach.
+                out.append(text[pos : quoted.end()])
+                pos = quoted.end()
+                continue
+            vq = quoted.group("vq")
+            out.append(f"{text[pos : match.end()]}{vq}{PLACEHOLDER}{vq}")
+            pos = quoted.end()
+            continue
+        bare = (_TEXT_BARE_SECRET if secret else _TEXT_BARE_SHORT).match(text, value_at)
+        if bare is None:
+            out.append(text[pos : match.end()])
+            pos = match.end()
+            continue
+        value = bare.group(0).rstrip()
+        if secret and value.casefold() in _AUTH_SCHEMES:
+            after = _TEXT_NEXT_WORD.match(text, value_at + len(value))
+            if after is not None:
+                value = text[value_at : after.end()]
+        if not (secret or looks_like_jwt(value)):
+            # Resume at the VALUE, not past it — it is the next candidate key.
+            out.append(text[pos:value_at])
+            pos = value_at
+            continue
+        out.append(f"{text[pos : match.end()]}{PLACEHOLDER}")
+        pos = value_at + len(value)
+    out.append(text[pos:])
+    return _BARE_JWT.sub(PLACEHOLDER, "".join(out))
 
 
 def redact(obj: Any, *, _key: str | None = None) -> Any:
