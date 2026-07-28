@@ -500,10 +500,44 @@ async function runServiceFreePass(
 
 	const found = issues?.clusters?.length ?? 0;
 	publishExerciseState(
-		exerciseStateFromArtifacts(null, issues, 'done', `${why} — drove the service-free oracles`),
+		exerciseStateFromArtifacts(null, issues, 'done', `${why} — ${engineVerdict(workspaceRoot, found)}`),
 	);
 	await dispatchFreshClusters(context, workspaceRoot, issues);
 	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
+}
+
+/** The `functions.json` shape this file reads — status and diagnostics only. */
+interface FunctionsVerdict {
+	status?: string;
+	diagnostics?: string[];
+}
+
+/**
+ * What the run actually concluded, not just how many clusters it produced.
+ *
+ * The engine already refuses to call a run clean when it could not import the
+ * code — `status: "environment"` plus a diagnostic naming the interpreter, the
+ * unmet precondition or the escalated variables. The CLI prints those loudly.
+ * The EXTENSION read neither, so in the product a run that never executed the
+ * target still rendered as "drove the service-free oracles" with zero issues —
+ * which is the exact silent zero the engine-side work exists to remove,
+ * reproduced one layer up.
+ *
+ * A producer and a consumer are two ends, and a test on the writing end passes
+ * whether or not the reading end exists. This is the reading end.
+ */
+export function engineVerdict(workspaceRoot: string, clusters: number): string {
+	const doc = readExerciseJson<FunctionsVerdict>(workspaceRoot, 'functions.json');
+	const diagnostics = doc?.diagnostics ?? [];
+	if (doc?.status === 'environment') {
+		// The strongest thing the engine can say: it could not load the code, so
+		// "no issues" means nothing was tested rather than nothing was wrong.
+		return diagnostics[0] ?? 'the code under test could not be imported — nothing was exercised';
+	}
+	if (diagnostics.length > 0) {
+		return `drove the service-free oracles — ${diagnostics[0]}`;
+	}
+	return `drove the service-free oracles${clusters === 0 ? ' — no issues found' : ''}`;
 }
 
 /**

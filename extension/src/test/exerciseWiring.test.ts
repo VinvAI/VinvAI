@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as fsx from 'fs';
+import * as osx from 'os';
+import * as pathx from 'path';
 import {
 	applyStageOutcome,
 	decideOnStageFailure,
@@ -15,6 +18,7 @@ import {
 	isAssertShapedKind,
 	isDispatchableKind,
 	evidenceFileForKind,
+	engineVerdict,
 	ASSERT_SUCCESS_CRITERIA,
 } from '../harness/exerciseRunner';
 import { computeFlowModel, type FlowFacts } from '../views/flowModel';
@@ -219,5 +223,62 @@ suite('exercise facts render into the Verify stage', () => {
 		const verify = model.stages.find((s) => s.id === 'verify');
 		assert.ok(verify);
 		assert.ok(!verify.links.some((l) => l.label.includes('Behavior coverage')));
+	});
+});
+
+/**
+ * The reading end of `functions.json`.
+ *
+ * The engine refuses to call a run clean when it could not import the code —
+ * `status: "environment"` plus a diagnostic naming the cause. The CLI prints
+ * those loudly; the extension read neither, so in the product a run that never
+ * executed the target rendered as "drove the service-free oracles" with zero
+ * issues. That is the silent zero the engine-side work exists to remove,
+ * reproduced one layer up.
+ */
+suite('the engine verdict reaches the UI', () => {
+	function workspaceWith(doc: unknown | null): string {
+		const root = fsx.mkdtempSync(pathx.join(osx.tmpdir(), 'vinv-verdict-'));
+		fsx.mkdirSync(pathx.join(root, '.vinv', 'exercise'), { recursive: true });
+		if (doc !== null) {
+			fsx.writeFileSync(
+				pathx.join(root, '.vinv', 'exercise', 'functions.json'),
+				JSON.stringify(doc),
+				'utf8',
+			);
+		}
+		return root;
+	}
+
+	test('an environment failure is stated, not rendered as a clean run', () => {
+		const root = workspaceWith({
+			status: 'environment',
+			diagnostics: ['14/15 module(s) could not be imported by /usr/bin/python3'],
+		});
+		const verdict = engineVerdict(root, 0);
+		assert.match(verdict, /could not be imported/);
+		assert.doesNotMatch(verdict, /no issues found/);
+	});
+
+	test('an environment failure with no diagnostic still says nothing was exercised', () => {
+		const verdict = engineVerdict(workspaceWith({ status: 'environment' }), 0);
+		assert.match(verdict, /nothing was exercised/);
+	});
+
+	test('a diagnostic on an ok run is surfaced too', () => {
+		const root = workspaceWith({
+			status: 'ok',
+			diagnostics: ['2 environment variable(s) were escalated: VINV_REGION'],
+		});
+		assert.match(engineVerdict(root, 3), /escalated: VINV_REGION/);
+	});
+
+	test('a genuinely clean run says so', () => {
+		const verdict = engineVerdict(workspaceWith({ status: 'ok', diagnostics: [] }), 0);
+		assert.match(verdict, /no issues found/);
+	});
+
+	test('a missing artifact degrades to the plain label rather than throwing', () => {
+		assert.strictEqual(typeof engineVerdict(workspaceWith(null), 0), 'string');
 	});
 });
