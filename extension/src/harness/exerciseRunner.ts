@@ -37,6 +37,7 @@ import { dispatchIssueEpisode } from './autoTrigger';
 import { drainAgentChannels, type DrainReport } from './agentChannel';
 import { runHarnessPrompt } from './harnessRunner';
 import { getHarnessId } from '../config/settings';
+import { openConfigRequestPanel, writeAnswers } from '../views/configRequestPanel';
 import { isAutoEpisodesEnabled } from '../config/settings';
 
 /** .vinv/exercise/<file> */
@@ -498,12 +499,60 @@ async function runServiceFreePass(
 		// went wrong.
 	}
 
+	// Anything the harness could not answer either is a question only a person
+	// can close. Opening the panel is the LAST step of the ladder, not a
+	// fallback for a failure — the engine derived what it could, induced what it
+	// could, asked the agent, and this is the remainder.
+	askUserForRemainingConfig(workspaceRoot, bin, env);
+
 	const found = issues?.clusters?.length ?? 0;
 	publishExerciseState(
 		exerciseStateFromArtifacts(null, issues, 'done', `${why} — ${engineVerdict(workspaceRoot, found)}`),
 	);
 	await dispatchFreshClusters(context, workspaceRoot, issues);
 	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
+}
+
+/**
+ * Show the user whatever configuration is still unresolved, and re-run on submit.
+ *
+ * Opens nothing when nothing is being asked, which is the common case: the
+ * panel is the tail of the ladder, so a repo Vinv configured on its own never
+ * sees it. Deliberately not awaited — the exercise pass is finished and its
+ * findings are already published; a person filling in a form must not hold the
+ * pipeline open while they do it.
+ */
+function askUserForRemainingConfig(
+	workspaceRoot: string,
+	bin: string,
+	env: NodeJS.ProcessEnv,
+): void {
+	try {
+		openConfigRequestPanel(workspaceRoot, {
+			save: (answers) => writeAnswers(workspaceRoot, answers),
+			rerun: async () => {
+				publishExerciseState(
+					exerciseStateFromArtifacts(null, null, 'running', 'configuration supplied — re-running…'),
+				);
+				await runEngine(
+					bin,
+					['campaign', workspaceRoot, '--budget', String(campaignBudget())],
+					workspaceRoot,
+					env,
+				);
+				const issues = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+				publishExerciseState(
+					exerciseStateFromArtifacts(
+						null, issues, 'done', engineVerdict(workspaceRoot, issues?.clusters?.length ?? 0),
+					),
+				);
+			},
+			showError: (message) => void vscode.window.showErrorMessage(message),
+		});
+	} catch {
+		// A panel that cannot open must never fail the exercise pass. The requests
+		// stay on disk and the next run offers them again.
+	}
 }
 
 /** The `functions.json` shape this file reads — status and diagnostics only. */
