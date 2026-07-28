@@ -152,7 +152,13 @@ class TestTheWorkerEnvironmentIsReproducible:
         real_run = subprocess.run
 
         def _capture(cmd, **kwargs):
-            seen.append(dict(kwargs.get("env") or {}))
+            # WORKER launches only. `exerciser.differential.subprocess` is the
+            # shared module object, so patching `.run` through it intercepts
+            # every subprocess the run makes — including interpreter
+            # resolution's metadata probe, which launches no worker and pins
+            # nothing. The claim under test is about the worker's environment.
+            if "--worker" in list(cmd):
+                seen.append(dict(kwargs.get("env") or {}))
             return real_run(
                 [__import__("sys").executable, "-c", "pass"],
                 capture_output=True,

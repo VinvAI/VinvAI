@@ -38,6 +38,7 @@ from typing import Any
 from . import store
 from ._worker import worker_entrypoint
 from .functions import detect_src_roots
+from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
 
 DEFAULT_WORKERS = 4
@@ -311,6 +312,7 @@ def run_concurrency(
     """Probe one target for hangs and schedule-dependent results."""
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
+    python = resolve_cached(repo, explicit=python, logger=log).python
     tmp_dir = store.exercise_dir(repo) / "concurrency"
     tmp_dir.mkdir(parents=True, exist_ok=True)
 

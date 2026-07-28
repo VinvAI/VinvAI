@@ -58,6 +58,7 @@ from . import store
 from ._worker import worker_entrypoint
 from .agent_loop import AgentChannel, Question, question_key
 from .functions import detect_src_roots
+from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
 
 DEFAULT_TIMEOUT_S = 60.0
@@ -733,6 +734,7 @@ def run_faults(
     """
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
+    python = resolve_cached(repo, explicit=python, logger=log).python
     store.exercise_dir(repo).mkdir(parents=True, exist_ok=True)
     channel = AgentChannel(repo, "contract", max_new=max_questions)
     # Bound on every branch: an auto-derived boundary has no declared sweep.

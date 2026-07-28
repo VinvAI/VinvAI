@@ -24,8 +24,10 @@ from exerciser.functions import (
     call_verdict,
     classify_row,
     denial_reason,
+    detect_src_roots,
     discover_targets,
     discover_with_refusals,
+    import_canary,
     impurities_in_source,
     is_denied,
     is_test_scaffolding,
@@ -895,12 +897,17 @@ def test_argument_sets_cover_the_input_classes():
     assert value_for(None, "boundary") == ""
 
 
-def test_discovery_skips_private_and_destructive(tmp_path: Path):
+def test_discovery_drives_internals_but_never_destructive(tmp_path: Path):
     repo = _make_repo(tmp_path)
     targets, skipped = discover_targets(repo)
     names = {t.qualname for t in targets}
     assert {"add", "halve", "greet", "untyped"} <= names
-    assert "_private" not in names, "private by convention"
+    # A leading underscore is an API-stability marker, not a safety one, and the
+    # helpers it hides are where input-shaped defects concentrate. It is driven,
+    # and labelled so a reader can tell it from the published surface.
+    assert "_private" in names
+    assert {t.kind for t in targets if t.qualname == "_private"} == {"internal"}
+    # Safety is still decided by the guards, and they are unaffected.
     assert "delete_everything" not in names
     assert any(s["reason"].startswith("destructive-name") for s in skipped)
     assert all(t.module == "targetpkg.calc" for t in targets)
@@ -1441,3 +1448,96 @@ def test_a_suppressed_signature_is_re_examinable_from_a_real_run(tmp_path: Path)
     assert explored is not None, "a suppressed signature must be re-examinable"
     assert explored["issue_clusters"] > 0, "and reported, so it can be labelled"
     assert any(c["kind"] == "function-crash" for c in explored["clusters"])
+
+
+# ---- the canary and the source roots are load-bearing for each other --------
+
+
+def _monorepo(tmp_path: Path) -> Path:
+    """Two distributions under libs/, the shape a single-root scan gets wrong."""
+    for dist, pkg in (("core", "acme_core"), ("api", "acme_api")):
+        src = tmp_path / "libs" / dist / pkg
+        src.mkdir(parents=True)
+        (src / "__init__.py").write_text("", encoding="utf-8")
+        (tmp_path / "libs" / dist / "pyproject.toml").write_text(
+            f'[project]\nname = "{pkg}"\n', encoding="utf-8"
+        )
+    return tmp_path
+
+
+def test_each_distribution_resolves_to_its_installed_import_name(tmp_path: Path):
+    repo = _monorepo(tmp_path)
+    roots = detect_src_roots(repo)
+    # Not `libs.core.acme_core`: that name is importable only as a namespace
+    # package, and importing it loads a SECOND copy beside the installed one.
+    assert module_name_for("libs/core/acme_core/__init__.py", roots) == "acme_core"
+    assert module_name_for("libs/api/acme_api/__init__.py", roots) == "acme_api"
+
+
+def test_the_canary_fires_because_the_roots_named_the_package_correctly():
+    """The ownership gate reads `repo_packages`, which comes from the resolved
+    module names. Collapse the roots and every package looks third-party, so the
+    canary goes silent on exactly the run that motivated it — these two fixes
+    cannot be changed independently.
+    """
+    resolved = [
+        {
+            "module": "acme_core.util",
+            "phase": "import",
+            "status": "error",
+            "error": "No module named 'acme_core'",
+            "repo_packages": ["acme_core"],
+        }
+    ]
+    assert import_canary(resolved, 1)["own_packages_unimportable"] == ["acme_core"]
+
+    # The pre-fix world: modules resolved to `libs.…`, so `repo_packages` was
+    # `{"libs"}` and the missing package never matched.
+    collapsed = [{**resolved[0], "module": "libs.core.acme_core.util", "repo_packages": ["libs"]}]
+    assert import_canary(collapsed, 1)["own_packages_unimportable"] == []
+
+
+def test_a_stale_install_counts_as_unimportable_too():
+    """A package present but too old to carry the name the source expects is not
+    a defect in the source — it is the same wrong-interpreter problem wearing a
+    different exception message.
+    """
+    rows = [
+        {
+            "module": "acme_core.util",
+            "phase": "import",
+            "status": "error",
+            "error": "cannot import name 'Widget' from 'acme_core.models'",
+            "repo_packages": ["acme_core"],
+        }
+    ]
+    assert import_canary(rows, 1)["own_packages_unimportable"] == ["acme_core"]
+
+
+def test_a_missing_third_party_extra_is_not_an_environment_failure():
+    rows = [
+        {
+            "module": "acme_core.vectors",
+            "phase": "import",
+            "status": "error",
+            "error": "No module named 'qdrant_client'",
+            "repo_packages": ["acme_core"],
+        }
+    ]
+    canary = import_canary(rows, 4)
+    assert canary["own_packages_unimportable"] == []
+    assert canary["blocking"] is False
+
+
+def test_blocking_needs_a_majority_of_modules_not_a_single_one():
+    def row(mod: str) -> dict:
+        return {
+            "module": mod,
+            "phase": "import",
+            "status": "error",
+            "error": "No module named 'acme_core'",
+            "repo_packages": ["acme_core"],
+        }
+
+    assert import_canary([row("acme_core.a")], 10)["blocking"] is False
+    assert import_canary([row(f"acme_core.{c}") for c in "abcdef"], 10)["blocking"] is True

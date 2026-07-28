@@ -60,6 +60,7 @@ from typing import Any
 
 from . import exception_policy, store
 from .bandit import Action, ActionBandit, Outcome, seed_actions_from_prior
+from .interpreter import resolve_cached
 
 # Wall-clock seconds that count as ONE probe-equivalent. An HTTP probe against a
 # local traced service is the unit the budget was always denominated in, and it
@@ -781,6 +782,12 @@ def run_campaign(
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
 
+    # Resolved ONCE for the whole campaign and handed to every oracle: five
+    # oracles independently defaulting to `sys.executable` was five separate
+    # ways to spend a budget importing nothing.
+    interpreter_choice = resolve_cached(repo, explicit=python, logger=log)
+    python = interpreter_choice.python
+
     space = ActionSpace(actions=list(actions)) if actions is not None else None
     if space is None:
         space = enumerate_actions(
@@ -803,7 +810,7 @@ def run_campaign(
         )
         runners = default_runners(cfg)
 
-    diagnostics = list(space.notes)
+    diagnostics = list(interpreter_choice.diagnostics) + list(space.notes)
     if not space.actions:
         diagnostics.append(
             "0 actions armed — no oracle is available for this repo, so there "
@@ -975,6 +982,10 @@ def run_campaign(
     result: dict[str, Any] = {
         "status": "ok",
         "diagnostics": diagnostics,
+        # The interpreter every oracle's workers ran under. `inconclusive_plays`
+        # says budget reached no target; this says which environment it was spent
+        # in, which is the first thing to check when that number is high.
+        "interpreter": interpreter_choice.to_json(),
         "repo": str(repo),
         "actions": len(bandit.actions),
         "armed": dict(sorted(space.armed.items())),

@@ -221,3 +221,85 @@ class TestLedgerHarvest:
         # The non-secret scalars are still harvested — teardown depends on them.
         assert "user@example.com" in harvested
         assert "bearer" in harvested
+
+
+# =========================================================================
+# SEC-3: a credential rendered INSIDE an exception message
+# =========================================================================
+
+
+class TestSecretsInsideFreeText:
+    """``redact`` decides by field name, which cannot reach inside one string.
+
+    Found in a real run against demo-fastapi once the workers started using the
+    target's own interpreter: every module failed to import because required
+    settings were unset, and pydantic renders the whole input dict into the
+    validation message — API key included. That message was persisted to
+    ``.vinv/exercise/functions.json`` and printed to stdout.
+    """
+
+    def test_a_credential_in_a_rendered_dict_is_removed(self) -> None:
+        from exerciser.redact import redact_text
+
+        # Wholly fabricated. A fixture for a redaction test is the LAST place a
+        # real credential should be pasted from a run's output, however dead the
+        # key is believed to be — the test file is the artifact that gets pushed.
+        message = (
+            "5 validation errors for Settings\nPROJECT_NAME\n  Field required "
+            "[type=missing, input_value={'openai_api_key': 'sk-proj-EXAMPLE-NOT-A-REAL-KEY', "
+            "'project': 'demo'}, input_type=dict]"
+        )
+        cleaned = redact_text(message)
+        assert "sk-proj-EXAMPLE-NOT-A-REAL-KEY" not in cleaned
+        # The surrounding diagnostic is what makes the message useful.
+        assert "PROJECT_NAME" in cleaned
+        assert "'project': 'demo'" in cleaned
+
+    def test_a_non_secret_key_does_not_swallow_the_secret_after_it(self) -> None:
+        """The bug the first version of the pattern had.
+
+        ``input_value={'openai_api_key': …}`` matched as the pair
+        ``input_value`` → ``{'openai_api_key':`` — an innocent key whose "value"
+        consumed the real credential, so it was never examined.
+        """
+        from exerciser.redact import redact_text
+
+        cleaned = redact_text("input_value={'api_key': 'AKIAsecretsecret'}")
+        assert "AKIAsecretsecret" not in cleaned
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "POSTGRES_PASSWORD=s3cr3tvalue",
+            '{"Authorization": "Bearer abc.def"}',
+            "client_secret: 'shhh'",
+            "X-Api-Key = 'abcdef123456'",
+        ],
+    )
+    def test_the_credential_spellings_a_message_actually_carries(self, text: str) -> None:
+        from exerciser.redact import redact_text
+
+        cleaned = redact_text(text)
+        assert PLACEHOLDER in cleaned
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "token_type: bearer",
+            "count: 5",
+            "PROJECT_NAME=demo",
+            "no credentials in this sentence",
+            "",
+        ],
+    )
+    def test_ordinary_text_is_left_alone(self, text: str) -> None:
+        """Over-redaction is an oracle bug, exactly as it is for ``redact``."""
+        from exerciser.redact import redact_text
+
+        assert redact_text(text) == text
+
+    def test_the_separator_and_quoting_survive(self) -> None:
+        from exerciser.redact import redact_text
+
+        assert redact_text("PASSWORD=x") == f"PASSWORD={PLACEHOLDER}"
+        assert redact_text("'password': 'x'") == f"'password': '{PLACEHOLDER}'"

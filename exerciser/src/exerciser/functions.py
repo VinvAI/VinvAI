@@ -118,7 +118,9 @@ from typing import Any
 from . import store
 from ._worker import worker_entrypoint
 from .exception_policy import DECAY, ExceptionPolicy, family_of, provenance_of, signature
+from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
+from .redact import redact_text
 from .sandbox import SandboxPolicy, run_sandboxed_targets
 
 # =========================================================================
@@ -524,15 +526,66 @@ def module_name_for(rel_file: str, src_roots: list[str]) -> str | None:
     return ".".join(parts)
 
 
+#: How deep to look for nested distributions. A monorepo nests its packages a
+#: level or two down (``libs/core``, ``packages/api``, ``libs/partners/openai``);
+#: past that a match is far more likely to be a fixture or a vendored copy.
+_MAX_DIST_DEPTH = 4
+
+#: Files that mark a directory as a distribution root — the thing that ends up
+#: on ``sys.path`` once installed.
+_DIST_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg")
+
+
 def detect_src_roots(repo: Path) -> list[str]:
     """Repo-relative directories that behave as import roots.
 
-    ``src/`` when present (the src-layout convention), plus the repo root.
+    A repo with ONE distribution has one root (``src/`` under the src-layout
+    convention, else the repo itself). A monorepo has one per distribution, and
+    treating it as a single root is not a smaller answer but a wrong one: with
+    only ``.``, ``libs/core/langchain_core/utils.py`` resolves to the module
+    ``libs.core.langchain_core.utils``, which imports a SECOND copy of the
+    package alongside the installed one (implicit namespace packages make it
+    succeed rather than fail). Two copies means ``isinstance`` across them is
+    false and every cross-package import gets the other copy — so the harness
+    reports phantom errors it caused itself.
+
+    The extra roots come from the distributions declared in the tree, because
+    that is what packaging already records; nothing is inferred from directory
+    names. They are ADDITIVE — the src-layout convention still holds for a tree
+    that carries no packaging metadata at all.
     """
-    roots = ["."]
-    if (repo / "src").is_dir():
-        roots.insert(0, "src")
+    roots: list[str] = []
+    for marker_dir in _distribution_dirs(repo):
+        src = marker_dir / "src"
+        root = src if src.is_dir() else marker_dir
+        rel = root.relative_to(repo).as_posix()
+        if rel and rel not in roots:
+            roots.append(rel)
+    if (repo / "src").is_dir() and "src" not in roots:
+        roots.append("src")
+    # The repo root stays last: `module_name_for` prefers the longest matching
+    # root, so it only applies to files no distribution claims.
+    roots.append(".")
     return roots
+
+
+def _distribution_dirs(repo: Path) -> list[Path]:
+    """Every directory in the tree that declares itself an installable package."""
+    found: list[Path] = []
+    for marker in _DIST_MARKERS:
+        for path in repo.rglob(marker):
+            parent = path.parent
+            try:
+                depth = len(parent.relative_to(repo).parts)
+            except ValueError:
+                continue
+            if depth > _MAX_DIST_DEPTH:
+                continue
+            if any(part in store.SKIP_DIRS for part in parent.relative_to(repo).parts):
+                continue
+            if parent not in found:
+                found.append(parent)
+    return found
 
 
 # =========================================================================
@@ -2126,9 +2179,17 @@ def discover_with_refusals(
         if module is None:
             continue
         for name in index_syms.get(rel, []):
-            if name.startswith("_"):
-                continue  # private by convention
-            _add(module, name, rel, "exported")
+            # A leading underscore is a statement about API STABILITY, not about
+            # whether calling the function is safe or worth doing — and it is
+            # where the parsing, merging and normalising helpers live, which is
+            # where input-shaped defects concentrate. Safety is decided by the
+            # purity guard, the destructive-name vocabulary and containment, all
+            # of which apply here unchanged. Dunders stay out: they are the
+            # interpreter's protocol, driven through the operation that invokes
+            # them rather than by name.
+            if name.startswith("__"):
+                continue
+            _add(module, name, rel, "internal" if name.startswith("_") else "exported")
 
     log.info(
         "functions: %d targets, %d skipped (%d sandboxable) (roots=%s)",
@@ -2856,6 +2917,158 @@ def cluster_function_failures(
     )
 
 
+#: Share of the modules that ATTEMPTED an import which must fail with one
+#: identical exception before it is read as a shared precondition rather than as
+#: a defect per module. Paired with an absolute floor, because "both of my two
+#: modules raised the same thing" is not dispersion, it is a small repo.
+_SHARED_PRECONDITION_SHARE = 0.5
+_SHARED_PRECONDITION_MIN_MODULES = 3
+
+
+def shared_import_preconditions(
+    rows: list[dict[str, Any]],
+    clusters: list[FailureCluster],
+) -> tuple[list[FailureCluster], list[dict[str, Any]]]:
+    """Split import failures that are ONE unmet precondition off from defects.
+
+    ``classify_row`` already exempts the two import failures that say nothing
+    about the code: a dependency this machine lacks (the ``ImportError`` family)
+    and an exception the repo defines about itself. A third shape reaches a
+    verdict and should not, and it became common the moment workers started
+    running under the target's own interpreter: a service that reads REQUIRED
+    configuration at import time. Every module that transitively imports the
+    settings object raises the same third-party validation error — on
+    demo-fastapi, ``pydantic_core.ValidationError`` from 14 of the 14 modules
+    that attempted an import — and each one was reported as its own defect. That
+    is fifteen fabricated findings on a repo whose only problem is an unset
+    environment variable.
+
+    Provenance cannot separate these: the exception belongs to pydantic, not to
+    the repo, so the "package stating its own precondition" exemption misses it.
+    DISPERSION can, and it is a fact about the run rather than a vocabulary: one
+    error taking out every module is a single unmet precondition, because a
+    genuine defect in one module does not stop the others from importing.
+
+    Returns ``(clusters_to_report, preconditions)``. Nothing is discarded — the
+    withheld group comes back described, so the caller reports it as the
+    environment finding it is instead of as silence.
+    """
+    imports = [r for r in rows if r.get("phase") == "import" and r.get("status") == "error"]
+    attempted = {str(r.get("module", "")) for r in rows if r.get("phase") == "import"}
+    if len(attempted) < _SHARED_PRECONDITION_MIN_MODULES:
+        return clusters, []
+
+    by_signature: dict[tuple[str, str], set[str]] = {}
+    for row in imports:
+        key = (str(row.get("error_type", "")), str(row.get("error_module", "")))
+        by_signature.setdefault(key, set()).add(str(row.get("module", "")))
+
+    blocked: dict[str, tuple[str, str]] = {}
+    findings: list[dict[str, Any]] = []
+    for (error_type, error_module), modules in sorted(by_signature.items()):
+        share = len(modules) / len(attempted)
+        if len(modules) < _SHARED_PRECONDITION_MIN_MODULES or share < _SHARED_PRECONDITION_SHARE:
+            continue
+        for module in modules:
+            blocked[module] = (error_type, error_module)
+        exemplar = next(
+            (r for r in imports if str(r.get("module", "")) in modules),
+            {},
+        )
+        findings.append(
+            {
+                "error_type": error_type,
+                "error_module": error_module,
+                "modules_blocked": len(modules),
+                "modules_attempted": len(attempted),
+                # A settings object that fails validation renders its whole
+                # input dict — API keys included — into the message, and this
+                # field is persisted and printed.
+                "detail": redact_text(str(exemplar.get("error", "")))[:400],
+                "modules": sorted(modules)[:50],
+            }
+        )
+
+    if not blocked:
+        return clusters, []
+
+    kept: list[FailureCluster] = []
+    withheld_by_signature: dict[tuple[str, str], int] = {}
+    for cluster in clusters:
+        doc = cluster.to_json()
+        endpoint = str(doc.get("endpoint_id") or "")
+        signature = blocked.get(endpoint)
+        if doc.get("kind") == "import-error" and signature is not None:
+            withheld_by_signature[signature] = withheld_by_signature.get(signature, 0) + 1
+        else:
+            kept.append(cluster)
+    for finding in findings:
+        key = (finding["error_type"], finding["error_module"])
+        finding["clusters_withheld"] = withheld_by_signature.get(key, 0)
+    return kept, findings
+
+
+#: Share of attempted modules that must fail to import a repo-owned package
+#: before the run is called an environment failure rather than a clean result.
+_ENVIRONMENT_FAILURE_SHARE = 0.5
+
+#: The two shapes an unimportable package takes. A package that is absent
+#: entirely raises the first; one that is present but STALE — an older release
+#: installed over the checkout, so a name the source expects is not there yet —
+#: raises the second. Both mean the interpreter is not carrying this repo's
+#: code, which is the only question this canary asks.
+_UNIMPORTABLE_RES = (
+    re.compile(r"No module named ['\"]([\w.]+)['\"]"),
+    re.compile(r"cannot import name .+ from (?:partially initialized module )?['\"]([\w.]+)['\"]"),
+)
+
+
+def _unimportable_package(message: str) -> str | None:
+    """The top-level package an import-phase error says could not be loaded."""
+    for pattern in _UNIMPORTABLE_RES:
+        found = pattern.search(message)
+        if found:
+            return found.group(1).partition(".")[0]
+    return None
+
+
+def import_canary(rows: list[dict[str, Any]], modules_attempted: int) -> dict[str, Any]:
+    """Whether the interpreter driving the targets can import the target's code.
+
+    The function channel imports the repo under test. When the chosen
+    interpreter has not installed it, EVERY import raises and the run finds
+    nothing — and "found nothing" is exactly what a clean repo looks like. That
+    ambiguity is the failure mode this exists to remove: a run that could not
+    load the code must never be reported as a run that found no defects.
+
+    A missing module is only evidence about the ENVIRONMENT when the repo owns
+    it; a target that fails to import ``qdrant_client`` is telling us about an
+    optional extra, and the run is still meaningful for everything else. That
+    ownership test reads ``repo_packages``, which is only correct once
+    ``detect_src_roots`` has resolved each distribution to its real import name
+    — the two are load-bearing for each other.
+    """
+    missing: dict[str, int] = {}
+    failed_modules: set[str] = set()
+    for row in rows:
+        if row.get("phase") != "import" or row.get("status") != "error":
+            continue
+        top = _unimportable_package(str(row.get("error", "")))
+        if top is None:
+            continue
+        if top not in {str(n) for n in (row.get("repo_packages") or [])}:
+            continue
+        missing[top] = missing.get(top, 0) + 1
+        failed_modules.add(str(row.get("module", "")))
+    share = len(failed_modules) / modules_attempted if modules_attempted else 0.0
+    return {
+        "own_packages_unimportable": sorted(missing),
+        "modules_failed": len(failed_modules),
+        "modules_attempted": modules_attempted,
+        "blocking": share >= _ENVIRONMENT_FAILURE_SHARE and bool(missing),
+    }
+
+
 def run_functions(
     repo: Path,
     *,
@@ -2960,6 +3173,16 @@ def run_functions(
         refusals = [r for r in refusals if r.id in wanted]
 
     diagnostics: list[str] = []
+
+    # WHICH interpreter, before any worker is spawned. `python or sys.executable`
+    # meant Vinv's own venv on every repo that was not installed into it, so the
+    # workers imported nothing and the run reported a clean zero. An explicit
+    # `--python` still wins; without one this picks the interpreter that has the
+    # code under test installed, and says so.
+    choice = resolve_cached(repo, explicit=python, logger=log)
+    python = choice.python
+    diagnostics.extend(choice.diagnostics)
+
     if opted_out and refusals:
         # LOUD, not silent. The impure set is where the interesting functions
         # live; a run that leaves it undriven has to say so on the summary as
@@ -3191,6 +3414,17 @@ def run_functions(
     # clustering and the verdict tally below cannot disagree about a row.
     rng = random.Random(seed) if explore else None
     clusters = cluster_function_failures(rows, policy, total_targets=total_targets, rng=rng)
+    # One unmet precondition is one finding, not one per module it blocked.
+    clusters, preconditions = shared_import_preconditions(rows, clusters)
+    for precondition in preconditions:
+        diagnostics.append(
+            f"{precondition['modules_blocked']}/{precondition['modules_attempted']} module(s) "
+            f"failed to import with the SAME {precondition['error_type']} from "
+            f"{precondition['error_module']} — one unmet precondition, not "
+            f"{precondition['clusters_withheld']} defects, so it is reported here rather than "
+            f"clustered: {precondition['detail'][:200]}"
+        )
+        log.warning("functions_shared_precondition %s", diagnostics[-1])
     store.write_jsonl(store.exercise_dir(repo) / "function_results.jsonl", rows)
 
     called = sum(1 for r in rows if r.get("phase") == "call")
@@ -3207,8 +3441,44 @@ def run_functions(
                 sandbox_verdicts[v] = sandbox_verdicts.get(v, 0) + 1
     if sandbox_report.get("enabled"):
         sandbox_report["verdicts"] = dict(sorted(sandbox_verdicts.items()))
+
+    canary = import_canary(rows, len(by_module))
+    if canary["own_packages_unimportable"]:
+        names = ", ".join(canary["own_packages_unimportable"])
+        # Discovery already ran, so the advice has to depend on what it found:
+        # telling a human to "point --python at the repo's venv" when resolution
+        # searched the tree and found no better interpreter sends them looking
+        # for a venv that does not exist.
+        remedy = (
+            "Install the target into that interpreter, or pass --python explicitly."
+            if choice.handed_off
+            else (
+                f"No interpreter with {names} installed was found among "
+                f"{len(choice.considered)} candidate(s) — create the target's venv and "
+                "install it, or pass --python explicitly."
+            )
+        )
+        detail = (
+            f"{canary['modules_failed']}/{canary['modules_attempted']} module(s) could not be "
+            f"imported by {python}: the repo's own package(s) {names} are not "
+            f"installed for it. {remedy}"
+        )
+        diagnostics.append(detail)
+        log.warning("functions_import_canary %s", detail)
+
     result: dict[str, Any] = {
-        "status": "ok",
+        # A run that could not import the code under test found nothing BECAUSE
+        # it never ran it, which is not the same claim as a clean repo.
+        "status": "environment" if canary["blocking"] else "ok",
+        "import_canary": canary,
+        # Which interpreter drove the workers, and the evidence for it. Without
+        # this a run is unreproducible: the single most important input to the
+        # result was chosen and never written down.
+        "interpreter": choice.to_json(),
+        # Import failures that were ONE unmet precondition across many modules.
+        # Withheld from `clusters` because they are not per-module defects, and
+        # stated here because they are not nothing either.
+        "import_preconditions": preconditions,
         "diagnostics": diagnostics,
         "repo": str(repo),
         "service": service,

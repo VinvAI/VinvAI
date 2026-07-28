@@ -109,6 +109,53 @@ def is_id_shaped(value: str) -> bool:
     return not any(c in value for c in " \t\r\n/?#&=")
 
 
+#: ``key: 'value'`` / ``"key" = "value"`` / ``KEY=value`` inside FREE TEXT.
+#: The key is captured so the existing ``is_secret_key`` predicate decides —
+#: this adds a place to look, never a second vocabulary of what is secret.
+#: The bare-value branch deliberately excludes quotes and openers. Without that
+#: exclusion ``input_value={'openai_api_key': 'sk-…'}`` matched as the pair
+#: ``input_value`` → ``{'openai_api_key':`` — a non-secret key whose "value"
+#: swallowed the real one, so the credential a character later was never even
+#: looked at. The nested pair has to stay reachable.
+_TEXT_PAIR = re.compile(
+    r"""(?P<kq>['"]?)(?P<key>[A-Za-z_][A-Za-z0-9_.\- ]{0,60})(?P=kq)"""
+    r"""(?P<sep>\s*[:=]\s*)"""
+    r"""(?:(?P<vq>['"])(?P<quoted>(?:(?!(?P=vq)).)*)(?P=vq)|(?P<bare>[^\s,;:=)}\]'"{\[(]+))"""
+)
+
+
+def redact_text(text: str) -> str:
+    """Redact credential values embedded in a free-text blob.
+
+    ``redact`` walks a STRUCTURE and decides by field name, which is the right
+    rule and the wrong reach: an exception message is one string, and the
+    credential inside it is spelled as text. A settings object that fails
+    validation renders its whole input dict into the message —
+
+        5 validation errors for Settings ... input_value={'openai_api_key':
+        'sk-pr...54k5cA', ...}
+
+    — and that message is persisted to ``.vinv/`` and printed to stdout. The
+    engine has to be able to quote a target's error without becoming a way to
+    exfiltrate the target's keys.
+    """
+    if not text:
+        return text
+
+    def _sub(match: re.Match[str]) -> str:
+        key = match.group("key")
+        value = match.group("quoted")
+        if value is None:
+            value = match.group("bare") or ""
+        if not (is_secret_key(key) or looks_like_jwt(value)):
+            return match.group(0)
+        quote = match.group("vq") or ""
+        kq = match.group("kq")
+        return f"{kq}{key}{kq}{match.group('sep')}{quote}{PLACEHOLDER}{quote}"
+
+    return _TEXT_PAIR.sub(_sub, text)
+
+
 def redact(obj: Any, *, _key: str | None = None) -> Any:
     """Return ``obj`` with credential values replaced, shape and types intact.
 

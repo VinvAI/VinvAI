@@ -73,6 +73,7 @@ from typing import Any
 from . import store
 from ._worker import worker_entrypoint
 from .functions import annotation_base, detect_src_roots, discover_targets
+from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
 from .semantics_corpus import RAISING_CORPUS, SEMANTIC_CORPUS
 
@@ -892,6 +893,7 @@ def run_differential(
     """
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
+    python = resolve_cached(repo, explicit=python, logger=log).python
 
     if target:
         refs = [
