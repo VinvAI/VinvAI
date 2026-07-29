@@ -8,7 +8,7 @@
     "fault oracle skipped 2 target(s): no annotated parameter to derive a contract from"
   ],
   "interpreter": {
-    "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+    "python": "<python>",
     "origin": "vinv's own interpreter",
     "handed_off": false,
     "python_version": "3.13.14",
@@ -26,7 +26,7 @@
     ],
     "considered": [
       {
-        "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+        "python": "<python>",
         "origin": "vinv's own interpreter",
         "detail": "fallback",
         "ok": true,
@@ -37,7 +37,7 @@
       }
     ]
   },
-  "repo": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0",
+  "repo": "<repo>",
   "actions": 15,
   "armed": {
     "concurrency": 5,
@@ -60,7 +60,7 @@
       "plays": 2,
       "violations": 0,
       "coverage_sum": 2,
-      "cost_sum": 4.8897,
+      "cost_sum": 5.4969,
       "posterior_mean": 0.375
     },
     "deterministic": {
@@ -74,7 +74,7 @@
       "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 7.5142,
+      "cost_sum": 8.0031,
       "posterior_mean": 0.4
     }
   },
@@ -83,7 +83,7 @@
       "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 7.5142,
+      "cost_sum": 8.0031,
       "posterior_mean": 0.4
     },
     "crash": {
@@ -97,7 +97,7 @@
       "plays": 2,
       "violations": 0,
       "coverage_sum": 2,
-      "cost_sum": 4.8897,
+      "cost_sum": 5.4969,
       "posterior_mean": 0.375
     }
   },
@@ -106,5 +106,5 @@
     "technique": "deterministic",
     "oracle": "crash"
   },
-  "campaign_file": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0\\.vinv\\exercise\\campaign.json"
+  "campaign_file": "<repo>\\.vinv\\exercise\\campaign.json"
 }

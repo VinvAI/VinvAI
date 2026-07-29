@@ -7,7 +7,7 @@
     "blocking": false
   },
   "interpreter": {
-    "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+    "python": "<python>",
     "origin": "vinv's own interpreter",
     "handed_off": false,
     "python_version": "3.13.14",
@@ -25,7 +25,7 @@
     ],
     "considered": [
       {
-        "python": "C:\\Anshul\\VinvAI\\vinv\\.venv\\Scripts\\python.exe",
+        "python": "<python>",
         "origin": "vinv's own interpreter",
         "detail": "fallback",
         "ok": true,
@@ -47,7 +47,7 @@
     "pending": 0,
     "answered": 0,
     "overflow": 0,
-    "file": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0\\.vinv\\exercise\\agent_config.json"
+    "file": "<repo>\\.vinv\\exercise\\agent_config.json"
   },
   "blocked_imports_asked": [],
   "blocked_channel": {
@@ -56,10 +56,10 @@
     "pending": 0,
     "answered": 0,
     "overflow": 0,
-    "file": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0\\.vinv\\exercise\\agent_blocked-import.json"
+    "file": "<repo>\\.vinv\\exercise\\agent_blocked-import.json"
   },
   "diagnostics": [],
-  "repo": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0",
+  "repo": "<repo>",
   "service": null,
   "targets": 1,
   "modules": 1,
@@ -164,5 +164,5 @@
   },
   "issue_clusters": 0,
   "clusters": [],
-  "results_file": "C:\\Users\\SERVER\\AppData\\Local\\Temp\\pytest-of-SERVER\\pytest-344\\demo-repo0\\.vinv\\exercise\\function_results.jsonl"
+  "results_file": "<repo>\\.vinv\\exercise\\function_results.jsonl"
 }

@@ -415,6 +415,31 @@ _FIXTURE_DIR = (
 _HANDSHAKE_ARTIFACTS = ("issues.json", "campaign_result.json", "functions.json")
 
 
+def _machine_independent(text: str, repo: Path) -> str:
+    """Replace this machine's absolute paths with stable placeholders.
+
+    These files are COMMITTED, and an engine artifact records where it ran: the
+    repo it drove and the interpreter it drove it with. Left verbatim that
+    publishes the developer's home directory and username into the repository,
+    and makes regenerating on any other machine a diff of pure noise — which is
+    how a golden fixture stops being maintained and starts being reverted.
+
+    Only paths are touched. Every field the extension reads — `status`,
+    `diagnostics`, `cluster_count`, `clusters` — stays exactly as the engine
+    emitted it, because the point is to hold the READER to what the WRITER
+    really produces.
+    """
+    for actual, placeholder in (
+        (str(repo.resolve()), "<repo>"),
+        (str(Path(sys.executable).resolve()), "<python>"),
+        (str(Path(sys.executable).parent.parent.resolve()), "<venv>"),
+    ):
+        # Both spellings: raw, and JSON-escaped as it appears in the file.
+        text = text.replace(actual.replace("\\", "\\\\"), placeholder)
+        text = text.replace(actual, placeholder)
+    return text
+
+
 def test_the_artifacts_the_extension_reads_are_published_for_its_tests(
     demo_repo: Path, functions_result: dict[str, Any]
 ) -> None:
@@ -440,7 +465,7 @@ def test_the_artifacts_the_extension_reads_are_published_for_its_tests(
         source = store.exercise_dir(demo_repo) / name
         if not source.is_file():
             continue
-        text = source.read_text(encoding="utf-8")
+        text = _machine_independent(source.read_text(encoding="utf-8"), demo_repo)
         assert FAKE_KEY not in text, f"{name} carries a credential and must not be committed"
         (_FIXTURE_DIR / name).write_text(text, encoding="utf-8")
         published.append(name)
@@ -455,6 +480,12 @@ def test_the_artifacts_the_extension_reads_are_published_for_its_tests(
     assert isinstance(issues.get("clusters"), list)
     verdict = json.loads((_FIXTURE_DIR / "campaign_result.json").read_text(encoding="utf-8"))
     assert "status" in verdict and "diagnostics" in verdict, "`engineVerdict` reads both"
+
+    # And nothing machine-specific survived into a committed file.
+    for name in published:
+        published_text = (_FIXTURE_DIR / name).read_text(encoding="utf-8")
+        assert str(Path.home()) not in published_text, f"{name} carries a home directory"
+        assert str(demo_repo) not in published_text, f"{name} carries a temp path"
 
 
 # =========================================================================
