@@ -575,6 +575,32 @@ service's own tracelens-wrapped start command. Every launch of `{service}` from
 this file replays this list verbatim, so it must contain nothing that should run
 only once at setup time.
 
+**The recorded command must be SELF-CONTAINED — it is replayed in a DIFFERENT
+environment from yours.** Your shell was launched with Vinv's engine `bin/`
+prepended to `PATH`, so a bare `tracelens …` resolves for you. Nothing that
+replays this file inherits that: the editor's service launcher, the probe pass
+and fix episodes all start it from a plain environment. A command that works
+here and nowhere else fails with `exit 127 tracelens: command not found`, and no
+later agent can repair it — this file is outside the repo, so a fix episode's
+diff can never touch it.
+
+Before recording, make the command carry its own environment:
+
+- prepend the service venv's `bin/` to `PATH` **inline** in the command itself,
+  so `opentelemetry-instrument` resolves (see the tracelens section — an
+  absolute path to `tracelens` alone is NOT enough and fails differently);
+- name the interpreter explicitly (`<venv>/bin/python -m uvicorn …`), never a
+  bare `python`, which resolves to whatever the replaying shell happens to have;
+- `tracelens` must also be **importable by that interpreter** — the child hook
+  is injected via `sitecustomize` and swallows a failed `import tracelens`
+  silently, leaving you a trace file with parent-process spans only and no
+  error. Verify with `<venv>/bin/python -c "import tracelens"` before recording.
+
+Then prove it: run the exact string you are about to record in a **fresh shell
+that has not activated anything**, and confirm the service still comes up and
+`trace.jsonl` still grows. If it only works in your current shell, it is not
+finished.
+
 **EXCLUDE from `commands` (these are setup, run once during this bring-up — do
 NOT record them):**
 - dependency installs of any kind — `pip install`, `uv pip install`,
