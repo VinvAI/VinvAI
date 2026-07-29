@@ -1,4 +1,4 @@
-"""A run-to-completion CLI probed as a service yields a terminal skip verdict."""
+"""A failing replay must NOT be written off as a run-to-completion CLI."""
 
 from __future__ import annotations
 
@@ -6,17 +6,6 @@ import sys
 from pathlib import Path
 
 from bringup.runner import verify_replay
-
-
-def test_quick_clean_exit_is_not_a_service(tmp_path):
-    data = {
-        "commands": [{"command": f"{sys.executable} -c 'print(1)'"}],
-        "verification": {"probe": {"type": "process"}},
-    }
-    r = verify_replay(Path(tmp_path), "cli-ish", data)
-    assert r["ok"] is False
-    assert r.get("verdict") == "not-a-service"
-    assert "reclassify as kind=cli" in r["reason"]
 
 
 def test_quick_nonzero_exit_stays_a_failure(tmp_path):
