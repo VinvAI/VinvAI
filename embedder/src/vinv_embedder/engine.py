@@ -118,6 +118,16 @@ class EmbeddingEngine:
         """True while the first encode for the current device is in flight."""
         return self._warming
 
+    @property
+    def ready(self) -> bool:
+        """True once load() has a model — what /health gates readiness on.
+
+        The server now binds before load() so that "coming up" is observable,
+        which means /health can be reached while there is still no model. This
+        is the flag that keeps that window honest: 503 until it flips.
+        """
+        return self._model is not None
+
     # -- lifecycle -----------------------------------------------------------
 
     def load(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import signal
@@ -75,30 +76,63 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             logger.warning("auto-tune failed (%s); continuing with the static device order", exc)
 
     engine = EmbeddingEngine(model_name=args.model, device=args.device)
-    engine.load()  # first run shows HF download progress on stderr
 
-    server = make_server(args.port, engine)
+    # Bind BEFORE loading the model. Loading is minutes long on CPU, and while
+    # nothing is listening there is no way for anyone — another VS Code window,
+    # the extension's health probe, a second `serve` — to tell "still coming
+    # up" from "not running at all". Every one of them would conclude the
+    # latter and start yet another server, each loading its own copy of the
+    # model and making the machine slower. Binding first fixes both halves:
+    # startup becomes observable (/health answers 503 `loading`), and the
+    # socket becomes the single-instance lock, so a loser fails fast here
+    # instead of racing.
+    try:
+        server = make_server(args.port, engine)
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE and getattr(exc, "winerror", 0) != 10048:
+            raise
+        print(
+            f"vinv-embedder: port {args.port} is already held by another instance "
+            "— reusing it rather than loading a second copy of the model.",
+            file=sys.stderr,
+        )
+        return 0
+
+    stop = threading.Event()
 
     def _shutdown(signum: int, _frame: object) -> None:
         logger.info("received signal %d; shutting down", signum)
         # shutdown() must not be called from the thread running serve_forever
         threading.Thread(target=server.shutdown, daemon=True).start()
+        stop.set()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
+    # serve_forever moves to its own thread so /health can answer throughout
+    # the load below, which now runs on the main thread.
+    threading.Thread(target=server.serve_forever, daemon=True, name="vinv-embedder-http").start()
     logger.info(
-        "listening on http://%s:%d (model=%s, device=%s, batch=%d, workers=%d)",
+        "listening on http://%s:%d — loading model %s on %s (health reports 503 until ready)",
         config.BIND_HOST,
         args.port,
         engine.model_name,
         engine.device,
-        engine.batch_size,
-        engine.workers,
     )
     try:
-        server.serve_forever()
+        engine.load()  # first run shows HF download progress on stderr
+        logger.info(
+            "ready on http://%s:%d (model=%s, device=%s, batch=%d, workers=%d)",
+            config.BIND_HOST,
+            args.port,
+            engine.model_name,
+            engine.device,
+            engine.batch_size,
+            engine.workers,
+        )
+        stop.wait()
     finally:
+        server.shutdown()
         server.server_close()
         engine.close()
         logger.info("shutdown complete")

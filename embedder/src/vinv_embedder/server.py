@@ -12,6 +12,7 @@ process down — every request path returns proper JSON 4xx/5xx on failure.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,7 +46,14 @@ def _estimate_tokens(texts: list[str]) -> int:
 
 class EmbedderServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # The bind is the machine-wide single-instance lock: one embedder serves
+    # every VS Code window, every service and every agent, because a second
+    # `serve` loses the port instead of loading its own copy of the model.
+    # SO_REUSEADDR means opposite things per platform — on POSIX it only skips
+    # TIME_WAIT after a restart (wanted), but on Windows it lets a second
+    # process bind a port that is actively in use, which would silently split
+    # traffic between two half-loaded servers and defeat the lock entirely.
+    allow_reuse_address = os.name != "nt"
 
     def __init__(self, addr: tuple[str, int], engine: Any) -> None:
         self.engine = engine
@@ -138,15 +146,22 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if self.path in ("/health", "/healthz"):
                 eng = self.server.engine
+                # 503 until the model is in memory. The socket exists from the
+                # moment `serve` starts so that startup is observable, but a
+                # 2xx here is a promise that embeddings will actually work —
+                # clients gate on the status code, so it must not lie during
+                # the (multi-minute, on CPU) load.
+                ready = bool(getattr(eng, "ready", True))
                 self._send_json(
-                    200,
+                    200 if ready else 503,
                     {
-                        "status": "ok",
+                        "status": "ok" if ready else "loading",
                         "model": eng.model_name,
                         "device": eng.device,
                         "queue_depth": self.server.queue_depth,
                         "warming": bool(getattr(eng, "warming", False)),
                     },
+                    headers=None if ready else {"Retry-After": str(RETRY_AFTER_S)},
                 )
             elif self.path in EMBED_PATHS:
                 self._send_error_json(405, "use POST for embeddings", "method_not_allowed")
@@ -167,6 +182,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._safe_500(exc)
 
     def _handle_embeddings(self) -> None:
+        # Reachable before the model is loaded now that the bind comes first —
+        # shed with the same Retry-After clients already honour for overload
+        # rather than blocking a request behind a multi-minute load.
+        if not getattr(self.server.engine, "ready", True):
+            self._send_error_json(
+                503,
+                "model is still loading; retry shortly",
+                "service_unavailable",
+                headers={"Retry-After": str(RETRY_AFTER_S)},
+            )
+            return
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
