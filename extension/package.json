@@ -85,6 +85,11 @@
 					],
 					"default": "",
 					"markdownDescription": "What to do when the engines checkout does not match the version this extension build was released with. Only ever applies to Vinv's own clone at `~/.vinv/engines` — a checkout you point at with `#vinv.enginesPath#` is never modified."
+				},
+				"vinv.notices.enabled": {
+					"type": "boolean",
+					"default": true,
+					"markdownDescription": "Check `notices.vinv.ai` on startup for notices about broken releases and security fixes. One-way: a GET of a static file that sends no data and no identifiers, at most once every 12 hours, showing at most one message."
 				}
 			}
 		},

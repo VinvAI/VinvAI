@@ -36,6 +36,7 @@ import {
 	registerEnginesCommands,
 } from './engines/install';
 import { maybeUpdateEngines, registerEngineUpdate } from './engines/update';
+import { maybeShowNotices } from './notices/notices';
 import { stopEmbedderIfStarted } from './embedder/sidecar';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -103,6 +104,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// the machine has none. Fire-and-forget: it is a couple of git reads, and the
 	// clone/build itself runs in a terminal, so activation never blocks.
 	void maybeUpdateEngines(context);
+
+	// The one channel that reaches an install that is already broken: a static
+	// notices file, polled at most twice a day, filtered here, at most one toast.
+	// This is the extension's ONLY outbound request — a GET that uploads nothing —
+	// and it is silent when the endpoint is unreachable. Off with vinv.notices.enabled.
+	void maybeShowNotices(context);
 
 	// Engines present? Offer the one-time embedding-model warmup so the first
 	// index build doesn't stall inside the sidecar. When they are missing, the
