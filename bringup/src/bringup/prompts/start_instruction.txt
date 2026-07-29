@@ -254,10 +254,10 @@ shell first to confirm the flags available in the installed version. Then:
 3. **Compose the wrapped command.** Use the exact `--target-package` flags below:
 
    ```bash
-   {_tracelens_cmd} run \
+   PATH="{_venv_bin}:$PATH" {_tracelens_cmd} run \
 {_target_pkg_flags}     --output {_caps_base}/{tracelens_subdir}<service-name>/trace.jsonl \
      --sample-rate 1.0 \
-     -- python -m <module> <original-args>
+     -- {_venv_python} -m <module> <original-args>
    ```
 
    {_tracelens_path_note}
@@ -275,9 +275,12 @@ shell first to confirm the flags available in the installed version. Then:
    ```
    initialize_terminal(session_name="vinv_{service}", working_directory="{root}")
    send_terminal_command(session_name="vinv_{service}",
-       keystrokes="{_tracelens_cmd} run … -- python -m <module> <args>",
+       keystrokes="PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run … -- {_venv_python} -m <module> <args>",
        block=false)
    ```
+   Start it in exactly the venv-qualified form above — the same string you will
+   record in step 7. Starting it some other way (an activated venv, a bare
+   `tracelens`) means the string you verified is not the string you record.
    **Do NOT** start the server with `block: true` and a `duration`. A blocking
    call sends SIGINT to the foreground process when `duration` elapses — that
    **kills your server mid-startup** (you'll see exit code 130) before it ever
@@ -575,6 +578,50 @@ service's own tracelens-wrapped start command. Every launch of `{service}` from
 this file replays this list verbatim, so it must contain nothing that should run
 only once at setup time.
 
+**The recorded command must be SELF-CONTAINED — it is replayed in a DIFFERENT
+environment from yours.** Your shell was launched with Vinv's engine `bin/`
+prepended to `PATH`, so a bare `tracelens …` resolves for you. Nothing that
+replays this file inherits that: the editor's service launcher, the probe pass
+and fix episodes all start it from a plain environment. A command that works
+here and nowhere else fails with `exit 127 tracelens: command not found`, and no
+later agent can repair it — this file is outside the repo, so a fix episode's
+diff can never touch it.
+
+Before recording, make the command carry its own environment:
+
+- prepend the service venv's script dir to `PATH` **inline** in the command
+  itself, so `opentelemetry-instrument` resolves (see the tracelens section — an
+  absolute path to `tracelens` alone is NOT enough and fails differently);
+- invoke tracelens through that same dir (`{_tracelens_cmd} run …`), never a
+  bare `tracelens`;
+- name the interpreter explicitly (`{_venv_python} -m uvicorn …`), never a bare
+  `python`, which resolves to whatever the replaying shell happens to have — and
+  on **Windows write `python.exe`**, the only interpreter file that exists in
+  `Scripts/` (there is no extensionless `python` beside it);
+- `tracelens` must also be **importable by that interpreter** — the child hook
+  is injected via `sitecustomize` and swallows a failed `import tracelens`
+  silently, leaving you a trace file with parent-process spans only and no
+  error. Verify with `{_venv_python} -c "import tracelens"` before recording.
+
+Substitute the real venv path for `{_venv_bin}` everywhere (`bin/` on
+macOS/Linux, `Scripts/` on Windows). The replayer runs the string through
+`bash -lc`, so on Windows write it the way Git Bash reads it —
+`/c/Users/…/.venv/Scripts`, not `C:\Users\…\.venv\Scripts`, whose drive-letter
+colon would be parsed as a `PATH` separator — and join `PATH` entries with `:`.
+
+**Never write a single backslash in any path in this file.** It breaks twice:
+`\U` / `\A` are not valid JSON escapes, so the file you just wrote does not
+parse; and inside the `command` string `bash` eats backslashes as escapes, so
+`C:\Users\SERVER\.tracelens` arrives as `C:UsersSERVER.tracelens` — a relative
+path, so the trace silently lands where nothing reads it and the baseline comes
+back empty. Use forward slashes (`C:/Users/SERVER/…`): valid JSON, and a valid
+Windows path.
+
+Then prove it: run the exact string you are about to record in a **fresh shell
+that has not activated anything**, and confirm the service still comes up and
+`trace.jsonl` still grows. If it only works in your current shell, it is not
+finished.
+
 **EXCLUDE from `commands` (these are setup, run once during this bring-up — do
 NOT record them):**
 - dependency installs of any kind — `pip install`, `uv pip install`,
@@ -609,8 +656,8 @@ not placeholders:
   "commands": [
     {{
       "purpose": "start {service} under tracelens",
-      "command": "{_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/trace.jsonl --sample-rate 1.0 -- python -m <module> <args>",
-      "working_directory": "{root}",
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> <args>",
+      "working_directory": "{_root_json}",
       "session_name": "vinv_{service}"
     }}
   ]
@@ -692,13 +739,18 @@ Rules for the deliverable:
   array: if any entry contains `pip`, `install`, `--force-reinstall`, `--help`,
   `--version`, `-V`, `lsof`, `curl`, `wc`, `which`, or a `python -c "import …"`
   smoke test, **delete that entry** — it is setup/diagnostic noise, not a start
-  command. The normal result is a single `{_tracelens_cmd} run … -- python -m …`
-  entry (plus an optional service-dependency entry).
+  command. The normal result is a single
+  `PATH="…" {_tracelens_cmd} run … -- {_venv_python} -m …` entry (plus an
+  optional service-dependency entry).
+- **Last check before saving: no bare `tracelens`, no bare `python`.** Re-read
+  the `{service}` entry's `command`. If it starts with `tracelens ` or contains
+  ` -- python `, it is NOT self-contained and will fail on replay with exit 127 —
+  go back and qualify both with the venv script dir, plus the inline `PATH=`.
 - Emit **valid JSON only** (no trailing commas, no comments in the actual file,
   no Markdown fences inside the file).
 - Use the **real** values you used — the actual port, the actual
-  `--target-package` flags, the actual venv `python` path if the venv wasn't
-  activated, the real `{_caps_base}/{tracelens_subdir}{service}/trace.jsonl`
+  `--target-package` flags, the real venv script dir substituted for
+  `{_venv_bin}`, the real `{_caps_base}/{tracelens_subdir}{service}/trace.jsonl`
   output path.
 
 After `save_file` returns `status: success`, run `cat '{start_commands_json}'`

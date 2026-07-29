@@ -15,6 +15,7 @@ import { enginesReady } from '../engines/install';
 import { isProjectIndexed } from '../index/indexing';
 import { readServices, isServiceStarted } from '../bringup/bringup';
 import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
+import { readEnhanceRecord, shouldAutoEnhance } from '../index/enhanceRunner';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { getAutoPilotStatus } from '../harness/autoPilot';
 import { getPipelinePhase } from '../harness/pipelineState';
@@ -47,6 +48,54 @@ function openPendingEdges(workspaceRoot: string): number {
 	const done = readAdjudicated(storeDir);
 	return readPendingEdges(storeDir).filter((r) => !done.has(`${r.src_id}\u0000${r.name}`))
 		.length;
+}
+
+/**
+ * The post-green pipeline stages, as observable disk facts.
+ *
+ * Auto-Pilot schedules these from an in-memory ledger (planPipelineAction),
+ * which a compass reading a cold workspace cannot see — so these read the
+ * artifact each pass actually writes. Same order the scheduler drains them in,
+ * so driving manually walks the same path Auto-Pilot would.
+ *
+ * Insights is deliberately absent: pipelineRunners rebuilds it automatically
+ * whenever new capture spans land, so it is never something the user has to be
+ * told to do.
+ */
+function hasProbes(workspaceRoot: string): boolean {
+	try {
+		return fs
+			.readdirSync(path.join(workspaceRoot, '.vinv', 'probes'))
+			.some((f) => f.endsWith('.json'));
+	} catch {
+		return false;
+	}
+}
+
+function hasExerciseScorecard(workspaceRoot: string): boolean {
+	return fs.existsSync(path.join(workspaceRoot, '.vinv', 'exercise', 'scorecard.json'));
+}
+
+/**
+ * Enhancement is once-per-epoch and TERMINAL, so a raw pending count is the
+ * wrong gate: the agent abstains on genuinely indistinguishable candidates and
+ * abstentions are never written to edge_overrides.jsonl, leaving the count
+ * permanently non-zero — which pinned the compass on "Enhance the graph"
+ * forever, even in a fully wired workspace. Ask the same question the runner
+ * and the Flow rail ask instead: has THIS epoch been handled?
+ */
+function graphNeedsEnhancing(workspaceRoot: string): boolean {
+	let epoch = 0;
+	try {
+		epoch = loadStoreEpoch(indexStoreDir(workspaceRoot));
+	} catch {
+		return false;
+	}
+	return shouldAutoEnhance(
+		readEnhanceRecord(workspaceRoot),
+		epoch,
+		openPendingEdges(workspaceRoot),
+	);
 }
 
 /**
@@ -96,14 +145,6 @@ export async function computeNextStep(
 			command: 'vinv-vs.indexProject',
 		};
 	}
-	if (openPendingEdges(workspaceRoot) > 0) {
-		return {
-			label: 'Enhance the graph',
-			detail:
-				'An agent resolves the ambiguous cross-file references the deterministic resolver refused to guess — sharper PageRank, slices and blast radius.',
-			command: 'vinv-vs.enhanceGraph',
-		};
-	}
 	const services = readServices(workspaceRoot);
 	const unstarted = services.filter((s) => !isServiceStarted(workspaceRoot, s.name));
 	if (unstarted.length > 0) {
@@ -126,10 +167,41 @@ export async function computeNextStep(
 			args: services.length > 0 ? [services[0].name] : undefined,
 		};
 	}
+	// The post-green pipeline, in the scheduler's own order. These used to be
+	// missing entirely: Auto-Pilot ran insights → probes → exercise, but a user
+	// driving manually went straight from "a capture exists" to "everything is
+	// wired" and was never told any of it was outstanding.
+	if (!hasProbes(workspaceRoot)) {
+		return {
+			label: 'Run probes',
+			detail:
+				'Exercises each green service to find what actually breaks — the evidence issues and episodes are built from.',
+			command: 'vinv-vs.runProbes',
+		};
+	}
+	if (!hasExerciseScorecard(workspaceRoot)) {
+		return {
+			label: 'Exercise the services',
+			detail:
+				'Plan → run → profile → scorecard over every endpoint, which is what fills the Journey and Findings views. No standalone command yet — Auto-Pilot drives this stage.',
+			command: 'vinv-vs.autoPilot',
+		};
+	}
+	// Deliberately LAST of the actionable rungs. Enhancement sharpens PageRank,
+	// slices and blast radius, but nothing upstream needs it — putting it early
+	// blocked the path to services and tracing behind an optional refinement.
+	if (graphNeedsEnhancing(workspaceRoot)) {
+		return {
+			label: 'Enhance the graph',
+			detail:
+				'An agent resolves the ambiguous cross-file references the deterministic resolver refused to guess — sharper PageRank, slices and blast radius.',
+			command: 'vinv-vs.enhanceGraph',
+		};
+	}
 	return {
 		label: 'Ask Vinv about this codebase',
 		detail:
-			'Everything is wired: static graph + runtime evidence. Ask a question, or send a task to your coding harness as a closed-loop episode.',
+			'Everything is wired: static graph + runtime evidence, insights built, probes and exercise run. Ask a question, or send a task to your coding harness as a closed-loop episode.',
 		command: 'vinv-vs.askVinv',
 	};
 }

@@ -325,6 +325,49 @@ def _is_frozen() -> bool:
     )
 
 
+def _resolve_executable_path(cmd0: str) -> Path | None:
+    """The file a path-style ``argv[0]`` actually launches, or None.
+
+    Applies Windows' executable-extension semantics, which is what the launch
+    itself does: ``CreateProcess`` appends an extension from ``PATHEXT`` when the
+    given path has none, so ``<venv>/Scripts/python`` really does start
+    ``python.exe``. A plain ``Path.exists()`` check does NOT — a Windows venv
+    ships only ``python.exe``, with no extensionless ``python`` beside it — and
+    rejecting that path would fail a command that would otherwise have run.
+
+    This matters because the recorded start command in
+    ``.vinv/start_commands/<service>.json`` is written once by bring-up and lives
+    OUTSIDE the repo, so no later fix episode can edit it. Tolerating the
+    extensionless form here is what keeps those records launchable.
+    """
+    p = Path(cmd0).expanduser()
+    if p.exists() and os.access(p, os.X_OK):
+        return p
+    if os.name != "nt":
+        return None
+    # Append (never replace) each PATHEXT entry: `python` → `python.exe`, and
+    # `python3.13` → `python3.13.exe` without mistaking `.13` for an extension.
+    exts = [e for e in os.environ.get("PATHEXT", ".EXE").split(os.pathsep) if e.strip()]
+    for ext in exts:
+        cand = p.with_name(p.name + ext.lower())
+        if cand.exists() and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
+def _resolvable_executable(cmd0: str) -> bool:
+    """False only for a path-style argv[0] that points at nothing executable.
+
+    Bare names (``python``, ``uvicorn``) are left to PATH resolution at exec
+    time; only an explicit path (contains a separator) is checked here. That is
+    the mistyped-venv-interpreter case, which otherwise surfaces as a raw
+    ``FileNotFoundError`` traceback out of ``os.execvpe``.
+    """
+    if os.sep not in cmd0 and (os.altsep is None or os.altsep not in cmd0):
+        return True
+    return _resolve_executable_path(cmd0) is not None
+
+
 def _external_target_python(user: list[str]) -> str | None:
     """Resolve the interpreter a ``python …`` user command would launch.
 
@@ -341,6 +384,15 @@ def _external_target_python(user: list[str]) -> str | None:
     if len(user) < 2:
         return None
     exe0 = shutil.which(user[0]) or user[0]
+    # A path-style argv[0] may name `python` where only `python.exe` exists, so
+    # resolve it to the real file before comparing against ``sys.executable``.
+    # Without this the comparison is between a non-existent path and a real one:
+    # a source tracelens already running INSIDE the target venv would look like a
+    # foreign interpreter and hand off to itself instead of taking the fast
+    # in-process path.
+    resolved = _resolve_executable_path(exe0)
+    if resolved is not None:
+        exe0 = str(resolved)
     if "python" not in Path(exe0).name.lower():
         return None
     try:
@@ -565,20 +617,6 @@ def _install_capture_dep_fallback() -> list[str]:
         importlib.invalidate_caches()
         _log.info("tracelens: capture-dependency fallback active (sys.path+=%s)", added)
     return added
-
-
-def _resolvable_executable(cmd0: str) -> bool:
-    """False only for a path-style argv[0] that points at nothing executable.
-
-    Bare names (``python``, ``uvicorn``) are left to PATH resolution at exec
-    time; only an explicit path (contains a separator) is checked here. That is
-    the mistyped-venv-interpreter case, which otherwise surfaces as a raw
-    ``FileNotFoundError`` traceback out of ``os.execvpe``.
-    """
-    if os.sep not in cmd0 and (os.altsep is None or os.altsep not in cmd0):
-        return True
-    p = Path(cmd0).expanduser()
-    return p.exists() and os.access(p, os.X_OK)
 
 
 def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:

@@ -13,7 +13,7 @@
  * deactivate when THIS process started it.
  */
 import * as http from 'http';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execFile, type ChildProcess } from 'child_process';
 import { engineCommand } from '../engines/resolve';
 
 export const EMBEDDER_PORT = 8776;
@@ -25,18 +25,94 @@ export const EMBEDDER_GATEWAY_URL = `${EMBEDDER_BASE_URL}/v1`;
 const HEALTH_CACHE_MS = 30_000;
 
 /**
- * Default time to wait for a freshly-spawned sidecar to answer /health. Generous
- * because the FIRST run downloads the ~500 MB embedding model inside this window
- * (and even a cached cold start is ~30s: torch/transformers import + model
- * load). The wait loop below still fails fast if the process actually exits, so
- * a large cap only adds patience for a process that is genuinely still coming
- * up — it never masks a crash.
+ * Default time to wait for a sidecar to answer /health with a 2xx. Generous
+ * because the FIRST run downloads the ~500 MB embedding model inside this
+ * window, and because a plain cached cold start is far slower than it sounds:
+ * measured on a CPU-only Windows box, torch → transformers →
+ * sentence_transformers import plus the model load runs past five minutes and
+ * peaks over 1 GB RSS. The old 4-minute cap expired mid-load and reported
+ * failure for a sidecar that was working correctly — then left it running as
+ * an orphan nothing tracked. The wait loop below still fails fast if the
+ * process actually exits, so a large cap only adds patience for a process that
+ * is genuinely still coming up — it never masks a crash.
  */
-const SPAWN_HEALTH_TIMEOUT_MS = 240_000;
+const SPAWN_HEALTH_TIMEOUT_MS = 600_000;
 
 let ownedChild: ChildProcess | null = null;
 let lastHealthyAt = 0;
 let ensureInFlight: Promise<boolean> | null = null;
+let lastStderr = '';
+
+/** Tail of the last spawned sidecar's stderr — the only clue when it wedges. */
+export function lastEmbedderStderr(): string {
+	return lastStderr;
+}
+
+/**
+ * PIDs of `vinv-embedder` processes already on this machine, ours or not.
+ *
+ * The health probe alone cannot tell "nothing is running" from "something is
+ * running but has not bound the port yet": both look like a refused
+ * connection. Spawning on that ambiguity is how a machine ends up with a pile
+ * of 4 MB processes owned by extension hosts that exited long ago — each
+ * failed attempt leaves one behind and nothing ever reaps it.
+ */
+function findEmbedderPids(): Promise<number[]> {
+	return new Promise((resolve) => {
+		const file: string = process.platform === 'win32' ? 'tasklist' : 'pgrep';
+		const args: string[] =
+			process.platform === 'win32'
+				? ['/FI', 'IMAGENAME eq vinv-embedder.exe', '/FO', 'CSV', '/NH']
+				: ['-f', 'vinv-embedder'];
+		execFile(file, args, { timeout: 5_000, windowsHide: true }, (err, stdout) => {
+			if (err || !stdout) {
+				resolve([]); // No lister, no matches, or a filter that matched nothing.
+				return;
+			}
+			const pids: number[] = [];
+			for (const line of stdout.split('\n')) {
+				// tasklist CSV: "image","pid",… — elsewhere pgrep prints bare pids.
+				const found = process.platform === 'win32' ? /"[^"]*","(\d+)"/.exec(line) : /^(\d+)$/.exec(line.trim());
+				if (found) {
+					pids.push(Number(found[1]));
+				}
+			}
+			resolve(pids.filter((p) => Number.isInteger(p) && p > 0 && p !== process.pid));
+		});
+	});
+}
+
+/**
+ * True when something owns the port but is not serving yet — the engine
+ * answering 503 `loading` while the model loads (it binds before loading, see
+ * embedder/cli.py). A refused connection cannot tell "coming up" from "nothing
+ * there"; any reply at all can.
+ */
+export function isEmbedderStarting(timeoutMs = 1_500): Promise<boolean> {
+	return new Promise((resolve) => {
+		const req = http.get(`${EMBEDDER_BASE_URL}/health`, { timeout: timeoutMs }, (res) => {
+			res.resume();
+			resolve(true);
+		});
+		req.on('error', () => resolve(false));
+		req.on('timeout', () => {
+			req.destroy();
+			resolve(false);
+		});
+	});
+}
+
+/** Polls /health until it answers or the deadline passes. */
+async function waitForHealth(deadline: number): Promise<boolean> {
+	while (Date.now() < deadline) {
+		if (await isEmbedderHealthy()) {
+			lastHealthyAt = Date.now();
+			return true;
+		}
+		await sleep(500);
+	}
+	return false;
+}
 
 /** One GET /health probe. Resolves true on any 2xx within the timeout. */
 export function isEmbedderHealthy(timeoutMs = 1_500): Promise<boolean> {
@@ -80,6 +156,23 @@ export function ensureEmbedderRunning(opts?: {
 				lastHealthyAt = Date.now();
 				return true;
 			}
+			const deadline = Date.now() + (opts?.waitMs ?? SPAWN_HEALTH_TIMEOUT_MS);
+
+			// Something is already coming up: wait on it rather than stacking a
+			// second `serve`. A duplicate cannot make the first finish loading any
+			// sooner — it just loads a second copy of the model and slows both
+			// down. Two signals because they cover different engine versions: a
+			// port that answers at all is the current engine reporting `loading`,
+			// and a live process is the fallback for an older engine that binds
+			// only once the model is already in memory.
+			//
+			// Deliberately never kills what it finds. A sidecar that has not
+			// answered yet is far more likely to be mid-load (minutes, on CPU)
+			// than wedged, and killing it would restart that load from zero.
+			if ((await isEmbedderStarting()) || (await findEmbedderPids()).length > 0) {
+				return waitForHealth(deadline);
+			}
+
 			const cmd = engineCommand('vinv-embedder', opts);
 			if (!cmd) {
 				return false; // engines not installed — callers surface the install step
@@ -87,8 +180,14 @@ export function ensureEmbedderRunning(opts?: {
 			const child = spawn(
 				cmd.file,
 				[...cmd.prefixArgs, 'serve', '--port', String(EMBEDDER_PORT)],
-				{ stdio: 'ignore', windowsHide: true },
+				{ stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
 			);
+			// A sidecar that dies or hangs with stdio discarded is undiagnosable —
+			// keep the tail so callers can show WHY rather than just "not ready".
+			lastStderr = '';
+			child.stderr?.on('data', (chunk: Buffer) => {
+				lastStderr = `${lastStderr}${chunk.toString()}`.slice(-4096);
+			});
 			child.on('error', () => {
 				if (ownedChild === child) {
 					ownedChild = null;
@@ -100,7 +199,6 @@ export function ensureEmbedderRunning(opts?: {
 				}
 			});
 			ownedChild = child;
-			const deadline = Date.now() + (opts?.waitMs ?? SPAWN_HEALTH_TIMEOUT_MS);
 			while (Date.now() < deadline) {
 				if (await isEmbedderHealthy()) {
 					lastHealthyAt = Date.now();
@@ -117,6 +215,11 @@ export function ensureEmbedderRunning(opts?: {
 				}
 				await sleep(500);
 			}
+			// Our own spawn used the whole window without serving. Kill it here
+			// rather than leaving it for deactivate: a host that crashes or is
+			// force-closed never runs deactivate, and that is exactly how these
+			// accumulate across sessions.
+			stopEmbedderIfStarted();
 			return false;
 		} finally {
 			ensureInFlight = null;

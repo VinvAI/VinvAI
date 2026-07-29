@@ -787,13 +787,28 @@ interface HarnessTask {
 	deliverableDesc: string;
 }
 
-// One harness run at a time — same single-flight rule as the engine runners
-// (parallel agents in one workspace fight over installs, ports, and git state).
-let running = false;
+// How many harness runs this window has in flight.
+//
+// This used to be a boolean that also GATED dispatch: one run at a time,
+// because every agent shared the workspace tree and would corrupt the others'
+// snapshot, revert and reward diff. Isolation replaced that — each trigger
+// works in its own git worktree (harness/runIsolation), so concurrent agents
+// cannot see each other's edits and there is nothing left to serialize.
+//
+// A counter, not a flag, because runs genuinely overlap now: with a boolean,
+// the first to finish cleared it while the rest were still going and
+// isHarnessBusy() would report idle mid-flight. It is INFORMATIONAL only —
+// nothing refuses to start on it.
+let inFlight = 0;
 
-/** True when a harness CLI run is already in flight for this window. */
+/** How many harness runs are in flight in this window. */
+export function harnessRunsInFlight(): number {
+	return inFlight;
+}
+
+/** True when at least one harness run is in flight. Never gates a dispatch. */
 export function isHarnessBusy(): boolean {
-	return running;
+	return inFlight > 0;
 }
 
 /** Outcome of one raw prompt dispatch to a harness CLI. */
@@ -844,6 +859,11 @@ export function dispatchAgentPrompt(
 	workspaceRoot: string,
 	name: string,
 	prompt: string,
+	// The isolated tree this trigger works in (see harness/runIsolation). Only
+	// the AGENT moves — workspaceRoot still anchors logs and .vinv state, so
+	// trajectories and learning records stay in one place per workspace while
+	// the edits land in one tree per trigger.
+	cwd?: string,
 ): Promise<string | null> {
 	const harness = getHarness(harnessId);
 	if (harness.kind !== 'cli' || !harness.bin) {
@@ -886,7 +906,7 @@ export function dispatchAgentPrompt(
 		let child;
 		try {
 			child = spawn(commandLine, hiddenBackgroundOptions({
-				cwd: workspaceRoot,
+				cwd: cwd ?? workspaceRoot,
 				env: childEnv,
 				shell: true,
 			}));
@@ -974,16 +994,13 @@ export async function runHarnessPrompt(
 	workspaceRoot: string,
 	name: string,
 	prompt: string,
-	options?: { onUpdate?: (line: string) => void; token?: vscode.CancellationToken },
+	options?: {
+		onUpdate?: (line: string) => void;
+		token?: vscode.CancellationToken;
+		/** Isolated tree for this trigger; defaults to the workspace itself. */
+		cwd?: string;
+	},
 ): Promise<HarnessRunResult> {
-	if (running) {
-		return {
-			ok: false,
-			exitCode: null,
-			stdout: '',
-			detail: 'another harness run is already in progress — wait for it to finish',
-		};
-	}
 	const harness = getHarness(harnessId);
 	if (harness.kind === 'ide-chat') {
 		if (!isIdeChatAvailable(harness)) {
@@ -994,11 +1011,11 @@ export async function runHarnessPrompt(
 				detail: `${harness.label} is not reachable from this window. ${harness.installHint}`,
 			};
 		}
-		running = true;
+		inFlight += 1;
 		try {
 			return await runIdeChatPrompt(harness, workspaceRoot, name, prompt, options);
 		} finally {
-			running = false;
+			inFlight = Math.max(0, inFlight - 1);
 		}
 	}
 	if (!harness.bin) {
@@ -1048,13 +1065,13 @@ export async function runHarnessPrompt(
 		// killed as hung. Unbuffered children keep the cadence signal honest.
 		PYTHONUNBUFFERED: '1',
 	};
-	running = true;
+	inFlight += 1;
 	return new Promise<HarnessRunResult>((resolve) => {
 		const log = openTrajectoryLog(workspaceRoot, name, commandLine);
 		let child: ReturnType<typeof spawn>;
 		try {
 			child = spawn(commandLine, hiddenBackgroundOptions({
-				cwd: workspaceRoot,
+				cwd: options?.cwd ?? workspaceRoot,
 				env: childEnv,
 				shell: true,
 			}));
@@ -1063,7 +1080,7 @@ export async function runHarnessPrompt(
 			// drive). `running` is set above and is only cleared in settle(), so an
 			// unguarded throw here wedges isHarnessBusy() true for the whole session
 			// and every later episode reports "another harness run is in progress".
-			running = false;
+			inFlight = Math.max(0, inFlight - 1);
 			log?.end();
 			resolve({
 				ok: false,
@@ -1292,7 +1309,7 @@ export async function runHarnessPrompt(
 			clearInterval(watchdog);
 			cancelReg?.dispose();
 			log?.end();
-			running = false;
+			inFlight = Math.max(0, inFlight - 1);
 			resolve(result);
 		};
 		child.on('error', (err) => {
@@ -1353,10 +1370,9 @@ async function runHarnessTask(
 	task: HarnessTask,
 	onProgress?: (p: HarnessProgress) => void,
 	extToken?: vscode.CancellationToken,
+	/** Isolated tree for this trigger; defaults to the workspace itself. */
+	cwd?: string,
 ): Promise<boolean> {
-	if (running) {
-		return false;
-	}
 	const harness = getHarness(harnessId);
 	let exe: string | null = null;
 	if (harness.kind === 'ide-chat') {
@@ -1401,7 +1417,7 @@ async function runHarnessTask(
 		PYTHONUNBUFFERED: '1',
 	};
 
-	running = true;
+	inFlight += 1;
 	try {
 		return await vscode.window.withProgress(
 			{
@@ -1468,7 +1484,7 @@ async function runHarnessTask(
 					// shell:true runs .cmd shims on Windows; the prompt travels via
 					// stdin, so nothing needs shell-escaping.
 					const child = spawn(commandLine, hiddenBackgroundOptions({
-						cwd: workspaceRoot,
+						cwd: cwd ?? workspaceRoot,
 						env: childEnv,
 						shell: true,
 					}));
@@ -1556,7 +1572,7 @@ async function runHarnessTask(
 			},
 		);
 	} finally {
-		running = false;
+		inFlight = Math.max(0, inFlight - 1);
 	}
 }
 

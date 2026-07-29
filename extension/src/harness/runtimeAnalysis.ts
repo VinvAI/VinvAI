@@ -841,6 +841,16 @@ export interface TraceSpan {
 	errored: boolean;
 	/** The exit recorded I/O side effects or I/O determinism sources. */
 	io: boolean;
+	/**
+	 * Wall time this call spent OFF the CPU (tracelens `blocked_ms` = wall − cpu),
+	 * clamped to [0, durationMs]. 0 when the trace predates the field.
+	 *
+	 * `io` is the majority-blocked BOOLEAN derived from this; the raw number is
+	 * kept because ranking needs the degree, not just the verdict: a symbol that
+	 * is 99% blocked on a network call has almost no on-CPU work an optimization
+	 * could remove, and must not out-rank one that is genuinely compute-bound.
+	 */
+	blockedMs: number;
 	children: TraceSpan[];
 }
 
@@ -850,6 +860,19 @@ function parseTs(ts: string | undefined): number {
 	}
 	const t = Date.parse(ts);
 	return Number.isFinite(t) ? t : 0;
+}
+
+/** Blocked wall time for an exit, clamped into [0, duration]. 0 when absent. */
+function blockedMsOf(ev: ExitEvent): number {
+	const blocked = Number(ev.blocked_ms);
+	const wall = Number(ev.duration_ms);
+	if (!Number.isFinite(blocked) || blocked <= 0) {
+		return 0;
+	}
+	if (!Number.isFinite(wall) || wall <= 0) {
+		return 0;
+	}
+	return Math.min(blocked, wall);
 }
 
 function isIoExit(ev: ExitEvent): boolean {
@@ -940,6 +963,7 @@ export function collectRequestSpans(workspaceRoot: string, nodes: GraphNode[]): 
 						durationMs: 0,
 						errored: false,
 						io: false,
+						blockedMs: 0,
 						children: [],
 					},
 					depth: Number.isFinite(depth) ? depth : 0,
@@ -958,6 +982,7 @@ export function collectRequestSpans(workspaceRoot: string, nodes: GraphNode[]): 
 				p.span.durationMs = Number(ev.duration_ms ?? 0) || 0;
 				p.span.errored = Boolean(ev.error_type && ev.error_type !== 'None');
 				p.span.io = isIoExit(ev);
+				p.span.blockedMs = blockedMsOf(ev);
 				p.seq = seq++;
 				const list = perRequest.get(req) ?? [];
 				list.push(p);
@@ -1032,6 +1057,7 @@ function assembleByLineOrder(
 				durationMs: 0,
 				errored: false,
 				io: false,
+				blockedMs: 0,
 				children: [],
 			};
 			const parent = stack[stack.length - 1];
@@ -1051,6 +1077,7 @@ function assembleByLineOrder(
 					span.durationMs = Number(ev.duration_ms ?? 0) || 0;
 					span.errored = Boolean(ev.error_type && ev.error_type !== 'None');
 					span.io = isIoExit(ev);
+					span.blockedMs = blockedMsOf(ev);
 					stack.length = i;
 					break;
 				}

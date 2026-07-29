@@ -131,6 +131,18 @@ lessons from past PRs:
   no CDN workflow), so a committed asset can be missing or stale on the CDN;
   verify with `curl` before relying on it. (Badge images from img.shields.io
   are fine — the rule is about content images.)
+- **User-facing notices are for broken releases and security fixes — nothing
+  else.** The live file is served from `notices.vinv.ai` and is edited and
+  uploaded out of band — it is gitignored at `.github/assets/notices.json`,
+  which holds a worked example as the format reference. Nothing auto-syncs;
+  verify with `curl` after uploading. Every notice needs an
+  `id` (the once-only key), an `appliesTo` range so it cannot fire at users who
+  already updated, and an `expires` date. The notice writes its own buttons —
+  up to two, its own labels and order — but a notice cannot name a VS Code
+  command: `kind` is one of `checkForUpdates`, `updateEngines`, `open` (https,
+  and only to a host in the allowlist). Announcements, features and
+  anything that reads as marketing do not go here; that is how an extension
+  earns one-star reviews. See `extension/src/notices/notices.ts`.
 - **Never commit runtime or local state.** Files an engine or the extension
   writes at runtime — install-dir markers, generated reports, per-workspace
   config, anything under `.vinv/` — are local state, not source. Gitignore

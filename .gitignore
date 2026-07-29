@@ -47,6 +47,10 @@ build/
 *.log
 nuitka-crash-report.xml
 
+# The published notices file — served from notices.vinv.ai, edited and uploaded
+# out of band. The example inside it is the format reference; see AGENTS.md.
+/.github/assets/notices.json
+
 # Local editor / agent config (not part of the public release).
 /.claude/
 .vscode/

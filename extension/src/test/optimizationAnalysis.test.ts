@@ -491,7 +491,17 @@ function span(
 	durationMs: number,
 	opts: Partial<TraceSpan> = {},
 ): TraceSpan {
-	return { row, component, startMs, durationMs, errored: false, io: false, children: [], ...opts };
+	return {
+		row,
+		component,
+		startMs,
+		durationMs,
+		errored: false,
+		io: false,
+		blockedMs: 0,
+		children: [],
+		...opts,
+	};
 }
 
 /** A handler call at `start` with two 4ms db children and the given duration. */

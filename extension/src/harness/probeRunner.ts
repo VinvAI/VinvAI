@@ -23,6 +23,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as net from 'net';
 import * as path from 'path';
 import { getBinPath } from '../tracelens/bin';
 import { getHandbookEnv, getHarnessId, isAutoEpisodesEnabled } from '../config/settings';
@@ -30,7 +31,7 @@ import { dispatchAgentPrompt, isHarnessBusy } from './harnessRunner';
 import { isEpisodeRunning } from './episodeLoop';
 import { runGoalAgent, type AgentSpawn } from './binaryAgents';
 import { readServices, readStartCommands, serviceSlug } from '../bringup/bringup';
-import { isServiceRunning, runningServiceNames } from '../bringup/serviceRunner';
+import { isServiceRunning, runningServiceNames, startService } from '../bringup/serviceRunner';
 import { loadCorpus, resolveSymbol, type SummaryDict, type TraceCorpus } from '../runtime/traceStore';
 import { readInsightManifest, recomputeIssues } from './insightRunner';
 import { applyBaselines, responseShapeHash, type ObservedResponse } from './probeBaseline';
@@ -517,6 +518,65 @@ function servicePort(workspaceRoot: string, service: string): number | null {
 }
 
 /** The running service to probe: prefer a live session with a known port. */
+/** One TCP connect to 127.0.0.1:port — the same check the episode loop uses. */
+function portIsServing(port: number): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = net.connect({ host: '127.0.0.1', port, timeout: 1000 });
+		socket.once('connect', () => {
+			socket.destroy();
+			resolve(true);
+		});
+		const fail = (): void => {
+			socket.destroy();
+			resolve(false);
+		};
+		socket.once('error', fail);
+		socket.once('timeout', fail);
+	});
+}
+
+/** How long to wait for a service we just launched to accept connections. */
+const SERVICE_START_TIMEOUT_MS = 90_000;
+
+/**
+ * Makes the probe target actually serve, starting it if it does not.
+ *
+ * Probing a service IS the pass — so a stopped one is something to start, not
+ * a reason to skip and tell the user to go press a button. Two steps, in this
+ * order:
+ *
+ * 1. Ask the PORT, not the session map. `isServiceRunning` is
+ *    `sessions.has(name)`, which only knows what this window launched — a
+ *    service started from a terminal, by docker, or by another VS Code window
+ *    reads as down while it is plainly serving. Adopting it also avoids
+ *    launching a duplicate onto a port that is already taken.
+ * 2. Only if nothing answers, launch it and wait for the port to open.
+ *
+ * Returns false when there is no verified start command or it never came up —
+ * the one case where skipping is still the honest outcome.
+ */
+async function ensureServiceUp(
+	workspaceRoot: string,
+	target: { service: string; port: number },
+	note: (line: string) => void,
+): Promise<boolean> {
+	if (isServiceRunning(target.service) || (await portIsServing(target.port))) {
+		return true;
+	}
+	note(`starting ${target.service} to probe it…`);
+	if (!startService(workspaceRoot, target.service)) {
+		return false; // no verified start command — startService already warned
+	}
+	const deadline = Date.now() + SERVICE_START_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (await portIsServing(target.port)) {
+			return true;
+		}
+		await new Promise((r) => setTimeout(r, 1000));
+	}
+	return false;
+}
+
 function pickProbeTarget(workspaceRoot: string): { service: string; port: number } | null {
 	const candidates = runningServiceNames().length
 		? runningServiceNames()
@@ -809,8 +869,15 @@ async function probePassOnce(
 	if (!target) {
 		return skip('no service with a recorded port to probe');
 	}
-	if (!isServiceRunning(target.service)) {
-		return skip(`service '${target.service}' is not running — start it to probe`);
+	if (
+		!(await ensureServiceUp(workspaceRoot, target, (label) =>
+			publishProbeState({ phase: 'running', label, results: getProbeState().results }),
+		))
+	) {
+		return skip(
+			`service '${target.service}' is not running and could not be started — ` +
+				'bring it up first, then probe',
+		);
 	}
 	publishProbeState({
 		phase: 'running',

@@ -66,11 +66,11 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(action, { kind: 'setup', service: 'api' });
 	});
 
-	test('after green comes insights, then probes, then exercise, then done', () => {
+	test('after green comes probes, then exercise, then done', () => {
 		let ledger = initialPipelineLedger();
 		const services = [svc()];
-		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'insights' });
-		ledger = applyStageOutcome(ledger, 'insights', 'done');
+		// Insights is not a scheduled stage: pipelineRunners rebuilds it on new
+		// capture spans, so the pipeline goes straight to the evidence stages.
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'probes' });
 		ledger = applyStageOutcome(ledger, 'probes', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
@@ -90,20 +90,18 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'done' });
 	});
 
-	test('without a green service insights and probes stay skipped', () => {
+	test('without a green service probes stays skipped', () => {
 		const ledger = initialPipelineLedger();
 		const libraries = [svc({ phase: 'library' })];
-		// Never 'insights' or 'probes' — they have no traced session to read.
-		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'insights' });
+		// Never 'probes' — it has no traced session to read.
 		assert.notDeepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'probes' });
 	});
 
 	test('a stage no service will ever feed is settled, not left pending forever', () => {
-		// Leaving them 'pending' reached 'done' with two stages that read, to
-		// anything showing the ledger, as work still to come.
+		// Leaving it 'pending' reached 'done' with a stage that reads, to anything
+		// showing the ledger, as work still to come.
 		const libraries = [svc({ phase: 'library' }), svc({ name: 'b', phase: 'gave-up' })];
 		const settled = settleUnreachableStages(libraries, initialPipelineLedger());
-		assert.strictEqual(settled.insights, 'skipped');
 		assert.strictEqual(settled.probes, 'skipped');
 		// The one stage that CAN run on a library repo is untouched.
 		assert.strictEqual(settled.exercise, 'pending');
@@ -113,20 +111,18 @@ suite('pipeline machine: scheduling', () => {
 	test('settling is idempotent and never overwrites a stage that ran', () => {
 		const green = [svc({ phase: 'green' })];
 		const ledger = initialPipelineLedger();
-		// A green service means both stages are reachable — nothing is settled.
+		// A green service means every stage is reachable — nothing is settled.
 		assert.deepStrictEqual(settleUnreachableStages(green, ledger), ledger);
 
 		const libraries = [svc({ phase: 'library' })];
-		const ran = applyStageOutcome(initialPipelineLedger(), 'insights', 'done');
+		const ran = applyStageOutcome(initialPipelineLedger(), 'probes', 'done');
 		const settled = settleUnreachableStages(libraries, ran);
-		assert.strictEqual(settled.insights, 'done');
+		assert.strictEqual(settled.probes, 'done');
 		assert.deepStrictEqual(settleUnreachableStages(libraries, settled), settled);
 	});
 
 	test('skipped and failed stages are terminal for the run', () => {
-		let ledger = applyStageOutcome(initialPipelineLedger(), 'insights', 'skipped');
-		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'probes' });
-		ledger = applyStageOutcome(ledger, 'probes', 'failed');
+		let ledger = applyStageOutcome(initialPipelineLedger(), 'probes', 'failed');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'exercise' });
 		ledger = applyStageOutcome(ledger, 'exercise', 'skipped');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'done' });
@@ -169,9 +165,9 @@ suite('pipeline machine: stage failure budgets', () => {
 			...initialPipelineLedger(),
 			fixEpisodes: { s1: 2, s2: 2, s3: 2 },
 		};
-		const { decision, ledger } = decideOnStageFailure(shifty, 'insights', 'sBrandNew', DEFAULT_BUDGETS);
+		const { decision, ledger } = decideOnStageFailure(shifty, 'probes', 'sBrandNew', DEFAULT_BUDGETS);
 		assert.strictEqual(decision.next, 'give-up');
-		assert.strictEqual(ledger.insights, 'failed');
+		assert.strictEqual(ledger.probes, 'failed');
 	});
 
 	test('decideOnStageFailure never mutates its input', () => {

@@ -15,7 +15,7 @@ from typing import IO, Any
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.trace import StatusCode
+from opentelemetry.trace import SpanKind, StatusCode
 
 from tracelens import _health
 from tracelens.enrich.summaries import summarize
@@ -71,6 +71,52 @@ def _attr_int(attrs: Mapping[str, Any] | None, key: str, default: int = 0) -> in
         return int(str(v))
     except Exception:
         return default
+
+
+def _http_component(span_name: str, attrs: Mapping[str, Any] | None, kind: Any = None) -> str:
+    """Name an inbound HTTP span ``METHOD /path`` instead of a bare ``POST``.
+
+    OpenTelemetry names a server span after the route TEMPLATE, but only once
+    the framework has resolved one. Starlette/FastAPI routes that never match a
+    template — and every ASGI app instrumented without a router hook — arrive as
+    the bare method, so a whole service's requests collapse onto two component
+    names (``GET``/``POST``) and nothing downstream can tell which endpoint a
+    ``request_id`` belongs to.
+
+    Composing the name here restores that join for every consumer of the JSONL
+    at once. Precedence follows the semantic conventions: the route template
+    beats the concrete path (``/items/{id}`` groups, ``/items/42`` does not).
+    Query strings are dropped — they are per-request data, not endpoint
+    identity, and would fragment the grouping they are meant to enable.
+
+    Restricted to SERVER spans on purpose. An outbound client call carries the
+    same ``http.method``/``url.path`` attributes, so renaming those too would
+    mint fake endpoints out of the service's own dependencies — an httpx POST to
+    a third-party API would land in the endpoint list beside the routes the
+    service actually serves.
+
+    Non-HTTP spans (the AST-instrumented user code that makes up most of a
+    trace) carry no method attribute and are returned untouched.
+    """
+    if kind is not None and kind is not SpanKind.SERVER:
+        return span_name
+    method = _attr_str(attrs, "http.request.method") or _attr_str(attrs, "http.method")
+    if not method:
+        return span_name
+    # Already "METHOD /path" from a framework that resolved its route.
+    if " " in span_name.strip():
+        return span_name
+    route = (
+        _attr_str(attrs, "http.route")
+        or _attr_str(attrs, "url.path")
+        or _attr_str(attrs, "http.target")
+    )
+    if not route:
+        return span_name
+    path = route.split("?", 1)[0].split("#", 1)[0].strip()
+    if not path:
+        return span_name
+    return f"{method.upper()} {path}"
 
 
 def _parse_json_obj(s: str | None) -> dict[str, Any]:
@@ -243,7 +289,7 @@ class JSONLFileSpanExporter(SpanExporter):
             blocked_ms = round(max(0.0, (dur_ns_raw - cpu_ns_raw) / 1_000_000.0), 4)
         trace_id = span.context.trace_id
         request_id = _attr_str(attrs, "tracelens.request_id") or f"ot-{trace_id:032x}"
-        component = span.name
+        component = _http_component(span.name, attrs, getattr(span, "kind", None))
         depth = _attr_int(attrs, "tracelens.depth", 0)
         parent_raw = _attr_str(attrs, "tracelens.parent_component", "")
         parent_component: str | None = None if not parent_raw else parent_raw

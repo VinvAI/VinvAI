@@ -91,6 +91,14 @@ suite('engines pin check gating', () => {
 		assert.strictEqual(pinStateStamp('0.1.2'), pinStateStamp('0.1.2'));
 		assert.notStrictEqual(pinStateStamp('0.1.2'), pinStateStamp('0.1.3'));
 	});
+
+	test('a pin move invalidates the stamp even when the version is unchanged', () => {
+		// The regression this guards: keyed on version alone, every pin move
+		// inside one version was ignored, so a rebuilt vsix left the engines
+		// checkout wherever it already was.
+		assert.notStrictEqual(pinStateStamp('0.1.4', 'aaaaaaa'), pinStateStamp('0.1.4', 'bbbbbbb'));
+		assert.strictEqual(pinStateStamp('0.1.4', 'aaaaaaa'), pinStateStamp('0.1.4', 'aaaaaaa'));
+	});
 });
 
 suite('engines pin decision', () => {

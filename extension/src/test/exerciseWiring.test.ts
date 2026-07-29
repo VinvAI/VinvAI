@@ -47,7 +47,6 @@ function facts(over: Partial<FlowFacts> = {}): FlowFacts {
 suite('exercise pipeline stage', () => {
 	test('exercise runs after probes and before done', () => {
 		let ledger = initialPipelineLedger();
-		ledger = applyStageOutcome(ledger, 'insights', 'done');
 		ledger = applyStageOutcome(ledger, 'probes', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'exercise' });
 		ledger = applyStageOutcome(ledger, 'exercise', 'done');
@@ -56,7 +55,6 @@ suite('exercise pipeline stage', () => {
 
 	test('an exercise failure rides the shared fix-episode budget', () => {
 		let ledger = initialPipelineLedger();
-		ledger = applyStageOutcome(ledger, 'insights', 'done');
 		ledger = applyStageOutcome(ledger, 'probes', 'done');
 		const { ledger: next, decision } = decideOnStageFailure(ledger, 'exercise', 'sigX', DEFAULT_BUDGETS);
 		assert.deepStrictEqual(decision, { next: 'fix' });

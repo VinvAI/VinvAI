@@ -134,9 +134,8 @@ suite('end to end: a workspace with nothing to serve still gets exercised', () =
 		const libraries = [svc({ phase: 'library' }), svc({ name: 'b', phase: 'gave-up' })];
 		let ledger = settleUnreachableStages(libraries, initialPipelineLedger());
 
-		// insights and probes read a traced session; there is none, so they are
-		// DECIDED rather than left looking like outstanding work.
-		assert.strictEqual(ledger.insights, 'skipped');
+		// probes reads a traced session; there is none, so it is DECIDED rather
+		// than left looking like outstanding work.
 		assert.strictEqual(ledger.probes, 'skipped');
 
 		// The one stage that needs no port is the one that runs.
@@ -145,10 +144,10 @@ suite('end to end: a workspace with nothing to serve still gets exercised', () =
 		assert.deepStrictEqual(planPipelineAction(true, libraries, ledger), { kind: 'done' });
 	});
 
-	test('a green service still drains insights and probes first', () => {
+	test('a green service still drains probes first', () => {
 		const green = [svc({ phase: 'green' })];
 		const ledger = settleUnreachableStages(green, initialPipelineLedger());
-		assert.deepStrictEqual(planPipelineAction(true, green, ledger), { kind: 'insights' });
+		assert.deepStrictEqual(planPipelineAction(true, green, ledger), { kind: 'probes' });
 	});
 });
 

@@ -36,6 +36,7 @@ import {
 	registerEnginesCommands,
 } from './engines/install';
 import { maybeUpdateEngines, registerEngineUpdate } from './engines/update';
+import { maybeShowNotices } from './notices/notices';
 import { stopEmbedderIfStarted } from './embedder/sidecar';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -104,6 +105,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// clone/build itself runs in a terminal, so activation never blocks.
 	void maybeUpdateEngines(context);
 
+	// The one channel that reaches an install that is already broken: a static
+	// notices file, polled at most twice a day, filtered here, at most one toast.
+	// This is the extension's ONLY outbound request — a GET that uploads nothing —
+	// and it is silent when the endpoint is unreachable. Off with vinv.notices.enabled.
+	void maybeShowNotices(context);
+
 	// Engines present? Offer the one-time embedding-model warmup so the first
 	// index build doesn't stall inside the sidecar. When they are missing, the
 	// next-step ladder and the Project view point at "Install Vinv Engines".
@@ -114,16 +121,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// Keep Vinv's local artifacts (.vinv/) out of source control, like .claude/.
 	ensureVinvGitignored();
 
+	// Kept as data sources, not as sidebar trees: Flow already shows services
+	// and Findings already shows sessions, so a second copy of each in the rail
+	// was duplicate surface. The providers stay because the palette commands
+	// (refreshSessions, filterSessionsByTime, the services refresh after a
+	// bring-up) still drive them.
 	const servicesProvider = new ServicesProvider(context);
 	const sessionsProvider = new SessionsProvider(context);
-	// Sessions uses createTreeView (not registerTreeDataProvider) so we get
-	// visibility events: the view polls `tracesummary` every second for live
-	// trace-hit counts only while it is actually on screen.
-	const sessionsView = vscode.window.createTreeView('vinv.sessions', {
-		treeDataProvider: sessionsProvider,
-	});
-	sessionsProvider.attachView(sessionsView);
-	sessionsProvider.setVisible(sessionsView.visible);
 	// The Flow panel — the always-visible home: one vertical rail from
 	// Discover to Verify, with everything each stage produced one click away.
 	// Its state source also mirrors the model to .vinv/flow_state.json for
@@ -132,9 +136,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(
 		flowSource,
 		vscode.window.registerWebviewViewProvider(FLOW_VIEW_ID, new FlowViewProvider(context, flowSource)),
-		vscode.window.registerTreeDataProvider('vinv.services', servicesProvider),
-		sessionsView,
-		sessionsView.onDidChangeVisibility((e) => sessionsProvider.setVisible(e.visible)),
 	);
 	registerFlowIssueWarnings(context, flowSource);
 

@@ -72,7 +72,7 @@ export type PilotAction =
 	| { kind: 'done' };
 
 /** Which step a failure happened in (drives budget accounting). */
-export type PilotStep = 'setup' | 'start' | 'insights' | 'probes' | 'exercise';
+export type PilotStep = 'setup' | 'start' | 'probes' | 'exercise';
 
 /** What to do about a failed step. */
 export type FailureDecision =
@@ -269,7 +269,7 @@ export function decideOnFailure(
 	};
 }
 
-// ---- post-green pipeline stages (insights → probes) -------------------------
+// ---- post-green pipeline stages (probes → exercise) -------------------------
 
 /** Lifecycle of one workspace-level pipeline stage. */
 export type StagePhase = 'pending' | 'done' | 'failed' | 'skipped';
@@ -282,7 +282,6 @@ export type StagePhase = 'pending' | 'done' | 'failed' | 'skipped';
  * failure loops through exactly the same fix machinery as a start failure.
  */
 export interface PipelineLedger {
-	insights: StagePhase;
 	probes: StagePhase;
 	/**
 	 * The behavioral-exercise stage: after probes, the exerciser plans, executes,
@@ -297,31 +296,30 @@ export interface PipelineLedger {
 
 /** A fresh ledger: all post-green stages pending. */
 export function initialPipelineLedger(): PipelineLedger {
-	return { insights: 'pending', probes: 'pending', exercise: 'pending', fixEpisodes: {} };
+	return { probes: 'pending', exercise: 'pending', fixEpisodes: {} };
 }
 
 /** The next thing the FULL pipeline (services + post-green stages) should do. */
-export type PipelineAction =
-	| PilotAction
-	| { kind: 'insights' }
-	| { kind: 'probes' }
-	| { kind: 'exercise' };
+export type PipelineAction = PilotAction | { kind: 'probes' } | { kind: 'exercise' };
 
 /**
  * The full-pipeline scheduler: services drain first (planNextAction), then the
  * post-green stages.
  *
- * `insights` and `probes` genuinely require a live traced session — they read
- * what a running service recorded, so with nothing green there is nothing to
- * read. `exercise` does NOT: its crash, differential, fault and concurrency
- * oracles drive code in workers from the source and the index, and need no
- * port, no process and no traffic. Gating it on `anyGreen` too meant a
- * workspace of libraries did nothing at all after discovery — on a clone of
- * langchain, Auto-Pilot fired zero oracles. (The 511-target/1,944-call figure
- * quoted for that repo comes from the standalone `functions` command with a
- * raised `--max-targets`; this stage runs `campaign`, whose per-oracle cap is
- * 50. The point is the same and the scale is not.) A library is not "nothing to
- * observe"; it is nothing to SERVE.
+ * `probes` genuinely requires a live traced session — it reads what a running
+ * service recorded, so with nothing green there is nothing to read. `exercise`
+ * does NOT: its crash, differential, fault and concurrency oracles drive code in
+ * workers from the source and the index, and need no port, no process and no
+ * traffic. Gating it on `anyGreen` too meant a workspace of libraries did nothing
+ * at all after discovery — on a clone of langchain, Auto-Pilot fired zero
+ * oracles. (The 511-target/1,944-call figure quoted for that repo comes from the
+ * standalone `functions` command with a raised `--max-targets`; this stage runs
+ * `campaign`, whose per-oracle cap is 50. The point is the same and the scale is
+ * not.) A library is not "nothing to observe"; it is nothing to SERVE.
+ *
+ * Insights is NOT a stage here: pipelineRunners rebuilds it on its own whenever
+ * new capture spans land, so scheduling it again was redundant work on the
+ * critical path to the stages that actually produce evidence.
  *
  * Terminal stage phases (done/failed/skipped) never re-enter; failures are
  * retried via decideOnStageFailure, which flips the stage back to 'pending'
@@ -337,9 +335,6 @@ export function planPipelineAction(
 		return serviceAction;
 	}
 	const anyGreen = services.some((s) => s.phase === 'green');
-	if (anyGreen && ledger.insights === 'pending') {
-		return { kind: 'insights' };
-	}
 	if (anyGreen && ledger.probes === 'pending') {
 		return { kind: 'probes' };
 	}
@@ -352,11 +347,15 @@ export function planPipelineAction(
 /**
  * Settle the stages this workspace can never reach.
  *
- * `insights` and `probes` need a live traced session, so on a workspace of
- * libraries they are not "still to do" — they are decided. Leaving them
- * 'pending' let the scheduler reach 'done' with two stages that read, to
- * anything displaying the ledger, as outstanding work that never arrives. A
- * stage nothing will run is 'skipped', which is a phase the ledger already has.
+ * `probes` needs a live traced session, so on a workspace of libraries it is not
+ * "still to do" — it is decided. Leaving it 'pending' let the scheduler reach
+ * 'done' with a stage that reads, to anything displaying the ledger, as
+ * outstanding work that never arrives. A stage nothing will run is 'skipped',
+ * which is a phase the ledger already has.
+ *
+ * `exercise` is deliberately NOT settled here: it needs nothing serving, so on a
+ * library-only workspace it is the one stage that still has real work to do (see
+ * planPipelineAction).
  *
  * Idempotent, and never downgrades a stage that actually ran: only 'pending' is
  * rewritten.
@@ -368,17 +367,11 @@ export function settleUnreachableStages(
 	if (services.some((s) => s.phase === 'green')) {
 		return ledger;
 	}
-	let next = ledger;
-	for (const stage of ['insights', 'probes'] as const) {
-		if (next[stage] === 'pending') {
-			next = { ...next, [stage]: 'skipped' };
-		}
-	}
-	return next;
+	return ledger.probes === 'pending' ? { ...ledger, probes: 'skipped' } : ledger;
 }
 
 /** The post-green stages, in the order the scheduler drains them. */
-export type PipelineStage = 'insights' | 'probes' | 'exercise';
+export type PipelineStage = 'probes' | 'exercise';
 
 /** Records how a stage attempt settled. */
 export function applyStageOutcome(

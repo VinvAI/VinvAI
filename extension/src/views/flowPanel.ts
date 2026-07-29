@@ -248,6 +248,14 @@ function getFlowHtml(cspSource: string): string {
 		.stage.error .summary { color: var(--accent-fg); }
 		.activity { color: var(--accent-fg); margin: 3px 0 0; line-height: 1.5; }
 		.links { margin: 6px 0 0; }
+		.lnk-row { display: flex; align-items: stretch; gap: 2px; }
+		.lnk-row > .lnk { flex: 1 1 auto; min-width: 0; }
+		.act {
+			flex: 0 0 auto; width: 22px; border: 0; border-radius: 3px; cursor: pointer;
+			background: transparent; color: var(--vscode-foreground); opacity: .65;
+			font-size: 10px; line-height: 1; padding: 0;
+		}
+		.act:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
 		.lnk {
 			display: flex; align-items: baseline; gap: 7px;
 			width: 100%; text-align: left; box-sizing: border-box;
@@ -350,7 +358,24 @@ function getFlowHtml(cspSource: string): string {
 			} else {
 				b.disabled = true;
 			}
-			return b;
+			if (!link.action) { return b; }
+			// The action is a SIBLING, not a child: link rows are <button>, and a
+			// nested button is invalid HTML that browsers reparent.
+			const row = el('div', 'lnk-row');
+			row.appendChild(b);
+			const act = el('button', 'act');
+			act.type = 'button';
+			act.title = link.action.title;
+			act.textContent = link.action.icon === 'play' ? '▶' : '■';
+			act.addEventListener('click', (e) => {
+				e.stopPropagation(); // never also trigger the row behind it
+				vscode.postMessage({
+					type: 'link',
+					link: { label: link.label, command: link.action.command, args: link.action.args },
+				});
+			});
+			row.appendChild(act);
+			return row;
 		}
 
 		const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', error: 'needs attention' };

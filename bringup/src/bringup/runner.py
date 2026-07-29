@@ -1063,12 +1063,44 @@ def start_instruction(
     # writer and reader in sync. Embed the resolved absolute base in the prompt
     # instead of a hardcoded ``~/.tracelens/baselines`` literal so that setting the
     # env var actually moves where the agent WRITES, not just where we scan.
-    _caps_base = str(_captures_root())
+    #
+    # Rendered with FORWARD SLASHES, deliberately. Every use of this base sits
+    # inside a shell command (`--output …`, `wc -l …`) that the recorded entry
+    # carries into `bash -lc`, and a Windows path written with single backslashes
+    # loses them twice over:
+    #   * bash eats them as escapes — `C:\Users\SERVER\.tracelens` arrives as
+    #     `C:UsersSERVER.tracelens`, a relative path, so the trace lands
+    #     somewhere the backend reader never scans and the baseline reads empty;
+    #   * `\U` / `\S` are not valid JSON escapes, so the deliverable this prompt
+    #     asks for would not even parse — while the same section demands "valid
+    #     JSON only".
+    # Forward slashes dodge both (no escape to eat, nothing to escape) and are
+    # still a perfectly good Windows path: Win32 and Python accept `C:/…`, so
+    # this needs no Git-Bash `/c/…` mangling and works if the command is ever run
+    # outside Git Bash. POSIX paths are unaffected.
+    _caps_base = str(_captures_root()).replace("\\", "/")
+    # Same reasoning for the recorded `working_directory`: it is a JSON string
+    # value, so single backslashes would break the parse. It is handed to the
+    # replayer as a subprocess cwd (never through bash), and `C:/…` is valid
+    # there. Prose/tool-arg uses of `{root}` keep the native form.
+    _root_json = root.replace("\\", "/")
     tl_pkg = _tracelens_package_path()
     tracelens_install_block = _render_tracelens_install_block(tl_pkg)
-    # The command examples below invoke tracelens via the `tracelens`
-    # entrypoint on PATH / in the activated venv.
-    _tracelens_cmd = "tracelens"
+    # The command examples below invoke tracelens and the interpreter through the
+    # SERVICE venv's script directory, written as the `<venv-bin>` placeholder.
+    #
+    # Deliberately a placeholder and NOT a resolved path: the venv is created by
+    # the agent at run time (STEP 0 detects the manager first), long after this
+    # prompt is rendered, so there is nothing real to bake in. What matters is
+    # that the shape the agent copies into `.vinv/start_commands/<svc>.json` is
+    # venv-qualified. A bare `tracelens` / bare `python` resolves for the agent
+    # only because of what ITS shell happens to have on PATH, and the recorded
+    # command is replayed later from a plain non-interactive shell that inherits
+    # none of that — it fails with exit 127 and no agent can repair it, because
+    # the file lives outside the repo where a fix episode's diff cannot reach.
+    _venv_bin = "<venv-bin>"
+    _tracelens_cmd = f"{_venv_bin}/tracelens"
+    _venv_python = f"{_venv_bin}/python"
     # tracelens shells out to the `opentelemetry-instrument` console script to
     # wrap the app. That script lives in the SERVICE venv's `bin/` (next to
     # `python`), not on the global PATH — and invoking tracelens by absolute
@@ -1077,23 +1109,35 @@ def start_instruction(
     # `tracelens run: opentelemetry-instrument not on PATH` and the service
     # never starts. The fix is to prepend the venv `bin/` to PATH inline.
     _otel_path_note = (
-        "\n\n**CRITICAL — put the service venv's `bin/` on `PATH` when you invoke "
-        "tracelens.** tracelens shells out to the `opentelemetry-instrument` "
-        "console script to wrap the app; that script lives in the service venv's "
-        "`bin/` (alongside `python`), NOT on the global `PATH`. If it isn't found "
-        "tracelens aborts with `tracelens run: opentelemetry-instrument not on "
-        "PATH` and the service never starts. Calling tracelens by absolute path "
-        "does NOT add it, and `uv run` only fixes the *inner* process's "
-        "environment — so prepend it inline on the tracelens command itself:\n"
+        "\n\n**CRITICAL — put the service venv's script dir on `PATH` when you "
+        "invoke tracelens.** tracelens shells out to the "
+        "`opentelemetry-instrument` console script to wrap the app; that script "
+        "lives in the service venv's script dir (alongside `python`), NOT on the "
+        "global `PATH`. If it isn't found tracelens aborts with `tracelens run: "
+        "opentelemetry-instrument not on PATH` and the service never starts. "
+        "Calling tracelens by absolute path does NOT add it, and `uv run` only "
+        "fixes the *inner* process's environment — so prepend it inline on the "
+        "tracelens command itself:\n"
         "```bash\n"
-        "PATH=\"<venv>/bin:$PATH\" <venv>/bin/tracelens"
-        " run … -- python -m <module> <args>\n"
+        f"PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd}"
+        f" run … -- {_venv_python} -m <module> <args>\n"
         "```"
     )
     _tracelens_path_note = (
-        "Use the exact path the venv installs to (e.g. `<venv>/bin/tracelens` "
-        "and `<venv>/bin/python`) if the venv isn't already activated in that "
-        "shell."
+        f"**`{_venv_bin}` is a placeholder — substitute the real path.** It is "
+        "the service venv's script directory: `bin/` on macOS/Linux, `Scripts/` "
+        "on Windows. Resolve it from the venv YOU created in the install step "
+        "and use it for both `tracelens` and the interpreter.\n\n"
+        "**Never leave a bare `tracelens` or a bare `python` in a command you "
+        "record.** Both resolve for you only because of what your shell happens "
+        "to have on `PATH` or an activated venv; the recorded start command is "
+        "replayed later from a plain shell that inherits neither, where a bare "
+        "name fails with `exit 127 command not found`.\n\n"
+        "**The recorded command is executed by `bash -lc`, on every platform.** "
+        "On Windows that is Git Bash, so write the venv path in the form bash "
+        "accepts — `/c/Users/…/.venv/Scripts`, not `C:\\Users\\…\\.venv\\Scripts` "
+        "(a drive-letter colon would be read as a `PATH` separator) — and "
+        "separate `PATH` entries with `:`, never `;`."
     ) + _otel_path_note
     # The caller selected the modules (top-level Python packages) to instrument
     # for this service. Fall back to auto-discovery only if none were passed.
@@ -1120,7 +1164,7 @@ def start_instruction(
             "value manually."
         )
     key = "start_instruction_portable" if portable else "start_instruction"
-    return _prompt(key).format(service=service, vinv_md=vinv_md, tracelens_install_block=tracelens_install_block, _caps_base=_caps_base, _tracelens_cmd=_tracelens_cmd, _target_pkg_note=_target_pkg_note, _target_pkg_flags=_target_pkg_flags, tracelens_subdir=tracelens_subdir, _tracelens_path_note=_tracelens_path_note, _g0=tracelens_subdir or '<session-id>/', root=root, start_commands_json=start_commands_json).strip()
+    return _prompt(key).format(service=service, vinv_md=vinv_md, tracelens_install_block=tracelens_install_block, _caps_base=_caps_base, _tracelens_cmd=_tracelens_cmd, _venv_bin=_venv_bin, _venv_python=_venv_python, _target_pkg_note=_target_pkg_note, _target_pkg_flags=_target_pkg_flags, tracelens_subdir=tracelens_subdir, _tracelens_path_note=_tracelens_path_note, _g0=tracelens_subdir or '<session-id>/', root=root, _root_json=_root_json, start_commands_json=start_commands_json).strip()
 
 
 # ── Prompt rendering for --print-prompt (no agent, no LLM) ────────

@@ -72,12 +72,15 @@ suite('Extension Test Suite', () => {
 		assert.strictEqual(`${manifest.publisher}.${manifest.name}`, 'VinvAI.VinvAI');
 	});
 
-	test('MCP registration exposes index and runtime servers without secrets', () => {
+	test('MCP registration exposes index, runtime and exercise servers without secrets', () => {
 		const context = { extensionPath: path.join(path.sep, 'opt', 'vinv-vs') } as vscode.ExtensionContext;
 		const specs = buildServerSpecs(context, path.join(path.sep, 'workspace'));
+		// vinv-exercise is the WRITE half (reporting an external run back in); it
+		// is a separate server so write access can be granted independently of
+		// the two read-only ones.
 		assert.deepStrictEqual(
 			specs.map((spec) => spec.key),
-			['vinv-index', 'vinv-runtime'],
+			['vinv-index', 'vinv-runtime', 'vinv-exercise'],
 		);
 		for (const spec of specs) {
 			assert.strictEqual(spec.env.ELECTRON_RUN_AS_NODE, '1');
@@ -133,6 +136,39 @@ suite('Extension Test Suite', () => {
 			assert.strictEqual(claude.isRegistered(ws), true);
 			// Idempotent: an unchanged write reports no change.
 			assert.strictEqual(claude.write(specs, ws), false);
+
+			// Claude Code keys projects by the literal cwd spelling it was launched
+			// with, so one directory accumulates several equal-but-differently-spelled
+			// keys. Every one of them must get the servers — registering only the
+			// first leaves sessions launched with another spelling seeing no tools.
+			// Concatenated, not path.join'd: join() would normalize the spelling
+			// straight back to `ws` and the map would hold one key, not two.
+			const spellings = [ws, ws + path.sep + '.'];
+			if (process.platform === 'win32') {
+				spellings.push(ws.toUpperCase(), ws.replace(/\\/g, '/'));
+			}
+			fs.writeFileSync(
+				claudeJson,
+				JSON.stringify({
+					projects: Object.fromEntries(spellings.map((k) => [k, { mcpServers: {} }])),
+				}),
+			);
+			assert.strictEqual(claude.write(specs, ws), true);
+			const multi = JSON.parse(fs.readFileSync(claudeJson, 'utf8')) as {
+				projects: Record<string, { mcpServers: Record<string, unknown> }>;
+			};
+			assert.strictEqual(Object.keys(multi.projects).length, spellings.length);
+			for (const key of spellings) {
+				assert.ok(
+					multi.projects[key].mcpServers['vinv-index'],
+					`spelling ${key} missing vinv-index`,
+				);
+			}
+			assert.strictEqual(claude.isRegistered(ws), true);
+			// ...and remove() has to clear all of them, or isRegistered stays true.
+			assert.strictEqual(claude.remove(ws), true);
+			assert.strictEqual(claude.isRegistered(ws), false);
+			claude.write(specs, ws);
 
 			// An unparseable ~/.claude.json is never overwritten.
 			fs.writeFileSync(claudeJson, '{not json');

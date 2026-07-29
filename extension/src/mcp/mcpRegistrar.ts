@@ -37,8 +37,14 @@ import * as fs from 'fs';
 
 const INDEX_KEY = 'vinv-index';
 const RUNTIME_KEY = 'vinv-runtime';
+/** The write half: reports an external endpoint-test run back into .vinv. */
+const EXERCISE_KEY = 'vinv-exercise';
 /** Server keys written by older extension versions, stripped on every write. */
 const LEGACY_KEYS = ['vinv-ahsi'];
+/** Every key we own. Removal must cover all of them or teardown leaves orphans. */
+const MANAGED_KEYS = [INDEX_KEY, RUNTIME_KEY, EXERCISE_KEY, ...LEGACY_KEYS];
+/** The keys a fully-registered config carries (legacy names excluded). */
+const CURRENT_KEYS = [INDEX_KEY, RUNTIME_KEY, EXERCISE_KEY];
 
 /** One MCP server's launch spec, in the neutral shape every client maps from. */
 export interface McpServerSpec {
@@ -55,6 +61,7 @@ export function buildServerSpecs(
 ): McpServerSpec[] {
 	const indexScript = path.join(context.extensionPath, 'out', 'mcp', 'indexServer.js');
 	const runtimeScript = path.join(context.extensionPath, 'out', 'mcp', 'runtimeServer.js');
+	const exerciseScript = path.join(context.extensionPath, 'out', 'mcp', 'exerciseServer.js');
 
 	// Neither server carries secrets in its launch spec: the API key would
 	// otherwise be serialized into repo-tracked config (.mcp.json, .cursor/mcp.json)
@@ -69,6 +76,12 @@ export function buildServerSpecs(
 			key: RUNTIME_KEY,
 			command: process.execPath,
 			args: [runtimeScript, workspaceRoot],
+			env: { ELECTRON_RUN_AS_NODE: '1' },
+		},
+		{
+			key: EXERCISE_KEY,
+			command: process.execPath,
+			args: [exerciseScript, workspaceRoot],
 			env: { ELECTRON_RUN_AS_NODE: '1' },
 		},
 	];
@@ -199,7 +212,7 @@ function jsonTarget(opts: {
 				return false;
 			}
 			let changed = false;
-			for (const key of [INDEX_KEY, RUNTIME_KEY, ...LEGACY_KEYS]) {
+			for (const key of MANAGED_KEYS) {
 				if (key in container) {
 					delete container[key];
 					changed = true;
@@ -210,7 +223,7 @@ function jsonTarget(opts: {
 		isRegistered(workspaceRoot) {
 			const config = readJson(opts.configPath(workspaceRoot));
 			const container = config[opts.containerKey];
-			return !!container && INDEX_KEY in container && RUNTIME_KEY in container;
+			return !!container && CURRENT_KEYS.every((k) => k in container);
 		},
 	};
 }
@@ -254,10 +267,7 @@ function stripCodexBlocks(toml: string): string {
 	const lines = toml.split('\n');
 	const out: string[] = [];
 	const ours = new Set(
-		[INDEX_KEY, RUNTIME_KEY, ...LEGACY_KEYS].flatMap((key) => [
-			`[mcp_servers.${key}]`,
-			`[mcp_servers.${key}.env]`,
-		]),
+		MANAGED_KEYS.flatMap((key) => [`[mcp_servers.${key}]`, `[mcp_servers.${key}.env]`]),
 	);
 	let skipping = false;
 	for (const line of lines) {
@@ -309,10 +319,7 @@ function codexTarget(): McpClientTarget {
 		isRegistered() {
 			try {
 				const toml = fs.readFileSync(configPath(), 'utf8');
-				return (
-					toml.includes(`[mcp_servers.${INDEX_KEY}]`) &&
-					toml.includes(`[mcp_servers.${RUNTIME_KEY}]`)
-				);
+				return CURRENT_KEYS.every((k) => toml.includes(`[mcp_servers.${k}]`));
 			} catch {
 				return false;
 			}
@@ -381,28 +388,44 @@ function stripLegacyProjectMcpJson(workspaceRoot: string): boolean {
 function claudeTarget(): McpClientTarget {
 	const configPath = (): string => path.join(os.homedir(), '.claude.json');
 
-	/** The projects-map key for this workspace: Claude Code's own if present. */
-	const keyFor = (projects: Record<string, unknown>, workspaceRoot: string): string =>
-		Object.keys(projects).find((k) => sameWorkspacePath(k, workspaceRoot)) ?? workspaceRoot;
+	/**
+	 * Every projects-map key that denotes this workspace, falling back to the
+	 * literal root when Claude Code has no entry yet.
+	 *
+	 * Claude Code creates one entry per distinct cwd *spelling* it is launched
+	 * with and looks its project up by exact string, so the same directory
+	 * routinely accumulates several keys (`c:\p`, `C:\p`, `C:/p`, …). VS Code
+	 * hands us a lowercased drive letter in `fsPath`, so writing only the first
+	 * match would register a spelling no shell-launched session ever reads. We
+	 * write them all; we never invent spellings that aren't already present.
+	 */
+	const keysFor = (projects: Record<string, unknown>, workspaceRoot: string): string[] => {
+		const matches = Object.keys(projects).filter((k) => sameWorkspacePath(k, workspaceRoot));
+		return matches.length ? matches : [workspaceRoot];
+	};
 
+	/** The mcpServers container of each key denoting this workspace, if any. */
 	const serversOf = (
 		config: Record<string, unknown>,
 		workspaceRoot: string,
-	): Record<string, unknown> | undefined => {
+	): Record<string, unknown>[] => {
 		const projects = config.projects;
 		if (!projects || typeof projects !== 'object') {
-			return undefined;
+			return [];
 		}
-		const project = (projects as Record<string, unknown>)[
-			keyFor(projects as Record<string, unknown>, workspaceRoot)
-		];
-		if (!project || typeof project !== 'object') {
-			return undefined;
-		}
-		const servers = (project as Record<string, unknown>).mcpServers;
-		return servers && typeof servers === 'object'
-			? (servers as Record<string, unknown>)
-			: undefined;
+		const map = projects as Record<string, unknown>;
+		return keysFor(map, workspaceRoot)
+			.map((key) => {
+				const project = map[key];
+				if (!project || typeof project !== 'object') {
+					return undefined;
+				}
+				const servers = (project as Record<string, unknown>).mcpServers;
+				return servers && typeof servers === 'object'
+					? (servers as Record<string, unknown>)
+					: undefined;
+			})
+			.filter((s): s is Record<string, unknown> => s !== undefined);
 	};
 
 	return {
@@ -424,23 +447,24 @@ function claudeTarget(): McpClientTarget {
 				config.projects && typeof config.projects === 'object'
 					? (config.projects as Record<string, unknown>)
 					: {};
-			const key = keyFor(projects, workspaceRoot);
-			const project =
-				projects[key] && typeof projects[key] === 'object'
-					? (projects[key] as Record<string, unknown>)
-					: {};
-			const servers =
-				project.mcpServers && typeof project.mcpServers === 'object'
-					? (project.mcpServers as Record<string, unknown>)
-					: {};
-			for (const legacy of LEGACY_KEYS) {
-				delete servers[legacy];
+			for (const key of keysFor(projects, workspaceRoot)) {
+				const project =
+					projects[key] && typeof projects[key] === 'object'
+						? (projects[key] as Record<string, unknown>)
+						: {};
+				const servers =
+					project.mcpServers && typeof project.mcpServers === 'object'
+						? (project.mcpServers as Record<string, unknown>)
+						: {};
+				for (const legacy of LEGACY_KEYS) {
+					delete servers[legacy];
+				}
+				for (const spec of specs) {
+					servers[spec.key] = { command: spec.command, args: spec.args, env: spec.env };
+				}
+				project.mcpServers = servers;
+				projects[key] = project;
 			}
-			for (const spec of specs) {
-				servers[spec.key] = { command: spec.command, args: spec.args, env: spec.env };
-			}
-			project.mcpServers = servers;
-			projects[key] = project;
 			config.projects = projects;
 			const changedHome = writeIfChanged(file, JSON.stringify(config, null, 2) + '\n');
 			const changedRepo = stripLegacyProjectMcpJson(workspaceRoot);
@@ -456,28 +480,29 @@ function claudeTarget(): McpClientTarget {
 			if (config === null) {
 				return changed;
 			}
-			const servers = serversOf(config, workspaceRoot);
-			if (servers) {
-				let removedAny = false;
-				for (const key of [INDEX_KEY, RUNTIME_KEY, ...LEGACY_KEYS]) {
+			let removedAny = false;
+			for (const servers of serversOf(config, workspaceRoot)) {
+				for (const key of MANAGED_KEYS) {
 					if (key in servers) {
 						delete servers[key];
 						removedAny = true;
 					}
 				}
-				if (removedAny) {
-					changed = writeIfChanged(file, JSON.stringify(config, null, 2) + '\n') || changed;
-				}
+			}
+			if (removedAny) {
+				changed = writeIfChanged(file, JSON.stringify(config, null, 2) + '\n') || changed;
 			}
 			return changed;
 		},
+		// Registered only when *every* spelling of this workspace carries the
+		// servers: a session launched with an unregistered spelling sees none.
 		isRegistered(workspaceRoot) {
 			const config = readJsonObjectStrict(configPath());
 			if (!config) {
 				return false;
 			}
-			const servers = serversOf(config, workspaceRoot);
-			return !!servers && INDEX_KEY in servers && RUNTIME_KEY in servers;
+			const all = serversOf(config, workspaceRoot);
+			return all.length > 0 && all.every((s) => CURRENT_KEYS.every((k) => k in s));
 		},
 	};
 }

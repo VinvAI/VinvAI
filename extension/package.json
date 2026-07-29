@@ -85,6 +85,11 @@
 					],
 					"default": "",
 					"markdownDescription": "What to do when the engines checkout does not match the version this extension build was released with. Only ever applies to Vinv's own clone at `~/.vinv/engines` — a checkout you point at with `#vinv.enginesPath#` is never modified."
+				},
+				"vinv.notices.enabled": {
+					"type": "boolean",
+					"default": true,
+					"markdownDescription": "Check `notices.vinv.ai` on startup for notices about broken releases and security fixes. One-way: a GET of a static file that sends no data and no identifiers, at most once every 12 hours, showing at most one message."
 				}
 			}
 		},
@@ -171,27 +176,9 @@
 					"type": "webview",
 					"id": "vinv.flow",
 					"name": "Flow"
-				},
-				{
-					"id": "vinv.services",
-					"name": "Services"
-				},
-				{
-					"id": "vinv.sessions",
-					"name": "Sessions"
 				}
 			]
 		},
-		"viewsWelcome": [
-			{
-				"view": "vinv.services",
-				"contents": "Nothing to run yet.\nVinv finds this project's services when it scans the project — the Flow panel above shows progress and what to do next.\n[Scan Project](command:vinv-vs.indexProject)"
-			},
-			{
-				"view": "vinv.sessions",
-				"contents": "Nothing has run yet.\nStart a service from the Services list and every request it handles will show up here, busiest first."
-			}
-		],
 		"walkthroughs": [
 			{
 				"id": "vinv.gettingStarted",
@@ -275,7 +262,8 @@
 			{
 				"command": "vinv-vs.openFindings",
 				"title": "Open Findings (what Vinv found and fixed)",
-				"category": "Vinv"
+				"category": "Vinv",
+				"icon": "$(checklist)"
 			},
 			{
 				"command": "vinv-vs.refreshSessions",
@@ -527,51 +515,19 @@
 					"group": "navigation@1"
 				},
 				{
-					"command": "vinv-vs.askVinv",
+					"command": "vinv-vs.openFindings",
 					"when": "view == vinv.flow",
 					"group": "navigation@2"
+				},
+				{
+					"command": "vinv-vs.askVinv",
+					"when": "view == vinv.flow",
+					"group": "navigation@3"
 				},
 				{
 					"command": "vinv-vs.configureProject",
 					"when": "view == vinv.flow",
 					"group": "navigation@9"
-				},
-				{
-					"command": "vinv-vs.filterSessionsByTime",
-					"when": "view == vinv.sessions",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.refreshSessions",
-					"when": "view == vinv.sessions",
-					"group": "navigation@1"
-				},
-				{
-					"command": "vinv-vs.serviceStart",
-					"when": "view == vinv.services",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.refreshServices",
-					"when": "view == vinv.services",
-					"group": "navigation@1"
-				}
-			],
-			"view/item/context": [
-				{
-					"command": "vinv-vs.serviceStart",
-					"when": "view == vinv.services && viewItem == vinv.service.ready",
-					"group": "inline"
-				},
-				{
-					"command": "vinv-vs.serviceStop",
-					"when": "view == vinv.services && viewItem == vinv.service.running",
-					"group": "inline"
-				},
-				{
-					"command": "vinv-vs.serviceSetup",
-					"when": "view == vinv.services && viewItem == vinv.service.unverified",
-					"group": "inline"
 				}
 			]
 		}
