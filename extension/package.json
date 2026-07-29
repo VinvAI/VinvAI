@@ -275,7 +275,8 @@
 			{
 				"command": "vinv-vs.openFindings",
 				"title": "Open Findings (what Vinv found and fixed)",
-				"category": "Vinv"
+				"category": "Vinv",
+				"icon": "$(checklist)"
 			},
 			{
 				"command": "vinv-vs.refreshSessions",
@@ -527,9 +528,14 @@
 					"group": "navigation@1"
 				},
 				{
-					"command": "vinv-vs.askVinv",
+					"command": "vinv-vs.openFindings",
 					"when": "view == vinv.flow",
 					"group": "navigation@2"
+				},
+				{
+					"command": "vinv-vs.askVinv",
+					"when": "view == vinv.flow",
+					"group": "navigation@3"
 				},
 				{
 					"command": "vinv-vs.configureProject",

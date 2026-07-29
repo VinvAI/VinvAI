@@ -15,6 +15,7 @@ import { enginesReady } from '../engines/install';
 import { isProjectIndexed } from '../index/indexing';
 import { readServices, isServiceStarted } from '../bringup/bringup';
 import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
+import { readEnhanceRecord, shouldAutoEnhance } from '../index/enhanceRunner';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { getAutoPilotStatus } from '../harness/autoPilot';
 import { getPipelinePhase } from '../harness/pipelineState';
@@ -47,6 +48,28 @@ function openPendingEdges(workspaceRoot: string): number {
 	const done = readAdjudicated(storeDir);
 	return readPendingEdges(storeDir).filter((r) => !done.has(`${r.src_id}\u0000${r.name}`))
 		.length;
+}
+
+/**
+ * Enhancement is once-per-epoch and TERMINAL, so a raw pending count is the
+ * wrong gate: the agent abstains on genuinely indistinguishable candidates and
+ * abstentions are never written to edge_overrides.jsonl, leaving the count
+ * permanently non-zero — which pinned the compass on "Enhance the graph"
+ * forever, even in a fully wired workspace. Ask the same question the runner
+ * and the Flow rail ask instead: has THIS epoch been handled?
+ */
+function graphNeedsEnhancing(workspaceRoot: string): boolean {
+	let epoch = 0;
+	try {
+		epoch = loadStoreEpoch(indexStoreDir(workspaceRoot));
+	} catch {
+		return false;
+	}
+	return shouldAutoEnhance(
+		readEnhanceRecord(workspaceRoot),
+		epoch,
+		openPendingEdges(workspaceRoot),
+	);
 }
 
 /**
@@ -96,7 +119,7 @@ export async function computeNextStep(
 			command: 'vinv-vs.indexProject',
 		};
 	}
-	if (openPendingEdges(workspaceRoot) > 0) {
+	if (graphNeedsEnhancing(workspaceRoot)) {
 		return {
 			label: 'Enhance the graph',
 			detail:
