@@ -112,7 +112,13 @@ suite('Webview button wiring', () => {
 	});
 
 	suite('openPathInEditor', () => {
-		test('opens a real file and reports success', async () => {
+		test('opens a real file and reports success', async function () {
+			// This is the only test in the suite that opens a document in the REAL
+			// editor — `openTextDocument` plus `showTextDocument` — so it pays for
+			// the text-model and editor-layout machinery starting up, once, here.
+			// Past mocha's 2s default on a cold Windows editor, and it was being
+			// reported as a hang rather than as the slow first call it is.
+			this.timeout(30_000);
 			const ws = makeWorkspace();
 			try {
 				const ok = await openPathInEditor(ws.existing, { label: 'context pack' });

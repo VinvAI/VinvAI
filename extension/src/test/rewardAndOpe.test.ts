@@ -75,6 +75,32 @@ function judgeReport(over: Partial<import('../harness/rewardSignals').JudgeRepor
 	};
 }
 
+/**
+ * A virtual environment on THIS platform, returning its interpreter's path.
+ *
+ * `discoverPythonCandidates` looks for `Scripts/python.exe` on Windows and
+ * `bin/python` elsewhere — correctly, because that is where the two layouts put
+ * it. A fixture that only ever builds the POSIX one therefore tests nothing on
+ * Windows: discovery finds no interpreter, and every assertion about ordering
+ * and precedence fails for a reason that has nothing to do with the rule being
+ * tested. Same shape as the POSIX-only fixtures that were failing on the engine
+ * side of this repo.
+ *
+ * `marker: false` builds the trap the shape rule has to reject — a `bin/python`
+ * with no PEP 405 `pyvenv.cfg` beside it, which is not an environment.
+ */
+function makeVenv(root: string, name: string, opts: { marker?: boolean } = {}): string {
+	const isWin = process.platform === 'win32';
+	const binDir = path.join(root, name, isWin ? 'Scripts' : 'bin');
+	fs.mkdirSync(binDir, { recursive: true });
+	const python = path.join(binDir, isWin ? 'python.exe' : 'python');
+	fs.writeFileSync(python, '', { mode: 0o755 });
+	if (opts.marker !== false) {
+		fs.writeFileSync(path.join(root, name, 'pyvenv.cfg'), 'home = /usr\n');
+	}
+	return python;
+}
+
 suite('Acceptance-test extraction', () => {
 	test('takes the LAST python-acceptance fence and requires a real test', () => {
 		const stdout = [
@@ -489,29 +515,28 @@ suite('Test-interpreter resolution', () => {
 			// The live failure: the workspace's only env was named `.venv-smol`,
 			// so resolution fell through to a bare python3 with none of the repo's
 			// dependencies installed.
-			for (const name of ['.venv-smol', 'venv311', 'node_modules', 'src']) {
-				fs.mkdirSync(path.join(ws, name, 'bin'), { recursive: true });
-				fs.writeFileSync(path.join(ws, name, 'bin', 'python'), '');
-			}
 			// Only the real environments carry PEP 405's marker; node_modules and
-			// src have a `bin/python` shim and nothing else, which is exactly the
+			// src have an interpreter shim and nothing else, which is exactly the
 			// case a shape-only rule would wrongly accept.
-			for (const name of ['.venv-smol', 'venv311']) {
-				fs.writeFileSync(path.join(ws, name, 'pyvenv.cfg'), 'home = /usr\n');
-			}
+			const smol = makeVenv(ws, '.venv-smol');
+			const venv311 = makeVenv(ws, 'venv311');
+			makeVenv(ws, 'node_modules', { marker: false });
+			makeVenv(ws, 'src', { marker: false });
+
 			const found = discoverPythonCandidates(ws);
 			assert.ok(
-				found.includes(path.join(ws, '.venv-smol', 'bin', 'python')),
+				found.includes(smol),
 				`a non-standard venv name must be discovered: ${found.join(', ')}`,
 			);
-			assert.ok(found.includes(path.join(ws, 'venv311', 'bin', 'python')));
+			assert.ok(found.includes(venv311));
 			// A `bin/python` shim without PEP 405's marker is not an environment,
 			// so `node_modules/bin/python` and `src/bin/python` stay out.
 			assert.ok(!found.some((c) => c.includes(`${path.sep}node_modules${path.sep}`)));
-			assert.ok(!found.some((c) => c.includes(`${path.sep}src${path.sep}bin`)));
+			assert.ok(!found.some((c) => c.includes(`${path.sep}src${path.sep}`)));
 			// PATH names come last, so a real env always outranks them.
-			assert.ok(found.indexOf('python3') > found.indexOf(path.join(ws, '.venv-smol', 'bin', 'python')));
-			assert.strictEqual(resolveTestPython(ws), path.join(ws, '.venv-smol', 'bin', 'python'));
+			const pathName = process.platform === 'win32' ? 'python' : 'python3';
+			assert.ok(found.indexOf(pathName) > found.indexOf(smol));
+			assert.strictEqual(resolveTestPython(ws), smol);
 			// Alphabetical among the non-preferred names — never readdir order.
 			assert.deepStrictEqual(discoverPythonCandidates(ws), found);
 		} finally {
@@ -521,15 +546,23 @@ suite('Test-interpreter resolution', () => {
 
 	test('an explicit override and .venv keep priority over discovered envs', () => {
 		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-venvorder-'));
+		// Captured and restored: this used to be SET and never cleared, so every
+		// later test in the run saw an override pointing at a path that does not
+		// exist. A test that leaks an environment variable is a test that decides
+		// whether the ones after it pass.
+		const overrideBefore = process.env.VINV_TEST_PYTHON;
 		try {
-			for (const name of ['.venv', 'zz-venv']) {
-				fs.mkdirSync(path.join(ws, name, 'bin'), { recursive: true });
-				fs.writeFileSync(path.join(ws, name, 'bin', 'python'), '');
-			}
-			assert.strictEqual(discoverPythonCandidates(ws)[0], path.join(ws, '.venv', 'bin', 'python'));
+			const preferred = makeVenv(ws, '.venv');
+			makeVenv(ws, 'zz-venv');
+			assert.strictEqual(discoverPythonCandidates(ws)[0], preferred);
 			process.env.VINV_TEST_PYTHON = '/custom/python';
 			assert.strictEqual(discoverPythonCandidates(ws)[0], '/custom/python');
 		} finally {
+			if (overrideBefore === undefined) {
+				delete process.env.VINV_TEST_PYTHON;
+			} else {
+				process.env.VINV_TEST_PYTHON = overrideBefore;
+			}
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
 	});
@@ -1207,10 +1240,7 @@ suite('Virtual-env discovery is structural, not name-based', () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-envshape-'));
 		try {
 			for (const name of ['sandbox', '.direnv', 'toolchain']) {
-				const bin = path.join(root, name, 'bin');
-				fs.mkdirSync(bin, { recursive: true });
-				fs.writeFileSync(path.join(bin, 'python'), '#!/bin/sh\n', { mode: 0o755 });
-				fs.writeFileSync(path.join(root, name, 'pyvenv.cfg'), 'home = /usr\n');
+				makeVenv(root, name);
 			}
 			// A directory that merely LOOKS like source must not be offered.
 			fs.mkdirSync(path.join(root, 'mypkg'), { recursive: true });

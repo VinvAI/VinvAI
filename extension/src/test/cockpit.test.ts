@@ -581,7 +581,15 @@ suite('Episode telemetry (bandit over pack composition)', () => {
 		}
 	});
 
-	test('the loop LEARNS: Thompson selection + ledger update converges to the best arm', () => {
+	test('the loop LEARNS: Thompson selection + ledger update converges to the best arm', function () {
+		// 60 episodes, each of which LOADS the policy, appends two ledger events
+		// and rewrites the posterior — around 300 synchronous filesystem calls.
+		// That is inherent to the thing being tested (the ledger is the mechanism,
+		// so stubbing it would test nothing), and it is comfortably past mocha's
+		// 2s default on Windows, where each call carries the filter driver's
+		// overhead. A slow test is not a hanging one, and it was being reported as
+		// a hang.
+		this.timeout(60_000);
 		// The value-prop test — the old Bernstein-promotion policy never moved
 		// from its hand-coded prior in realistic use; this proves TS converges.
 		const previous = process.env.VINV_HOME;

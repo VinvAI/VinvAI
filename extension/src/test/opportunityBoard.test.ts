@@ -410,7 +410,14 @@ function writeSession(root: string, dir: string, lines: string[], iso: string): 
 	fs.utimesSync(f, new Date(iso), new Date(iso));
 }
 
-suite('opportunity board (sweeps route through the analyzer)', () => {
+suite('opportunity board (sweeps route through the analyzer)', function () {
+	// The `setup` below writes a ~700-line trace session before EVERY test in
+	// this suite, because each test mutates the board and must not inherit the
+	// previous one's writes. That is the right isolation and it is real
+	// filesystem work, past mocha's 2s default often enough on Windows to make
+	// the suite look intermittently broken — reported as "ensure done() is
+	// called" on a hook that is not even async.
+	this.timeout(30_000);
 	let root: string;
 
 	setup(() => {
