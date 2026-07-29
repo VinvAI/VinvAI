@@ -114,16 +114,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// Keep Vinv's local artifacts (.vinv/) out of source control, like .claude/.
 	ensureVinvGitignored();
 
+	// Kept as data sources, not as sidebar trees: Flow already shows services
+	// and Findings already shows sessions, so a second copy of each in the rail
+	// was duplicate surface. The providers stay because the palette commands
+	// (refreshSessions, filterSessionsByTime, the services refresh after a
+	// bring-up) still drive them.
 	const servicesProvider = new ServicesProvider(context);
 	const sessionsProvider = new SessionsProvider(context);
-	// Sessions uses createTreeView (not registerTreeDataProvider) so we get
-	// visibility events: the view polls `tracesummary` every second for live
-	// trace-hit counts only while it is actually on screen.
-	const sessionsView = vscode.window.createTreeView('vinv.sessions', {
-		treeDataProvider: sessionsProvider,
-	});
-	sessionsProvider.attachView(sessionsView);
-	sessionsProvider.setVisible(sessionsView.visible);
 	// The Flow panel — the always-visible home: one vertical rail from
 	// Discover to Verify, with everything each stage produced one click away.
 	// Its state source also mirrors the model to .vinv/flow_state.json for
@@ -132,9 +129,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(
 		flowSource,
 		vscode.window.registerWebviewViewProvider(FLOW_VIEW_ID, new FlowViewProvider(context, flowSource)),
-		vscode.window.registerTreeDataProvider('vinv.services', servicesProvider),
-		sessionsView,
-		sessionsView.onDidChangeVisibility((e) => sessionsProvider.setVisible(e.visible)),
 	);
 	registerFlowIssueWarnings(context, flowSource);
 

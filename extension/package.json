@@ -171,27 +171,9 @@
 					"type": "webview",
 					"id": "vinv.flow",
 					"name": "Flow"
-				},
-				{
-					"id": "vinv.services",
-					"name": "Services"
-				},
-				{
-					"id": "vinv.sessions",
-					"name": "Sessions"
 				}
 			]
 		},
-		"viewsWelcome": [
-			{
-				"view": "vinv.services",
-				"contents": "Nothing to run yet.\nVinv finds this project's services when it scans the project — the Flow panel above shows progress and what to do next.\n[Scan Project](command:vinv-vs.indexProject)"
-			},
-			{
-				"view": "vinv.sessions",
-				"contents": "Nothing has run yet.\nStart a service from the Services list and every request it handles will show up here, busiest first."
-			}
-		],
 		"walkthroughs": [
 			{
 				"id": "vinv.gettingStarted",
@@ -541,43 +523,6 @@
 					"command": "vinv-vs.configureProject",
 					"when": "view == vinv.flow",
 					"group": "navigation@9"
-				},
-				{
-					"command": "vinv-vs.filterSessionsByTime",
-					"when": "view == vinv.sessions",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.refreshSessions",
-					"when": "view == vinv.sessions",
-					"group": "navigation@1"
-				},
-				{
-					"command": "vinv-vs.serviceStart",
-					"when": "view == vinv.services",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.refreshServices",
-					"when": "view == vinv.services",
-					"group": "navigation@1"
-				}
-			],
-			"view/item/context": [
-				{
-					"command": "vinv-vs.serviceStart",
-					"when": "view == vinv.services && viewItem == vinv.service.ready",
-					"group": "inline"
-				},
-				{
-					"command": "vinv-vs.serviceStop",
-					"when": "view == vinv.services && viewItem == vinv.service.running",
-					"group": "inline"
-				},
-				{
-					"command": "vinv-vs.serviceSetup",
-					"when": "view == vinv.services && viewItem == vinv.service.unverified",
-					"group": "inline"
 				}
 			]
 		}
