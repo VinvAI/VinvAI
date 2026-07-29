@@ -95,6 +95,7 @@ import {
 import { breakStall, evidenceSimilarity } from './stallBreaker';
 import { reconcile } from './reconciliation';
 import { captureWorkspaceSnapshot, revertToSnapshot } from './workspaceSnapshot';
+import { openRun, closeRun, releaseRun } from './runIsolation';
 import {
 	acceptanceDir,
 	auditWorkspaceDiff,
@@ -1055,7 +1056,18 @@ export async function runEpisode(
 
 	const policy = loadEpisodePolicy();
 	const decision = selectEpisodeArm(policy);
-	const episodeId = crypto.randomUUID();
+	// The episode's isolated tree. The trigger id IS the episode id — one
+	// identity for the run, its worktree, its branch and every record it
+	// writes — so nothing has to be correlated after the fact. The agent edits
+	// `run.tree`; workspaceRoot still anchors .vinv, the event ledger and the
+	// learning aggregates, so concurrent episodes stay invisible to each other
+	// in the tree while remaining one dataset for the bandit.
+	const triggerRun = await openRun(workspaceRoot, {
+		kind: task.kind,
+		harness: chosenHarness,
+		task: task.trigger,
+	});
+	const episodeId = triggerRun.id;
 	appendEpisodeEvent({
 		type: 'episode_start',
 		ts: new Date().toISOString(),
@@ -1110,7 +1122,10 @@ export async function runEpisode(
 	// Pre-episode snapshot: the whole working state committed to a hidden ref
 	// so every escalation can offer a one-click, exact revert of the agent's
 	// changes. Null when the workspace isn't a git repo — then no offer.
-	const snapshotSha = await captureWorkspaceSnapshot(workspaceRoot, episodeId).catch(
+	// Snapshot the tree the agent will actually edit. On an isolated run that is
+	// the worktree, so revert can never reach across into another episode's
+	// files — the exact failure that forced episodes to be single-flight.
+	const snapshotSha = await captureWorkspaceSnapshot(triggerRun.tree, episodeId).catch(
 		() => null,
 	);
 	/**
@@ -1149,7 +1164,9 @@ export async function runEpisode(
 
 	const doRevert = async (): Promise<void> => {
 		try {
-			const result = await revertToSnapshot(workspaceRoot, episodeId);
+			// Revert the run's own tree — never the shared workspace, which may
+			// hold the user's edits or another episode's in-flight work.
+			const result = await revertToSnapshot(triggerRun.tree, episodeId);
 			appendEpisodeEvent({
 				type: 'revert',
 				ts: new Date().toISOString(),
@@ -1240,7 +1257,13 @@ export async function runEpisode(
 							env: getHandbookEnv(path.dirname(goalBin), workspaceRoot),
 							cwd: workspaceRoot,
 							dispatch: (name, prompt) =>
-								dispatchAgentPrompt(chosenHarness, workspaceRoot, name, prompt),
+								dispatchAgentPrompt(
+									chosenHarness,
+									workspaceRoot,
+									name,
+									prompt,
+									triggerRun.tree,
+								),
 						}
 					: null;
 				const stallJudge = (payload: { task: string; evidence_a: string; evidence_b: string }) =>
@@ -1555,6 +1578,8 @@ export async function runEpisode(
 						pack.content,
 						{
 							token,
+							// The agent works in this episode's own tree.
+							cwd: triggerRun.tree,
 							onUpdate: (line) => {
 								// The chat transcript is the thinking surface; the
 								// notification only mirrors lines when the panel is
@@ -1914,7 +1939,10 @@ export async function runEpisode(
 					// signals cannot rescue a failed gate).
 					let breakdown: RewardBreakdown;
 					if (verify.verdict === 'pass') {
-						const flags = await auditWorkspaceDiff(workspaceRoot, episodeId);
+						// Audit the run's own tree: the snapshot ref it diffs against
+						// was captured there, and in the shared root the diff would
+						// also sweep up whatever other episodes and the user changed.
+						const flags = await auditWorkspaceDiff(triggerRun.tree, episodeId);
 						// The judge runs on: any audit flag, a non-objective pass, OR
 						// whenever stated success criteria exist — a served-port +
 						// tests-pass fix can still fail to meet the SPECIFIED goal
@@ -2259,6 +2287,22 @@ export async function runEpisode(
 			},
 		);
 	} finally {
+		// Stamp the run and fold it into the root aggregates, then drop the
+		// worktree while KEEPING its branch: the checkout is scratch, the branch
+		// is the deliverable the user reviews or cherry-picks.
+		closeRun(workspaceRoot, triggerRun, {
+			episode_id: episodeId,
+			kind: task.kind,
+			service: task.service ?? null,
+			harness: chosenHarness,
+			attempts,
+			verified,
+			aborted,
+			objective: objectiveOutcome,
+			arm: decision.arm,
+			arm_index: decision.armIndex,
+		});
+		await releaseRun(workspaceRoot, triggerRun);
 		episodeRunning = false;
 		currentEpisodeSessionId = undefined;
 		// The episode is over: a later click on a stale chat cancel control must
