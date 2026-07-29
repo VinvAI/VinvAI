@@ -284,3 +284,26 @@ def test_missing_target_python_unit(monkeypatch: pytest.MonkeyPatch) -> None:
         run_mod._maybe_handoff_to_target_python(
             ["--", "/nope/bin/python", "app.py"], ["/nope/bin/python", "app.py"]
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PATHEXT resolution is Windows-only")
+def test_extensionless_windows_interpreter_is_resolvable(tmp_path: Path) -> None:
+    """`<venv>/Scripts/python` must pass the preflight, as CreateProcess appends .exe.
+
+    A Windows venv ships only ``python.exe``, so a plain ``Path.exists()`` check
+    rejected the very form bring-up records — a false negative that failed a
+    command the OS would have launched fine. The recorded start command lives
+    outside the repo where no fix episode can edit it, so the launcher has to
+    tolerate it.
+    """
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    (scripts / "python.exe").write_bytes(b"MZ")  # only the .exe, as uv/venv creates
+    extensionless = str(scripts / "python")
+
+    assert run_mod._resolvable_executable(extensionless) is True
+    assert run_mod._resolve_executable_path(extensionless) == scripts / "python.exe"
+    # Forward-slash form too: that is what Git Bash hands a native exe.
+    assert run_mod._resolvable_executable(extensionless.replace("\\", "/")) is True
+    # A genuinely absent interpreter must still be reported, not silently passed.
+    assert run_mod._resolvable_executable(str(scripts / "nosuchpy")) is False
