@@ -51,18 +51,17 @@ function openPendingEdges(workspaceRoot: string): number {
 }
 
 /**
- * The three post-green pipeline stages, as observable disk facts.
+ * The post-green pipeline stages, as observable disk facts.
  *
  * Auto-Pilot schedules these from an in-memory ledger (planPipelineAction),
  * which a compass reading a cold workspace cannot see — so these read the
  * artifact each pass actually writes. Same order the scheduler drains them in,
  * so driving manually walks the same path Auto-Pilot would.
+ *
+ * Insights is deliberately absent: pipelineRunners rebuilds it automatically
+ * whenever new capture spans land, so it is never something the user has to be
+ * told to do.
  */
-function hasInsights(workspaceRoot: string): boolean {
-	// The insight pass writes a manifest last; its presence means the pass ran.
-	return fs.existsSync(path.join(workspaceRoot, '.vinv', 'reports', 'index.json'));
-}
-
 function hasProbes(workspaceRoot: string): boolean {
 	try {
 		return fs
@@ -172,14 +171,6 @@ export async function computeNextStep(
 	// missing entirely: Auto-Pilot ran insights → probes → exercise, but a user
 	// driving manually went straight from "a capture exists" to "everything is
 	// wired" and was never told any of it was outstanding.
-	if (!hasInsights(workspaceRoot)) {
-		return {
-			label: 'Build insights',
-			detail:
-				'Turns the captured traces into call trees, latency profiles and reports — the runtime half of every answer and context pack.',
-			command: 'vinv-vs.runInsights',
-		};
-	}
 	if (!hasProbes(workspaceRoot)) {
 		return {
 			label: 'Run probes',

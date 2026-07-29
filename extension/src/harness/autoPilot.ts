@@ -40,7 +40,6 @@ import {
 	type PipelineLedger,
 	type ServiceState,
 } from './autoPilotMachine';
-import { runInsightPass } from './insightRunner';
 import { runProbePass } from './probeRunner';
 import { runExercisePass } from './exerciseRunner';
 import { maybeAutoEnhance } from '../index/enhanceRunner';
@@ -319,7 +318,7 @@ async function drive(
 	let budgets: AutoPilotBudgets = getAutoPilotBudgets();
 	let discovered = isProjectDiscovered(workspaceRoot);
 	let services: ServiceState[] = discovered ? buildServiceStates(workspaceRoot) : [];
-	// The post-green ledger: insights → probes, with the shared fix budgets.
+	// The post-green ledger: probes → exercise, with the shared fix budgets.
 	let ledger: PipelineLedger = initialPipelineLedger();
 	const replace = (next: ServiceState): void => {
 		services = services.map((s) => (s.name === next.name ? next : s));
@@ -348,28 +347,22 @@ async function drive(
 			return;
 		}
 
-		// ---- post-green stages: insights, then probes, then exercise ----------
-		if (action.kind === 'insights' || action.kind === 'probes' || action.kind === 'exercise') {
+		// ---- post-green stages: probes, then exercise -------------------------
+		// Insights is not scheduled here: pipelineRunners rebuilds it whenever
+		// new capture spans land, so running it again just delayed the stages
+		// that actually produce evidence.
+		if (action.kind === 'probes' || action.kind === 'exercise') {
 			const stage = action.kind;
 			publishPipelinePhase(stage);
 			report(
-				stage === 'insights'
-					? 'Building insights (call trees + reports)…'
-					: stage === 'probes'
-						? 'Probing endpoints (I/O checks)…'
-						: 'Exercising every endpoint (behavioral coverage)…',
+				stage === 'probes'
+					? 'Probing endpoints (I/O checks)…'
+					: 'Exercising every endpoint (behavioral coverage)…',
 			);
 			let outcome: 'done' | 'failed' | 'skipped' = 'failed';
 			let failureDetail = '';
 			try {
-				if (stage === 'insights') {
-					const result = await runInsightPass(context, workspaceRoot);
-					outcome = result.outcome;
-					failureDetail = result.error ?? '';
-					if (outcome === 'done') {
-						report(`Insights built — ${result.endpoints} endpoint(s), ${result.issues} issue(s) identified`);
-					}
-				} else if (stage === 'exercise') {
+				if (stage === 'exercise') {
 					// The exerciser drives EVERY discovered endpoint itself, closing the
 					// coverage loop and clustering behavioral failures into the same
 					// issue→episode path. A 'done' pass with issues is a stage failure

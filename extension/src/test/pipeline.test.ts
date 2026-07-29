@@ -65,11 +65,11 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(action, { kind: 'setup', service: 'api' });
 	});
 
-	test('after green comes insights, then probes, then exercise, then done', () => {
+	test('after green comes probes, then exercise, then done', () => {
 		let ledger = initialPipelineLedger();
 		const services = [svc()];
-		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'insights' });
-		ledger = applyStageOutcome(ledger, 'insights', 'done');
+		// Insights is not a scheduled stage: pipelineRunners rebuilds it on new
+		// capture spans, so the pipeline goes straight to the evidence stages.
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'probes' });
 		ledger = applyStageOutcome(ledger, 'probes', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
@@ -86,9 +86,7 @@ suite('pipeline machine: scheduling', () => {
 	});
 
 	test('skipped and failed stages are terminal for the run', () => {
-		let ledger = applyStageOutcome(initialPipelineLedger(), 'insights', 'skipped');
-		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'probes' });
-		ledger = applyStageOutcome(ledger, 'probes', 'failed');
+		let ledger = applyStageOutcome(initialPipelineLedger(), 'probes', 'failed');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'exercise' });
 		ledger = applyStageOutcome(ledger, 'exercise', 'skipped');
 		assert.deepStrictEqual(planPipelineAction(true, [svc()], ledger), { kind: 'done' });
@@ -131,9 +129,9 @@ suite('pipeline machine: stage failure budgets', () => {
 			...initialPipelineLedger(),
 			fixEpisodes: { s1: 2, s2: 2, s3: 2 },
 		};
-		const { decision, ledger } = decideOnStageFailure(shifty, 'insights', 'sBrandNew', DEFAULT_BUDGETS);
+		const { decision, ledger } = decideOnStageFailure(shifty, 'probes', 'sBrandNew', DEFAULT_BUDGETS);
 		assert.strictEqual(decision.next, 'give-up');
-		assert.strictEqual(ledger.insights, 'failed');
+		assert.strictEqual(ledger.probes, 'failed');
 	});
 
 	test('decideOnStageFailure never mutates its input', () => {

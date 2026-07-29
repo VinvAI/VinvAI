@@ -72,7 +72,7 @@ export type PilotAction =
 	| { kind: 'done' };
 
 /** Which step a failure happened in (drives budget accounting). */
-export type PilotStep = 'setup' | 'start' | 'insights' | 'probes' | 'exercise';
+export type PilotStep = 'setup' | 'start' | 'probes' | 'exercise';
 
 /** What to do about a failed step. */
 export type FailureDecision =
@@ -282,7 +282,6 @@ export type StagePhase = 'pending' | 'done' | 'failed' | 'skipped';
  * failure loops through exactly the same fix machinery as a start failure.
  */
 export interface PipelineLedger {
-	insights: StagePhase;
 	probes: StagePhase;
 	/**
 	 * The behavioral-exercise stage: after probes, the exerciser plans, executes,
@@ -297,23 +296,23 @@ export interface PipelineLedger {
 
 /** A fresh ledger: all post-green stages pending. */
 export function initialPipelineLedger(): PipelineLedger {
-	return { insights: 'pending', probes: 'pending', exercise: 'pending', fixEpisodes: {} };
+	return { probes: 'pending', exercise: 'pending', fixEpisodes: {} };
 }
 
 /** The next thing the FULL pipeline (services + post-green stages) should do. */
-export type PipelineAction =
-	| PilotAction
-	| { kind: 'insights' }
-	| { kind: 'probes' }
-	| { kind: 'exercise' };
+export type PipelineAction = PilotAction | { kind: 'probes' } | { kind: 'exercise' };
 
 /**
  * The full-pipeline scheduler: services drain first (planNextAction), then —
  * only when at least one service actually went green (a workspace of
- * libraries/gave-ups has nothing to observe) — insights build, then probes
- * run. Terminal stage phases (done/failed/skipped) never re-enter; failures
- * are retried via decideOnStageFailure, which flips the stage back to
- * 'pending' while budget remains.
+ * libraries/gave-ups has nothing to observe) — probes run, then exercise.
+ * Terminal stage phases (done/failed/skipped) never re-enter; failures are
+ * retried via decideOnStageFailure, which flips the stage back to 'pending'
+ * while budget remains.
+ *
+ * Insights is NOT a stage here: pipelineRunners rebuilds it on its own
+ * whenever new capture spans land, so scheduling it again was redundant work
+ * on the critical path to the stages that actually produce evidence.
  */
 export function planPipelineAction(
 	discovered: boolean,
@@ -328,9 +327,6 @@ export function planPipelineAction(
 	if (!anyGreen) {
 		return { kind: 'done' };
 	}
-	if (ledger.insights === 'pending') {
-		return { kind: 'insights' };
-	}
 	if (ledger.probes === 'pending') {
 		return { kind: 'probes' };
 	}
@@ -341,7 +337,7 @@ export function planPipelineAction(
 }
 
 /** The post-green stages, in the order the scheduler drains them. */
-export type PipelineStage = 'insights' | 'probes' | 'exercise';
+export type PipelineStage = 'probes' | 'exercise';
 
 /** Records how a stage attempt settled. */
 export function applyStageOutcome(
