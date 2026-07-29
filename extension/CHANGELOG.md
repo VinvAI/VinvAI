@@ -4,6 +4,85 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] — 2026-07-30
+
+### ✨ Added
+
+- **Start and stop each service from the row itself.** The flow view gained a
+  play/stop control per service, so bringing one up no longer means finding the
+  right command in a terminal.
+- **A Findings button in the toolbar**, and a compass that walks the actual
+  pipeline rungs instead of parking on "Enhance the graph".
+- **Your coding agent can report a test run back to Vinv** through the new
+  `vinv-exercise` MCP server, which closes the endpoint-testing loop: the agent
+  exercises your service and Vinv grades what came back.
+- **The exerciser asks when it genuinely cannot proceed, instead of failing
+  quietly.** Configuration nothing can synthesise — a real API key, a base URL
+  only you know — now escalates: first to the harness, and then to you in a
+  panel, with the run re-driven once the answers arrive. The engine's agent
+  channels are dispatched and drained, which was the missing half of that
+  contract, and the panel shows the engine's actual verdict rather than only a
+  cluster count.
+- **A provider-backed path runs without a key.** HTTP is substituted at the
+  boundary, so code that calls an LLM or a paid API is exercised on a stand-in
+  instead of being skipped.
+- **Interpreter and virtual-env discovery is structural, not name-based.** Vinv
+  finds the environment your project actually uses — including layouts the old
+  name whitelist missed — and honours a declared working directory when running
+  your code.
+- **Notices for broken releases and security fixes.** If a release breaks your
+  install, nothing inside it can tell you — so the extension now reads a static
+  file at `notices.vinv.ai` on startup and may show one message. It sends no data
+  and no identifiers, checks at most once every 12 hours, and goes quiet when the
+  endpoint is unreachable. Turn it off with `vinv.notices.enabled`.
+- **Inbound HTTP spans are named `METHOD /path`**, and tracelens now warns when a
+  library you have installed has no instrumenter, instead of silently capturing
+  nothing for it.
+
+### 🐛 Fixed
+
+- **A recorded start command could not be replayed on Windows.** Bring-up writes
+  the verified command to `.vinv/start_commands/<service>.json`, and the Run
+  button replays that string through `bash -lc` in a fresh shell. Three separate
+  defects made it fail there and nowhere else — and because the file lives
+  outside your repo, no later fix pass could repair it:
+  - a bare `tracelens` / `python` resolved only in the agent's own activated
+    shell, so replay died with `exit 127 command not found`;
+  - the interpreter was recorded as `<venv>/Scripts/python`, which tracelens
+    rejected as missing — a Windows venv ships only `python.exe`, and the check
+    was stricter than the launch, which appends the extension itself;
+  - paths were written with single backslashes, which are not valid JSON escapes
+    (so the file did not parse) and are eaten by bash (so `--output` pointed at a
+    relative path and the trace landed where nothing reads it — an empty baseline
+    with no error to explain it).
+- **Bring-up instrumented the web framework but not your own libraries**, so
+  traces covered the request path and missed the code under it. It now bootstraps
+  the instrumenters for the service's own dependencies too.
+- **One embedder sidecar can serve everyone again** — it binds its port before
+  loading the model, so a second workspace no longer races it during startup.
+- **A service-fix episode could "fix" a start failure by deleting tracelens.**
+  That path is closed: the wrapper is not a candidate for removal.
+- **Blocked time is no longer counted as recoverable** in optimization estimates,
+  so a function that spends its time waiting is not reported as a speedup
+  opportunity it cannot deliver.
+- **Probes start the target service** instead of skipping the pass when it is not
+  already up.
+- **Claude Code workspace keys** are registered under every spelling the
+  projects map uses, so the MCP servers attach to the workspace you actually
+  opened.
+- **An engines pin bump now takes effect within a version.** The "already
+  settled" marker was keyed on the extension version alone, so the second and
+  later pin moves inside one version were silently ignored and the checkout stayed
+  wherever it was. It is keyed on the ref as well.
+
+### 🔧 Maintenance
+
+- Each harness trigger runs in its own git worktree rather than taking a lock, so
+  two triggers no longer serialize behind each other.
+- Insights is no longer a scheduled pipeline stage in either flow, and the
+  Services and Sessions trees are gone from the sidebar — the flow view covers
+  both.
+
 ## [0.1.4] — 2026-07-28
 
 ### ✨ Added

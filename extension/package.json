@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "Runs, benchmarks and optimizes your agent-written Python code until it's production-ready. Vinv traces a real run, joins every call to your code, exercises every endpoint, and grades fixes against tests the agent never sees.",
-	"version": "0.1.4",
+	"version": "0.1.5",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
