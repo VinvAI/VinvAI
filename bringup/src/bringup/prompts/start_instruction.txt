@@ -595,7 +595,9 @@ Before recording, make the command carry its own environment:
 - invoke tracelens through that same dir (`{_tracelens_cmd} run …`), never a
   bare `tracelens`;
 - name the interpreter explicitly (`{_venv_python} -m uvicorn …`), never a bare
-  `python`, which resolves to whatever the replaying shell happens to have;
+  `python`, which resolves to whatever the replaying shell happens to have — and
+  on **Windows write `python.exe`**, the only interpreter file that exists in
+  `Scripts/` (there is no extensionless `python` beside it);
 - `tracelens` must also be **importable by that interpreter** — the child hook
   is injected via `sitecustomize` and swallows a failed `import tracelens`
   silently, leaving you a trace file with parent-process spans only and no
@@ -606,6 +608,14 @@ macOS/Linux, `Scripts/` on Windows). The replayer runs the string through
 `bash -lc`, so on Windows write it the way Git Bash reads it —
 `/c/Users/…/.venv/Scripts`, not `C:\Users\…\.venv\Scripts`, whose drive-letter
 colon would be parsed as a `PATH` separator — and join `PATH` entries with `:`.
+
+**Never write a single backslash in any path in this file.** It breaks twice:
+`\U` / `\A` are not valid JSON escapes, so the file you just wrote does not
+parse; and inside the `command` string `bash` eats backslashes as escapes, so
+`C:\Users\SERVER\.tracelens` arrives as `C:UsersSERVER.tracelens` — a relative
+path, so the trace silently lands where nothing reads it and the baseline comes
+back empty. Use forward slashes (`C:/Users/SERVER/…`): valid JSON, and a valid
+Windows path.
 
 Then prove it: run the exact string you are about to record in a **fresh shell
 that has not activated anything**, and confirm the service still comes up and
@@ -647,7 +657,7 @@ not placeholders:
     {{
       "purpose": "start {service} under tracelens",
       "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> <args>",
-      "working_directory": "{root}",
+      "working_directory": "{_root_json}",
       "session_name": "vinv_{service}"
     }}
   ]

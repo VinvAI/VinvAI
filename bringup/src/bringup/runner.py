@@ -1063,7 +1063,27 @@ def start_instruction(
     # writer and reader in sync. Embed the resolved absolute base in the prompt
     # instead of a hardcoded ``~/.tracelens/baselines`` literal so that setting the
     # env var actually moves where the agent WRITES, not just where we scan.
-    _caps_base = str(_captures_root())
+    #
+    # Rendered with FORWARD SLASHES, deliberately. Every use of this base sits
+    # inside a shell command (`--output …`, `wc -l …`) that the recorded entry
+    # carries into `bash -lc`, and a Windows path written with single backslashes
+    # loses them twice over:
+    #   * bash eats them as escapes — `C:\Users\SERVER\.tracelens` arrives as
+    #     `C:UsersSERVER.tracelens`, a relative path, so the trace lands
+    #     somewhere the backend reader never scans and the baseline reads empty;
+    #   * `\U` / `\S` are not valid JSON escapes, so the deliverable this prompt
+    #     asks for would not even parse — while the same section demands "valid
+    #     JSON only".
+    # Forward slashes dodge both (no escape to eat, nothing to escape) and are
+    # still a perfectly good Windows path: Win32 and Python accept `C:/…`, so
+    # this needs no Git-Bash `/c/…` mangling and works if the command is ever run
+    # outside Git Bash. POSIX paths are unaffected.
+    _caps_base = str(_captures_root()).replace("\\", "/")
+    # Same reasoning for the recorded `working_directory`: it is a JSON string
+    # value, so single backslashes would break the parse. It is handed to the
+    # replayer as a subprocess cwd (never through bash), and `C:/…` is valid
+    # there. Prose/tool-arg uses of `{root}` keep the native form.
+    _root_json = root.replace("\\", "/")
     tl_pkg = _tracelens_package_path()
     tracelens_install_block = _render_tracelens_install_block(tl_pkg)
     # The command examples below invoke tracelens and the interpreter through the
@@ -1144,7 +1164,7 @@ def start_instruction(
             "value manually."
         )
     key = "start_instruction_portable" if portable else "start_instruction"
-    return _prompt(key).format(service=service, vinv_md=vinv_md, tracelens_install_block=tracelens_install_block, _caps_base=_caps_base, _tracelens_cmd=_tracelens_cmd, _venv_bin=_venv_bin, _venv_python=_venv_python, _target_pkg_note=_target_pkg_note, _target_pkg_flags=_target_pkg_flags, tracelens_subdir=tracelens_subdir, _tracelens_path_note=_tracelens_path_note, _g0=tracelens_subdir or '<session-id>/', root=root, start_commands_json=start_commands_json).strip()
+    return _prompt(key).format(service=service, vinv_md=vinv_md, tracelens_install_block=tracelens_install_block, _caps_base=_caps_base, _tracelens_cmd=_tracelens_cmd, _venv_bin=_venv_bin, _venv_python=_venv_python, _target_pkg_note=_target_pkg_note, _target_pkg_flags=_target_pkg_flags, tracelens_subdir=tracelens_subdir, _tracelens_path_note=_tracelens_path_note, _g0=tracelens_subdir or '<session-id>/', root=root, _root_json=_root_json, start_commands_json=start_commands_json).strip()
 
 
 # ── Prompt rendering for --print-prompt (no agent, no LLM) ────────

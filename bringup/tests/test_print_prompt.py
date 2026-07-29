@@ -13,6 +13,8 @@ risk they guard is entirely in the templates themselves:
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -53,6 +55,7 @@ _START_KW = {
     "_tracelens_path_note": "PATHNOTE",
     "_g0": "sess/",
     "root": "/r",
+    "_root_json": "/r",
     "start_commands_json": "/r/.vinv/start_commands/svc.json",
 }
 
@@ -120,6 +123,39 @@ def test_recorded_command_template_is_venv_qualified(key: str) -> None:
         assert _START_KW["_tracelens_cmd"] in line, f"{key}: bare tracelens in {line}"
         assert " -- python " not in line, f"{key}: bare interpreter in {line}"
         assert _START_KW["_venv_python"] in line, f"{key}: no venv interpreter in {line}"
+
+
+@pytest.mark.parametrize("key", ["start_instruction", "start_instruction_portable"])
+def test_deliverable_json_example_actually_parses(key: str) -> None:
+    """The JSON block the agent copies must BE valid JSON once rendered.
+
+    It previously wasn't on Windows: ``root``/``_caps_base`` were interpolated as
+    native paths, so the example read ``"working_directory": "C:\\Anshul\\proj"``
+    with single backslashes — ``\\A`` is not a valid JSON escape, in a section that
+    simultaneously demands "valid JSON only". The same backslashes inside the
+    ``command`` string are eaten by ``bash -lc`` (``C:\\Users\\S`` →
+    ``C:UsersS``), pointing ``--output`` at a relative path so the baseline reads
+    empty. Renders with Windows-shaped paths and parses the result.
+    """
+    kw = {
+        **_START_KW,
+        "root": "C:\\Anshul\\project\\demo",
+        "_root_json": "C:/Anshul/project/demo",
+        "_caps_base": "C:/Users/SERVER/.tracelens/baselines",
+        "start_commands_json": "C:\\Anshul\\project\\demo\\.vinv\\start_commands\\svc.json",
+    }
+    out = _template(key).format(**kw)
+    blocks = re.findall(r"```json\n(.*?)```", out, re.DOTALL)
+    assert blocks, f"{key} has no ```json deliverable example"
+    for block in blocks:
+        # Strip the intentional <port-or-null> / <int-or-null> slots the agent fills.
+        concrete = re.sub(r"<[^\"\n>]*>", "0", block)
+        parsed = json.loads(concrete)  # the real assertion: it must parse
+        for entry in parsed.get("commands", []):
+            cmd = entry.get("command", "")
+            assert "\\U" not in cmd and "\\A" not in cmd, f"{key}: bash-eaten backslash in {cmd}"
+            wd = entry.get("working_directory", "")
+            assert "\\" not in wd, f"{key}: single backslash survives in working_directory {wd!r}"
 
 
 @pytest.mark.parametrize("key", ["start_instruction", "start_instruction_portable"])

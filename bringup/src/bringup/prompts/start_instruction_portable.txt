@@ -162,7 +162,7 @@ tool:
     {{
       "purpose": "start {service} under tracelens",
       "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> <args>",
-      "working_directory": "{root}",
+      "working_directory": "{_root_json}",
       "session_name": "vinv_{service}"
     }}
   ]
@@ -189,13 +189,20 @@ repair it** — this file lives outside the repo, so a fix episode's diff can ne
   `opentelemetry-instrument` resolves (an absolute path to `tracelens` alone is NOT enough — it fails
   differently, see the compose step above);
 - invoke tracelens through that same dir (`{_tracelens_cmd} run …`), never a bare `tracelens`;
-- name the interpreter explicitly (`{_venv_python} -m …`), never a bare `python`;
+- name the interpreter explicitly (`{_venv_python} -m …`), never a bare `python` — and on **Windows
+  write `python.exe`**, since that is the only interpreter file that exists in `Scripts/` (there is no
+  extensionless `python` beside it);
 - confirm `tracelens` is **importable by that interpreter** (`{_venv_python} -c "import tracelens"`) —
   the child hook is injected via `sitecustomize` and swallows a failed import silently, leaving a
   trace file with parent-process spans only and no error;
 - substitute the real path for `{_venv_bin}` (`bin/` on macOS/Linux, `Scripts/` on Windows), written
   the way `bash` reads it — on Windows `/c/Users/…/.venv/Scripts`, not `C:\Users\…\.venv\Scripts`
-  (the drive-letter colon would be parsed as a `PATH` separator) — and join `PATH` entries with `:`.
+  (the drive-letter colon would be parsed as a `PATH` separator) — and join `PATH` entries with `:`;
+- **never write a single backslash in any path in this file.** `\U` / `\A` are not valid JSON escapes,
+  so the file would not parse — and inside the `command` string `bash` eats backslashes as escapes, so
+  `C:\Users\SERVER\.tracelens` arrives as `C:UsersSERVER.tracelens`: a relative path, meaning the trace
+  silently lands where nothing reads it and the baseline comes back empty. Use forward slashes
+  (`C:/Users/SERVER/…`), which are valid JSON **and** a valid Windows path.
 
 Then prove it: run the exact string you are about to record in a **fresh shell that has not activated
 anything**, and confirm the service still comes up and `trace.jsonl` still grows. If it only works in
