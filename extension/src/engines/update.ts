@@ -66,8 +66,17 @@ const PIN_LOGIC_REV = 2;
  * decision logic that wrote it. A marker written by different logic is stale and
  * simply does not match, so the check re-runs.
  */
-export function pinStateStamp(version: string): string {
-	return `${version}#${PIN_LOGIC_REV}`;
+export function pinStateStamp(version: string, ref: string = ENGINE_REF): string {
+	// The REF belongs in the stamp, not just the version. Keyed on version
+	// alone, "settled" meant "settled for 0.1.4" — so a build that moved
+	// ENGINE_REF without bumping the version could never re-run the check, and
+	// reinstalling the same vsix did not help either. That is the normal case
+	// while iterating: the pin moves many times inside one version, and every
+	// move after the first was silently ignored, leaving the checkout on
+	// whatever commit it happened to be at. Including the ref makes any pin
+	// move invalidate the marker, which is what "force the checkout onto the
+	// ref this build was cut against" was always supposed to mean.
+	return `${version}#${ref}#${PIN_LOGIC_REV}`;
 }
 
 /**
