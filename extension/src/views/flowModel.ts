@@ -119,6 +119,13 @@ export interface FlowLink {
 	markdownPreview?: boolean;
 	/** Row dot: ok (green-ish), running (pulsing), error (red), muted. */
 	state?: 'ok' | 'running' | 'error' | 'muted';
+	/**
+	 * A second control on the same row, right-aligned — for when the row's own
+	 * click already means something else. A ready service opens its recorded
+	 * start command when clicked, so "run it" needs its own affordance rather
+	 * than displacing that.
+	 */
+	action?: { icon: 'play' | 'stop'; title: string; command: string; args?: unknown[] };
 }
 
 export interface FlowStage {
@@ -329,6 +336,24 @@ function servicesStage(f: FlowFacts): FlowStage {
 		} else if (s.state === 'unattempted' || s.state === 'failed') {
 			link.command = 'vinv-vs.serviceSetup';
 			link.args = [s.name];
+		}
+		// A service that knows how to start should be startable from here —
+		// there is no Services tree to go to any more, and the row's own click
+		// is already spoken for by the start-command file.
+		if (s.state === 'ready') {
+			link.action = {
+				icon: 'play',
+				title: `Start ${s.name} under tracing`,
+				command: 'vinv-vs.serviceStart',
+				args: [s.name],
+			};
+		} else if (s.state === 'running') {
+			link.action = {
+				icon: 'stop',
+				title: `Stop ${s.name}`,
+				command: 'vinv-vs.serviceStop',
+				args: [s.name],
+			};
 		}
 		return link;
 	});
