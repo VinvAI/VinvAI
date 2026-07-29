@@ -38,11 +38,13 @@ export function enginesRoot(context: vscode.ExtensionContext): string | null {
  * Absolute path of an engine executable.
  *
  * Python engines resolve to their console script inside the engines monorepo's
- * uv-workspace venv (`<engines-root>/.venv/bin/<name>`), a machine-stable
- * path. That stability matters because bring-up bakes the tracelens binary's
- * absolute path into the verified start commands it records
- * (.vinv/start_commands/<service>.json), which are replayed across windows
- * and sessions.
+ * uv-workspace venv (`<engines-root>/.venv/bin/<name>`), a machine-stable path.
+ *
+ * Note this is NOT the tracelens that ends up in a recorded start command:
+ * bring-up installs tracelens editable into the SERVICE's own venv and records
+ * that copy's path (see bringup's `start_instruction`), because tracelens has
+ * to be importable by the interpreter it wraps. This path is only how the
+ * extension invokes the engines themselves.
  *
  * The Rust `index` binary resolves through its own chain: config override →
  * the checkout's release build → the downloaded ~/.vinv/bin copy → PATH.

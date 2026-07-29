@@ -44,7 +44,9 @@ _START_KW = {
     "vinv_md": "/r/.vinv/vinv.md",
     "tracelens_install_block": "INSTALL",
     "_caps_base": "/caps",
-    "_tracelens_cmd": "tracelens",
+    "_tracelens_cmd": "<venv-bin>/tracelens",
+    "_venv_bin": "<venv-bin>",
+    "_venv_python": "<venv-bin>/python",
     "_target_pkg_note": "NOTE",
     "_target_pkg_flags": "  --target-package svc \\\n",
     "tracelens_subdir": "sess/",
@@ -96,3 +98,40 @@ def test_portable_start_keeps_deliverable_contract() -> None:
     assert "trace.jsonl" in out                      # tracelens output path
     assert _START_KW["start_commands_json"] in out   # where to write the deliverable
     assert '"verified"' in out                       # the verified-command JSON schema
+
+
+@pytest.mark.parametrize("key", ["start_instruction", "start_instruction_portable"])
+def test_recorded_command_template_is_venv_qualified(key: str) -> None:
+    """The JSON the agent copies must never show a bare `tracelens` / `python`.
+
+    Agents fill the ``<pkg>``/``<module>``/``<args>`` slots of the deliverable
+    template and leave the rest verbatim, so whatever shape that template has is
+    the shape that lands in ``.vinv/start_commands/<svc>.json``. A bare
+    ``tracelens run … -- python -m …`` resolves in the agent's own shell but
+    fails ``exit 127`` when the extension replays it through ``bash -lc``.
+    """
+    out = _template(key).format(**_START_KW)
+    recorded = [ln for ln in out.splitlines() if '"command":' in ln]
+    assert recorded, f"{key} has no deliverable command template"
+    for line in recorded:
+        if "docker compose" in line:
+            continue  # a detached dependency entry, not the tracelens start
+        assert '"PATH=' in line, f"{key}: recorded command lacks an inline PATH: {line}"
+        assert _START_KW["_tracelens_cmd"] in line, f"{key}: bare tracelens in {line}"
+        assert " -- python " not in line, f"{key}: bare interpreter in {line}"
+        assert _START_KW["_venv_python"] in line, f"{key}: no venv interpreter in {line}"
+
+
+@pytest.mark.parametrize("key", ["start_instruction", "start_instruction_portable"])
+def test_start_templates_carry_replay_contracts(key: str) -> None:
+    """Both variants must state that the recorded string outlives the agent's shell.
+
+    The portable variant is the ONLY one the VS Code extension renders
+    (``--print-prompt --portable``), so a contract present in the full runbook
+    alone protects nobody in practice.
+    """
+    out = _template(key).format(**_START_KW)
+    assert "SELF-CONTAINED" in out            # recorded ≠ what your shell can resolve
+    assert "exit 127" in out                  # the concrete failure it prevents
+    assert "REPLAY CONTRACT" in out           # foreground-only, no `&` / nohup / redirect
+    assert "bash -lc" in out                  # how the replayer actually runs it
