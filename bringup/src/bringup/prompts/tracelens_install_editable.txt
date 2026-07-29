@@ -38,6 +38,18 @@ The third command MUST print ``otel-api: {_OTEL_CORE_VERSION} instrumentation: {
 
 If Step 3 instead fails with ``ModuleNotFoundError`` for the **service's own** packages (e.g. ``No module named 'fastapi'``), the service's dependency install never populated this venv — that is a STEP 0 problem, not an OTel one. Re-check which manager the manifest names and re-install into this same venv; do not create a second venv.
 
+# Step 4 — instrument the service's OWN third-party libraries, not just the web framework.
+
+```bash
+<venv-python> -m opentelemetry.instrumentation.bootstrap -a install
+```
+
+Steps 2-3 pin the framework instrumenters. They do NOT cover the libraries the service itself calls out through — `aiohttp`, `urllib3`/`requests`, `logging`, database and cache clients. Each needs its own `opentelemetry-instrumentation-*` package, and `bootstrap -a install` resolves that from what is actually installed in THIS venv rather than a guess. Run it after the service's own dependencies are installed, or it will not see them.
+
+Without this the run still succeeds and `trace.jsonl` still fills — tracelens's AST hook covers the `--target-package` code either way — so nothing fails loudly. What is lost is every **outbound** call: an HTTP request to a model API or another service produces no child span, so its latency is charged to the calling function as unexplained self-time. Downstream that is actively harmful, not merely thinner: the optimization pass ranks by recoverable time and will nominate a function that is doing nothing but waiting on the network, and fan-out/N+1 detection sees twenty sequential API calls as one slow call. Do not skip this step because the service starts fine without it.
+
+`tracelens run` prints one `… is installed but its instrumenter … is not` warning per uninstrumented library. After this step those warnings should be gone for everything the service actually uses; any that remain name a library with no instrumenter available, which is fine to leave.
+
 If `{tl_pkg}` does not exist on this machine (e.g. a packaged build with a different layout), the operator can override with the `VINV_TRACELENS_PACKAGE_PATH` env var before launching bringup.
 
 **Instrumentation is required, but self-heal before giving up.** If the editable install fails (filesystem, build error, missing OTel wheels, `No module named pip`), FIRST diagnose and apply the obvious fix per the Prime Directive (use `uv pip install` for uv venvs, the venv interpreter explicitly, install a missing build tool) and RETRY. Do NOT proceed without instrumentation — downstream stages depend on `tracelens run` — but do NOT quit on the first error. Only stop and report (exact failing command + stderr) after exhausting the fixes.
