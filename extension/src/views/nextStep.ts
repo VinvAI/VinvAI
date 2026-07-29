@@ -51,6 +51,33 @@ function openPendingEdges(workspaceRoot: string): number {
 }
 
 /**
+ * The three post-green pipeline stages, as observable disk facts.
+ *
+ * Auto-Pilot schedules these from an in-memory ledger (planPipelineAction),
+ * which a compass reading a cold workspace cannot see — so these read the
+ * artifact each pass actually writes. Same order the scheduler drains them in,
+ * so driving manually walks the same path Auto-Pilot would.
+ */
+function hasInsights(workspaceRoot: string): boolean {
+	// The insight pass writes a manifest last; its presence means the pass ran.
+	return fs.existsSync(path.join(workspaceRoot, '.vinv', 'reports', 'index.json'));
+}
+
+function hasProbes(workspaceRoot: string): boolean {
+	try {
+		return fs
+			.readdirSync(path.join(workspaceRoot, '.vinv', 'probes'))
+			.some((f) => f.endsWith('.json'));
+	} catch {
+		return false;
+	}
+}
+
+function hasExerciseScorecard(workspaceRoot: string): boolean {
+	return fs.existsSync(path.join(workspaceRoot, '.vinv', 'exercise', 'scorecard.json'));
+}
+
+/**
  * Enhancement is once-per-epoch and TERMINAL, so a raw pending count is the
  * wrong gate: the agent abstains on genuinely indistinguishable candidates and
  * abstentions are never written to edge_overrides.jsonl, leaving the count
@@ -119,14 +146,6 @@ export async function computeNextStep(
 			command: 'vinv-vs.indexProject',
 		};
 	}
-	if (graphNeedsEnhancing(workspaceRoot)) {
-		return {
-			label: 'Enhance the graph',
-			detail:
-				'An agent resolves the ambiguous cross-file references the deterministic resolver refused to guess — sharper PageRank, slices and blast radius.',
-			command: 'vinv-vs.enhanceGraph',
-		};
-	}
 	const services = readServices(workspaceRoot);
 	const unstarted = services.filter((s) => !isServiceStarted(workspaceRoot, s.name));
 	if (unstarted.length > 0) {
@@ -149,10 +168,49 @@ export async function computeNextStep(
 			args: services.length > 0 ? [services[0].name] : undefined,
 		};
 	}
+	// The post-green pipeline, in the scheduler's own order. These used to be
+	// missing entirely: Auto-Pilot ran insights → probes → exercise, but a user
+	// driving manually went straight from "a capture exists" to "everything is
+	// wired" and was never told any of it was outstanding.
+	if (!hasInsights(workspaceRoot)) {
+		return {
+			label: 'Build insights',
+			detail:
+				'Turns the captured traces into call trees, latency profiles and reports — the runtime half of every answer and context pack.',
+			command: 'vinv-vs.runInsights',
+		};
+	}
+	if (!hasProbes(workspaceRoot)) {
+		return {
+			label: 'Run probes',
+			detail:
+				'Exercises each green service to find what actually breaks — the evidence issues and episodes are built from.',
+			command: 'vinv-vs.runProbes',
+		};
+	}
+	if (!hasExerciseScorecard(workspaceRoot)) {
+		return {
+			label: 'Exercise the services',
+			detail:
+				'Plan → run → profile → scorecard over every endpoint, which is what fills the Journey and Findings views. No standalone command yet — Auto-Pilot drives this stage.',
+			command: 'vinv-vs.autoPilot',
+		};
+	}
+	// Deliberately LAST of the actionable rungs. Enhancement sharpens PageRank,
+	// slices and blast radius, but nothing upstream needs it — putting it early
+	// blocked the path to services and tracing behind an optional refinement.
+	if (graphNeedsEnhancing(workspaceRoot)) {
+		return {
+			label: 'Enhance the graph',
+			detail:
+				'An agent resolves the ambiguous cross-file references the deterministic resolver refused to guess — sharper PageRank, slices and blast radius.',
+			command: 'vinv-vs.enhanceGraph',
+		};
+	}
 	return {
 		label: 'Ask Vinv about this codebase',
 		detail:
-			'Everything is wired: static graph + runtime evidence. Ask a question, or send a task to your coding harness as a closed-loop episode.',
+			'Everything is wired: static graph + runtime evidence, insights built, probes and exercise run. Ask a question, or send a task to your coding harness as a closed-loop episode.',
 		command: 'vinv-vs.askVinv',
 	};
 }
