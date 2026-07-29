@@ -185,6 +185,12 @@ function fixTask(service: string, step: PilotStep, detail: string): EpisodeTask 
 			`.vinv/start_commands/${slug}.json records verified: true with a foreground start command`,
 			'That command starts the service, it keeps running, and it accepts connections on its recorded port (when one is recorded)',
 			'No new errors appear in the startup output',
+			// Load-bearing, not a nicety: without it the cheapest way to make a
+			// broken `tracelens run …` command start is to delete the wrapper,
+			// which satisfies every criterion above while silently ending tracing.
+			// Guidance can be ignored; a criterion is checked.
+			'If the command was tracelens-wrapped it still is, and replaying it grows the recorded ' +
+				'trace.jsonl beyond zero lines — a green service with no traces does NOT pass',
 		],
 	};
 }

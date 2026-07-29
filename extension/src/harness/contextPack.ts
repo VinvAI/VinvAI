@@ -421,6 +421,29 @@ export function composePackContent(
 				'redirection) — the harness will replay it exactly as recorded to verify your fix. If the ' +
 				'start command itself must change, update that JSON file with the corrected plain foreground form.',
 		);
+		lines.push('');
+		// Without this, the cheapest way to make a broken `tracelens run …`
+		// command start is to delete the wrapper — which passes every criterion
+		// while silently ending tracing, and tracing is the entire point.
+		lines.push(
+			'**If the recorded command wraps the process in `tracelens run`, it MUST STILL wrap it after ' +
+				'your fix.** That wrapper is what produces the runtime evidence everything downstream is ' +
+				'built from; a service that starts green with no traces is a WORSE outcome than one that ' +
+				'does not start, because nothing reports it. Keep the `--target-package` flags and the ' +
+				'`--output` path exactly as recorded. Never "fix" a start failure by removing tracelens, ' +
+				'and never drop it because it is hard to resolve.',
+		);
+		lines.push(
+			'A `tracelens: command not found` (exit 127) means the command relies on a PATH it does not ' +
+				'carry — Vinv’s bring-up shell had the engine `bin/` prepended, and nothing that replays ' +
+				'the command does. Make the recorded string self-contained instead of removing the wrapper: ' +
+				'prepend the service venv’s `bin/` to `PATH` INLINE in the command (an absolute path to ' +
+				'`tracelens` alone is not enough — it shells out to `opentelemetry-instrument`, which lives ' +
+				'in that same `bin/`), and name the interpreter explicitly rather than a bare `python`. ' +
+				'`tracelens` must also be importable BY that interpreter: the child hook is injected through ' +
+				'`sitecustomize` and swallows a failed `import tracelens` silently, leaving parent-process ' +
+				'spans only and no error. Verify with `<venv>/bin/python -c "import tracelens"`.',
+		);
 	}
 	return { content: lines.join('\n') + '\n', sliceRows: slice.map((n) => n.row) };
 }
