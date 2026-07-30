@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { spawn, type ChildProcess } from 'child_process';
-import { readStartCommands } from './bringup';
+import { readServices, readStartCommands, type StartCommand } from './bringup';
+import { missingTargetPackage } from './targetPackages';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
 
 /**
@@ -309,17 +310,65 @@ export function initServiceRunner(context: vscode.ExtensionContext): void {
  * focused instead of launching a duplicate. Returns false when nothing is
  * recorded yet (bring the service up first).
  */
+/** Services already warned about this session — one notice, not one per start. */
+const staleTargetWarned = new Set<string>();
+
+/**
+ * Tells the user when the recorded command instruments the wrong package, and
+ * offers the one action that repairs it (re-running bring-up re-records it).
+ */
+function warnOnStaleTargetPackage(
+	workspaceRoot: string,
+	service: string,
+	commands: StartCommand[],
+): void {
+	if (staleTargetWarned.has(service)) {
+		return;
+	}
+	const entry = readServices(workspaceRoot).find((s) => s.name === service);
+	if (!entry) {
+		return;
+	}
+	const missing = commands
+		.map((c) => missingTargetPackage(c.command, entry))
+		.find((m): m is string => !!m);
+	if (!missing) {
+		return;
+	}
+	staleTargetWarned.add(service);
+	void vscode.window
+		.showWarningMessage(
+			`Vinv: ${service} will be traced without its own package '${missing}' — its recorded ` +
+				'start command instruments something else, so its handlers produce no spans and ' +
+				'every endpoint will report 0% coverage. Re-running setup re-records the command.',
+			'Re-run Setup',
+			'Run Anyway',
+		)
+		.then((choice) => {
+			if (choice === 'Re-run Setup') {
+				void vscode.commands.executeCommand('vinv-vs.serviceSetup', service);
+			}
+		});
+}
+
 export function startService(workspaceRoot: string, service: string): boolean {
 	if (sessions.has(service)) {
 		// Already running — its session is in the toolbar; don't launch a duplicate.
 		return true;
 	}
-	if (readStartCommands(workspaceRoot, service).length === 0) {
+	const commands = readStartCommands(workspaceRoot, service);
+	if (commands.length === 0) {
 		void vscode.window.showWarningMessage(
 			`Vinv: No verified start command for ${service}. Bring it up first.`,
 		);
 		return false;
 	}
+	// The recorded command is replayed verbatim, so a stale `--target-package`
+	// survives every later fix: the service comes up green and traces none of its
+	// own code, which downstream reads as 0% coverage rather than as a defect.
+	// Warn rather than block — the run is still useful, and re-recording the
+	// command means re-running bring-up, which is the user's call.
+	warnOnStaleTargetPackage(workspaceRoot, service, commands);
 	const config: VinvDebugConfig = {
 		type: DEBUG_TYPE,
 		name: `Vinv: ${service}`,

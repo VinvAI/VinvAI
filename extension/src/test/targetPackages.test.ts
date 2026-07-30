@@ -17,6 +17,8 @@ import * as path from 'path';
 import {
 	entrypointModule,
 	judgeOwnCode,
+	missingTargetPackage,
+	recordedTargetPackages,
 	rootPackage,
 	serviceForEndpointFile,
 	targetPackagesFor,
@@ -182,6 +184,62 @@ suite('targetPackages: which capture an endpoint should overlay', () => {
 		assert.strictEqual(
 			serviceForEndpointFile([{ name: 'api', command: 'python -m uvicorn acme.api:app' }], 'acme/routes/users.py'),
 			'api',
+		);
+	});
+});
+
+// targetPackagesFor governs what a NEW bring-up records. The recorded command
+// lives outside the repo and is replayed verbatim, so a service brought up by an
+// older build keeps instrumenting the wrong package forever — green every time,
+// and zero coverage every time. This is the pre-run check for that.
+suite('targetPackages: a recorded command that instruments the wrong package', () => {
+	const service = {
+		command: 'python -m uvicorn examples.async_agent.main:app --host 0.0.0.0 --port 8000',
+		modules: ['smolagents'],
+	};
+
+	test('the real recorded command names the package it is missing', () => {
+		const recorded =
+			'PATH="/c/p/.venv/Scripts:$PATH" /c/p/.venv/Scripts/tracelens run ' +
+			'--target-package smolagents --output C:/p/.vinv/captures/x/trace.jsonl --sample-rate 1.0 ' +
+			'-- /c/p/.venv/Scripts/python.exe -m uvicorn examples.async_agent.main:app --port 8000';
+		assert.strictEqual(missingTargetPackage(recorded, service), 'examples');
+	});
+
+	test('a command that already instruments the entrypoint package is fine', () => {
+		const recorded =
+			'tracelens run --target-package smolagents --target-package examples -o t.jsonl ' +
+			'-- python -m uvicorn examples.async_agent.main:app';
+		assert.strictEqual(missingTargetPackage(recorded, service), null);
+	});
+
+	test('the -t spelling counts too', () => {
+		assert.strictEqual(
+			missingTargetPackage('tracelens run -t examples -- python -m uvicorn examples.async_agent.main:app', service),
+			null,
+		);
+	});
+
+	// No tracelens wrapper is a different defect (untraced service), and reporting
+	// a "wrong target package" for it would send the user at the wrong repair.
+	test('a command with no target flags at all is not a wrong-target report', () => {
+		assert.strictEqual(
+			missingTargetPackage('python -m uvicorn examples.async_agent.main:app', service),
+			null,
+		);
+	});
+
+	test('an unreadable entrypoint yields no opinion', () => {
+		assert.strictEqual(
+			missingTargetPackage('tracelens run -t acme -- python app.py', { command: 'python app.py' }),
+			null,
+		);
+	});
+
+	test('recordedTargetPackages reads both spellings, in order', () => {
+		assert.deepStrictEqual(
+			recordedTargetPackages('tracelens run -t a --target-package b -t c -o x.jsonl -- py m.py'),
+			['a', 'b', 'c'],
 		);
 	});
 });

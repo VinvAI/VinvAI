@@ -173,6 +173,44 @@ export function serviceForEndpointFile(
 }
 
 /**
+ * The `--target-package` values a recorded start command actually carries.
+ * Both spellings tracelens accepts, matching tracedRun's own parsing.
+ */
+export function recordedTargetPackages(command: string): string[] {
+	return [...command.matchAll(/(?:--target-package|-t)\s+(\S+)/g)].map((m) => m[1]);
+}
+
+/**
+ * The package a recorded start command fails to instrument, or null when it is
+ * fine (or unknowable).
+ *
+ * Checked BEFORE a run, from the record alone — no trace needed. The bring-up
+ * path now appends the entrypoint's package (targetPackagesFor), but that only
+ * governs what a NEW bring-up records: `.vinv/start_commands/<service>.json`
+ * lives outside the repo and is replayed verbatim, so a service brought up by an
+ * older build keeps instrumenting the wrong package indefinitely. Every capture
+ * it produces then has inbound spans and not one application frame, which reads
+ * downstream as 0% coverage on a green service.
+ */
+export function missingTargetPackage(
+	command: string,
+	service: { command?: string; modules?: string[] },
+): string | null {
+	const entry = service.command ? entrypointModule(service.command) : null;
+	if (!entry) {
+		return null;
+	}
+	const recorded = recordedTargetPackages(command);
+	// No flags at all means tracelens is not wrapping this command — a service
+	// started without tracing is a different problem, not a wrong target.
+	if (recorded.length === 0) {
+		return null;
+	}
+	const root = rootPackage(entry);
+	return recorded.includes(root) ? null : root;
+}
+
+/**
  * Whether a trace shows the service's OWN code running, and can say so.
  *
  * Answers three ways on purpose. `unknown` (no entrypoint package, or no

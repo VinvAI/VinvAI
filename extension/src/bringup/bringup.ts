@@ -1,7 +1,12 @@
 import * as path from 'path';
 import * as fs from 'fs';
 
-import { entrypointModule, judgeOwnCode, type OwnCodeVerdict } from './targetPackages';
+import {
+	entrypointModule,
+	judgeOwnCode,
+	serviceForEndpointFile,
+	type OwnCodeVerdict,
+} from './targetPackages';
 
 /** Project-local service inventory: <workspace>/.vinv/services.json */
 export function getServicesPath(workspaceRoot: string): string {
@@ -193,6 +198,29 @@ export function readBringupOutcome(workspaceRoot: string, service: string): Brin
 	} catch {
 		return { state: 'unattempted' };
 	}
+}
+
+/**
+ * The capture subdirectory to overlay an endpoint from — the slug of whichever
+ * service defines it, or undefined when the join is ambiguous.
+ *
+ * Lives here, next to `readServices`, because THREE call sites need it and
+ * missing one is not a cosmetic slip: the call-tree view re-runs `tracemap`
+ * every second and rewrites the very snapshot the insight pass wrote, so a view
+ * that omits the service silently replaces a correct overlay with one read off
+ * whichever service traced most recently.
+ */
+export function captureServiceFor(
+	workspaceRoot: string,
+	file: string | undefined,
+): string | undefined {
+	if (!file) {
+		return undefined;
+	}
+	const name = serviceForEndpointFile(readServices(workspaceRoot), file);
+	// Captures are keyed by the SLUG (.vinv/captures/<session>/<slug>/), which is
+	// what the engine matches the directory name against.
+	return name ? serviceSlug(name) : undefined;
 }
 
 /** Pulls span component names out of a trace without parsing every line. */

@@ -86,26 +86,11 @@ function writeInsightManifest(workspaceRoot: string, manifest: InsightManifest):
 	fs.renameSync(tmp, target);
 }
 
-import { readServices, serviceSlug } from '../bringup/bringup';
-import { serviceForEndpointFile } from '../bringup/targetPackages';
+import { captureServiceFor } from '../bringup/bringup';
 
 /** Filename-safe id, mirroring the smoke report's own sanitization. */
 function safeId(apiId: string): string {
 	return apiId.replace(/[^A-Za-z0-9._-]/g, '_');
-}
-
-/**
- * The capture subdirectory to overlay an endpoint from — the slug of whichever
- * service defines it, or undefined when the join is ambiguous.
- */
-export function captureServiceFor(workspaceRoot: string, file: string | undefined): string | undefined {
-	if (!file) {
-		return undefined;
-	}
-	const name = serviceForEndpointFile(readServices(workspaceRoot), file);
-	// Captures are keyed by the SLUG (.vinv/captures/<session>/<slug>/), which is
-	// what the engine matches the directory name against.
-	return name ? serviceSlug(name) : undefined;
 }
 
 /** Where an endpoint's call-tree snapshot lives. */

@@ -1,7 +1,14 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getCallTree, getTraceMap, type CallNode, type TraceMapResult } from './identification';
+import {
+	getCallTree,
+	getTraceMap,
+	readEntryPoints,
+	type CallNode,
+	type TraceMapResult,
+} from './identification';
+import { captureServiceFor } from '../bringup/bringup';
 import { VINV_BASE_CSS, VINV_FONT_SERIF } from '../views/webviewTheme';
 import { getTraceMemory, memoryForNode, type TraceMemory } from './traceMemory';
 import { generateSmokeReport } from '../tracelens/report';
@@ -233,13 +240,26 @@ function wireCallTree(
 	})();
 
 	// 2) Runtime overlay — poll tracemap every second while the tab is open.
+	//
+	// The capture is chosen by the service that DEFINES this endpoint. Omitting it
+	// made the engine fall back to "the freshest trace.jsonl anywhere", and since
+	// this poll rewrites .vinv/reports/calltree-<id>.json — the same snapshot the
+	// insight pass writes — merely opening the tab replaced a correct overlay with
+	// one read off whichever service happened to trace last. On a repo with four
+	// traced services that showed every node "not run" at 0% coverage, with
+	// `status: ok` and nothing naming the mismatch. Resolved once: services.json
+	// does not change while a tab is open.
+	const captureService = captureServiceFor(
+		workspaceRoot,
+		readEntryPoints(workspaceRoot).find((e) => e.id === apiId)?.file,
+	);
 	const tick = async (): Promise<void> => {
 		if (polling || disposed) {
 			return;
 		}
 		polling = true;
 		try {
-			const map = await getTraceMap(context, workspaceRoot, apiId);
+			const map = await getTraceMap(context, workspaceRoot, apiId, captureService);
 			// The binary's overlay has latency but not memory; attribute memory
 			// from the raw trace and merge it onto each executed node.
 			enrichWithMemory(map, getTraceMemory(workspaceRoot));
