@@ -471,6 +471,51 @@ function validWalk(raw: unknown): raw is WalkParams {
 }
 
 /**
+ * Would this stored policy be valid but for the declared v2 -> v3 grid change?
+ *
+ * The version number alone cannot answer that. A v2 file can fail validation
+ * for reasons the grid change does not explain — a truncated write, a bad hand
+ * edit, an out-of-range budget — and reporting those as "grid change v2->v3:
+ * snippet_chars removed from the arm space" asserts a cause nothing established.
+ * That is the exact failure this whole change set exists to remove: a reader
+ * could not tell a deliberate reset from a malformed file, three states with one
+ * rendering, and answering "migration" from the version alone rebuilds it one
+ * level up.
+ *
+ * So the claim is TESTED rather than assumed: rebuild the record as if the
+ * declared migration had already been applied, and hand it to the ordinary
+ * validator. If it passes, the version step really was the only thing wrong. If
+ * anything still fails, there is a second fault and the reason must say so.
+ *
+ * Only the two casualties the step genuinely causes are neutralised — the arm
+ * index (v2's grid was twice as wide, and the arm it had promoted ceases to
+ * exist) and the absent `qna_snippet_chars`, which v2 had no field for.
+ * `preferred_arm` is first checked against V2's range: an index outside 0..7 was
+ * never valid under either grid, so it is corruption rather than a step.
+ * `arm_levels` and `arm_posteriors` need no allowance — the current validator
+ * already ignores the removed `snippet_chars` levels and does not constrain
+ * posterior array length.
+ */
+function failsOnlyOnGridChange(raw: Partial<EpisodePolicy>): boolean {
+	const rawVersion = (raw as { version?: unknown }).version;
+	if (rawVersion !== POLICY_PRIORS.version - 1) {
+		return false;
+	}
+	const preferred = (raw as { preferred_arm?: unknown }).preferred_arm;
+	if (!Number.isInteger(preferred) || (preferred as number) < 0 || (preferred as number) > 7) {
+		return false; // never valid under v2 either — corrupt, not migrated
+	}
+	const qna = (raw as { qna_snippet_chars?: unknown }).qna_snippet_chars;
+	const asIfMigrated = {
+		...raw,
+		version: POLICY_PRIORS.version,
+		preferred_arm: POLICY_PRIORS.preferred_arm,
+		qna_snippet_chars: qna ?? POLICY_PRIORS.qna_snippet_chars,
+	} as Partial<EpisodePolicy>;
+	return validPolicy(asIfMigrated);
+}
+
+/**
  * Loads the learned episode policy, falling back to the priors. Malformed or
  * out-of-range values are rejected wholesale (and the rejection is logged) —
  * a partially-honored policy would corrupt the logged propensities.
@@ -502,7 +547,13 @@ export function loadEpisodePolicy(): EpisodePolicy {
 		// arms — arm 4, the one v2 had promoted, ceases to exist. Discarding them
 		// is correct AND cheap here (the ledger holds one objective observation),
 		// but it must be a declared reset rather than a silent fallback.
-		const migration = storedVersion === POLICY_PRIORS.version - 1;
+		//
+		// Established rather than assumed (see failsOnlyOnGridChange): a v2 file
+		// that ALSO fails on something the step does not explain gets its own
+		// reason, because calling that a clean migration would assert a cause we
+		// have not shown — the very thing this record exists to stop doing.
+		const migration = failsOnlyOnGridChange(raw);
+		const staleVersion = storedVersion === POLICY_PRIORS.version - 1;
 		appendEpisodeEvent({
 			type: 'policy_invalidated',
 			ts: new Date().toISOString(),
@@ -512,7 +563,11 @@ export function loadEpisodePolicy(): EpisodePolicy {
 				? 'grid change v2->v3: snippet_chars removed from the arm space (it was '
 					+ 'inert on the pack path), so arm indices are not comparable and the '
 					+ 'stored posteriors were discarded'
-				: 'stored policy failed validation and was replaced with priors',
+				: staleVersion
+					? 'stored policy is v2 AND fails validation on fields the v2->v3 grid '
+						+ 'change does not account for, so it was discarded as malformed '
+						+ 'rather than migrated'
+					: 'stored policy failed validation and was replaced with priors',
 			declared_migration: migration,
 			discarded_arm_count: discardedArms,
 			arm_count: 1 << EPISODE_FEATURES.length,

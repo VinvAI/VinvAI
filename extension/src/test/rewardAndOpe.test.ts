@@ -414,6 +414,70 @@ suite('Adaptive replay budget', () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
+	// A reset must say WHY, and must not claim a cause it has not established.
+	// v2 -> v3 dropped snippet_chars from the arm grid, so a clean v2 file is a
+	// declared migration — but a v2 file that is ALSO malformed is not, and
+	// deciding that from the version number alone (`stored === current - 1`)
+	// labels corruption as a tidy migration. That is the same "three states, one
+	// rendering" defect the ledger record exists to remove.
+	test('a v2 policy is only called a migration when the grid step is the ONLY fault', () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-home-mig-'));
+		const prior = process.env.VINV_HOME;
+		process.env.VINV_HOME = dir;
+		const policyPath = path.join(dir, 'episode-policy.json');
+		const ledger = (): Array<Record<string, unknown>> =>
+			fs
+				.readFileSync(path.join(dir, 'telemetry', 'episodes.jsonl'), 'utf8')
+				.split('\n')
+				.filter(Boolean)
+				.map((l) => JSON.parse(l) as Record<string, unknown>);
+		// A v2 file is exactly a v3 one minus qna_snippet_chars, with the wider
+		// arm space it used to have.
+		const v2 = (over: Record<string, unknown> = {}): string => {
+			const p = { ...POLICY_PRIORS, version: 2, preferred_arm: 4, ...over } as Record<string, unknown>;
+			delete p.qna_snippet_chars;
+			return JSON.stringify(p);
+		};
+		try {
+			// Clean v2: everything checks out but the declared step.
+			fs.writeFileSync(policyPath, v2());
+			assert.deepStrictEqual(loadEpisodePolicy(), POLICY_PRIORS);
+			let last = ledger()[ledger().length - 1];
+			assert.strictEqual(last.declared_migration, true);
+			assert.match(String(last.reason), /grid change v2->v3/);
+			assert.strictEqual(last.from_version, 2);
+
+			// v2 AND a second fault the grid change does not account for. The
+			// version step cannot explain an out-of-range attempt budget, so
+			// calling this a migration would assert a cause we have not shown.
+			fs.writeFileSync(policyPath, v2({ attempt_budget: 99 }));
+			assert.deepStrictEqual(loadEpisodePolicy(), POLICY_PRIORS);
+			last = ledger()[ledger().length - 1];
+			assert.strictEqual(last.declared_migration, false, 'a second fault is not a migration');
+			assert.match(String(last.reason), /does not account for/);
+
+			// An arm index outside v2's OWN 0..7 range was never valid under
+			// either grid — corruption, not a step.
+			fs.writeFileSync(policyPath, v2({ preferred_arm: 99 }));
+			assert.deepStrictEqual(loadEpisodePolicy(), POLICY_PRIORS);
+			assert.strictEqual(ledger()[ledger().length - 1].declared_migration, false);
+
+			// And an unrelated version still reads as plain corruption.
+			fs.writeFileSync(policyPath, JSON.stringify({ ...POLICY_PRIORS, version: 1 }));
+			assert.deepStrictEqual(loadEpisodePolicy(), POLICY_PRIORS);
+			last = ledger()[ledger().length - 1];
+			assert.strictEqual(last.declared_migration, false);
+			assert.match(String(last.reason), /failed validation/);
+		} finally {
+			if (prior === undefined) {
+				delete process.env.VINV_HOME;
+			} else {
+				process.env.VINV_HOME = prior;
+			}
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test('policy replay block: priors fill absent, invalid rejected wholesale', () => {
 		assert.deepStrictEqual(replayParams(POLICY_PRIORS), REPLAY_PRIORS);
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-home-'));
