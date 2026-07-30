@@ -130,7 +130,11 @@ never a guessed default — so the tree is buildable. For a Python service, addi
    returns an empty reply / HTTP `000` — that combination means **still booting**, not failed.
    - **Two positive proofs it is alive and you must keep waiting:** the `trace.jsonl` line count is
      **growing** (`wc -l {_caps_base}/{_g0}<service>/trace.jsonl` a few seconds apart), or the
-     process is in the table (`pgrep -af "tracelens run|<module>"`).
+     process is in the table (`pgrep -af "tracelens run|<module>"`, or `tasklist | grep -i tracelens`
+     on Windows).
+   - **Use the port-probe tool this host actually has** — `lsof` on macOS/Linux, `netstat -ano |
+     grep -w LISTENING | grep ':<port>'` on Windows. `lsof: command not found` in Git Bash says
+     nothing about the server; it is not a "not listening" result.
    - Ignore benign `Attempting to instrument while already instrumented` noise — it is not a crash.
    - **Do NOT relaunch a server that is still booting** — each relaunch resets the startup clock and
      throws away all boot progress. As long as the log keeps advancing, keep waiting.
@@ -143,9 +147,24 @@ never a guessed default — so the tree is buildable. For a Python service, addi
    count = **verified**. A 500 on every request means it booted but isn't really serving — check
    tracelens flags / env / instrumentation conflicts.
 7. **Stop the service, then record the command.** The deliverable is the *verified start command*,
-   not a live process. Find the PID (`lsof -nP -iTCP:<port> -sTCP:LISTEN`) and `kill -TERM <pid>`
-   (tracelens flushes its JSONL and writes `<output>.summary.json` on the way out). Then write the
-   deliverable below.
+   not a live process. Find the listening PID with whichever tool this host has — `lsof -nP
+   -iTCP:<port> -sTCP:LISTEN` on macOS/Linux, or `netstat -ano | grep -w LISTENING | grep ':<port>'`
+   on Windows, where the PID is the LAST column (Git Bash has no `lsof`; its "command not found" is
+   not evidence the service stopped). Then stop it:
+   - **macOS/Linux:** `kill -TERM <pid>` — tracelens flushes its JSONL and writes
+     `<output>.summary.json` on the way out.
+   - **Windows:** `kill -TERM` **does not work and lies about it** — MSYS `kill` knows only MSYS
+     pids, so against a native pid it answers `No such process` and exits 1 **while the server is
+     still serving**. Never read that as "already stopped". Use `taskkill /F /T /PID <pid>` (single
+     slashes in Git Bash — `//F` is rejected) against the **root `tracelens.exe`**: the tree is
+     `tracelens.exe → python.exe → python.exe`, and killing an inner node leaves the leaf holding
+     the port. Plain `taskkill` without `/F` is refused by this tree, so `/F /T` is expected here.
+
+   **Confirm the port is actually free before finishing** — re-run the probe and require it to
+   return nothing. A bring-up that leaves the port held makes the NEXT launch die with "address
+   already in use". On Windows the forced kill skips tracelens's shutdown hook so
+   `<output>.summary.json` is not written; that is an accepted loss (`trace.jsonl` is what
+   downstream needs) — do not retry over it and do not call the verification failed.
 
 ### REQUIRED DELIVERABLE — write the verified start command(s)
 
@@ -177,9 +196,17 @@ tool:
 }}
 ```
 
-**`verification.probe` selects the readiness oracle replayers use** — record the one matching what
-the service actually is: `{{"type": "port"}}` for an HTTP service (default when `port` is set);
-`{{"type": "stdio-jsonrpc"}}` for a stdio JSON-RPC server (MCP style — no port; readiness is
+**`verification.probe` selects the readiness oracle replayers use** — and you must **classify by
+what the process BINDS, not by what it is CALLED.** A service named `*-mcp-server` is very often an
+ordinary HTTP app (e.g. a Starlette/FastAPI server that is itself an MCP *client* of some remote
+endpoint). Recording `stdio-jsonrpc` for it sets `"port": null`, so **every future replay fails
+forever** and no fix episode can repair it — this file lives outside the repo. `services.json`
+records `transport` and `port` per service; trust those and your own curl over the name. If you
+verified it by hitting a port, it is a **port** probe whatever it is called.
+
+Record the one matching what the service actually is: `{{"type": "port"}}` for an HTTP service
+(default when `port` is set); `{{"type": "stdio-jsonrpc"}}` ONLY for a server that genuinely binds
+no port and speaks JSON-RPC on stdin/stdout (readiness is
 writing one JSON-RPC initialize line to its stdin and getting a JSON line back on stdout; verify
 it that way yourself, set port/http_status/endpoint_checked to null, and optionally put the exact
 initialize object in `"request"`); `{{"type": "process"}}` for a portless worker/scheduler whose

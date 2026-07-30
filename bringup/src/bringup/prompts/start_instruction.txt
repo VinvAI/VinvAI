@@ -357,6 +357,9 @@ shell first to confirm the flags available in the installed version. Then:
    get_incremental_output(session_name="vinv_{service}")                 # READ-ONLY: scan for "Application startup complete" / "Uvicorn running on"
    send_terminal_command(session_name="vinv_verify", keystrokes="sleep 10 && lsof -nP -iTCP:<port> -sTCP:LISTEN | head -3", duration=14, block=true)   # SEPARATE session
    ```
+   On Windows substitute `netstat -ano | grep -w LISTENING | grep ':<port>'` for
+   the `lsof` call — Git Bash has no `lsof`, and its "command not found" tells
+   you nothing about whether the server is up.
 
    **🚫 DO NOT RELAUNCH A SERVER THAT IS STILL BOOTING.** This is the #1 cause of
    failed bring-ups. Every relaunch **resets the startup clock to zero and throws
@@ -427,12 +430,44 @@ shell first to confirm the flags available in the installed version. Then:
 
 7. **STOP the service, then record the command.** Your deliverable is the
    *verified start command*, not a running process — so once you have confirmed
-   it is alive (step 6), **stop it cleanly**: find its PID
-   (`lsof -nP -iTCP:<port> -sTCP:LISTEN` from `vinv_verify`) and `kill -TERM <pid>`
-   (tracelens flushes its JSONL and writes `<output>.summary.json` on the way
-   out). Confirm the port is no longer LISTENing. THEN write the
-   `verified:true` deliverable with the exact command you used to start it. You
-   do NOT need to leave anything running.
+   it is alive (step 6), **stop it cleanly**. Run all of this from `vinv_verify`,
+   never the server's own session.
+
+   **Find the listening PID with whichever tool this host actually has:**
+   ```bash
+   lsof -nP -iTCP:<port> -sTCP:LISTEN                 # macOS/Linux
+   netstat -ano | grep -w LISTENING | grep ':<port>'  # Windows — PID is the LAST column
+   ```
+   `lsof` does not exist in Git Bash; do not conclude the service is stopped
+   because `lsof` was not found.
+
+   **Then stop it — the right call differs by platform:**
+   - **macOS/Linux:** `kill -TERM <pid>`. tracelens flushes its JSONL and writes
+     `<output>.summary.json` on the way out.
+   - **Windows:** `kill -TERM <pid>` **does not work and lies about it.** MSYS
+     `kill` only understands MSYS pids, so against a native Win32 pid it answers
+     `kill: (<pid>) - No such process` and exits 1 **while the server is still
+     serving on that port**. Never read that message as "already stopped". Use
+     `taskkill /F /T /PID <pid>` instead (single slashes in Git Bash — `//F` is
+     rejected), and target the **root `tracelens.exe`**: the tree is
+     `tracelens.exe → python.exe → python.exe` and killing an inner node leaves
+     the leaf still holding the port. `taskkill` without `/F` is refused by this
+     tree ("can only be terminated forcefully"), so `/F /T` is expected here, not
+     a last resort.
+
+   **Confirm the port is actually free before you finish** — re-run the probe
+   above and require it to return nothing. A bring-up that "succeeded" but left
+   the port held makes the NEXT launch (Run button, probe pass, fix episode) die
+   with "address already in use" — the same breakage the replay contract exists
+   to prevent, arriving through the stop path instead of the start path.
+
+   On Windows a forced kill skips tracelens's shutdown hook, so
+   `<output>.summary.json` is not written. That is an accepted loss:
+   `trace.jsonl` is the artifact downstream stages need. Do not retry, and do
+   not treat the missing summary as a failed verification.
+
+   THEN write the `verified:true` deliverable with the exact command you used to
+   start it. You do NOT need to leave anything running.
 
 ### Workspace
 
@@ -528,12 +563,14 @@ Concrete checklist — answer each one explicitly in your trajectory:
    from the server's own `vinv_{service}` session (a `send_terminal_command` into
    that session kills the foreground server). Run:
    ```bash
-   lsof -nP -iTCP:<port> -sTCP:LISTEN | head -3
+   lsof -nP -iTCP:<port> -sTCP:LISTEN | head -3                 # macOS/Linux
+   netstat -ano | grep -w LISTENING | grep ':<port>' | head -3  # Windows (no lsof in Git Bash)
    curl -sS -o /dev/null -w "%{{http_code}}\n" --max-time 5 http://localhost:<port>/
    ```
    A LISTEN row + any HTTP response (even 404 / 500) counts as alive.
    *No LISTEN row* means the service never started — go back and start it
-   before declaring done.
+   before declaring done. `lsof: command not found` is NOT a "no LISTEN row";
+   it means you used the wrong tool for this host — re-probe with `netstat`.
 
 3. **Confirm the service actually serves a request, not just starts.**
    Many fail-modes (e.g. tracelens `--capture-determinism` clashing with
@@ -682,10 +719,20 @@ before the `{service}` entry.)
 button) which readiness oracle proves this service alive.** Record the one that
 matches what `{service}` actually is:
 
+**Classify by what the process BINDS, not by what it is CALLED.** The name is not
+evidence. A service called `*-mcp-server` is very often an ordinary HTTP app —
+e.g. a Starlette/FastAPI server that happens to be an MCP *client* of some remote
+endpoint — and recording `stdio-jsonrpc` for it sets `"port": null`, so **every
+future replay fails forever** and no fix episode can repair it (this file is
+outside the repo). `.vinv/services.json` already records `transport` and `port`
+per service; trust those and your own verification over the name. If you curl'd a
+port and got a response, it is a **port** probe, whatever it is called.
+
 - `{{"type": "port"}}` — an HTTP service: readiness is its port accepting a
   connection (the default when `port` is set; what you verified with curl).
-- `{{"type": "stdio-jsonrpc"}}` — a stdio JSON-RPC server (an MCP server or
-  similar): it has **no port**, so a port probe can never pass. Readiness is an
+- `{{"type": "stdio-jsonrpc"}}` — a stdio JSON-RPC server: it binds **no port**
+  and speaks JSON-RPC over stdin/stdout, so a port probe can never pass. Record
+  this ONLY when the process genuinely never listens on a port. Readiness is an
   initialize round-trip: spawn the command, write one JSON-RPC initialize line
   to its stdin, expect a JSON line back on stdout. Verify it yourself the same
   way before recording (e.g.
