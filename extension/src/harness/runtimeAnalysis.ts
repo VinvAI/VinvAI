@@ -155,6 +155,74 @@ export function collectRuntimeErrorClusters(
 	};
 }
 
+/**
+ * What a bounded selection actually did.
+ *
+ * Every selector here stops on ONE of two bounds — a Pareto coverage target or a
+ * hard item cap — and until now neither said so. A caller received `4` and had
+ * no way to tell "4 is everything worth having" from "4 is the cap and 196 were
+ * dropped". On this repo the honest answer is the first: the cache selector
+ * returns 4 of 24 and those 4 carry 99.96% of the reclaimable time, the 20
+ * dropped being worth 14.6ms combined against a smallest-kept of 6,583ms. That
+ * is the Pareto head doing its job — but the ONLY way to establish it was to
+ * write a probe, which a user cannot do.
+ *
+ * So the defect was never the bound; it was the silence. This makes the bound
+ * self-describing, and `stopped_by` in particular means we do not have to guess
+ * today whether a cap is set correctly — the first time one fires ahead of the
+ * coverage target, the report says `'cap'` and the evidence arrives on its own.
+ */
+export interface SelectionStats {
+	/** Items handed back. */
+	returned: number;
+	/** Items the analysis found before any bound was applied. */
+	total: number;
+	/** total - returned, precomputed so no caller has to subtract. */
+	dropped: number;
+	/** Share (0..1) of the ranked quantity the returned set covers. */
+	coverage_achieved: number;
+	/**
+	 * Which bound ended the selection. `'exhausted'` means neither fired and the
+	 * result IS everything found — the value that lets a surface say "4 of 4"
+	 * honestly rather than leaving "4" ambiguous.
+	 */
+	stopped_by: 'coverage' | 'cap' | 'exhausted';
+}
+
+/**
+ * The one-line honest rendering of a bounded selection.
+ *
+ * Lives beside `SelectionStats` on purpose: every surface that states a count
+ * should state the SAME thing about it, and a formatter per surface is how two
+ * renderings of one fact drift apart. `noun` is the singular item name, e.g.
+ * 'memoization candidate'.
+ *
+ * The three shapes it produces:
+ *   exhausted -> "4 memoization candidate(s)"                    nothing was dropped
+ *   coverage  -> "4 of 24 memoization candidate(s) — the top 4 carry 100.0% of
+ *                 the ranked total; the rest were below the coverage target"
+ *   cap       -> "8 of 200 … — stopped at the item cap, so the 192 dropped are
+ *                 NOT known to be immaterial"
+ * The cap wording is deliberately louder: a coverage stop has measured that what
+ * it dropped does not matter, and a cap stop has measured nothing of the kind.
+ */
+export function describeSelection(stats: SelectionStats, noun: string): string {
+	const pct = (stats.coverage_achieved * 100).toFixed(1);
+	if (stats.stopped_by === 'exhausted' || stats.dropped === 0) {
+		return `${stats.returned} ${noun}(s)`;
+	}
+	if (stats.stopped_by === 'coverage') {
+		return (
+			`${stats.returned} of ${stats.total} ${noun}(s) — the top ${stats.returned} carry ` +
+			`${pct}% of the ranked total; the remaining ${stats.dropped} fell below the coverage target`
+		);
+	}
+	return (
+		`${stats.returned} of ${stats.total} ${noun}(s) — STOPPED AT THE ITEM CAP at ${pct}% ` +
+		`coverage, so the ${stats.dropped} dropped are not known to be immaterial`
+	);
+}
+
 /** One latency hotspot from the captured trace, with its share of total time. */
 export interface Hotspot {
 	row: number;
@@ -179,19 +247,31 @@ export function selectHotspots(
 	overlay: Record<number, RuntimeOverlay>,
 	coverage = 0.8,
 	cap = 8,
-): Hotspot[] {
+): { items: Hotspot[]; stats: SelectionStats } {
 	const entries = Object.entries(overlay)
 		.map(([row, rt]) => ({ row: Number(row), rt }))
 		.filter(({ rt }) => rt.total_ms > 0);
 	const totalMs = entries.reduce((sum, e) => sum + e.rt.total_ms, 0);
 	if (totalMs <= 0) {
-		return [];
+		return {
+			items: [],
+			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+		};
 	}
 	entries.sort((a, b) => b.rt.total_ms - a.rt.total_ms);
 	const out: Hotspot[] = [];
 	let covered = 0;
+	// Which bound ends the loop, recorded as it happens rather than inferred
+	// afterwards — 'returned === cap' would misreport a coverage stop that
+	// happens to land on the cap.
+	let stoppedBy: SelectionStats['stopped_by'] = 'exhausted';
 	for (const { row, rt } of entries) {
-		if (out.length >= cap || covered / totalMs >= coverage) {
+		if (out.length >= cap) {
+			stoppedBy = 'cap';
+			break;
+		}
+		if (covered / totalMs >= coverage) {
+			stoppedBy = 'coverage';
 			break;
 		}
 		covered += rt.total_ms;
@@ -209,7 +289,16 @@ export function selectHotspots(
 			share: rt.total_ms / totalMs,
 		});
 	}
-	return out;
+	return {
+		items: out,
+		stats: {
+			returned: out.length,
+			total: entries.length,
+			dropped: entries.length - out.length,
+			coverage_achieved: covered / totalMs,
+			stopped_by: stoppedBy,
+		},
+	};
 }
 
 /** One symbol retaining memory across sessions, with its trend. */
@@ -650,7 +739,7 @@ export function collectCacheCandidates(
 	nodes: GraphNode[],
 	coverage = 0.8,
 	cap = 8,
-): CacheCandidate[] {
+): { items: CacheCandidate[]; stats: SelectionStats } {
 	const rowsFor = buildComponentMatcher(nodes);
 	const guarded = securityGuardReasons(workspaceRoot, nodes);
 	interface ArgGroup {
@@ -788,19 +877,37 @@ export function collectCacheCandidates(
 	}
 	const total = raw.reduce((s, c) => s + c.reclaimable_ms, 0);
 	if (total <= 0) {
-		return [];
+		return {
+			items: [],
+			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+		};
 	}
 	raw.sort((a, b) => b.reclaimable_ms - a.reclaimable_ms);
 	const out: CacheCandidate[] = [];
 	let covered = 0;
+	let stoppedBy: SelectionStats['stopped_by'] = 'exhausted';
 	for (const c of raw) {
-		if (out.length >= cap || covered / total >= coverage) {
+		if (out.length >= cap) {
+			stoppedBy = 'cap';
+			break;
+		}
+		if (covered / total >= coverage) {
+			stoppedBy = 'coverage';
 			break;
 		}
 		covered += c.reclaimable_ms;
 		out.push({ ...c, share: c.reclaimable_ms / total });
 	}
-	return out;
+	return {
+		items: out,
+		stats: {
+			returned: out.length,
+			total: raw.length,
+			dropped: raw.length - out.length,
+			coverage_achieved: covered / total,
+			stopped_by: stoppedBy,
+		},
+	};
 }
 
 /** One symbol's cost in ONE capture session — the unit the proof loop diffs. */

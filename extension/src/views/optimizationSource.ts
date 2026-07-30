@@ -37,6 +37,7 @@ import {
 	collectRequestSpans,
 	collectSymbolTimings,
 	lifetimeFrames,
+	type SelectionStats,
 	type SymbolSessionTiming,
 } from '../harness/runtimeAnalysis';
 import {
@@ -60,6 +61,12 @@ export interface OptimizationModel {
 	hasTrace: boolean;
 	/** Ranked candidates, dispatched/resolved ones interleaved by priority. */
 	candidates: OptimizationCandidate[];
+	/**
+	 * How the ranking was bounded. Carried so the panel can state "5 of 23"
+	 * rather than "5" — a count printed bare reads as "and that is all of
+	 * them", which a Pareto head has usually not earned.
+	 */
+	selection?: SelectionStats;
 }
 
 /** Where the agent-legible mirror lives (a sibling of graph.json/findings.json). */
@@ -151,6 +158,8 @@ export class OptimizationSource implements vscode.Disposable {
 	private lastWritten = '';
 	private memoSig = '\u0000none';
 	private memoCandidates: OptimizationCandidate[] = [];
+	/** The bound that produced `memoCandidates`, memoized with them. */
+	private memoSelection: SelectionStats | undefined;
 	/** Dispatched + resolved candidates, by row — survive recompute & restart. */
 	private tracked = new Map<number, OptimizationCandidate>();
 
@@ -226,7 +235,7 @@ export class OptimizationSource implements vscode.Disposable {
 			// smallest-detectable floor (see noiseBand's derivation note).
 			relSpread = traceRelativeSpread(allTimings);
 			if (!existing) {
-				existing = this.computeCandidates(root).find((c) => c.row === row);
+				existing = this.computeCandidates(root).items.find((c) => c.row === row);
 			}
 			if (!existing) {
 				const n = nodes[row];
@@ -426,7 +435,9 @@ export class OptimizationSource implements vscode.Disposable {
 			}
 			const sig = overlaySignature(root);
 			if (sig !== this.memoSig) {
-				this.memoCandidates = this.computeCandidates(root);
+				const computed = this.computeCandidates(root);
+				this.memoCandidates = computed.items;
+				this.memoSelection = computed.stats;
 				this.memoSig = sig;
 				// Fresh evidence: record which persisted attempt keys are still
 				// alive in this capture session (the doom-loop store's expiry clock).
@@ -445,12 +456,12 @@ export class OptimizationSource implements vscode.Disposable {
 	}
 
 	/** The expensive pass: load evidence and rank candidates. */
-	private computeCandidates(root: string): OptimizationCandidate[] {
+	private computeCandidates(root: string): { items: OptimizationCandidate[]; stats: SelectionStats } {
 		const storeDir = indexStoreDir(root);
 		const nodes: GraphNode[] = loadNodes(storeDir);
 		const edges = loadEdges(storeDir, nodes.length);
 		const timings = collectSymbolTimings(root, nodes);
-		const cacheByRow = new Map(collectCacheCandidates(root, nodes).map((c) => [c.row, c]));
+		const cacheByRow = new Map(collectCacheCandidates(root, nodes).items.map((c) => [c.row, c]));
 		const spans = collectRequestSpans(root, nodes);
 		// Ranking-time calibration: predicted_ms deflated by the learned
 		// per-waste-kind outcome ratio when the artifact exists (default 1).
@@ -557,7 +568,15 @@ export class OptimizationSource implements vscode.Disposable {
 		}
 		const candidates = sortCandidates([...byRow.values()]);
 		this.publish(
-			{ updatedAt: new Date().toISOString(), hasTrace: candidates.length > 0, candidates },
+			{
+				updatedAt: new Date().toISOString(),
+				hasTrace: candidates.length > 0,
+				candidates,
+				// The bound that produced the ranking, so the panel and the agent
+				// mirror can both say "5 of 23" instead of a bare count. Undefined
+				// only before the first successful analysis.
+				selection: this.memoSelection,
+			},
 			root,
 		);
 	}
@@ -581,7 +600,17 @@ export class OptimizationSource implements vscode.Disposable {
 			fs.mkdirSync(path.dirname(file), { recursive: true });
 			fs.writeFileSync(
 				file,
-				`${JSON.stringify({ updated_at: model.updatedAt, candidates: model.candidates }, null, 2)}\n`,
+				`${JSON.stringify(
+					{
+						updated_at: model.updatedAt,
+						candidates: model.candidates,
+						// Agents read this mirror; a count without its bound is the
+						// same ambiguity here as on the panel.
+						selection: model.selection,
+					},
+					null,
+					2,
+				)}\n`,
 				'utf8',
 			);
 			this.lastWritten = bare;

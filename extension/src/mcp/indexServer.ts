@@ -41,6 +41,7 @@ import {
 	collectCacheCandidates,
 	collectMemoryTrends,
 	collectRuntimeErrorClusters,
+	describeSelection,
 	selectHotspots,
 } from '../harness/runtimeAnalysis';
 import {
@@ -410,12 +411,12 @@ function sessionReadAction(action: string): string | null {
 			return federatedReadAction(
 				'No latency hotspots — capture a trace first (run a service and exercise it).',
 				(graph) => {
-					const hotspots = selectHotspots(graph.nodes, graph.overlay);
+					const { items: hotspots, stats } = selectHotspots(graph.nodes, graph.overlay);
 					if (hotspots.length === 0) {
 						return null;
 					}
 					return (
-						'Pareto head of traced runtime:\n' +
+						`Pareto head of traced runtime — ${describeSelection(stats, 'hotspot')}:\n` +
 						hotspots
 							.map(
 								(h) =>
@@ -466,12 +467,12 @@ function sessionReadAction(action: string): string | null {
 			return federatedReadAction(
 				'No cache opportunities — no deterministic symbol was re-called with identical arguments in the captured traces.',
 				(graph, root) => {
-					const candidates = collectCacheCandidates(root, graph.nodes);
+					const { items: candidates, stats } = collectCacheCandidates(root, graph.nodes);
 					if (candidates.length === 0) {
 						return null;
 					}
 					return (
-						`${candidates.length} memoization candidate(s):\n` +
+						`${describeSelection(stats, 'memoization candidate')}:\n` +
 						candidates
 							.map(
 								(c) =>

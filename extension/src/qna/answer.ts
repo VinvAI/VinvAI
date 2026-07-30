@@ -39,6 +39,7 @@ import { loadEpisodePolicy, walkParams, type WalkParams } from '../harness/episo
 import {
 	collectCacheCandidates,
 	collectMemoryTrends,
+	describeSelection,
 	selectHotspots,
 } from '../harness/runtimeAnalysis';
 import { indexStoreDir } from '../graph/indexGraph';
@@ -101,10 +102,18 @@ export async function runIndexQuery(
 	});
 }
 
-/** The preferred arm's per-symbol snippet budget from the learned policy. */
+/**
+ * Ask Vinv's per-anchor SOURCE budget.
+ *
+ * Reads the policy's explicit `qna_snippet_chars`. It previously decoded
+ * `(preferred_arm >> 2) & 1` — a bandit bit learned against context PACKS,
+ * where it sliced summaries (max 696 chars) and so could never bite, then
+ * applied here to anchor SOURCE, where it does (median 436, p95 3769, 30.3%
+ * of symbols over the old 800 level). The arm no longer carries that feature;
+ * see EPISODE_FEATURES in harness/episodeTelemetry.ts.
+ */
 function episodeArmSnippetChars(policy: ReturnType<typeof loadEpisodePolicy>): number {
-	const levels = policy.arm_levels.snippet_chars;
-	return levels[((policy.preferred_arm >> 2) & 1) as 0 | 1];
+	return policy.qna_snippet_chars;
 }
 
 /** Maps index hits to graph node rows (join on file + name + start line). */
@@ -455,6 +464,17 @@ export function assembleEvidence(
 			// asking for the rest of the code retrials can never provide).
 			const anchorChars = Math.ceil(snippetChars * (options?.budgetGrowth ?? 1));
 			let entry = `### ${n.name} — ${n.file}:${n.start_line}-${n.end_line} (as indexed, epoch ${n.epoch})\n\`\`\`${n.lang}\n${body.slice(0, anchorChars)}\n\`\`\``;
+			// A body cut mid-function inside a fence is indistinguishable from a
+			// short function. The anchor is the symbol the question is ABOUT, so a
+			// silent cut is the worst one available: measured on this repo, 30.3%
+			// of symbols exceed the 800-char level. Say what was withheld and how
+			// to get it — the same stated-size-plus-escape-hatch the context pack
+			// uses, rather than leaving the model to infer completeness.
+			if (body.length > anchorChars) {
+				entry +=
+					`\nNOTE: source truncated — showing ${anchorChars} of ${body.length} characters. ` +
+					`Read \`${n.file}\` lines ${n.start_line}-${n.end_line} for the rest.`;
+			}
 			if (indexed !== undefined && diskSegment !== undefined && indexed.trim() !== diskSegment.trim()) {
 				entry +=
 					'\nNOTE: the file has changed on disk since this was indexed — line numbers and code above reflect the indexed epoch (which is what the runtime traces were captured against).';
@@ -465,9 +485,15 @@ export function assembleEvidence(
 	}
 	lines.push(`## Retrieved symbols (top ${hits.length})`);
 	for (const h of hits) {
+		const snippet = h.snippet ?? '';
+		const shown = snippet.slice(0, snippetChars);
 		lines.push(
 			`### ${h.name} (${h.kind}) — ${h.file}:${h.lines?.[0] ?? '?'}\n` +
-				`${h.summary}\n\n\`\`\`${h.lang}\n${(h.snippet ?? '').slice(0, snippetChars)}\n\`\`\``,
+				`${h.summary}\n\n\`\`\`${h.lang}\n${shown}\n\`\`\`` +
+				(snippet.length > snippetChars
+					? `\nNOTE: snippet truncated — showing ${snippetChars} of ${snippet.length} characters. ` +
+						`Read \`${h.file}\` for the rest.`
+					: ''),
 		);
 	}
 	// Unambiguous failure attribution FIRST: exactly which symbols raised, per
@@ -594,10 +620,18 @@ export function assembleEvidence(
 	// wasteful" question actually needs. Omitted entirely when no overlay
 	// exists (nothing measured — nothing to claim).
 	if (Object.keys(snapshot.runtime).length > 0) {
-		const hotspots = selectHotspots(snapshot.nodes, snapshot.runtime);
+		// Every heading in this section states its bound. The reader here is an
+		// AGENT, and an agent shown three candidates with no total concludes there
+		// are three — any plan it then writes ("I've addressed the memoization
+		// opportunities") is false by construction. A human reading a panel can
+		// click through; this is the evidence the model reasons from.
+		const hot = selectHotspots(snapshot.nodes, snapshot.runtime);
+		const hotspots = hot.items;
 		if (hotspots.length > 0) {
 			lines.push('\n## Runtime cost analyses (measured across all captures)');
-			lines.push('Latency Pareto head (share of ALL traced time):');
+			lines.push(
+				`Latency Pareto head (share of ALL traced time) — ${describeSelection(hot.stats, 'hotspot')}:`,
+			);
 			for (const h of hotspots) {
 				lines.push(
 					`- ${h.name} (${h.file}:${h.line}) — ${Math.round(h.total_ms)}ms over ${h.calls} call(s), ${(h.share * 100).toFixed(1)}% of traced time`,
@@ -606,8 +640,17 @@ export function assembleEvidence(
 		}
 		const trends = collectMemoryTrends(workspaceRoot, snapshot.nodes);
 		if (trends.length > 0) {
-			lines.push('Memory-leak suspects (retained in EVERY session, positive Theil–Sen trend):');
-			for (const s of trends.slice(0, walk.failure_exemplars)) {
+			// collectMemoryTrends returns everything it found — no analysis bound —
+			// so the only cap here is this display one, and it says so.
+			const shownTrends = trends.slice(0, walk.failure_exemplars);
+			lines.push(
+				'Memory-leak suspects (retained in EVERY session, positive Theil–Sen trend)' +
+					(trends.length > shownTrends.length
+						? ` — showing the top ${shownTrends.length} of ${trends.length}`
+						: '') +
+					':',
+			);
+			for (const s of shownTrends) {
 				lines.push(
 					`- ${s.name} (${s.file}:${s.line}) — ${Math.round(s.total_retained_bytes / 1024)}KB over ${s.sessions} sessions, +${Math.round(s.slope_bytes_per_session / 1024)}KB/session`,
 				);
@@ -617,10 +660,23 @@ export function assembleEvidence(
 				'Memory-leak suspects: none detected (needs 3+ capture sessions with persistent retention).',
 			);
 		}
-		const cacheable = collectCacheCandidates(workspaceRoot, snapshot.nodes);
+		const cache = collectCacheCandidates(workspaceRoot, snapshot.nodes);
+		const cacheable = cache.items;
 		if (cacheable.length > 0) {
-			lines.push('Duplicate-recomputation (memoization) candidates:');
-			for (const c of cacheable.slice(0, walk.failure_exemplars)) {
+			// TWO bounds stack here: the analysis Pareto head, and this display cap
+			// on top of it. Reporting only the first would be an honest-looking
+			// sentence standing in front of a second, hidden truncation — measured
+			// on this repo the chain is 24 found -> 4 ranked -> 3 shown, and the
+			// heading used to say none of it.
+			const shownCache = cacheable.slice(0, walk.failure_exemplars);
+			lines.push(
+				`Duplicate-recomputation (memoization) candidates — ${describeSelection(cache.stats, 'candidate')}` +
+					(cacheable.length > shownCache.length
+						? `; showing the top ${shownCache.length} of those`
+						: '') +
+					':',
+			);
+			for (const c of shownCache) {
 				lines.push(
 					`- ${c.name} (${c.file}:${c.line}) — ${c.calls} calls, only ${c.distinct_args} distinct arg hash(es), ~${Math.round(c.reclaimable_ms)}ms reclaimable`,
 				);
