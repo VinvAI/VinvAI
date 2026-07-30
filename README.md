@@ -53,10 +53,38 @@ Or straight from your editor's CLI:
 git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
 ```
 
+## Context beats model size
+
+Receipts first — then how the loop produces them.
+
+Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★). Same five issues, same prompts, Vinv grading every run:
+
+| Setup | Fixed |
+|---|---|
+| **Cheap commodity model + Vinv evidence** | **4 bugs + 1 optimization** |
+| Frontier model, working blind | 1 bug |
+| Cheap commodity model, working blind | nothing |
+
+One trial per condition — a **demonstration, not a benchmark**. Blind, the commodity model scored zero. Hand it the failing frame, the caller chain, and the real argument values, and it beats a stronger model guessing from static code. **The evidence is what moved, not the weights.**
+
+On that same pristine template the optimization loop later detected — from live traces alone — that the app's default database pool makes requests **queue for connection checkouts** under concurrent load, dispatched the pool-sizing fix, and proved it: sustained-load median **75.6ms → 41.2ms, 45.4% faster (95% CI [36.3%, 45.8%])**, responses byte-identical. Two earlier attempts whose measurement windows couldn't certify the win were **auto-reverted** — the accept landed only when the evidence did.
+
 <div align="center">
-<img src="https://images.vinv.ai/vinv-journey-light.gif" alt="Runtime tracing for AI coding agents: Vinv installs, discovers and runs every service under tracing, catches a real bug, dispatches the fix, and verifies it — on its own repo" width="720">
-<br><sub>The whole loop on Vinv's own repo: install → discover → trace → catch a real bug → dispatch → verified fix, zero clicks.</sub>
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: detects connection-pool starvation, proves 45.4% sustained-load median improvement with a paired-bootstrap 95% CI, auto-reverts uncertified attempts" width="720">
 </div>
+
+### Same discipline, upstream on Hugging Face
+
+Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 agent framework, no affiliation — the allocation loop proved a fast-path in `sanitize_for_rich`: **~37,137× less** transient allocation on a realistic 4&nbsp;KB log line, `log_task` measured **~615.7&nbsp;KB → ~125&nbsp;B** across 3 calls, byte-identical across **2,015** inputs. That fix is open upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572) (*open, not merged* — maintainers' call).
+
+<div align="center">
+<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="docs/media/smolagents-pr-2572.png" alt="Open PR #2572 on huggingface/smolagents — perf fast-path for sanitize_for_rich, +10 on the production file" width="720"></a>
+<br>
+<img src="docs/media/smolagents-pr-2572-diff.png" alt="Light-theme GitHub Files changed view for smolagents PR #2572 — the +10 fast-path in src/smolagents/utils.py" width="720">
+<br><sub><a href="https://github.com/huggingface/smolagents/pull/2572">huggingface/smolagents#2572</a> · allocation win, not a latency claim · open PR</sub>
+</div>
+
+That is *how come after it*: oracles find the waste, your agent proposes the edit, paired-bootstrap + byte-identical replay decide accept or revert, and only then does anything go upstream. The rest of this README is the machinery behind those receipts.
 
 ## The problem
 
@@ -151,26 +179,6 @@ Measured on this repo's own ledger (800 logged decisions, 770 joined, 12 index e
 | top-k 20 | +0.148 | [+0.062, +0.283] | 0 | no — zero support, never logged |
 
 **The gate admitted exactly the measured winner and blocked both the uncertain and the unsupported candidate.** That is what "closed-loop" is being asked to mean here — and the parts that are *not* online learning (the referee's thresholds, the oracle catalogue, the fault shapes) are fixed policy, deliberately.
-
-## Case study: commodity models out-fix frontier ones
-
-Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (44k★). We handed all five to each setup — same issues, same prompts, one trial per condition, Vinv grading every run:
-
-| Setup | Fixed |
-|---|---|
-| **Cheap commodity model + Vinv context** | **4 bugs + 1 optimization** |
-| Frontier model, working blind | 1 bug |
-| Cheap commodity model, working blind | nothing |
-
-**This is a demonstration, not a benchmark** — five issues, one repo, one trial per condition. We're publishing it because it's checkable, not because n=5 settles anything.
-
-The claim isn't a model ranking — blind, the commodity model scored zero. The claim is that **a model holding the failing frame, the caller chain, and the real argument values beats a stronger model guessing from static code.** The evidence is what moved, not the weights.
-
-**And the loop keeps finding real ones.** On the same pristine template, the optimization loop later surfaced — and statistically proved — a fix nobody planted: the app's default database pool (SQLAlchemy's 5+10) makes requests **queue for connection checkouts** under concurrent load, so a 7-row indexed lookup measured 22× the typical symbol's cost. Pool sized to the worker concurrency: sustained-load median **75.6ms → 41.2ms — 45.4% faster, 95% CI [36.3%, 45.8%]** — responses byte-identical. The same engine auto-reverted two earlier attempts whose measurement windows couldn't certify the win; the accept only landed when the evidence did.
-
-<div align="center">
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv optimization loop on the FastAPI template: detects connection-pool starvation from real traces, dispatches the pool-sizing fix, proves 45.4% median improvement with a paired-bootstrap 95% CI, and records the episode with its reverted attempts in Findings" width="720">
-</div>
 
 ## If any of these is your open tab
 

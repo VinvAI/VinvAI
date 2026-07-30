@@ -60,23 +60,30 @@ Nine oracles, each with a distinct way of breaking your code, all writing into t
 
 They don't all run flat out. **One budget is allocated across every armed oracle by Thompson sampling** over `(target × technique × oracle)`, cost is measured rather than assumed, credit is paid once per defect signature, and the posteriors persist — so *which technique pays on your repo* is learned across runs.
 
-### Context beats model size — on a repo you know
+### Context beats model size
 
-One local run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (44k★) took it from **0 of 23 endpoints executed to 23 of 23**, symbol coverage **18 → 37 of 44**, and banked **125 replayable regression cases**. It surfaced **four bugs and one performance problem** — all behind auth, which is why ordinary traffic never reached them.
+Receipts first. One local run against [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★) took it from **0 of 23 endpoints executed to 23 of 23**, symbol coverage **18 → 37 of 44**, and banked **125 replayable regression cases**. It surfaced **four bugs and one performance problem** — all behind auth.
 
-Handed those same five issues to each setup, same prompts, Vinv grading every run:
+Same five issues, same prompts, Vinv grading:
 
 | Setup | Fixed |
 |---|---|
-| **Cheap commodity model + Vinv context** | **4 bugs + 1 optimization** |
+| **Cheap commodity model + Vinv evidence** | **4 bugs + 1 optimization** |
 | Frontier model, working blind | 1 bug |
 | Cheap commodity model, working blind | nothing |
 
-One trial per condition — a demonstration, not a benchmark. [Full story and screenshots →](https://github.com/VinvAI/VinvAI#case-study-commodity-models-out-fix-frontier-ones)
+One trial per condition — a demonstration, not a benchmark. [Full story →](https://github.com/VinvAI/VinvAI#context-beats-model-size)
 
-The loop keeps finding real ones on the same template: it detected from live traces that the app's **default database pool makes requests queue for connection checkouts** under concurrent load, dispatched the pool-sizing fix, and proved it — sustained-load median **75.6ms → 41.2ms (45.4% faster, 95% CI [36.3%, 45.8%])**, responses byte-identical. Two earlier attempts whose measurement windows couldn't certify the win were auto-reverted; only the evidence-backed change landed.
+On the same template: live traces showed the default DB pool making requests **queue for connection checkouts** under load — sustained-load median **75.6ms → 41.2ms (45.4% faster, 95% CI [36.3%, 45.8%])**, responses byte-identical; two uncertified attempts auto-reverted.
 
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv detects connection-pool starvation on the FastAPI template, dispatches the fix, and proves a 45.4% median improvement with a paired-bootstrap 95% confidence interval" width="720" />
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: 45.4% sustained-load median improvement with paired-bootstrap 95% CI" width="720" />
+
+Same discipline on [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★): allocation fast-path in `sanitize_for_rich` (~37,137× less transient allocation on a 4&nbsp;KB log line; `log_task` ~615.7&nbsp;KB → ~125&nbsp;B; byte-identical across 2,015 inputs), open upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572) (*open, not merged*).
+
+<p align="center">
+<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/smolagents-pr-2572.png" alt="Open PR #2572 on huggingface/smolagents" width="720"></a><br>
+<img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/smolagents-pr-2572-diff.png" alt="Light-theme Files changed view for smolagents PR #2572" width="720">
+</p>
 
 **Before you install:** the extension is one click, but Vinv builds its engines on first run (`git clone` + `uv sync` + `cargo build` in a terminal you can watch) and fetches a one-time ~500 MB local embedding model. You need [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs), plus a coding-agent CLI you already pay for. No account, no API keys, about four minutes.
 
