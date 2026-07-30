@@ -1543,14 +1543,42 @@ def _default_modules(project_root: Path, service: str, modules: list[str] | None
         if m in known_packages:
             grounded.append(m)
         elif m in dist_packages:
+            # The ONE transformation worth making, because it is the only one where
+            # a better answer is actually known: a DISTRIBUTION name (`admin`) is
+            # replaced by the import package(s) it ships (`vinv_admin`), which is
+            # what `--target-package` matches on.
             grounded.extend(dist_packages[m])
         else:
-            logger.warning(
-                "bringup: module %r for service %r is neither an import package nor a "
-                "distribution in this repo; dropping it from the tracelens targets",
-                m,
-                service,
-            )
+            # PASS IT THROUGH. Anything else is not ours to delete.
+            #
+            # This branch used to drop the target, and that deletion cost a full
+            # day of debugging: `examples/` is a PEP 420 namespace directory (no
+            # __init__.py), so it is not an "import package" and not a
+            # distribution — and the service's entrypoint lived inside it. The
+            # target was silently removed, the rendered prompt then instructed the
+            # agent to use the filtered list "verbatim — do not add any package
+            # names", and every bring-up dutifully recorded a command that could
+            # not trace the service's own handlers. The check added to prevent
+            # "framework spans only" produced exactly that.
+            #
+            # Deleting was never justified, because tracelens already resolves
+            # these cases and is deliberately permissive about them (see
+            # launcher/targets.split_targets): a regular package matches by module
+            # fullname, a non-importable DIRECTORY becomes a source root and
+            # instruments the files under it, and an unresolvable name is kept as
+            # an import name in case the target only becomes importable after the
+            # app mutates sys.path at startup. Three strategies, all downstream of
+            # here — so a filter here can only ever throw away information the
+            # component that knows best was about to use.
+            grounded.append(m)
+            if not (project_root / m).is_dir():
+                logger.info(
+                    "bringup: module %r for service %r is not an import package, a "
+                    "distribution, or a repo directory — forwarding it to tracelens "
+                    "anyway; it resolves targets itself",
+                    m,
+                    service,
+                )
     return list(dict.fromkeys(grounded))
 
 

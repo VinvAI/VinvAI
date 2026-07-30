@@ -87,6 +87,74 @@ class TestDiscoveredCommand:
         assert _discovered_command(repo, "api") is None
 
 
+class TestModuleGrounding:
+    """Grounding must not drop a target the tracer itself accepts.
+
+    The failure this pins, observed live for a full day: the extension passed
+    ``--module smolagents --module examples``, grounding dropped ``examples``
+    (no ``__init__.py`` → "not an import package"), and the rendered prompt then
+    ordered the agent to use the filtered list "verbatim — do not add any
+    package names". Every bring-up faithfully recorded a command that could
+    never trace the service's own handlers, and every audit blamed the capture.
+    tracelens classifies a non-importable directory target as a SOURCE ROOT and
+    instruments the files under it, so the directory is a legitimate target.
+    """
+
+    @pytest.fixture()
+    def distros(self, monkeypatch: pytest.MonkeyPatch):
+        from types import SimpleNamespace
+
+        from bringup import runner
+
+        monkeypatch.setattr(
+            runner,
+            "_discover_distributions",
+            lambda root: [SimpleNamespace(name="acme", packages=("acme",))],
+        )
+
+    def test_a_repo_directory_target_survives_grounding(
+        self, tmp_path: Path, distros: None
+    ) -> None:
+        from bringup.runner import _default_modules
+
+        (tmp_path / "examples").mkdir()
+        assert _default_modules(tmp_path, "svc", ["acme", "examples"]) == [
+            "acme",
+            "examples",
+        ]
+
+    def test_an_unrecognised_target_is_forwarded_not_deleted(
+        self, tmp_path: Path, distros: None
+    ) -> None:
+        # tracelens keeps an unresolvable name as an import name on purpose — the
+        # target may only become importable after the app mutates sys.path at
+        # startup. Deleting it here throws away information the component that
+        # resolves targets was about to use.
+        from bringup.runner import _default_modules
+
+        assert _default_modules(tmp_path, "svc", ["acme", "late_bound"]) == [
+            "acme",
+            "late_bound",
+        ]
+
+    def test_a_distribution_name_is_still_remapped_to_its_import_packages(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The one transformation that stays, because it is the only one where a
+        # better answer is known: --target-package matches import names, not dist
+        # names.
+        from types import SimpleNamespace
+
+        from bringup import runner
+
+        monkeypatch.setattr(
+            runner,
+            "_discover_distributions",
+            lambda root: [SimpleNamespace(name="admin", packages=("vinv_admin",))],
+        )
+        assert runner._default_modules(tmp_path, "svc", ["admin"]) == ["vinv_admin"]
+
+
 class TestPromptResolution:
     def test_the_discovered_command_reaches_the_prompt(self, repo: Path) -> None:
         prompt = render_start_prompt(repo, service="api")

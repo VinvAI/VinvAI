@@ -245,6 +245,16 @@ shell first to confirm the flags available in the installed version. Then:
 
 1. **Target packages are pre-computed — do not guess.**
    {_target_pkg_note}
+
+   **The deliverable is that THIS SERVICE'S OWN CODE gets traced.** The flags below
+   are the framework's best answer, not a ceiling. Before you compose the command,
+   check that the module your entrypoint lives in is actually covered: for
+   `-m uvicorn pkg.sub.app:app` that is `pkg`, for `python dir/thing.py` it is `dir`.
+   If the listed targets do not cover it, **add a `--target-package` for it** and say
+   so in your notes — a directory without `__init__.py` is a valid target (tracelens
+   treats it as a source root and instruments the files under it). A service that
+   starts green while its own handlers emit no spans is a FAILED bring-up, not a
+   passing one, and it is the single most common way this step goes wrong.
 2. **Convert the launch command into a Python-script form** so tracelens's `runpy` dispatch
    keeps the AST hook installed:
    - **Replace `uvicorn ARGS`** with **`python -m uvicorn ARGS`**.

@@ -91,6 +91,14 @@ never a guessed default — so the tree is buildable. For a Python service, addi
 ### Start the service under tracelens
 
 1. **Target packages are pre-computed — do not guess.** {_target_pkg_note}
+
+   **The deliverable is that THIS SERVICE'S OWN CODE gets traced.** These flags are
+   the framework's best answer, not a ceiling. Check that the module your entrypoint
+   lives in is covered: for `-m uvicorn pkg.sub.app:app` that is `pkg`, for
+   `python dir/thing.py` it is `dir`. If it is not covered, **add a
+   `--target-package` for it** and note that you did — a directory without
+   `__init__.py` is a valid target (tracelens treats it as a source root). A service
+   that starts green while its own handlers emit no spans is a FAILED bring-up.
 2. **Convert the launch command to Python-script form** so tracelens's `runpy` dispatch keeps the
    AST hook installed: replace `uvicorn ARGS` with `python -m uvicorn ARGS`, and drop `--reload`
    (reload forks workers and loses child-process spans).

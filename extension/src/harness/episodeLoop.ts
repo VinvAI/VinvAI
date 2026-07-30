@@ -346,6 +346,25 @@ export async function verifyServiceReplay(
 			reason: 'no bash found on PATH to replay the start command',
 		};
 	}
+	if (port !== null && (await portIsServing(port))) {
+		// The port answers BEFORE the replay has started anything, so nothing the
+		// probe observes below can be attributed to the recorded command — the
+		// port check would be measuring whatever is squatting there, typically a
+		// previous run's server that survived its kill (a real Windows failure
+		// mode in this repo: killing the bash wrapper leaves the python server
+		// holding the port). The trace-refresh guard cannot catch that case
+		// either, because a surviving TRACED server keeps writing the trace file,
+		// so the file refreshes and the squatter reads as an objective pass —
+		// which is exactly how a repaired command "verified" while the capture
+		// still showed the old flags' output.
+		return {
+			verdict: 'inconclusive',
+			reason:
+				`port ${port} was already serving before the replay started — a previous run of ` +
+				`'${service}' is likely still holding it. Stop that process and retry; a served ` +
+				'port cannot be attributed to the recorded command while something else owns it.',
+		};
+	}
 	const child = spawn(bash, ['-lc', script], hiddenBackgroundOptions({
 		cwd: commands[0].working_directory ?? workspaceRoot,
 		env: process.env,
