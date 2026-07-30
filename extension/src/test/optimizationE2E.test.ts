@@ -156,8 +156,8 @@ suite('optimization end-to-end (disk pipeline)', () => {
 		const nodes = loadNodes(store);
 		const edges = loadEdges(store, nodes.length);
 		const timings = collectSymbolTimings(root, nodes);
-		const cacheByRow = new Map(collectCacheCandidates(root, nodes).map((c) => [c.row, c]));
-		return { nodes, timings, list: computeOptimizationCandidates({ nodes, edges, timings, cacheByRow }) };
+		const cacheByRow = new Map(collectCacheCandidates(root, nodes).items.map((c) => [c.row, c]));
+		return { nodes, timings, list: computeOptimizationCandidates({ nodes, edges, timings, cacheByRow }).items };
 	}
 
 	test('a symbol whose only call RAISED is never a hotspot (the smolagents defect)', () => {
@@ -285,7 +285,7 @@ suite('optimization end-to-end (request-structure detectors)', () => {
 			timings: collectSymbolTimings(root, nodes),
 			cacheByRow: new Map(),
 			spans: collectRequestSpans(root, nodes),
-		});
+		}).items;
 	}
 
 	test('a callee repeated many times in one request is flagged N+1', () => {
@@ -448,7 +448,7 @@ suite('optimization end-to-end (end-ordered exporter traces)', () => {
 			timings: collectSymbolTimings(root, nodes),
 			cacheByRow: new Map(),
 			spans: forest(),
-		});
+		}).items;
 		assert.ok(
 			out.some((c) => c.name === 'db_get' && c.waste_kind === 'n-plus-1'),
 			'N+1 detected despite end-ordered lines',
