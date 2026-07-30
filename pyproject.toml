@@ -15,6 +15,17 @@
 # identically to the members so root and per-package linting agree.
 [dependency-groups]
 dev = [
+    # The OTel contrib instrumentors tracelens wraps a service with. These were
+    # previously present in the venv ONLY because bring-up's prompt had an agent
+    # pip-install them (dist-info: INSTALLER=uv, REQUESTED=yes, and three of
+    # them absent from uv.lock entirely). `uv sync` is exact and prunes
+    # extraneous packages, so any unrelated sync silently deleted the whole
+    # contrib set and tracing quietly degraded to parent-process spans with no
+    # error — observed live. tracelens declared the set as its `otel-libs`
+    # extra but nothing ever installed it, so the declaration was dead.
+    # Depending on the extra here makes coverage a reconciled, locked fact
+    # instead of a side effect of whoever wrote to the venv last.
+    "tracelens[otel-libs]",
     "pytest>=8.0.0,<10.0.0",
     "pytest-cov>=5.0.0,<6.0.0",
     "hypothesis>=6.100.0,<7.0.0",
@@ -23,6 +34,19 @@ dev = [
     # skip without it, and a skipped honesty guarantee is no guarantee — this
     # keeps them RUNNING under the root `uv sync` that CI performs.
     "sqlalchemy>=2.0,<3.0",
+    # Same reason, for the exerciser's `hypothesis_valid` generator arm
+    # (exerciser[propertygen]): `hypothesis_valid_available()` gates a real
+    # generator arm, its tests branch on that probe, and with the package
+    # absent they passed while covering nothing. Installing it at the root
+    # makes the adopted arm actually run under the `uv sync` CI performs.
+    "hypothesis-jsonschema>=0.23.0,<0.24.0",
+    # core's DSPy agent runtime is an OPTIONAL extra (see core/pyproject.toml):
+    # nothing in this repo drives it, and keeping dspy/litellm out of the base
+    # install is what stops `pip install vinv-core` silently resolving BerriAI
+    # litellm in place of the in-tree shim. But three of core's test files DO
+    # exercise the dspy path, so the extra is installed here — a capability the
+    # tests cover must be present under the root `uv sync` CI performs.
+    "vinv-core[agents]",
 ]
 
 # Python version policy (see issue #14). Ceiling is <3.15 for every member.
@@ -30,6 +54,14 @@ dev = [
 # own floor: embedder >=3.10 (standalone embedding sidecar — widest reach),
 # contracts and tracelens >=3.11 (the data contract and the tracer, which run
 # against third-party targets), and every other engine >=3.12.
+[tool.uv.sources]
+# The root dev group depends on `tracelens[otel-libs]` (see above), so the
+# workspace member has to be named as a source rather than resolved from PyPI —
+# where the `tracelens` name belongs to an unrelated third-party project.
+tracelens = { workspace = true }
+# Same reason: the root dev group depends on `vinv-core[agents]`.
+vinv-core = { workspace = true }
+
 [tool.uv.workspace]
 members = [
     "contracts",

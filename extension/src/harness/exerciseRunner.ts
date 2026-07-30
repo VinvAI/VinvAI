@@ -628,6 +628,7 @@ function askUserForRemainingConfig(
 				);
 			},
 			showError: (message) => void vscode.window.showErrorMessage(message),
+			notify: (message) => void vscode.window.showInformationMessage(`Vinv: ${message}`),
 		});
 	} catch {
 		// A panel that cannot open must never fail the exercise pass. The requests

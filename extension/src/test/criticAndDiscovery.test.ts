@@ -112,7 +112,7 @@ suite('Deterministic answer critic', () => {
 					args_summary: null,
 					error_stack: null,
 					capture_epoch: 1,
-					superseded: 'not_reproduced',
+					superseded: 'not_reproduced', contained: null, contained_by: null,
 				},
 			],
 			arg_exemplars: [],

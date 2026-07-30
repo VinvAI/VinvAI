@@ -231,7 +231,7 @@ function getHtml(): string {
 		td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line);
 			vertical-align: top; font-family: inherit; }
 		td.io-json { max-width: 340px; overflow-wrap: anywhere; color: var(--muted); }
-		.st-2xx { color: var(--ink); } .st-4xx { color: var(--muted); } .st-5xx { color: var(--accent-fg); }
+		.st-2xx { color: var(--ok-fg); } .st-4xx { color: var(--muted); } .st-5xx { color: var(--accent-fg); }
 		ul.tree { list-style: none; margin: 0; padding: 0; }
 		ul.tree ul { list-style: none; margin: 0 0 0 8px; padding-left: 18px;
 			border-left: 1px dashed var(--line-strong); }

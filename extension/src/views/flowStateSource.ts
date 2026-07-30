@@ -56,6 +56,7 @@ import {
 import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
 import { getHandbookPath, isHandbookGenerated } from '../handbook/handbook';
 import { computeNextStep } from './nextStep';
+import { readConfigRequests } from './configRequestPanel';
 import {
 	computeFlowModel,
 	flowStateJson,
@@ -253,6 +254,7 @@ export class FlowStateSource implements vscode.Disposable {
 			probes: [],
 			pendingEdges: 0,
 			autoPilot: { running: false, label: '' },
+			configRequests: 0,
 		};
 	}
 
@@ -300,6 +302,7 @@ export class FlowStateSource implements vscode.Disposable {
 		facts.reports = scanReports(root);
 		facts.autoPilot = getAutoPilotStatus();
 		facts.pipelinePhase = getPipelinePhase();
+		facts.configRequests = readConfigRequests(root).length;
 		try {
 			const storeDir = indexStoreDir(root);
 			const done = readAdjudicated(storeDir);

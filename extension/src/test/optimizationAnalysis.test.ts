@@ -99,6 +99,35 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 		});
 	}
 
+	test('a lifetime frame is excluded from EVERY waste kind, not just cache', () => {
+		// Regression: gating collectCacheCandidates alone left per-call/fanout/
+		// staircase dispatchable, because those are derived here from `timings`.
+		// Live consequence on the embedder capture: _cmd_serve posted as
+		// "10738.8ms per call (self) — 148428.8× the typical symbol; unexpectedly
+		// slow for the work it does" — backwards for a serve loop that is meant to
+		// span the run. Row 1 has a measured cache candidate AND outlier timings,
+		// so it would qualify on more than one signal if the gate missed a kind.
+		const gated = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cacheByRow: cacheFor(),
+			lifetimeRows: new Set([1]),
+		});
+		assert.ok(
+			!gated.some((c) => c.row === 1),
+			'a lifetime frame must not surface under any waste kind',
+		);
+		// The gate must be surgical: everything else still ranks as before.
+		assert.deepStrictEqual(
+			gated.map((c) => c.row),
+			candidates()
+				.map((c) => c.row)
+				.filter((r) => r !== 1),
+			'gating one row must not disturb the ranking of the others',
+		);
+	});
+
 	test('a hot-but-already-optimal symbol is excluded (hot ≠ optimizable)', () => {
 		assert.ok(
 			!candidates().some((c) => c.row === 3),

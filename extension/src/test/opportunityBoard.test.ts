@@ -21,11 +21,18 @@ import {
 	opportunitySignature,
 	postOpportunities,
 	reconcileOpportunityBoard,
+	retireStructurallyInvalid,
 	renderOpportunityBoard,
 	rankedOpportunityCandidates,
 	syncOpportunityBoard,
 	type OpportunityInput,
 } from '../harness/opportunityBoard';
+import {
+	enqueueEpisodeRequest,
+	readRequestOutcomes,
+	recordRequestOutcome,
+	requestOutcomesPath,
+} from '../harness/requestQueue';
 import {
 	prepareOptimizationSweep,
 	prepareRowOptimization,
@@ -73,6 +80,81 @@ suite('opportunity board (lifecycle)', () => {
 		assert.strictEqual(a, b, 'measurements drift between traces — identity must not');
 		const c = opportunitySignature('fanout', 'a.py', 'f', '9 of 10 calls repeat; ~90ms cacheable');
 		assert.notStrictEqual(a, c, 'a different waste kind is a different opportunity');
+	});
+
+	test('a drained request records WHY it produced nothing', () => {
+		// The queue drains atomically, which is right for crash-safety and wrong
+		// for observability: before the outcome ledger, a request that dispatched
+		// nothing left no trace and its reason went only to a transient VS Code
+		// toast. Observed live: run_sweep hotspots reported "queued
+		// (episode-363c2c62-….json)", .vinv/requests/ was left empty, and
+		// .vinv/episodes.jsonl never gained a line — while noPlanMessage had
+		// computed a perfectly actionable reason and thrown it away.
+		const file = enqueueEpisodeRequest(root, { source: 'test', kind: 'hotspots' });
+		const id = path.basename(file).replace(/^episode-/, '').replace(/\.json$/, '');
+
+		// Nothing recorded yet: a queued request has no outcome until it is acted on.
+		assert.strictEqual(readRequestOutcomes(root).filter((r) => r.request_id === id).length, 0);
+
+		recordRequestOutcome(root, {
+			request_id: id,
+			kind: 'hotspots',
+			outcome: 'no_plan',
+			reason: 'all current opportunities are held on the board',
+		});
+		const rows = readRequestOutcomes(root).filter((r) => r.request_id === id);
+		assert.strictEqual(rows.length, 1);
+		assert.strictEqual(rows[0].outcome, 'no_plan');
+		assert.match(rows[0].reason, /held on the board/, 'the REASON survives, not just the fact');
+		assert.ok(rows[0].ts, 'timestamped so a caller can order it against its request');
+
+		// harness_busy is distinct from no_plan: the request was NOT consumed.
+		recordRequestOutcome(root, {
+			request_id: id, kind: 'hotspots', outcome: 'harness_busy',
+			reason: 'an episode was already running',
+		});
+		const all = readRequestOutcomes(root).filter((r) => r.request_id === id);
+		assert.deepStrictEqual(all.map((r) => r.outcome), ['no_plan', 'harness_busy'],
+			'append-only: outcomes accumulate in order, none overwrites another');
+
+		// A torn line must not hide the rest of the ledger.
+		fs.appendFileSync(requestOutcomesPath(root), '{not json\n');
+		assert.strictEqual(readRequestOutcomes(root).filter((r) => r.request_id === id).length, 2);
+	});
+
+	test('a posting a soundness gate now rejects stops being dispatchable at once', () => {
+		// The board is a PERSISTED ledger, so a gate that only filters new
+		// postings leaves the old one dispatchable. Live case: `main` and
+		// `_cmd_serve` sat at "~25101ms is cacheable" — memoize a server's CLI
+		// entry point — with misses 0 and status posted, still offered by
+		// run_sweep AFTER both the cache and per-call lifetime gates shipped.
+		// Expiry alone would have taken three capture sessions to clear them,
+		// because expiry means "the evidence moved", not "we were wrong to post".
+		postOpportunities(root, [
+			input({ row: 7, name: 'main', file: 'cli.py' }),
+			input({ row: 9, name: 'worker', file: 'work.py' }),
+		]);
+		assert.strictEqual(
+			loadOpportunityBoard(root).filter((e) => e.status === 'posted').length,
+			2,
+		);
+
+		const retired = retireStructurallyInvalid(root, new Set([7]), 'lifetime, not work');
+		assert.strictEqual(retired.length, 1, 'only the rejected row is retired');
+
+		const board = loadOpportunityBoard(root);
+		const main = board.find((e) => e.row === 7)!;
+		const worker = board.find((e) => e.row === 9)!;
+		assert.strictEqual(main.status, 'expired', 'no longer dispatchable');
+		assert.strictEqual(main.resolution, 'lifetime, not work', 'retired WITH a reason, not deleted');
+		assert.match(main.note ?? '', /soundness gate/);
+		assert.strictEqual(main.evidence, board.find((e) => e.row === 7)!.evidence, 'evidence preserved');
+		assert.strictEqual(worker.status, 'posted', 'an unaffected entry is untouched');
+
+		// Idempotent: a second pass has nothing left to retire.
+		assert.strictEqual(retireStructurallyInvalid(root, new Set([7]), 'x').length, 0);
+		// An empty invalid set is a no-op, not a sweep.
+		assert.strictEqual(retireStructurallyInvalid(root, new Set(), 'x').length, 0);
 	});
 
 	test('post → dedup: re-posting the same signature appends nothing', () => {

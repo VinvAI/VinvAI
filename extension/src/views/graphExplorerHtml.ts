@@ -351,6 +351,13 @@ export function getGraphHtml(): string {
 		bakeLayout(prev, filePos);
 		if (selected && !byId.has(selected)) { select(null); }
 		if (selected) { neighborIds = adjacency.get(selected) || new Set(); }
+		// Every status line counts dnodes, and this is the ONE place dnodes
+		// changes — legend toggle, expand, collapse. Refreshing per call site
+		// missed all three: showing the hidden-by-default tests/docs layers
+		// grows the set from 336 to 577, so Dead Code kept reporting "332 of 336"
+		// while the truth on screen was "573 of 577", and expanding a file left
+		// the file-node count sitting over a canvas of symbol nodes.
+		setStatus(modeStatus());
 	}
 
 	// ---- diff impact: changed symbols + inbound invoke closure, per file ----
@@ -1093,7 +1100,12 @@ export function getGraphHtml(): string {
 	function rtLabel(rt) {
 		if (!rt) { return ''; }
 		let t = '×' + rt.calls + ' · ' + Math.round(rt.ms ?? rt.total_ms ?? 0) + 'ms';
-		if (rt.errors > 0) { t += ' · ⚠' + rt.errors; }
+		// current_errors is the DEFECT count (contained raises and 4xx rejections
+		// already removed); errors is the raw lifetime tally. The warning triangle
+		// is a defect signal, so it has to read the former — keying it off the raw
+		// count put a ⚠ on every symbol that ever raised inside a try/except.
+		const defects = rt.current_errors ?? rt.errors;
+		if (defects > 0) { t += ' · ⚠' + defects; }
 		return t;
 	}
 
@@ -1181,13 +1193,30 @@ export function getGraphHtml(): string {
 			html += '<h2>' + esc(n.file) + '</h2>';
 			html += '<div class="sub">' + g.symbols + ' symbols · rank ' + g.rank.toFixed(3) +
 				(g.changed ? ' · <span style="color:var(--accent-fg)">changed this epoch</span>' : '') + '</div>';
+			// A raise a caller caught leaves current_errors at 0 with a lifetime
+			// error still on the books, which lands it in "resolved" — where it
+			// would be labelled "not reproduced in latest run" about an exception
+			// that reproduces on EVERY run and is deliberately handled. It is
+			// neither a defect nor a fix, so it gets its own line and its own
+			// (neutral) color rather than borrowing either verdict.
+			const containedOf = (r) => (r.failures || [])[0];
+			const isContained = (r) => (r.errors || 0) > 0 && containedOf(r)?.contained === true;
 			if (n.rt) {
 				// Live error badge reflects the latest run; lifetime history is
-				// noted separately so a fixed file is not flagged red.
+				// noted separately so a fixed file is not flagged red. A file whose
+				// only lifetime errors were CAUGHT gets neither badge: "none in
+				// latest run" would be false (it raised, and was handled) and the
+				// success color would credit a fix that never happened. The
+				// per-symbol "handled:" line below says what actually happened.
 				const liveErr = n.rt.current_errors ?? n.rt.errors;
+				const historyIsAllHandled = g.rows.every(
+					(row) => !((snapshot.runtime[row] || {}).errors > 0) || isContained(snapshot.runtime[row] || {}),
+				);
 				const errBadge = liveErr
 					? ' · <span style="color:var(--accent-fg)">⚠' + liveErr + ' errors (latest run)</span>'
-					: (n.rt.errors ? ' · <span style="color:' + cssVar('--muted') + '">' + n.rt.errors + ' errors in history, none in latest run</span>' : '');
+					: (n.rt.errors && !historyIsAllHandled
+							? ' · <span style="color:' + cssVar('--ok-fg') + '">' + n.rt.errors + ' errors in history, none in latest run</span>'
+							: '');
 				html += '<div class="sub">runtime: ' + n.rt.executed + ' symbols executed · ×' + n.rt.calls +
 					' · ' + Math.round(n.rt.ms) + 'ms' + errBadge + '</div>';
 			}
@@ -1198,10 +1227,12 @@ export function getGraphHtml(): string {
 				const r = snapshot.runtime[row] || {};
 				return (r.current_errors ?? r.errors) > 0;
 			});
-			const resolvedRows = g.rows.filter((row) => {
+			const settledRows = g.rows.filter((row) => {
 				const r = snapshot.runtime[row] || {};
 				return (r.current_errors ?? r.errors) === 0 && (r.errors || 0) > 0;
 			});
+			const handledRows = settledRows.filter((row) => isContained(snapshot.runtime[row] || {}));
+			const resolvedRows = settledRows.filter((row) => !isContained(snapshot.runtime[row] || {}));
 			if (errRows.length) {
 				html += '<div class="sub" style="color:var(--accent-fg)">failing: ' +
 					errRows.map((row) => {
@@ -1215,8 +1246,17 @@ export function getGraphHtml(): string {
 						return esc(s.name) + ' (' + esc(detail) + ')';
 					}).join(' · ') + '</div>';
 			}
+			if (handledRows.length) {
+				html += '<div class="sub">handled: ' +
+					handledRows.map((row) => {
+						const s = snapshot.nodes[row];
+						const f = containedOf(snapshot.runtime[row]);
+						const by = f.contained_by ? 'caught by ' + f.contained_by : 'caught by a caller';
+						return esc(s.name) + ' (' + esc(f.error_type) + ' — ' + esc(by) + ')';
+					}).join(' · ') + '</div>';
+			}
 			if (resolvedRows.length) {
-				html += '<div class="sub">resolved: ' +
+				html += '<div class="sub" style="color:' + cssVar('--ok-fg') + '">resolved: ' +
 					resolvedRows.map((row) => {
 						const s = snapshot.nodes[row];
 						const rt = snapshot.runtime[row];
@@ -1242,7 +1282,7 @@ export function getGraphHtml(): string {
 				const isNew = snapshot.store_epoch > 0 && s.epoch === snapshot.store_epoch;
 				html += '<div class="sym" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="jump to ' + esc(s.file) + ':' + s.start_line + '">' +
 					'<span class="nm">' + esc(s.name) + (isNew ? ' <span style="color:var(--accent-fg)">●</span>' : '') + '</span>' +
-					'<span class="rt' + (rt && rt.errors > 0 ? ' err' : '') + '">' + (rt ? rtLabel(rt) : '') + '</span></div>';
+					'<span class="rt' + (rt && (rt.current_errors ?? rt.errors) > 0 ? ' err' : '') + '">' + (rt ? rtLabel(rt) : '') + '</span></div>';
 			}
 			html += '</div></div>';
 			// Diff context: say WHAT changed here this epoch, not just that it did.
@@ -1269,6 +1309,14 @@ export function getGraphHtml(): string {
 			if (rt) {
 				html += '<div class="sub">runtime: ' + rtLabel(rt) +
 					(rt.error_types && rt.error_types.length ? ' [' + esc(rt.error_types.join(', ')) + ']' : '') + '</div>';
+				// Without this, a symbol that raises by design shows a bare error
+				// type and nothing to say a caller absorbed it — the reader is left
+				// to assume a defect the rest of the panel has already dismissed.
+				const cf = (rt.failures || [])[0];
+				if (cf && cf.contained === true) {
+					html += '<div class="sub">' + esc(cf.error_type) + ' is caught by ' +
+						esc(cf.contained_by || 'a caller') + ' — control flow, not a failure</div>';
+				}
 			} else {
 				html += '<div class="sub">runtime: never executed in captured traces</div>';
 			}
@@ -1397,6 +1445,10 @@ export function getGraphHtml(): string {
 			return;
 		}
 		tourIndex = Math.max(0, Math.min(tour.length - 1, tourIndex));
+		// The index clamps, so Prev at step 1 and Next at the last step were live
+		// buttons that did nothing — a click with no feedback reads as broken.
+		document.getElementById('t-prev').disabled = tourIndex === 0;
+		document.getElementById('t-next').disabled = tourIndex === tour.length - 1;
 		const stop = tour[tourIndex];
 		const s = snapshot.nodes[stop.row];
 		document.getElementById('t-name').textContent = s.name + ' — ' + s.file + ':' + s.start_line;

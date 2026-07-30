@@ -21,7 +21,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Sync workspace
-        run: uv sync
+        # --locked: a bare `uv sync` may silently RE-RESOLVE and rewrite uv.lock,
+        # so a dependency drift lands green. Fail instead when the committed lock
+        # and the resolved set disagree.
+        run: uv sync --locked
+      - name: Every third-party import is declared
+        # Four instances of one defect shipped past review: real code with a real
+        # consumer and an absent (or uv-only) declaration — otel-libs,
+        # hypothesis-jsonschema, jsdom, core's litellm redirect. Two more
+        # (tiktoken, certifi) were found by this check on its first run, where
+        # `count_tokens` had been silently falling back to `len // 4`. Nothing
+        # fails loudly in that shape, which is why it needs a machine.
+        run: uv run python scripts/check-declared-deps.py
       - name: Run engine test suites
         run: |
           for pkg in contracts core tracelens identification handbook bringup goal embedder exerciser; do
@@ -31,6 +42,13 @@ jobs:
               echo "::endgroup::"
             fi
           done
+      - name: Index retrieval-eval suite
+        # `index` is a Rust crate with a PYTHON eval suite, so it fell between
+        # the two jobs: it is not in the loop above (no index/tests dir) and
+        # rust-index runs only `cargo test`. 30 tests, ~8s, gated by nothing
+        # until now — found because two full-validation runs disagreed by
+        # exactly 30 and the difference turned out to be this directory.
+        run: uv run pytest index/eval -q
 
   rust-index:
     name: rust index (${{ matrix.os }})
@@ -49,19 +67,41 @@ jobs:
         run: cargo test --manifest-path index/Cargo.toml
 
   extension:
-    name: extension (typecheck + bundle)
+    name: extension (typecheck + bundle + tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20, BECAUSE of the Tests step below: `npm test` runs
+          # `vscode-test`, which IS @vscode/test-cli's binary, and both
+          # @vscode/test-cli 0.0.15 and @vscode/test-electron 3.1.0 declare a
+          # HARD `engines.node: ">=22"` with no node-20 branch (verified by
+          # enumerating engines across the installed tree: those two are the only
+          # hard ones; the other 11 that want 22+ are permissive or dual).
+          # `npm ci` would NOT have caught it — engine-strict defaults to false,
+          # so EBADENGINE is a warning and the failure would have surfaced at
+          # runtime instead. The typecheck and bundle steps are fine on 20; this
+          # bump is for the step that actually boots Electron.
+          node-version: 22
       - name: Install
         run: npm ci --prefix extension
       - name: Typecheck
         run: npm run check --prefix extension
       - name: Bundle
         run: npm run bundle --prefix extension
+      - name: Tests
+        # NOTHING ran the extension suite before this step — grepping the whole
+        # workflow directory for `npm test`, `vscode-test` or `xvfb` returned
+        # nothing, so ~700 tests were gated only by whoever ran them locally.
+        # That is why the harness breakage (@vscode/test-electron 2.5.2 spawning
+        # Contents/MacOS/Electron, which VS Code 1.110+ renamed to Code) went
+        # unnoticed: CI never invoked it.
+        #
+        # xvfb-run is required, not optional: vscode-test launches a real VS Code
+        # (Electron) instance and exits non-zero with no DISPLAY on a headless
+        # runner. This is the standard invocation for VS Code extension CI.
+        run: xvfb-run -a npm test --prefix extension
 
   e2e:
     name: planted-bug golden e2e
@@ -74,6 +114,8 @@ jobs:
         with:
           workspaces: index
       - name: Sync workspace
-        run: uv sync
+        # --locked here too: a lock guard on only one of the two syncing jobs
+        # lets drift in through the other.
+        run: uv sync --locked
       - name: Run e2e
         run: uv run python tests/e2e/planted_bug_golden/run.py

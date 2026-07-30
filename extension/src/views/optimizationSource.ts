@@ -36,6 +36,7 @@ import {
 	collectMemoryTrends,
 	collectRequestSpans,
 	collectSymbolTimings,
+	lifetimeFrames,
 	type SymbolSessionTiming,
 } from '../harness/runtimeAnalysis';
 import {
@@ -465,6 +466,9 @@ export class OptimizationSource implements vscode.Disposable {
 			spans,
 			calibration,
 			memoryLeaks,
+			// The panel and the board must never rank the same evidence
+			// differently, so the lifetime gate is applied identically here.
+			lifetimeRows: new Set(lifetimeFrames(root, nodes).keys()),
 		});
 	}
 

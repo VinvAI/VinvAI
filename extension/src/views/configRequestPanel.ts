@@ -167,6 +167,14 @@ export interface ConfigPanelActions {
 	/** Re-run the pipeline so the answers take effect. */
 	rerun: () => Promise<void>;
 	showError: (message: string) => void;
+	/**
+	 * Confirm what landed and where.
+	 *
+	 * Saving disposes the panel, so without this the entire visible response to
+	 * pasting a credential is the tab vanishing. Say what was written and that a
+	 * re-run started, or the user has no way to tell a save from a crash.
+	 */
+	notify: (message: string) => void;
 }
 
 /**
@@ -195,6 +203,12 @@ export async function handlePanelMessage(
 		);
 		return { saved: 0, reran: false };
 	}
+	// Names the file so a user who pasted a credential can go verify where it
+	// went — and its permissions — without taking our word for it.
+	actions.notify(
+		`Saved ${saved} value${saved === 1 ? '' : 's'} to .vinv/exercise/config_answers.json ` +
+			'(owner-only) — re-running.',
+	);
 	// Re-running is the whole point — an answer that sits on disk until someone
 	// remembers to press play is the same stall in a different place.
 	await actions.rerun();
@@ -255,6 +269,7 @@ export function getConfigPanelHtml(cspSource: string, model: ConfigPanelModel): 
 			</div>`;
 
 	return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
@@ -281,8 +296,8 @@ input:focus { outline: 2px solid var(--accent-fg); outline-offset: -2px; }
            border-left: 2px solid var(--line); padding-left: 8px; margin: 6px 0 0; }
 .actions { margin-top: 16px; }
 button.primary { font-family: ${VINV_FONT_MONO}; font-size: 12.5px; padding: 8px 16px;
-                 background: var(--accent); color: #ffffff; border: none; cursor: pointer; }
-button.primary:hover { background: var(--accent-hover); }
+                 background: var(--ok); color: #ffffff; border: none; cursor: pointer; }
+button.primary:hover { background: var(--ok-hover); }
 .empty { color: var(--muted); font-size: 13px; }
 </style></head><body>
 <h1>Vinv needs a few values</h1>

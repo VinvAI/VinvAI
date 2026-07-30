@@ -726,7 +726,7 @@ suite('Harness handover pack (graph + evidence transfer)', () => {
 									duration_ms: 20865,
 									count: 1,
 									capture_epoch: 3,
-									superseded: null,
+									superseded: null, contained: null, contained_by: null,
 								},
 							],
 							current_errors: 1,

@@ -411,6 +411,7 @@ suite('end to end: what nothing could synthesise reaches a person', () => {
 				reran += 1;
 			},
 			showError: (message) => errors.push(message),
+			notify: () => undefined,
 		};
 		const outcome = await handlePanelMessage(
 			{ type: 'submit', values: { DEMO_REGION: 'eu-west-1', OPENAI_API_KEY: 'sk-typed' } },

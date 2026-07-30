@@ -1,4 +1,30 @@
 # In-tree replacement for BerriAI litellm: OpenAI SDK only (DSPy + Vinv Engine call sites).
+#
+# WHY THIS EXISTS AT ALL. `core` imports dspy at module load
+# (core/__init__.py -> components/agents/base_agent.py), and dspy 3.2.1 hard-requires
+# `litellm>=1.64.0`. Vinv itself never makes an in-process LLM call — every agent run is
+# delegated to an external harness CLI, and core.llm.ensure_dspy_lm_configured() RAISES
+# HarnessOnlyLLMError rather than configuring a cloud LM — so the real BerriAI package
+# would be a large transitive tree carried purely to satisfy an import. This shim stands
+# in for it: measured against dspy 3.2.1, it covers every litellm attribute dspy actually
+# references (the only two textual "gaps" are a docs URL and a string literal in an
+# allowlist), and `import dspy` succeeds against it.
+#
+# THE VERSION STRING IS LOAD-BEARING — DO NOT "CORRECT" IT. `1.81.13+...` is what makes
+# dspy's `litellm>=1.64.0` requirement resolve. Changing it to an honest low number (0.1.0,
+# 1.0.0) silently fails that constraint and the resolver pulls BerriAI litellm alongside
+# this package, whose `litellm/` directory then collides with it. Bump the numeric part only
+# to track the BerriAI release whose API surface this shim mirrors.
+#
+# KNOWN LIMITATION (see docs/dependency-and-capability-design.md). The substitution is a
+# `tool.uv.sources` redirect in core/pyproject.toml, which is uv-only and is NOT recorded in
+# built wheel metadata. So it applies in the monorepo venv — exactly where core's agents
+# never run — and does NOT apply to `pip install vinv-core`, which is the only audience core
+# is published for (core/README.md documents embedding it). Those users get BerriAI litellm
+# from PyPI against an unpinned `"litellm"` requirement. The substitution therefore works
+# only where it is unnecessary and is absent everywhere it is needed. Fixing that changes
+# what a published package installs for third parties, so it is a product decision, not a
+# drive-by edit.
 [project]
 name = "litellm"
 version = "1.81.13+vinv_engine.openai"

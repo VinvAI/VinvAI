@@ -31,6 +31,17 @@ export const VINV_BASE_CSS = `
 	 *   --accent-hover hover FILL — the same hue with lightness shifted per
 	 *               theme so white text stays ≥ 4.5:1 (darker in light,
 	 *               brighter in dark; #ff5a5f-style tints fail at 3.05:1)
+	 *
+	 * SUCCESS GREEN (--ok*) mirrors that contract exactly, so red can go back to
+	 * meaning failure and nothing else. Measured against the same references:
+	 *   --ok        fill  #15803d, white text 5.02:1 (red fill is 5.18:1)
+	 *   --ok-fg     text  #15803d on white 5.02:1 · #3fb950 on black 8.27:1
+	 *   --ok-hover  fill  #116a32 light 6.71:1 · #17853c dark 4.71:1
+	 * Hue 142 keeps it clear of the graph's layer palette — the data layer's sea
+	 * green sits at 162 and the scripts teal at 187 — so a success state never
+	 * reads as a layer. The dark hover brightens far less than red's does: green's
+	 * luminance climbs much faster per lightness step, and anything past #17853c
+	 * drops white text under 4.5:1.
 	 */
 	body {
 		--bg: #ffffff;
@@ -43,6 +54,13 @@ export const VINV_BASE_CSS = `
 		--accent-fg: #d71921;
 		--accent-hover: #b3151c;
 		--accent-soft: #ff5a5f;
+		--accent-ring: rgba(215, 25, 33, 0.18);
+		--accent-ring-soft: rgba(215, 25, 33, 0.05);
+		--ok: #15803d;
+		--ok-fg: #15803d;
+		--ok-hover: #116a32;
+		--ok-ring: rgba(21, 128, 61, 0.18);
+		--ok-ring-soft: rgba(21, 128, 61, 0.05);
 		--line: rgba(10, 10, 10, 0.14);
 		--line-strong: rgba(10, 10, 10, 0.32);
 		--grid: rgba(10, 10, 10, 0.05);
@@ -61,6 +79,13 @@ export const VINV_BASE_CSS = `
 		--accent-fg: #ff4048;
 		--accent-hover: #e2262f;
 		--accent-soft: #ff5a5f;
+		--accent-ring: rgba(255, 64, 72, 0.20);
+		--accent-ring-soft: rgba(255, 64, 72, 0.06);
+		--ok: #15803d;
+		--ok-fg: #3fb950;
+		--ok-hover: #17853c;
+		--ok-ring: rgba(63, 185, 80, 0.20);
+		--ok-ring-soft: rgba(63, 185, 80, 0.06);
 		--line: rgba(255, 255, 255, 0.14);
 		--line-strong: rgba(255, 255, 255, 0.32);
 		--grid: rgba(255, 255, 255, 0.05);
@@ -144,6 +169,10 @@ export const VINV_BASE_CSS = `
 	.v-btn:hover { border-color: var(--ink); letter-spacing: 0.26em; }
 	.v-btn.primary { background: var(--ink); border-color: var(--ink); color: var(--bg); }
 	.v-btn.primary:hover { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+	/* Confirming action (save, accept, apply). Red fill is reserved for the
+	   destructive/failing one, so a form's submit button lives here. */
+	.v-btn.ok { background: var(--ok); border-color: var(--ok); color: #ffffff; }
+	.v-btn.ok:hover { background: var(--ok-hover); border-color: var(--ok-hover); color: #ffffff; }
 	.v-btn:disabled { opacity: 0.5; cursor: default; letter-spacing: 0.22em; }
 
 	/* tiny bordered badge */
@@ -156,21 +185,35 @@ export const VINV_BASE_CSS = `
 		color: var(--muted);
 		border-radius: 0;
 	}
+	.v-badge.ok { color: var(--ok-fg); }
+	.v-badge.bad { color: var(--accent-fg); }
 
-	/* pulsing live dot */
+	/* pulsing live dot. The ring colors come from variables so the .ok variant
+	   reuses one keyframe rather than duplicating the animation per hue. */
 	.v-dot {
+		--dot-ring: var(--accent-ring);
+		--dot-ring-soft: var(--accent-ring-soft);
 		display: inline-block;
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
 		background: var(--accent-fg);
-		box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18);
+		box-shadow: 0 0 0 4px var(--dot-ring);
 		animation: v-pulse 2.4s ease-in-out infinite;
 	}
-	@keyframes v-pulse {
-		0%, 100% { box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18); }
-		50% { box-shadow: 0 0 0 7px rgba(215, 25, 33, 0.05); }
+	.v-dot.ok {
+		--dot-ring: var(--ok-ring);
+		--dot-ring-soft: var(--ok-ring-soft);
+		background: var(--ok-fg);
 	}
+	@keyframes v-pulse {
+		0%, 100% { box-shadow: 0 0 0 4px var(--dot-ring); }
+		50% { box-shadow: 0 0 0 7px var(--dot-ring-soft); }
+	}
+
+	/* Success/failure text. Paired so a view never has to reach for a raw hex. */
+	.v-ok { color: var(--ok-fg); }
+	.v-bad { color: var(--accent-fg); }
 
 	::selection { background: var(--accent); color: #ffffff; }
 `;

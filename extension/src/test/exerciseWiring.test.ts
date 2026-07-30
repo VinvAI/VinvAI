@@ -40,6 +40,7 @@ function facts(over: Partial<FlowFacts> = {}): FlowFacts {
 		probes: [],
 		pendingEdges: 0,
 		autoPilot: { running: false, label: '' },
+		configRequests: 0,
 		...over,
 	};
 }

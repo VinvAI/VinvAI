@@ -106,6 +106,60 @@ export interface SymbolRecord {
 	observedUntagged: boolean;
 }
 
+/**
+ * Fold the observed exit outcomes of a failing frame's ANCESTORS into one
+ * containment verdict — did the exception escape, or did a caller absorb it?
+ *
+ * `ancestorExitedOk` is ordered innermost-caller-first, one entry per frame of
+ * the observed caller chain: `true` = that frame exited `ok`, `false` = it also
+ * exited with an error, `undefined` = its exit was not in the capture.
+ *
+ *  - `true`  — some ancestor exited `ok` while the callee raised, so a
+ *    `try/except` upstream handled it. The raise is control flow.
+ *  - `false` — every ancestor whose exit WAS observed also errored, so nothing
+ *    absorbed it: the exception escaped.
+ *  - `null`  — no ancestor exit was observed at all. Unknown, and consumers
+ *    must read unknown as escaped; treating it as handled would hide real
+ *    failures.
+ *
+ * Shared by the graph overlay (`indexGraph.absorbRawCaptures`) and the
+ * `coverage_of` MCP tool (`analysis.toolCoverageOf`) so both answer this
+ * question identically — the same reason their session ordering is shared.
+ */
+export function containmentVerdict(
+	ancestorExitedOk: Array<boolean | undefined>,
+): boolean | null {
+	let verdict: boolean | null = null;
+	for (const ok of ancestorExitedOk) {
+		if (ok === undefined) {
+			continue; // no evidence from this frame
+		}
+		if (ok) {
+			return true; // absorbed here — no need to look further out
+		}
+		verdict = false; // observed, and it errored too: still escaping
+	}
+	return verdict;
+}
+
+/**
+ * Merge containment across repeat occurrences of the SAME failure identity.
+ * Only "handled" when EVERY observed occurrence was absorbed: one escape makes
+ * the identity a real defect, and an unknown never upgrades a known escape.
+ */
+export function mergeContainment(
+	a: boolean | null,
+	b: boolean | null,
+): boolean | null {
+	if (a === false || b === false) {
+		return false;
+	}
+	if (a === null || b === null) {
+		return null;
+	}
+	return true;
+}
+
 /** One request's outcome, derived from its exit rows. */
 export interface RequestOutcome {
 	request_id: string;

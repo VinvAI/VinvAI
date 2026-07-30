@@ -8,7 +8,7 @@
     "fault oracle skipped 2 target(s): no annotated parameter to derive a contract from"
   ],
   "interpreter": {
-    "python": "<python>",
+    "python": "<venv>/bin/python",
     "origin": "vinv's own interpreter",
     "handed_off": false,
     "python_version": "3.13.14",
@@ -26,7 +26,7 @@
     ],
     "considered": [
       {
-        "python": "<python>",
+        "python": "<venv>/bin/python",
         "origin": "vinv's own interpreter",
         "detail": "fallback",
         "ok": true,
@@ -51,17 +51,17 @@
   "issues_merged": 1,
   "warm_started_arms": 4,
   "violations": 1,
-  "repeat_violations": 0,
+  "repeat_violations": 1,
   "credited_signatures": 1,
-  "new_ground": 3,
+  "new_ground": 2,
   "stopped": "budget-exhausted",
   "by_technique": {
     "contract-faults": {
-      "plays": 2,
+      "plays": 1,
       "violations": 0,
-      "coverage_sum": 2,
-      "cost_sum": 5.4969,
-      "posterior_mean": 0.375
+      "coverage_sum": 1,
+      "cost_sum": 1.0,
+      "posterior_mean": 0.4286
     },
     "deterministic": {
       "plays": 0,
@@ -71,20 +71,20 @@
       "posterior_mean": 0.4839
     },
     "schedule": {
-      "plays": 2,
+      "plays": 3,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 8.0031,
-      "posterior_mean": 0.4
+      "cost_sum": 3.0,
+      "posterior_mean": 0.4815
     }
   },
   "by_oracle": {
     "concurrency": {
-      "plays": 2,
+      "plays": 3,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 8.0031,
-      "posterior_mean": 0.4
+      "cost_sum": 3.0,
+      "posterior_mean": 0.4815
     },
     "crash": {
       "plays": 0,
@@ -94,11 +94,11 @@
       "posterior_mean": 0.4839
     },
     "fault": {
-      "plays": 2,
+      "plays": 1,
       "violations": 0,
-      "coverage_sum": 2,
-      "cost_sum": 5.4969,
-      "posterior_mean": 0.375
+      "coverage_sum": 1,
+      "cost_sum": 1.0,
+      "posterior_mean": 0.4286
     }
   },
   "preferred": {
@@ -106,5 +106,5 @@
     "technique": "deterministic",
     "oracle": "crash"
   },
-  "campaign_file": "<repo>\\.vinv\\exercise\\campaign.json"
+  "campaign_file": "<repo>/.vinv/exercise/campaign.json"
 }

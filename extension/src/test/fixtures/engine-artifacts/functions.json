@@ -7,7 +7,7 @@
     "blocking": false
   },
   "interpreter": {
-    "python": "<python>",
+    "python": "<venv>/bin/python",
     "origin": "vinv's own interpreter",
     "handed_off": false,
     "python_version": "3.13.14",
@@ -25,7 +25,7 @@
     ],
     "considered": [
       {
-        "python": "<python>",
+        "python": "<venv>/bin/python",
         "origin": "vinv's own interpreter",
         "detail": "fallback",
         "ok": true,
@@ -47,7 +47,7 @@
     "pending": 0,
     "answered": 0,
     "overflow": 0,
-    "file": "<repo>\\.vinv\\exercise\\agent_config.json"
+    "file": "<repo>/.vinv/exercise/agent_config.json"
   },
   "blocked_imports_asked": [],
   "blocked_channel": {
@@ -56,7 +56,7 @@
     "pending": 0,
     "answered": 0,
     "overflow": 0,
-    "file": "<repo>\\.vinv\\exercise\\agent_blocked-import.json"
+    "file": "<repo>/.vinv/exercise/agent_blocked-import.json"
   },
   "diagnostics": [],
   "repo": "<repo>",
@@ -117,28 +117,38 @@
       "require_tier": null,
       "max_tier": null
     },
-    "tier": "process-shim",
+    "tier": "os-sandbox",
     "containment": {
-      "tier": "process-shim",
-      "mechanism": "python-shim",
-      "tool": null,
-      "blocks_writes_outside_root": false,
-      "blocks_network": false,
-      "effects_complete": false,
-      "detail": "generated sitecustomize patches the Python entry points; the durable guarantee is the disposable tree and the copied repo",
+      "tier": "os-sandbox",
+      "mechanism": "sandbox-exec",
+      "tool": "/usr/bin/sandbox-exec",
+      "blocks_writes_outside_root": true,
+      "blocks_network": true,
+      "effects_complete": true,
+      "detail": "probe passed",
       "checks": [
-        "shim-loaded-in-worker"
+        "profile-loads",
+        "write-inside-root-allowed",
+        "write-outside-root-denied",
+        "network-denied"
       ],
-      "fallback_reason": "no OS containment mechanism is known for platform 'win32'",
+      "fallback_reason": null,
       "guarantees": {
-        "writes_outside_root": "intercepted at the Python level (open/os.open/os.* family); a C extension calling open(2) is NOT stopped",
-        "network": "intercepted at the Python level (socket/ssl); a C extension calling connect(2) is NOT stopped",
-        "subprocess": "intercepted at the Python level (subprocess/os.exec*/os.spawn*)",
-        "effect_ledger": "INCOMPLETE wherever the static guard predicted C-level I/O \u2014 an empty effects map means 'we could not see', not 'nothing happened'"
+        "writes_outside_root": "IMPOSSIBLE \u2014 refused by the kernel, including from C extensions",
+        "network": "IMPOSSIBLE \u2014 refused by the kernel",
+        "subprocess": "intercepted by the Python shim; any child that escapes it inherits this OS sandbox",
+        "effect_ledger": "COMPLETE for the filesystem \u2014 a write either lands in the disposable tree (seen by the before/after walk) or is denied"
       },
-      "candidates": []
+      "candidates": [
+        {
+          "name": "sandbox-exec",
+          "tier": "os-sandbox",
+          "available": true,
+          "reason": "probe passed"
+        }
+      ]
     },
-    "effects_complete": false,
+    "effects_complete": true,
     "candidates": 0,
     "targets": 0,
     "modules": 0,
@@ -164,5 +174,5 @@
   },
   "issue_clusters": 0,
   "clusters": [],
-  "results_file": "<repo>\\.vinv\\exercise\\function_results.jsonl"
+  "results_file": "<repo>/.vinv/exercise/function_results.jsonl"
 }

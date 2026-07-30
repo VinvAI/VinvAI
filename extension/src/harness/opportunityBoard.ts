@@ -53,6 +53,7 @@ import {
 	collectCacheCandidates,
 	collectRequestSpans,
 	collectSymbolTimings,
+	lifetimeFrames,
 } from './runtimeAnalysis';
 import {
 	computeOptimizationCandidates,
@@ -772,6 +773,10 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 		cacheByRow,
 		spans,
 		calibration,
+		// collectCacheCandidates already drops these, but the per-call, fanout and
+		// staircase kinds are derived from `timings` inside the analyzer — without
+		// this the board still posts a serve loop as "unexpectedly slow".
+		lifetimeRows: new Set(lifetimeFrames(workspaceRoot, nodes).keys()),
 		// The board's own list budget — the eviction bound (LIVE_POSTED_CAP)
 		// derives from this cap, so it is passed explicitly rather than trusting
 		// the analyzer's default to stay in sync.
@@ -837,6 +842,59 @@ export interface BoardSyncResult {
 }
 
 /**
+ * Retire POSTED entries the analyzer can no longer produce because a soundness
+ * gate now rejects them outright.
+ *
+ * This is deliberately NOT the expiry path. Expiry means "the evidence moved" —
+ * a signature absent from fresh candidates accrues misses and retires after
+ * three capture sessions, which is the right patience for noisy evidence. These
+ * entries are different in kind: they were WRONG TO POST, and a gate now says so
+ * structurally. Waiting three sessions would leave them dispatchable in the
+ * meantime, and the board is a persisted ledger — so a gate that only filters new
+ * postings does not stop a user running the stale one.
+ *
+ * The live case this closes: `main` and `_cmd_serve` sat on the board at
+ * "~25101ms is cacheable" — memoize a server's CLI entry point — with misses 0
+ * and status posted, still dispatchable after BOTH the cache gate
+ * (collectCacheCandidates) and the per-call gate (computeOptimizationCandidates)
+ * had shipped.
+ *
+ * Retired, never deleted: the entry keeps its evidence and gains a `resolution`
+ * saying which gate rejected it, so the board still explains why an opportunity
+ * a user may have seen yesterday is gone.
+ */
+export function retireStructurallyInvalid(
+	workspaceRoot: string,
+	invalidRows: ReadonlySet<number>,
+	reason: string,
+): OpportunityEntry[] {
+	if (invalidRows.size === 0) {
+		return [];
+	}
+	const board = readBoardFile(workspaceRoot);
+	const changed: OpportunityEntry[] = [];
+	for (const entry of board.entries.values()) {
+		// Only entries that are still ACTIONABLE need retiring; terminal and
+		// in-flight ones are not offered to a dispatcher.
+		if (entry.status !== 'posted' || !invalidRows.has(entry.row)) {
+			continue;
+		}
+		changed.push(
+			transition(board, entry, {
+				status: 'expired',
+				misses: 0,
+				resolution: reason,
+				note: 'withdrawn: a soundness gate now rejects this evidence, so it is no longer dispatchable',
+			}),
+		);
+	}
+	if (changed.length > 0) {
+		appendEntries(workspaceRoot, changed);
+	}
+	return changed;
+}
+
+/**
  * The one produce-and-reconcile cycle every surface runs: derive the ranked
  * candidates, resolve dispatched entries from episode outcomes, advance
  * expiry against the fresh evidence, and post whatever the evidence newly
@@ -854,6 +912,23 @@ export function syncOpportunityBoard(
 		candidates = rankedOpportunityCandidates(workspaceRoot);
 	} catch {
 		evidenceKnown = false;
+	}
+	// Withdraw anything the CURRENT gates reject before reconciling, so a stale
+	// posting cannot stay dispatchable while expiry counts out three sessions.
+	// Only when the evidence is readable: an unreadable store must not be read
+	// as "no frame is a lifetime frame" and retire nothing (or everything).
+	if (evidenceKnown) {
+		try {
+			const storeDir = indexStoreDir(workspaceRoot);
+			const nodes = loadNodes(storeDir);
+			retireStructurallyInvalid(
+				workspaceRoot,
+				new Set(lifetimeFrames(workspaceRoot, nodes).keys()),
+				'its duration measures process/request lifetime, not work — a soundness gate now excludes it',
+			);
+		} catch {
+			// Unreadable store: leave the board alone rather than retire on a guess.
+		}
 	}
 	const freshIds = evidenceKnown ? new Set(candidates.map(candidateSignature)) : null;
 	const reconcile = reconcileOpportunityBoard(

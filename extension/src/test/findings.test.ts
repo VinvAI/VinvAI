@@ -118,12 +118,13 @@ suite('findings: assembly', () => {
 });
 
 suite('findings: message routing', () => {
-	test('openSource and refresh route through', async () => {
+	test('openSource, refresh and walk route through', async () => {
 		const log: string[] = [];
 		const a: FindingsActions = {
 			openSource: async (f, l) => void log.push(`open:${f}:${l}`),
 			refresh: async () => void log.push('refresh'),
 			dispatchFix: async (sig) => void log.push(`fix:${sig}`),
+			walk: async () => void log.push('walk'),
 		};
 		await handleFindingsMessage({ type: 'openSource', file: 'x.py', line: 3 }, a);
 		await handleFindingsMessage({ type: 'refresh' }, a);
@@ -131,7 +132,10 @@ suite('findings: message routing', () => {
 		// A fix message with no signature names no cluster — routing it would
 		// dispatch against `undefined`.
 		await handleFindingsMessage({ type: 'dispatchFix' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123']);
+		// The walkthrough is reached FROM the report now — Journey has no entry
+		// point of its own outside the command palette, so this is the path.
+		await handleFindingsMessage({ type: 'walk' }, a);
+		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123', 'walk']);
 	});
 });
 
@@ -248,8 +252,9 @@ suite('findings: service attribution', () => {
 			f.issues.map((i) => i.service),
 			['api', 'worker', undefined],
 		);
-		// Only services that actually own a finding drive the filter chips.
-		assert.deepStrictEqual(f.services, ['api', 'worker']);
+		// Only services that actually own a finding drive the filter chips —
+		// distinct from `services`, the bring-up inventory.
+		assert.deepStrictEqual(f.servicesWithFindings, ['api', 'worker']);
 	});
 
 	test('no identification or services artifact leaves everything unattributed', () => {
@@ -259,6 +264,6 @@ suite('findings: service attribution', () => {
 		});
 		const f = buildFindings(root);
 		assert.strictEqual(f.issues[0].service, undefined);
-		assert.deepStrictEqual(f.services, []);
+		assert.deepStrictEqual(f.servicesWithFindings, []);
 	});
 });

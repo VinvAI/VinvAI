@@ -141,6 +141,7 @@ suite('the submit arm', () => {
 			save: (answers) => writeAnswers(root, answers),
 			rerun: async () => { log.push('rerun'); },
 			showError: (m) => log.push(`error:${m}`),
+			notify: (m) => log.push(`notify:${m}`),
 		};
 	}
 
@@ -155,7 +156,13 @@ suite('the submit arm', () => {
 		);
 		assert.strictEqual(outcome.saved, 1);
 		assert.strictEqual(outcome.reran, true);
-		assert.deepStrictEqual(log, ['rerun']);
+		// The confirmation has to precede the re-run and name the file: saving
+		// disposes the panel, so this is the only evidence the user gets that a
+		// pasted credential landed somewhere.
+		assert.deepStrictEqual(log, [
+			'notify:Saved 1 value to .vinv/exercise/config_answers.json (owner-only) — re-running.',
+			'rerun',
+		]);
 		assert.deepStrictEqual(readAnswers(root), { A: 'x' });
 	});
 
@@ -178,6 +185,7 @@ suite('the submit arm', () => {
 			save: () => { throw new Error('disk full'); },
 			rerun: async () => { log.push('rerun'); },
 			showError: (m) => log.push(`error:${m}`),
+			notify: () => { throw new Error('must not claim a save that failed'); },
 		});
 		assert.strictEqual(outcome.saved, 0);
 		assert.strictEqual(outcome.reran, false, 're-ran on answers that were never saved');
@@ -189,6 +197,7 @@ suite('the submit arm', () => {
 			save: () => { throw new Error('should not be called'); },
 			rerun: async () => { throw new Error('should not be called'); },
 			showError: () => { throw new Error('should not be called'); },
+			notify: () => { throw new Error('should not be called'); },
 		});
 		assert.deepStrictEqual(outcome, { saved: 0, reran: false });
 	});

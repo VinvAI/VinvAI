@@ -145,8 +145,23 @@ export interface Findings {
 		stateCreated: number;
 		stateCleaned: number;
 	};
-	/** Every service owning at least one finding, sorted — drives the filter. */
-	services: string[];
+	/**
+	 * The services bring-up verified, from .vinv/services.json.
+	 *
+	 * Carried here because this view is the one landing surface: services were
+	 * previously visible ONLY in the Journey tab, which had no entry point
+	 * outside the command palette, so "what did Vinv actually bring up" was
+	 * effectively unreachable.
+	 */
+	services: Array<{ name: string; kind: string; port: number | null; command: string }>;
+	/**
+	 * Every service owning at least one finding, sorted — drives the filter
+	 * chips. Deliberately NOT `services` above: that is the bring-up inventory
+	 * (everything Vinv started, including services with nothing wrong), while
+	 * this is the subset the issue list can actually be narrowed to. A service
+	 * that came up clean belongs in one and not the other.
+	 */
+	servicesWithFindings: string[];
 	issues: FindingsIssue[];
 	episodes: FindingsEpisode[];
 	opportunities: Array<{
@@ -282,6 +297,15 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const ledger = readJsonl(path.join(ex, 'state_ledger.jsonl'));
 	const clusters: any[] = Array.isArray(issuesDoc.clusters) ? issuesDoc.clusters : [];
 	const issues = clusters.map((c) => toFindingsIssue(c, serviceIndex));
+	const servicesDoc = readJson(path.join(workspaceRoot, '.vinv', 'services.json')) ?? {};
+	const services = (Array.isArray(servicesDoc.services) ? servicesDoc.services : []).map(
+		(s: any) => ({
+			name: String(s.name ?? ''),
+			kind: String(s.kind ?? ''),
+			port: typeof s.port === 'number' ? s.port : null,
+			command: String(s.command ?? ''),
+		}),
+	);
 
 	const episodes: FindingsEpisode[] = episodesRaw.slice(-MAX_EPISODES).map((e: any) => ({
 		at: Number(e.at ?? 0),
@@ -359,8 +383,11 @@ export function buildFindings(workspaceRoot: string): Findings {
 			stateCreated: Number(pollution.created ?? 0),
 			stateCleaned: Number(pollution.cleaned ?? 0),
 		},
+		services,
 		issues,
-		services: [...new Set(issues.map((i) => i.service).filter((s): s is string => !!s))].sort(),
+		servicesWithFindings: [
+			...new Set(issues.map((i) => i.service).filter((s): s is string => !!s)),
+		].sort(),
 		episodes,
 		opportunities: (profile.opportunities ?? []).map((o: any) => ({
 			kind: String(o.kind ?? ''),

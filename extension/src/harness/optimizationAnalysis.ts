@@ -309,6 +309,21 @@ interface ComputeInputs {
 	/** memory-leak suspects (collectMemoryTrends) — the memory dimension's
 	 * cross-session retention signal. Optional. */
 	memoryLeaks?: MemoryLeakSuspect[];
+	/**
+	 * Rows whose duration is a request/process LIFETIME rather than work
+	 * (`lifetimeFrames` in runtimeAnalysis — depth-0 roots and ~100% pass-through
+	 * frames). Every signal in this module is duration-derived, so a lifetime
+	 * frame is an outlier on all of them by construction: the embedder's
+	 * `_cmd_serve` posted as "10738.8ms per call (self) — 148428.8x the typical
+	 * symbol; unexpectedly slow for the work it does", which is exactly backwards
+	 * for a serve loop that is SUPPOSED to span the run.
+	 *
+	 * Gating `collectCacheCandidates` alone was not enough: the per-call, fanout
+	 * and staircase kinds are derived here from `timings`, not from `cacheByRow`,
+	 * so they stayed dispatchable through the opportunity board. Optional — an
+	 * absent set preserves the previous behaviour for callers without spans.
+	 */
+	lifetimeRows?: ReadonlySet<number>;
 }
 
 /** Human byte sizes for candidate reasons. */
@@ -712,10 +727,18 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 	}
 
 	const raw: OptimizationCandidate[] = [];
+	const lifetimeRows = inputs.lifetimeRows;
 	for (const [row, sess] of timings) {
 		const l = latest(sess);
 		const node = nodes[row];
 		if (!l || !node || l.total_ms <= 0 || l.calls <= 0) {
+			continue;
+		}
+		// A lifetime frame is not a candidate for ANY kind: it is an outlier on
+		// every duration signal precisely because it measures how long the request
+		// or process lived. Skipped whole rather than per-kind — there is no waste
+		// signal here that would be sound if the others are not.
+		if (lifetimeRows?.has(row)) {
 			continue;
 		}
 

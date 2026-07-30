@@ -59,6 +59,7 @@ import { discoverStores, describeProvenance } from '../graph/storeDiscovery';
 import { EVAL_EVERY, maybeRunOpeEvaluation } from './opeEvaluator';
 import {
 	enqueueEpisodeRequest,
+	readRequestOutcomes,
 	type EpisodeRequestKind,
 } from '../harness/requestQueue';
 import { composePlaybookSlice, PLAYBOOK_KINDS } from '../harness/contextPack';
@@ -218,6 +219,9 @@ const SESSION_TOOL = {
 	description:
 		'Read what Vinv has observed about this workspace at runtime, and drive its ' +
 		'automated fix/optimize runs ("episodes"), from chat. READ: ' +
+		'action="requests" (what became of each sweep/fix you QUEUED — a queued ' +
+		'sweep does not always dispatch, and this is the only durable record ' +
+		'of why one did not), ' +
 		'action="trajectory" (every episode so far — what was tried, whether it ' +
 		'verified, the reward, the standing goal, any disputes), ' +
 		'action="status" (one-paragraph session summary), ' +
@@ -252,6 +256,7 @@ const SESSION_TOOL = {
 					'memory_trends',
 					'cache_candidates',
 					'opportunities',
+					'requests',
 					'playbook',
 					'fix',
 					'run_sweep',
@@ -482,6 +487,12 @@ function sessionReadAction(action: string): string | null {
 			return null;
 	}
 }
+
+/** The request id inside a queue filename (`episode-<uuid>.json`). Derived
+ * from the path enqueue returned so the id reported to the caller and the id
+ * written to the outcome ledger can never drift apart. */
+const requestIdOf = (file: string): string =>
+	path.basename(file).replace(/^episode-/, '').replace(/\.json$/, '');
 
 const SWEEP_REQUEST_KINDS: Record<string, EpisodeRequestKind> = {
 	runtime_errors: 'runtime-errors',
@@ -733,10 +744,29 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 						content: [{
 							type: 'text',
 							text:
-								`Sweep '${sweep}' queued (${path.basename(file)}). The Vinv ` +
+								`Sweep '${sweep}' queued as request ${requestIdOf(file)}. The Vinv ` +
 								'extension gathers the current evidence, seeds a context pack with the ' +
-								'affected symbols, and dispatches the episode — check progress with ' +
-								'action="trajectory".',
+								'affected symbols, and dispatches the episode. A queued sweep does NOT ' +
+								'always dispatch — it may find nothing to work on — so read ' +
+								'action="requests" for this request\'s recorded outcome, and ' +
+								'action="trajectory" for the episode once one exists.',
+						}],
+					});
+					return;
+				}
+				if (args.action === 'requests') {
+					// The other half of the queue's honesty: a drained request that
+					// dispatched nothing used to leave its reason in a transient toast.
+					const rows = readRequestOutcomes(workspaceRoot).slice(-25).reverse();
+					reply(req.id, {
+						content: [{
+							type: 'text',
+							text: rows.length === 0
+								? 'No queued-request outcomes recorded yet. (Requests queued before this ' +
+									'ledger existed left no record — that absence is not evidence they ran.)'
+								: ['Queued-request outcomes, newest first:', '']
+									.concat(rows.map((r) => `- [${r.outcome}] ${r.kind} ${r.request_id} @ ${r.ts}\n      ${r.reason}`))
+									.join('\n'),
 						}],
 					});
 					return;
