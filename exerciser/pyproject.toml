@@ -15,6 +15,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The property-based generator arm. `generators.py` documents
+# hypothesis-jsonschema as ADOPTED and `plan.py` consumes the
+# `hypothesis_valid` candidates it produces — but until this extra existed the
+# package was declared in no manifest at all, so `hypothesis_valid_available()`
+# returned False in every install that has ever shipped and the arm was dead
+# code. Optional by design (the in-tree generator in `schema.py` remains the
+# guaranteed source for every input class), declared so it is installable and
+# so CI can prove the arm actually runs.
+propertygen = [
+    "hypothesis>=6.100.0,<7.0.0",
+    "hypothesis-jsonschema>=0.23.0,<0.24.0",
+]
 dev = [
     "pytest>=8.0.0,<10.0.0",
     "ruff>=0.6.0,<0.9.0",

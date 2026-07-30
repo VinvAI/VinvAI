@@ -439,7 +439,30 @@ export function computeUpdatedPolicy(
 			best = a;
 		}
 	}
-	next.preferred_arm = best;
+	// PROMOTION GATES. `min_promotion_n` and `promotion_delta` were declared,
+	// defaulted and range-VALIDATED in episodeTelemetry.ts but never read here,
+	// so this was a bare argmax over posterior means. With a 1/1 prior a single
+	// verified episode moves one arm's mean to 0.667 while every other arm sits
+	// at 0.5, so ONE objective success promoted an arm — observed live on this
+	// machine: episodes_seen 17, exactly 1 objective observation in the
+	// posteriors, preferred_arm 4.
+	//
+	// That matters because `preferred_arm` is not merely reported: qna/answer.ts
+	// decodes bit 2 of it to pick Ask-Vinv's per-symbol snippet budget. (Episode
+	// arm SELECTION is Thompson sampling + decaying epsilon, which handles n=1
+	// correctly on its own — this gate is for the greedy readers.)
+	//
+	// Rule: keep the incumbent unless the challenger has at least
+	// `min_promotion_n` objective observations AND beats the incumbent's
+	// posterior mean by at least `promotion_delta`.
+	const incumbent =
+		current.preferred_arm >= 0 && current.preferred_arm < armCount ? current.preferred_arm : 0;
+	const challengerN = armCounts[best] ?? 0;
+	const beatsIncumbent = means[best] - means[incumbent] >= current.promotion_delta;
+	next.preferred_arm =
+		best === incumbent || (challengerN >= current.min_promotion_n && beatsIncumbent)
+			? best
+			: incumbent;
 
 	// Attempt budget: smallest budget covering the learned quantile of
 	// attempts-to-success (objective successes only), PLUS one attempt of

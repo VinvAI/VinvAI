@@ -1134,6 +1134,54 @@ suite('Episode walk: reward → ledger → policy update → OPE gate', () => {
 		assert.strictEqual(next.attempt_budget, 3);
 	});
 
+	test('preferred_arm respects min_promotion_n and promotion_delta', () => {
+		// These two knobs were declared, defaulted and range-validated in
+		// episodeTelemetry.ts but never READ by the updater, so promotion was a
+		// bare argmax over posterior means. With a Beta(1,1) prior ONE verified
+		// episode lifts an arm to 0.667 while every other arm sits at 0.5, so a
+		// single objective success promoted an arm. Observed live: a machine-global
+		// policy with episodes_seen 17, exactly one objective observation in the
+		// posteriors, and preferred_arm 4.
+		//
+		// preferred_arm is not merely reported — qna/answer.ts decodes bit 2 of it
+		// to choose Ask-Vinv's per-symbol snippet budget, so a thin promotion
+		// changes real behaviour. (Episode arm SELECTION is Thompson sampling with
+		// decaying epsilon and handles n=1 correctly on its own.)
+		const ep = (armIndex: number, verified: boolean) => ({
+			armIndex, propensity: 0.5, reward: verified ? 1 : 0,
+			attempts: 1, verified, objective: true,
+		});
+		const incumbent = POLICY_PRIORS.preferred_arm;
+
+		// n=1 is below min_promotion_n (5): the incumbent must hold.
+		assert.strictEqual(
+			computeUpdatedPolicy({ ...POLICY_PRIORS }, [ep(4, true)]).preferred_arm,
+			incumbent,
+			'one objective success must not promote an arm',
+		);
+
+		// Enough evidence AND a real margin: promote.
+		assert.strictEqual(
+			computeUpdatedPolicy(
+				{ ...POLICY_PRIORS },
+				[ep(4, true), ep(4, true), ep(4, true), ep(4, true), ep(4, true)],
+			).preferred_arm,
+			4,
+			'min_promotion_n met with margin must promote',
+		);
+
+		// Enough evidence but the challenger only matches the prior mean — no
+		// promotion_delta margin, so the incumbent holds.
+		assert.strictEqual(
+			computeUpdatedPolicy(
+				{ ...POLICY_PRIORS },
+				[ep(5, true), ep(5, false), ep(5, true), ep(5, false), ep(5, true), ep(5, false)],
+			).preferred_arm,
+			incumbent,
+			'a coin-flip arm must not displace the incumbent',
+		);
+	});
+
 	test('the OPE gate blocks a WORSE candidate policy outright', () => {
 		// Candidate action 10 is strictly worse than baseline 5 — supported,
 		// consistent, but its DR delta is negative, so the BCa LCB is < 0.

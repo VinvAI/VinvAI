@@ -10,7 +10,13 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { cmpSessionMark, readSessionTag, type SessionMark } from '../runtime/traceStore';
+import {
+	cmpSessionMark,
+	containmentVerdict,
+	mergeContainment,
+	readSessionTag,
+	type SessionMark,
+} from '../runtime/traceStore';
 
 /** One symbol chunk as stored in .vinv/index/chunks.jsonl (text omitted). */
 export interface GraphNode {
@@ -95,6 +101,29 @@ export interface FailureExemplar {
 	 *    unverified. Never silently dropped: claiming "fixed" requires a run.
 	 */
 	superseded: null | 'code_changed' | 'not_reproduced';
+	/**
+	 * Did this exception ESCAPE the call stack, or did a caller absorb it?
+	 *
+	 *  - true  — CONTAINED: an observed ancestor of the raising frame exited
+	 *    `ok`, so the exception was caught and handled. The raise is control
+	 *    flow, not a failure.
+	 *  - false — PROPAGATED: every observed ancestor also exited with an error,
+	 *    so nothing absorbed it.
+	 *  - null  — UNKNOWN: no ancestor exit was observed (no parent link, or the
+	 *    chain is the request root). Callers must treat null as PROPAGATED —
+	 *    when unsure, keep it on the defect list.
+	 *
+	 * Derived purely from the capture: `status` on the exit rows of the frames
+	 * named in `caller_chain`. Nothing here is inferred from source.
+	 */
+	contained: boolean | null;
+	/**
+	 * The observed ancestor frame that absorbed this exception (the innermost
+	 * one that exited `ok`), or null when it escaped / is unknown. Lets a
+	 * consumer say "caught by _cmd_serve" rather than silently dropping a
+	 * failure a user may have seen flagged red yesterday.
+	 */
+	contained_by: string | null;
 }
 
 /**
@@ -825,6 +854,18 @@ function absorbRawCaptures(
 		// failing exit.
 		const lastArgs = new Map<string, { schema: string | null; summary: Record<string, unknown> | null }>();
 		const parentOf = new Map<string, string | null>(); // req\0thread\0comp → parent comp
+		// Exit outcome per frame, for containment: an error that an ancestor
+		// absorbed (that ancestor exited `ok`) is handled control flow, not a
+		// defect. Populated on exit rows; read in the post-pass below, because a
+		// caller's exit is written AFTER the callee's as the stack unwinds.
+		const exitOkOf = new Map<string, boolean>(); // req\0thread\0comp → exited ok
+		/**
+		 * The (request, thread, component) key shape shared by `lastArgs`,
+		 * `parentOf` and `exitOkOf`. Must stay byte-identical to the inline
+		 * `reqKey` those maps are written with — same NUL separator.
+		 */
+		const keyOf = (req: string, thread: number, comp: string): string =>
+			`${req}\u0000${thread}\u0000${comp}`;
 		const errorExits: Array<{
 			component: string;
 			request_id: string;
@@ -870,6 +911,10 @@ function absorbRawCaptures(
 			}
 			const ms = Number(ev.duration_ms ?? 0) || 0;
 			const errType = ev.error_type && ev.error_type !== 'None' ? ev.error_type : null;
+			// A frame that exits without an error type absorbed whatever its
+			// callees raised. Recorded for every exit, not just clean ones, so a
+			// re-raising parent reads as `false` rather than unknown.
+			exitOkOf.set(reqKey, !errType);
 			const callArgs = lastArgs.get(reqKey) ?? null;
 			for (const row of rowsFor(ev.component)) {
 				const cur = overlay[row] ?? {
@@ -971,6 +1016,20 @@ function absorbRawCaptures(
 				chain.push(cursor);
 				cursor = parentOf.get(`${err.request_id}\u0000${err.thread_id}\u0000${cursor}`);
 			}
+			// Containment: walk the same observed chain and ask whether any
+			// ancestor exited `ok`. If one did, it caught this exception — the
+			// raise never escaped, so it is control flow rather than a defect
+			// (the embedder's EADDRINUSE single-instance lock is the canonical
+			// case: make_server exits error, _cmd_serve exits ok, main exits ok).
+			// Stays `null` when NO ancestor exit was observed at all, which
+			// consumers must read as propagated: unknown is never "handled".
+			const ancestorOk = chain.map((ancestor) =>
+				exitOkOf.get(keyOf(err.request_id, err.thread_id, ancestor)),
+			);
+			const contained = containmentVerdict(ancestorOk);
+			// Innermost ancestor that exited ok — the frame whose except: caught it.
+			const containedBy =
+				contained === true ? (chain[ancestorOk.indexOf(true)] ?? null) : null;
 			const args = err.args;
 			const failKey = `${err.error_type} ${err.error_message ?? ''}`;
 			for (const row of rowsFor(err.component)) {
@@ -988,6 +1047,12 @@ function absorbRawCaptures(
 				);
 				if (match) {
 					match.count += 1;
+					// Merge containment across occurrences of the same failure
+					// identity: it is only "handled" if EVERY observed occurrence
+					// was absorbed. One escape makes the whole identity a defect,
+					// and an unknown never upgrades a known escape.
+					match.contained = mergeContainment(match.contained, contained);
+					match.contained_by = match.contained === true ? (match.contained_by ?? containedBy) : null;
 					// Prefer an exemplar that carries a traceback over one without.
 					if (!match.error_stack && err.error_stack) {
 						match.error_stack = err.error_stack;
@@ -1010,7 +1075,24 @@ function absorbRawCaptures(
 						count: 1,
 						capture_epoch: mark.epoch,
 						superseded: null,
+						contained,
+						contained_by: containedBy,
 					});
+				}
+				// current_errors means "is this FAILING now" — it drives the graph's
+				// red rings, the "failing:" digest, the ⚠N row labels, the status bar
+				// and the Fix-with-Coding-Agent button. An exception a caller caught is
+				// not failing, so discount it from this session's tally here, where
+				// containment is finally known. Lifetime `errors` deliberately keeps the
+				// raw observed count: "it raised N times" stays a true fact.
+				if (contained === true) {
+					const sr = sessionRows.get(row);
+					if (sr) {
+						sr.errors = Math.max(0, sr.errors - 1);
+						if (!cur.failures.some((f) => f.contained !== true && `${f.error_type} ${f.error_message ?? ''}` === failKey)) {
+							sr.failKeys.delete(failKey);
+						}
+					}
 				}
 			}
 		}

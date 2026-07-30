@@ -37,7 +37,11 @@ import {
 	type OptimizeOpportunity,
 	type OptimizeRunResult,
 } from './exerciseOptimize';
-import { readAndClearRequests, restoreEpisodeRequests } from './requestQueue';
+import {
+	readAndClearRequests,
+	recordRequestOutcome,
+	restoreEpisodeRequests,
+} from './requestQueue';
 import {
 	collectMemoryTrends,
 	collectRuntimeErrorClusters,
@@ -287,11 +291,27 @@ export function registerEpisodeRequestTrigger(context: vscode.ExtensionContext):
 				// every request after it; restoring only the current item silently
 				// discarded the tail whenever the harness was already occupied.
 				restoreEpisodeRequests(root, requests.slice(index));
+				// Deferred, NOT consumed — the file is back on the queue. Recorded so a
+				// caller can tell "waiting for the harness" from "silently dropped".
+				for (const deferred of requests.slice(index)) {
+					recordRequestOutcome(root, {
+						request_id: deferred.id,
+						kind: deferred.kind,
+						outcome: 'harness_busy',
+						reason: 'an episode was already running — the request was restored to the queue and will be retried',
+					});
+				}
 				return;
 			}
 			switch (request.kind) {
 				case 'fix': {
 					if (!request.issue) {
+						recordRequestOutcome(root, {
+							request_id: request.id,
+							kind: request.kind,
+							outcome: 'invalid',
+							reason: "kind 'fix' requires issue text, and none was supplied",
+						});
 						break;
 					}
 					const service = request.service;
@@ -318,21 +338,32 @@ export function registerEpisodeRequestTrigger(context: vscode.ExtensionContext):
 						// none for a free-text defect.
 						successCriteria: criteriaFor(intent, service),
 					});
+					// A 'fix' request always reaches runEpisode — reaching here means it
+					// did, so this is observed, not assumed. The episode's own verdict
+					// lives in the episode ledger; this only records that it dispatched.
+					recordRequestOutcome(root, {
+						request_id: request.id,
+						kind: request.kind,
+						outcome: 'dispatched',
+						reason: `episode dispatched (${service ? 'service-fix' : 'general'}, intent ${intent})`,
+					});
 					break;
 				}
 				case 'runtime-errors':
-					await offerEpisodeForRuntimeErrors(context, root);
+					await offerEpisodeForRuntimeErrors(context, root, request.id);
 					break;
 				case 'hotspots':
 					// Chat-requested sweeps ride the same verdict engine as the
 					// panel: frozen probes, episode-bound verdict, real revert.
-					await runVerifiedHotspotEpisode(context, root);
+					// `request.id` makes the sweep record its own outcome, so a
+					// no-plan reason survives past the toast (see requestQueue).
+					await runVerifiedHotspotEpisode(context, root, undefined, request.id);
 					break;
 				case 'memory-trends':
-					await offerEpisodeForMemoryTrends(context, root);
+					await offerEpisodeForMemoryTrends(context, root, request.id);
 					break;
 				case 'cache-candidates':
-					await runVerifiedCacheSweep(context, root);
+					await runVerifiedCacheSweep(context, root, request.id);
 					break;
 			}
 		}
@@ -428,6 +459,12 @@ function runtimeErrorTask(clusters: ErrorCluster[]): EpisodeTask {
 export async function offerEpisodeForRuntimeErrors(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
+	/**
+	 * Set when this came from a QUEUED chat request, so a run that dispatches
+	 * nothing records WHY instead of returning silently. Absent for the
+	 * automatic/panel paths, which are not queued requests.
+	 */
+	requestId?: string,
 ): Promise<void> {
 	let clusters: ErrorCluster[] = [];
 	try {
@@ -437,9 +474,35 @@ export async function offerEpisodeForRuntimeErrors(
 			loadRuntimeOverlay(workspaceRoot, nodes),
 		).clusters;
 	} catch {
+		// UNREADABLE STORE — emphatically not the same as "no errors". Recorded
+		// as such so a caller cannot read a missing index as a clean bill of
+		// health; unknown stays unknown.
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'runtime-errors',
+				outcome: 'no_plan',
+				reason:
+					'the index store or runtime overlay could not be read, so whether any '
+					+ 'function is raising errors is UNKNOWN — this is not a report of zero errors',
+			});
+		}
 		return;
 	}
 	if (clusters.length === 0) {
+		// A genuine, informative answer — and after the containment gate this is
+		// the EXPECTED result on a healthy repo, so returning silently would
+		// leave a caller unable to tell success from a dropped request.
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'runtime-errors',
+				outcome: 'no_plan',
+				reason:
+					'no function raised an unhandled error in the captured traces — exceptions '
+					+ 'a caller absorbed and deliberate 4xx rejections are excluded by design',
+			});
+		}
 		return;
 	}
 	await offerOrDispatch(
@@ -904,17 +967,41 @@ async function offerPreparedOptimization(
 export async function offerEpisodeForMemoryTrends(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
+	/**
+	 * Set when this came from a QUEUED chat request, so a run that dispatches
+	 * nothing records WHY instead of returning silently. Absent for the
+	 * automatic/panel paths, which are not queued requests.
+	 */
+	requestId?: string,
 ): Promise<void> {
 	let suspects: ReturnType<typeof collectMemoryTrends> = [];
 	try {
 		suspects = collectMemoryTrends(workspaceRoot, loadNodes(indexStoreDir(workspaceRoot)));
 	} catch {
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'memory-trends',
+				outcome: 'no_plan',
+				reason:
+					'the index store or capture series could not be read, so leak trends are '
+					+ 'UNKNOWN — this is not a report of zero leaks',
+			});
+		}
 		return;
 	}
 	if (suspects.length === 0) {
-		void vscode.window.showInformationMessage(
-			'Vinv: No memory-leak trends — needs 3+ capture sessions where a symbol keeps retaining memory. Run services across several sessions to build the series.',
-		);
+		const why =
+			'Vinv: No memory-leak trends — needs 3+ capture sessions where a symbol keeps retaining memory. Run services across several sessions to build the series.';
+		void vscode.window.showInformationMessage(why);
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'memory-trends',
+				outcome: 'no_plan',
+				reason: why,
+			});
+		}
 		return;
 	}
 	const fmt = (b: number): string =>
@@ -977,6 +1064,13 @@ export async function runVerifiedHotspotEpisode(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	row?: number,
+	/**
+	 * Set when this sweep came from a QUEUED chat request. The queue drains
+	 * atomically, so without recording an outcome a sweep that dispatches
+	 * nothing leaves no trace and the reason reaches only a transient toast.
+	 * Absent for panel clicks, which are not queued requests.
+	 */
+	requestId?: string,
 ): Promise<void> {
 	let prep: OptimizationPrep;
 	try {
@@ -989,7 +1083,16 @@ export async function runVerifiedHotspotEpisode(
 	}
 	const plan = prep.plan;
 	if (!plan) {
-		void vscode.window.showInformationMessage(noPlanMessage(prep, 'hotspots'));
+		const why = noPlanMessage(prep, 'hotspots');
+		void vscode.window.showInformationMessage(why);
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'hotspots',
+				outcome: 'no_plan',
+				reason: why,
+			});
+		}
 		return;
 	}
 	// A memory opportunity is judged in BYTES; everything else in ms. The
@@ -1012,6 +1115,13 @@ export async function runVerifiedHotspotEpisode(
 export async function runVerifiedCacheSweep(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
+	/**
+	 * Set when this sweep came from a QUEUED chat request. The queue drains
+	 * atomically, so without recording an outcome a sweep that dispatches
+	 * nothing leaves no trace and the reason reaches only a transient toast.
+	 * Absent for panel clicks, which are not queued requests.
+	 */
+	requestId?: string,
 ): Promise<void> {
 	let prep: OptimizationPrep;
 	try {
@@ -1021,7 +1131,16 @@ export async function runVerifiedCacheSweep(
 	}
 	const plan = prep.plan;
 	if (!plan) {
-		void vscode.window.showInformationMessage(noPlanMessage(prep, 'cache_candidates'));
+		const why = noPlanMessage(prep, 'cache_candidates');
+		void vscode.window.showInformationMessage(why);
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'cache-candidates',
+				outcome: 'no_plan',
+				reason: why,
+			});
+		}
 		return;
 	}
 	const deps = buildWorkspaceDeps(workspaceRoot, {});

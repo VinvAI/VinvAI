@@ -42,6 +42,19 @@ export interface EpisodeOutcome {
 	verified: boolean;
 	aborted: boolean;
 	reward: number;
+	/**
+	 * Executable-evidence weight behind `reward` (oracle + acceptance tests +
+	 * regression, before renormalization). 0 means NOTHING executable ran, so the
+	 * reward is the audit/adherence components alone.
+	 *
+	 * Persisted because `reward` is renormalized over the components that were
+	 * AVAILABLE — correct MNAR handling, since an unrunnable check is not a
+	 * verdict — which makes the bare number incomparable across episodes: a clean
+	 * verified pass and an episode where nothing could be checked both render
+	 * 1.00. Optional: records written before this field carry `undefined`, which
+	 * means UNKNOWN and must never be displayed as if it were verified.
+	 */
+	verification_weight?: number;
 	/** One-line evidence digest of the final verdict (what happened, why). */
 	evidence: string;
 	/** Path to the last context pack — the full-evidence artifact for this

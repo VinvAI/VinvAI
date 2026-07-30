@@ -28,6 +28,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The contrib instrumenters `load_contrib_instrumenters` activates. Every entry
+# is version-ranged with the others so the set stays on ONE core/contrib release
+# pair — mixing them makes the instrumenters crash at import with
+# `ImportError: _StabilityMode` / `HTTP_DURATION_HISTOGRAM_BUCKETS*` and the
+# JSONL exporter silently emits zero spans.
+#
+# This extra must stay in sync with `_CONTRIB_MAP` in launcher/otel_setup.py:
+# anything mapped there but missing here shows up as `instrumenter_missing` in
+# `probe_contrib_instrumenters()` and costs a whole capability silently — the
+# run still succeeds and trace.jsonl still fills, but every OUTBOUND call loses
+# its child span, so its latency is charged to the caller as unexplained
+# self-time and fan-out/N+1 detection sees N sequential calls as one slow call.
 otel-libs = [
     "opentelemetry-instrumentation-fastapi>=0.48b0,<0.50.0",
     "opentelemetry-instrumentation-requests>=0.48b0,<0.50.0",
@@ -36,6 +48,13 @@ otel-libs = [
     "opentelemetry-instrumentation-redis>=0.48b0,<0.50.0",
     "opentelemetry-instrumentation-psycopg2>=0.48b0,<0.50.0",
     "opentelemetry-instrumentation-asyncio>=0.48b0,<0.50.0",
+    # urllib3 and logging were reaching the venv ONLY via bring-up's agent-run
+    # `bootstrap -a install`, so they were absent from the lock and any `uv sync`
+    # pruned them. Both libraries are present in virtually every Python service
+    # (requests rides on urllib3; logging is stdlib), and `probe_contrib_instrumenters`
+    # reported both as `instrumenter_missing` once the un-declared copies were pruned.
+    "opentelemetry-instrumentation-urllib3>=0.48b0,<0.50.0",
+    "opentelemetry-instrumentation-logging>=0.48b0,<0.50.0",
 ]
 rca = [
     "dowhy>=0.11.0,<0.13.0",

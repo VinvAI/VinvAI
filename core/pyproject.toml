@@ -13,23 +13,63 @@ readme = "README.md"
 requires-python = ">=3.12,<3.15"
 license = { text = "Apache-2.0" }
 dependencies = [
-    "pydantic>=2.10.5",
-    "dspy-ai>=3.1.0",
-    # Satisfied by the in-tree OpenAI-SDK shim (vendor/litellm_stub), not BerriAI.
-    "litellm",
-    "openai>=1.59.0",
-    "pexpect>=4.9",
-    "httpx>=0.24.0",
-    "pyyaml>=6.0.0",
-    "websocket-client>=1.8.0",
-    # dspy imports jsonschema at module load (adapters/types/tool.py).
-    "jsonschema>=4.0.0",
+    "pydantic>=2.10.5,<3.0.0",
+    "pexpect>=4.9,<5.0",
+    "httpx>=0.27.0,<0.29.0",
+    "pyyaml>=6.0.1,<7.0.0",
+    "websocket-client>=1.8.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
+# The DSPy-driven agent runtime. NOT a base dependency: measured, `import core`
+# and its whole public API (BaseSwarmAgent, TerminalExecutorAgent,
+# ensure_dspy_lm_configured) work with dspy and litellm absent — 17 of core's 21
+# dspy imports are already lazy, and nothing on the `core/__init__.py` path hits
+# the 4 module-level ones. Vinv itself never needs this: every agent run is
+# delegated to an external harness CLI, and `core.llm.ensure_dspy_lm_configured()`
+# RAISES rather than configuring a model, so no in-process LLM call is reachable.
+#
+# Keeping these out of the base install is what fixes the litellm substitution
+# hazard. The shim is redirected via `[tool.uv.sources]`, which is uv-only and
+# absent from wheel metadata, so a plain `pip install vinv-core` used to resolve
+# BerriAI litellm from PyPI against an unpinned `"litellm"` — silently swapping in
+# a different package for the only audience core is published for. Now:
+#   pip install vinv-core            -> no dspy, no litellm. Hazard gone.
+#   pip install vinv-core[agents]    -> real dspy + real BerriAI litellm, which is
+#                                       CORRECT for an embedder who must configure
+#                                       `dspy.settings.lm` with their own model.
+#   uv sync (this monorepo)          -> the in-tree shim, for core's own tests.
+agents = [
+    "dspy-ai>=3.1.0,<4.0.0",
+    # In this workspace only, satisfied by the in-tree OpenAI-SDK shim
+    # (vendor/litellm_stub) via [tool.uv.sources]; elsewhere by BerriAI.
+    # dspy hard-requires litellm>=1.64.0 — see the shim's pyproject for why its
+    # version string is load-bearing.
+    "litellm",
+    # Never imported by core directly — reaches it only through dspy/the shim.
+    # Ceiling is <3.0.0, not <2.0.0: 2.x is what this workspace already resolved
+    # and tests green against, and the shim's imports (OpenAI/AsyncOpenAI,
+    # APIStatusError, types.chat) are stable across that major. A <2.0.0 cap would
+    # silently DOWNGRADE a working install, which is a regression, not a fix.
+    "openai>=1.59.0,<3.0.0",
+    # dspy imports jsonschema at module load (adapters/types/tool.py).
+    "jsonschema>=4.20.0,<5.0.0",
+    # Accurate tokenization for the context compressor. Soft-imported in
+    # components/context_compressor/token_utils.py and declared NOWHERE until
+    # now, so `count_tokens` silently fell back to `len // 4` — a 4-chars-per-token
+    # guess — for feasibility checks, chunk sizing and the reference budget. For
+    # code, which is punctuation-dense, that estimate is badly off, and the only
+    # signal was a debug-level log line. certifi is used by the same function as
+    # the SSL fallback when tiktoken downloads its encoding.
+    "tiktoken>=0.7.0,<1.0.0",
+    "certifi>=2024.2.2",
+]
 dev = [
     "pytest>=8.0.0,<10.0.0",
     "ruff>=0.6.0,<0.9.0",
+    # test_litellm_transport / test_scratchpad_blackboard / test_offload_gc_live
+    # exercise the dspy path, so the tests need the extra they cover.
+    "vinv-core[agents]",
 ]
 
 [project.urls]

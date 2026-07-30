@@ -16,9 +16,12 @@
  */
 import {
 	cmpSessionMark,
+	containmentVerdict,
+	mergeContainment,
 	loadCorpus,
 	resolveSymbol,
 	TraceCorpus,
+	type ExitRow,
 	type SessionMark,
 } from './traceStore';
 import { valuesOf } from './valueProfiles';
@@ -282,9 +285,36 @@ export function toolCoverageOf(workspaceRoot: string, symbol?: string): Record<s
 			count: number;
 			capture_epoch: number | null;
 			superseded: null | 'code_changed' | 'not_reproduced';
+			/** Did a caller absorb it? See traceStore.containmentVerdict. */
+			contained: boolean | null;
+			/** Innermost ancestor that absorbed it; null when it escaped/unknown. */
+			contained_by: string | null;
 			lastSeen: SessionMark;
 		}
 		const failures = new Map<string, CoverageFailure>();
+		// Ancestor exit outcomes for containment: a parent's own exit row lives
+		// on its SymbolRecord, matched on (request_id, thread_id) so concurrent
+		// requests and threads never cross-contaminate. Innermost caller first.
+		const ancestorExits = (
+			x: ExitRow,
+		): { oks: Array<boolean | undefined>; chain: string[] } => {
+			const out: Array<boolean | undefined> = [];
+			const chain: string[] = [];
+			const seen = new Set<string>();
+			let cursor = x.parent_component;
+			while (cursor && out.length < 32 && !seen.has(cursor)) {
+				seen.add(cursor);
+				chain.push(cursor);
+				const pexit = corpus.bySymbol
+					.get(cursor)
+					?.exits.find(
+						(e) => e.request_id === x.request_id && e.thread_id === x.thread_id,
+					);
+				out.push(pexit ? pexit.status === 'ok' : undefined);
+				cursor = pexit?.parent_component ?? null;
+			}
+			return { oks: out, chain };
+		};
 		for (const x of rec.exits) {
 			if (x.status === 'error') {
 				error += 1;
@@ -297,6 +327,13 @@ export function toolCoverageOf(workspaceRoot: string, symbol?: string): Record<s
 					const cur = failures.get(key);
 					if (cur) {
 						cur.count += 1;
+						const anc = ancestorExits(x);
+						const verdict = containmentVerdict(anc.oks);
+						cur.contained = mergeContainment(cur.contained, verdict);
+						cur.contained_by =
+							cur.contained === true
+								? (cur.contained_by ?? anc.chain[anc.oks.indexOf(true)] ?? null)
+								: null;
 						if (!cur.error_stack && x.error_stack) {
 							cur.error_stack = x.error_stack;
 						}
@@ -313,6 +350,13 @@ export function toolCoverageOf(workspaceRoot: string, symbol?: string): Record<s
 							count: 1,
 							capture_epoch: x.source_epoch ?? null,
 							superseded: null,
+							contained: containmentVerdict(ancestorExits(x).oks),
+							contained_by: (() => {
+								const a = ancestorExits(x);
+								return containmentVerdict(a.oks) === true
+									? (a.chain[a.oks.indexOf(true)] ?? null)
+									: null;
+							})(),
 							lastSeen: sessionKey(x),
 						});
 					}

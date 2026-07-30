@@ -1107,6 +1107,16 @@ export async function runEpisode(
 	let lastObjectiveFail = false;
 	let lastPackPath = '';
 	let lastEvidence = '';
+	/**
+	 * The agent's last disputed premise, kept for the outcome digest.
+	 *
+	 * A dispute produces no verification evidence by construction — the agent
+	 * declined to treat the issue as real — so `lastEvidence` stays empty and the
+	 * episode recorded the digest "no evidence". That is false: the dispute IS
+	 * the evidence, and the trajectory prints it two lines below the digest that
+	 * denies it exists.
+	 */
+	let lastDispute = '';
 	// The last attempt's full reward breakdown — logged at episode_end so the
 	// ledger carries the multi-signal reward, not only the shaped scalar.
 	let lastBreakdown: RewardBreakdown | undefined;
@@ -1678,6 +1688,7 @@ export async function runEpisode(
 						continue;
 					}
 					if (directives.dispute !== undefined && !isQuestion) {
+						lastDispute = directives.dispute;
 						progress.report({ message: `attempt ${attempts}: agent disputes the premise — negotiating…` });
 						const verdict = await breakStall(
 							task.title,
@@ -2374,9 +2385,20 @@ export async function runEpisode(
 				verified,
 				aborted,
 				reward,
+				// Carried so the trajectory can say whether anything executable
+				// stood behind the number: `reward` is renormalized over available
+				// components, so it alone cannot distinguish a verified pass from an
+				// episode where no check could run.
+				verification_weight: lastBreakdown?.verificationWeight,
 				// The digest line is the first evidence line WHOLE; the pack path
 				// points at the complete artifact for anything the line elides.
-				evidence: lastEvidence.split('\n')[0] || (verified ? 'verified' : 'no evidence'),
+				evidence:
+					lastEvidence.split('\n')[0] ||
+					(verified
+						? 'verified'
+						: lastDispute
+							? `agent disputed the premise: ${lastDispute.split('\n')[0]}`
+							: 'no evidence'),
 				pack_path: lastPackPath || undefined,
 				// Full issue + service enable post-completion dispute (the issue
 				// signature locates this episode's test set; re-dispatch needs both).

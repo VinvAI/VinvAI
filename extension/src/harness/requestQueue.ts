@@ -32,6 +32,92 @@ export interface EpisodeRequest {
 	service?: string;
 }
 
+/**
+ * Why a drained request produced what it produced.
+ *
+ * The queue is atomic and unconditional: `readAndClearRequests` removes the file
+ * before anything is attempted. That is correct for crash-safety, but it means a
+ * request that dispatches nothing leaves NO trace — and until this ledger, the
+ * only channel for the reason was `vscode.window.showInformationMessage`, a
+ * transient toast. So an MCP caller that queued a sweep observed: file created,
+ * file drained, silence forever, with no way even in principle to learn the
+ * outcome. Worse than silence, because the request was consumed, so a retry is
+ * not idempotent — it is a second consumption with the same silent result.
+ *
+ * Observed live: `run_sweep hotspots` reported `Sweep 'hotspots' queued
+ * (episode-363c2c62-….json)`; `.vinv/requests/` was left empty (drained) and
+ * `.vinv/episodes.jsonl` never gained a line. `noPlanMessage` had computed one of
+ * three perfectly actionable reasons — all opportunities held on the board / no
+ * cache opportunities / no recoverable time, capture a trace first — and routed
+ * every one of them to a popup.
+ *
+ * The general rule this encodes: this codebase guards VERDICTS everywhere
+ * (verified, objective, contained, superseded) and had no persistence at all for
+ * NON-verdicts. "Nothing happened, and here is why" is evidence too.
+ */
+export type RequestOutcomeKind =
+	| 'dispatched' // an episode actually ran for this request
+	| 'no_plan' // nothing to work on; `reason` says why (never a guess)
+	| 'harness_busy' // deferred, restored to the queue — NOT consumed
+	| 'invalid'; // malformed request (e.g. kind 'fix' with no issue text)
+
+export interface RequestOutcome {
+	request_id: string;
+	kind: EpisodeRequestKind;
+	outcome: RequestOutcomeKind;
+	/** Human-readable cause. For 'no_plan' this is the text the toast carried. */
+	reason: string;
+	ts: string;
+}
+
+/** Append-only outcome ledger, beside the other durable reports. */
+export function requestOutcomesPath(workspaceRoot: string): string {
+	return path.join(workspaceRoot, '.vinv', 'reports', 'request-outcomes.jsonl');
+}
+
+/**
+ * Records what became of one drained request. Best-effort by design: a failure
+ * to write the ledger must never take down a dispatch that is otherwise fine.
+ */
+export function recordRequestOutcome(
+	workspaceRoot: string,
+	outcome: Omit<RequestOutcome, 'ts'> & { ts?: string },
+): void {
+	try {
+		const file = requestOutcomesPath(workspaceRoot);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const row: RequestOutcome = { ...outcome, ts: outcome.ts ?? new Date().toISOString() };
+		fs.appendFileSync(file, `${JSON.stringify(row)}\n`);
+	} catch {
+		// A missing ledger line is a reporting loss, not a dispatch failure.
+	}
+}
+
+/** Reads the outcome ledger, newest last. `[]` when absent or unreadable. */
+export function readRequestOutcomes(workspaceRoot: string): RequestOutcome[] {
+	let text: string;
+	try {
+		text = fs.readFileSync(requestOutcomesPath(workspaceRoot), 'utf8');
+	} catch {
+		return [];
+	}
+	const out: RequestOutcome[] = [];
+	for (const line of text.split('\n')) {
+		if (!line.trim()) {
+			continue;
+		}
+		try {
+			const row = JSON.parse(line) as RequestOutcome;
+			if (row && typeof row.request_id === 'string' && typeof row.outcome === 'string') {
+				out.push(row);
+			}
+		} catch {
+			continue; // a torn line must not hide the rest of the ledger
+		}
+	}
+	return out;
+}
+
 export function requestsDir(workspaceRoot: string): string {
 	return path.join(workspaceRoot, '.vinv', 'requests');
 }

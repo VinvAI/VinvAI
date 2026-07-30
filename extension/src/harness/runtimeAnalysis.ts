@@ -73,13 +73,41 @@ export function isExpectedRejection(
 }
 
 /**
+ * Is this raised exception one a CALLER absorbed, rather than a failure that
+ * escaped? `contained === true` means the capture observed an ancestor frame
+ * exiting `ok` while this frame exited with an error — i.e. a `try/except`
+ * upstream handled it, deliberately, and the process carried on.
+ *
+ * This is the same false-positive class as `isExpectedRejection`, one level
+ * more general. The case that motivated it: the embedder binds its port as a
+ * machine-wide single-instance lock, so a second `serve` raises
+ * `OSError(EADDRINUSE)` inside `make_server`, and `_cmd_serve` catches it,
+ * prints "reusing it rather than loading a second copy of the model", and
+ * returns 0 (embedder/src/vinv_embedder/cli.py:91). The trace records exactly
+ * that shape — `make_server` exits error at depth 2, `_cmd_serve` exits ok at
+ * depth 1, `main` exits ok at depth 0 — yet it was clustered as a defect,
+ * dispatched as a fix episode, and the harness agent correctly disputed the
+ * premise ("the intentional single-instance bind lock, not an unhandled
+ * failure"). The episode aborted at reward -1.00. Handled control flow must
+ * never reach the episode queue.
+ *
+ * `null`/`undefined` (no ancestor exit observed) is NOT treated as handled —
+ * same "when unsure, keep it on the list" rule as everywhere else here.
+ */
+export function isHandledInternally(contained: boolean | null | undefined): boolean {
+	return contained === true;
+}
+
+/**
  * Scans the runtime overlay for symbols that raised DEFECTS. The returned
  * `signature` is order-independent and content-derived (file:name:errorTypes),
  * so "the same errors as last time" is a computable fact — the auto-trigger
  * uses it to dispatch each distinct failure picture exactly once.
  *
- * Deliberate 4xx rejections (see `isExpectedRejection`) are excluded: they
- * are the service saying "no" correctly, not the service breaking.
+ * Two classes of non-defect are excluded, both evidence-derived and both
+ * narrow: deliberate 4xx rejections (see `isExpectedRejection`) are the
+ * service saying "no" correctly, and exceptions an upstream frame caught (see
+ * `isHandledInternally`) never escaped at all. Everything else stays a defect.
  */
 export function collectRuntimeErrorClusters(
 	nodes: GraphNode[],
@@ -93,7 +121,9 @@ export function collectRuntimeErrorClusters(
 		.map(([row, rt]) => {
 			const current = rt.failures.filter((f) => f.superseded === null);
 			const defects = current.filter(
-				(f) => !isExpectedRejection(f.error_type, f.error_message),
+				(f) =>
+					!isExpectedRejection(f.error_type, f.error_message) &&
+					!isHandledInternally(f.contained),
 			);
 			// Older captures carry counts but no failure records — nothing to
 			// classify, so keep them defects (when unsure, keep on the list).
@@ -512,6 +542,109 @@ export function securityGuardReasons(
  * minus one representative call) and capped at the NEWEST session's total for
  * the symbol — you cannot reclaim more than the symbol currently costs.
  */
+/**
+ * Fraction of a request root's duration at or above which a frame's time IS the
+ * request/process lifetime rather than its own work.
+ *
+ * Not an absolute millisecond threshold — it is a ratio against THIS app's own
+ * request roots, so it holds for a 5ms service and a 5s batch alike (the same
+ * rule the rest of this module follows). Measured on the embedder capture, the
+ * separation is wide: `main` (depth 0), `do_GET` (depth 0) and `_cmd_serve` (the
+ * pass-through under main) all sit at 100.00% of their root, while the slowest
+ * frame that does REAL work — `EmbeddingEngine.load`, a sentence-transformer
+ * load — is 90.29%, and a request handler's `_send_json` is 55.69%. 0.99 keeps a
+ * ~9.7-point margin above the highest genuine worker.
+ */
+const LIFETIME_SHARE = 0.99;
+
+/**
+ * Rows whose observed duration measures PROCESS/REQUEST LIFETIME, not work —
+ * mapped to a human-readable reason.
+ *
+ * For a process or request root, `total_ms` is wall-clock lifetime: the program
+ * was running. Every duration-based heuristic misreads that, and the misreads
+ * are dispatchable. Observed live on this repo before this gate existed: the
+ * cache board offered `main` and `_cmd_serve` at "~25101ms is cacheable —
+ * recomputes identical inputs (1 of 2 calls repeat)", i.e. memoize the CLI entry
+ * point of a SERVER, and the hotspot board ranked the same two symbols #1 and #2
+ * at 31.2% each — 62.4% of "traced runtime" being "the process was running" —
+ * with a one-click optimize episode on both. The per-call rule read worst of all:
+ * "_cmd_serve 10738.8ms per call (self) — 148428.8x the typical symbol;
+ * unexpectedly slow for the work it does." A serve loop is SUPPOSED to take the
+ * whole run.
+ *
+ * None of the three existing soundness gates fires on these: functional
+ * dependence HOLDS (same argv, same exit 0, every time), no crypto/credential
+ * import is on the path, and `main` returns 0 rather than None.
+ *
+ * A row qualifies when it was observed at depth 0 (its duration is the lifetime
+ * by definition), or when its duration reaches LIFETIME_SHARE of the depth-0
+ * root of the same request — a pass-through frame that spans the whole run.
+ *
+ * Deliberately NOT "any once-per-request child of a root": in a web service most
+ * of a handler's real work is exactly that shape. On this capture that rule would
+ * have wrongly excluded `_send_json`, `queue_depth`, `ready` and `warming`, all
+ * legitimate optimization targets. The discriminator is the SHARE, not the
+ * parent.
+ *
+ * Excluded from cache candidates and from duration-ranked hotspots — the two
+ * surfaces that dispatch work. Coverage, the call tree and `why_did_this_run`
+ * keep them, because there lifetime is the correct and useful reading. Same
+ * discipline as the containment fix: stop CLASSIFYING it as waste, do not hide it.
+ */
+export function lifetimeFrames(
+	workspaceRoot: string,
+	nodes: GraphNode[],
+): Map<number, string> {
+	const rowsFor = buildComponentMatcher(nodes);
+	const out = new Map<number, string>();
+	// Per request: the depth-0 root's duration, and each component's total.
+	const rootMs = new Map<string, number>();
+	const compMs = new Map<string, Map<string, number>>();
+	const depthZero = new Set<string>();
+	for (const file of findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'))) {
+		for (const ev of eventsOf(file)) {
+			if (ev.event !== 'exit' || !ev.component) {
+				continue;
+			}
+			const rid = `${file}\u0000${ev.request_id ?? ''}`;
+			const ms = Number(ev.duration_ms ?? 0) || 0;
+			// depth is a string in raw captures — compare numerically.
+			if (Number(ev.depth ?? -1) === 0) {
+				depthZero.add(ev.component);
+				rootMs.set(rid, Math.max(rootMs.get(rid) ?? 0, ms));
+			}
+			const byComp = compMs.get(rid) ?? new Map<string, number>();
+			byComp.set(ev.component, (byComp.get(ev.component) ?? 0) + ms);
+			compMs.set(rid, byComp);
+		}
+	}
+	const mark = (component: string, reason: string): void => {
+		const rows = rowsFor(component);
+		if (rows.length === 1 && !out.has(rows[0])) {
+			out.set(rows[0], reason);
+		}
+	};
+	for (const component of depthZero) {
+		mark(component, 'runs at depth 0 — its duration is the request/process lifetime, not work');
+	}
+	for (const [rid, byComp] of compMs) {
+		const root = rootMs.get(rid);
+		if (!root || root <= 0) {
+			continue; // no depth-0 root observed for this request — no denominator
+		}
+		for (const [component, ms] of byComp) {
+			if (ms / root >= LIFETIME_SHARE) {
+				mark(
+					component,
+					`spans ${Math.round((ms / root) * 100)}% of its request root — a pass-through whose duration is the lifetime, not work`,
+				);
+			}
+		}
+	}
+	return out;
+}
+
 export function collectCacheCandidates(
 	workspaceRoot: string,
 	nodes: GraphNode[],
@@ -537,6 +670,12 @@ export function collectCacheCandidates(
 		newestSessionMs: number;
 	}
 	const perRow = new Map<number, Acc>();
+	// FOURTH soundness gate (see lifetimeFrames). The other three — functional
+	// dependence, the security guard, and the none-return rule — all PASS on a
+	// process entry point, which is how `main` and `_cmd_serve` came to be
+	// offered as memoization targets at "~25101ms is cacheable". Memoizing a
+	// server's CLI entry point means "do not start the process the second time".
+	const lifetime = lifetimeFrames(workspaceRoot, nodes);
 	for (const s of sessionTraces(workspaceRoot)) {
 		const sessionMs = new Map<number, number>();
 		// Pair enter→exit per (request, thread, component, depth) so each exit's
@@ -551,6 +690,9 @@ export function collectCacheCandidates(
 				continue;
 			}
 			const row = rows[0];
+			if (lifetime.has(row)) {
+				continue; // duration is lifetime, not work — nothing here is reclaimable
+			}
 			const pairKey = `${ev.request_id ?? ''}\u0000${ev.thread_id ?? ''}\u0000${ev.component}\u0000${ev.depth ?? ''}`;
 			if (ev.event === 'enter') {
 				const st = open.get(pairKey) ?? [];

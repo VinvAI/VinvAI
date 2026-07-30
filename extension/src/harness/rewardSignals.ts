@@ -94,6 +94,25 @@ export interface RewardBreakdown {
 	 * ("right code, wrong goal") — callers must not mislabel one as the other.
 	 */
 	verifiedBlockCause: 'none' | 'hard_flag' | 'cheat' | 'criteria';
+	/**
+	 * How much EXECUTABLE verification weight was actually available (oracle +
+	 * tests + regression), before renormalization. 0 means nothing executable
+	 * ran: the reward then comes from the audit/adherence components alone.
+	 *
+	 * Why this is reported. The rubric renormalizes over AVAILABLE components,
+	 * which is the right MNAR handling — an unrunnable check is not a verdict,
+	 * and scoring it 0 would punish an agent for missing infrastructure. But it
+	 * makes `reward` non-comparable across episodes with different signal
+	 * availability: an episode where nothing could be checked and the diff was
+	 * clean scores 1.0, byte-identical to one where the oracle, the held-out
+	 * acceptance tests and the regression suite all passed. The trajectory
+	 * report is what a human reads to judge whether the loop is working, so the
+	 * two must be distinguishable. This does NOT change the verified bit —
+	 * `verdict: 'pass'` still requires a positive signal and `objective: true`
+	 * still requires the replay oracle, so the bandit was never trained on a
+	 * no-evidence success. It is a reporting-honesty field.
+	 */
+	verificationWeight: number;
 	reasons: string[];
 	directives: string[];
 }
@@ -578,6 +597,22 @@ export function composeRewardBreakdown(
 		);
 	}
 
+	// Executable-evidence weight BEFORE the adherence/audit components are
+	// counted: components[0..2] are oracle, tests and regression in push order.
+	const verificationWeight = components
+		.slice(0, 3)
+		.reduce((a, c) => a + (c?.weight ?? 0), 0);
+	if (verificationWeight === 0) {
+		reasons.push(
+			'evidence: NO executable verification ran (no oracle, no acceptance tests, no ' +
+			'regression) — this reward is the audit/adherence components alone and is NOT ' +
+			'comparable to a verified pass',
+		);
+		directives.push(
+			'get at least one executable check running — a clean diff nobody could verify ' +
+			'is not evidence of a fix',
+		);
+	}
 	const available = components.filter((c): c is { score: number; weight: number } => c !== null);
 	const totalWeight = available.reduce((a, c) => a + c.weight, 0);
 	const reward =
@@ -611,6 +646,7 @@ export function composeRewardBreakdown(
 		reward: Math.round(reward * 1000) / 1000,
 		verifiedEligible,
 		verifiedBlockCause,
+		verificationWeight,
 		reasons,
 		directives: [...new Set(directives)],
 	};

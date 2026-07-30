@@ -83,10 +83,11 @@ import {
 } from '../harness/stallBreaker';
 import { isServiceStarted, readBringupOutcome, readStartCommands } from '../bringup/bringup';
 import { collectRuntimeErrorClusters, selectHotspots } from '../harness/autoTrigger';
-import { isExpectedRejection } from '../harness/runtimeAnalysis';
+import { isExpectedRejection, isHandledInternally } from '../harness/runtimeAnalysis';
 import { composeTrajectoryReport, readEpisodeEvents } from '../harness/trajectoryReport';
 import {
 	collectCacheCandidates,
+	lifetimeFrames,
 	collectMemoryTrends,
 	collectRequestSpans,
 	collectSymbolTimings,
@@ -825,8 +826,14 @@ suite('Episode policy updater (credit attribution + promotion)', () => {
 		assert.strictEqual(computeUpdatedPolicy(current, sparse).preferred_arm, 0);
 
 		// Aborted / human-adjudicated (non-objective) episodes do NOT train arms.
+		// Arm 2 carries 5 objective successes, not 3, so it clears the now-enforced
+		// `min_promotion_n` gate: this case is about the OBJECTIVE FILTER, and
+		// `preferred_arm` is only its observable. (The gate itself — promotion needs
+		// min_promotion_n observations AND a promotion_delta margin — has its own
+		// test in rewardAndOpe.test.ts. Before the gate was wired up, 3 sufficed
+		// here, and so did 1, which is exactly the defect it closes.)
 		const withNonObjective: CompletedEpisode[] = [
-			...episodesFor([{ arm: 2, rewards: [1, 1, 1] }]),
+			...episodesFor([{ arm: 2, rewards: [1, 1, 1, 1, 1] }]),
 			{ armIndex: 5, propensity: 0.5, reward: -1, attempts: 1, verified: false, objective: false },
 			{ armIndex: 5, propensity: 0.5, reward: 1, attempts: 1, verified: true, objective: false },
 		];
@@ -1456,6 +1463,147 @@ suite('Session state (goal + trajectory across episodes)', () => {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
 	});
+
+});
+
+/**
+ * A CROSS-SURFACE INVARIANT, not one report's content: no reward is ever printed
+ * without saying what stood behind it.
+ *
+ * `reward` is renormalized over the rubric components that were AVAILABLE, and an
+ * abort short-circuits scoring to a flat −1 whatever the cause. So the bare number
+ * cannot distinguish a verified pass from an episode nothing could check, nor a
+ * cancelled run from a proven regression — each pair prints the same magnitude.
+ * This suite exists so the rule binds reward surfaces nobody has written yet,
+ * rather than being buried in a test named for one digest.
+ */
+suite('reward reporting: every printed reward carries its provenance', () => {
+	function tempWs(): string {
+		return fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-reward-'));
+	}
+
+	test('no reward line is rendered bare', () => {
+		const ws = tempWs();
+		try {
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-verified',
+				ts: 't1',
+				title: 'Verified with executable evidence',
+				arm_index: 0,
+				attempts: 1,
+				verified: true,
+				aborted: false,
+				reward: 0.9,
+				verification_weight: 0.9,
+				evidence: 'oracle + tests green',
+			});
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-unverified',
+				ts: 't2',
+				title: 'Nothing executable ran',
+				arm_index: 1,
+				attempts: 1,
+				verified: false,
+				aborted: false,
+				reward: 1,
+				verification_weight: 0,
+				evidence: 'audit components only',
+			});
+			// Predates the field: UNKNOWN, which must not be asserted as a negative.
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-legacy',
+				ts: 't3',
+				title: 'Recorded before the field existed',
+				arm_index: 2,
+				attempts: 1,
+				verified: true,
+				aborted: false,
+				reward: 0.7,
+				evidence: 'legacy record',
+			});
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-aborted',
+				ts: 't4',
+				title: 'Cancelled',
+				arm_index: 3,
+				attempts: 1,
+				verified: false,
+				aborted: true,
+				reward: -1,
+				evidence: 'harness run failed: cancelled',
+			});
+			const report = composeTrajectoryReport(loadSession(ws), []);
+			const rewardLines = report.split('\n').filter((l) => l.includes('· reward '));
+			assert.strictEqual(rewardLines.length, 4, 'every episode prints a reward line');
+			for (const line of rewardLines) {
+				assert.match(
+					line,
+					/(verification weight|UNVERIFIED|not recorded|fixed abort penalty)/,
+					`a reward printed with no provenance qualifier: ${line}`,
+				);
+			}
+			// Unknown and zero are DIFFERENT, and neither is "verified".
+			assert.ok(
+				rewardLines.some((l) => l.includes('not recorded')),
+				'a pre-field record says its evidence is unknown, not that none ran',
+			);
+			assert.ok(
+				rewardLines.some((l) => l.includes('UNVERIFIED')),
+				'a zero-weight record says plainly that nothing executable ran',
+			);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('aborted episodes are excluded from cumulative reward — and the exclusion is stated', () => {
+		const ws = tempWs();
+		try {
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-ok',
+				ts: 't1',
+				title: 'A measured verdict',
+				arm_index: 0,
+				attempts: 1,
+				verified: true,
+				aborted: false,
+				reward: 0.5,
+				verification_weight: 0.9,
+				evidence: 'oracle passed',
+			});
+			// An abort scores a flat −1 whatever the cause and never trains the
+			// policy, so summing it into a figure a human reads as performance made
+			// a cancelled run weigh as much as shipped-and-reverted code.
+			recordEpisodeOutcome(ws, {
+				episode_id: 'ep-abort',
+				ts: 't2',
+				title: 'Cancelled before any verdict',
+				arm_index: 1,
+				attempts: 1,
+				verified: false,
+				aborted: true,
+				reward: -1,
+				evidence: 'harness run failed: cancelled',
+			});
+			const report = composeTrajectoryReport(loadSession(ws), []);
+			assert.ok(
+				report.includes('cumulative reward +0.50 across 1 measured verdict(s)'),
+				`the abort must not be summed into performance: ${report}`,
+			);
+			// Excluding silently would trade a wrong number for one that hides how
+			// much it left out — the same defect wearing the opposite costume.
+			assert.ok(
+				report.includes('1 aborted episode(s) excluded'),
+				'the exclusion has to be stated, not silent',
+			);
+			// A marked entry in the trend chain that is absent from the sum above
+			// must carry its own legend, or the two figures silently disagree.
+			assert.ok(report.includes('-1.00†'), 'aborts are marked in the trend chain');
+			assert.ok(report.includes('`†` = aborted'), 'the marker is explained');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
 });
 
 suite('Bring-up outcome classification (services view states)', () => {
@@ -1580,7 +1728,7 @@ suite('Stall breaker (Nash bargaining)', () => {
 		// clustered as defects, they handed the agent an unfixable goal.
 		const fail = (error_type: string, error_message: string, count = 4) => ({
 			error_type, error_message, error_stack: null, request_id: 'r',
-			count, capture_epoch: null, superseded: null as null,
+			count, capture_epoch: null, superseded: null as null, contained: null, contained_by: null,
 			caller_chain: [], args_schema: null, args_summary: null, duration_ms: 1,
 		});
 		const nodes = [0, 1, 2].map((r) => makeNode(r));
@@ -1610,6 +1758,61 @@ suite('Stall breaker (Nash bargaining)', () => {
 		assert.strictEqual(isExpectedRejection('fastapi.exceptions.HTTPException', 'no status here'), false);
 		assert.strictEqual(isExpectedRejection('sqlalchemy.exc.IntegrityError', '409: fake'), false);
 		assert.strictEqual(isExpectedRejection('MyHTTPExceptionFactory', '404: x'), false);
+	});
+
+	test('exceptions a caller absorbed are NOT defects; escaping ones are', () => {
+		// The second live false-positive, same class as the 4xx one above. The
+		// embedder binds its port as a machine-wide single-instance lock, so a
+		// second `serve` raises OSError(EADDRINUSE) in make_server and
+		// _cmd_serve catches it and returns 0 (vinv_embedder/cli.py:91). The
+		// capture recorded make_server exit=error at depth 2, _cmd_serve exit=ok
+		// at depth 1, main exit=ok at depth 0 — handled control flow. It was
+		// clustered as a defect and dispatched as a fix episode anyway; the
+		// harness agent disputed the premise and the episode aborted at -1.00.
+		const fail = (
+			error_type: string,
+			error_message: string,
+			contained: boolean | null,
+			count = 1,
+		) => ({
+			error_type, error_message, error_stack: null, request_id: 'r',
+			count, capture_epoch: null, superseded: null as null, contained,
+			contained_by: contained === true ? 'vinv_embedder.cli._cmd_serve' : null,
+			caller_chain: ['vinv_embedder.cli._cmd_serve', 'vinv_embedder.cli.main'],
+			args_schema: null, args_summary: null, duration_ms: 1,
+		});
+		const nodes = [0, 1, 2, 3].map((r) => makeNode(r));
+		const overlay: Record<number, RuntimeOverlay> = {
+			// make_server: raised, but _cmd_serve absorbed it → not a defect.
+			0: { executed: true, calls: 1, total_ms: 1, errors: 1, error_types: ['OSError'],
+				failures: [fail('OSError', '[Errno 48] Address already in use', true)],
+				current_errors: 1, latest_epoch: null },
+			// A genuinely escaping error → still a defect.
+			1: { executed: true, calls: 3, total_ms: 5, errors: 2, error_types: ['ValueError'],
+				failures: [fail('ValueError', 'bad input', false, 2)],
+				current_errors: 2, latest_epoch: null },
+			// Containment unknown (no ancestor exit observed) → stays a defect.
+			2: { executed: true, calls: 2, total_ms: 3, errors: 1, error_types: ['KeyError'],
+				failures: [fail('KeyError', 'missing', null)],
+				current_errors: 1, latest_epoch: null },
+			// Same identity seen both absorbed AND escaping → one escape makes it
+			// a defect, so the merged verdict must be false, not true.
+			3: { executed: true, calls: 4, total_ms: 6, errors: 2, error_types: ['TimeoutError'],
+				failures: [fail('TimeoutError', 'timed out', false, 2)],
+				current_errors: 2, latest_epoch: null },
+		};
+		const { clusters } = collectRuntimeErrorClusters(nodes, overlay);
+		assert.deepStrictEqual(
+			clusters.map((c) => c.row).sort((a, b) => a - b),
+			[1, 2, 3],
+			'handled-internally symbol excluded; escaping and unknown kept',
+		);
+		// The predicate: only an observed `true` counts as handled. Unknown must
+		// never be read as handled — that would hide real failures.
+		assert.strictEqual(isHandledInternally(true), true);
+		assert.strictEqual(isHandledInternally(false), false);
+		assert.strictEqual(isHandledInternally(null), false);
+		assert.strictEqual(isHandledInternally(undefined), false);
 	});
 
 	test('the live stall-judge utilities escalate via the Nash rule', () => {
@@ -2229,6 +2432,51 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 			const out = collectCacheCandidates(ws, [makeNode(0)]);
 			assert.strictEqual(out.length, 1);
 			assert.ok(out[0].reclaimable_ms <= 50, `capped at newest session (got ${out[0].reclaimable_ms})`);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('an entry point is never a cache candidate — its duration is lifetime, not work', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-lifetime-'));
+		try {
+			// The live shape this closes. `main` is the process root: same argv →
+			// same exit 0 every launch, so functional dependence HOLDS, no crypto is
+			// on the path, and it returns 0 rather than None — all three existing
+			// soundness gates pass. The board therefore offered `main` and
+			// `_cmd_serve` at "~25101ms is cacheable (1 of 2 calls repeat)", i.e.
+			// memoize a server's CLI entry point, and ranked them #1/#2 of traced
+			// runtime at 31.2% each. For a process root, duration is WALL-CLOCK
+			// LIFETIME, not compute.
+			//
+			// fn0 = main at depth 0. fn1 = _cmd_serve, depth 1, spanning the whole
+			// root. fn2 = real work nested under fn1 at a fraction of the root — it
+			// MUST stay eligible, which is what keeps the gate narrow.
+			const lines: string[] = [];
+			for (const req of ['r0', 'r1']) {
+				lines.push(JSON.stringify({ event: 'enter', component: 'src.mod0.fn0', args_hash: 'aaaa', request_id: req, depth: 0 }));
+				lines.push(JSON.stringify({ event: 'enter', component: 'src.mod1.fn1', args_hash: 'bbbb', request_id: req, depth: 1 }));
+				lines.push(JSON.stringify({ event: 'enter', component: 'src.mod2.fn2', args_hash: 'cccc', request_id: req, depth: 2 }));
+				lines.push(JSON.stringify({ event: 'exit', component: 'src.mod2.fn2', error_type: 'None', request_id: req, depth: 2, duration_ms: 100, result_hash: 'h2' }));
+				lines.push(JSON.stringify({ event: 'exit', component: 'src.mod1.fn1', error_type: 'None', request_id: req, depth: 1, duration_ms: 1000, result_hash: 'h1' }));
+				lines.push(JSON.stringify({ event: 'exit', component: 'src.mod0.fn0', error_type: 'None', request_id: req, depth: 0, duration_ms: 1000, result_hash: 'h0' }));
+			}
+			writeTrace(ws, 's0', lines, Math.floor(Date.now() / 1000));
+			const nodes = [makeNode(0), makeNode(1), makeNode(2)];
+
+			const lifetime = lifetimeFrames(ws, nodes);
+			assert.ok(lifetime.has(0), 'depth-0 root is a lifetime frame');
+			assert.ok(lifetime.has(1), 'a pass-through spanning the whole root is a lifetime frame');
+			assert.ok(!lifetime.has(2), 'nested real work is NOT a lifetime frame');
+			assert.match(lifetime.get(0)!, /depth 0/);
+			assert.match(lifetime.get(1)!, /spans 100% of its request root/);
+
+			// Both entry points are duplicated (identical args across two runs) and
+			// would otherwise be the two biggest cache candidates by time.
+			const rows = collectCacheCandidates(ws, nodes).map((c) => c.row);
+			assert.ok(!rows.includes(0), 'the process root must not be offered for memoization');
+			assert.ok(!rows.includes(1), 'the pass-through must not be offered for memoization');
+			assert.deepStrictEqual(rows, [2], 'only genuine nested work stays eligible');
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}

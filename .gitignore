@@ -37,6 +37,12 @@ dist/
 models/
 *.gguf
 *.safetensors
+# tiktoken downloads its BPE encoding (~1.6MB) into a cache dir that
+# token_utils.py points at its OWN package directory, so the blob lands inside
+# the source tree rather than under a temp or home path. It appears the first
+# time anything calls count_tokens — i.e. for every developer and every CI run
+# now that tiktoken is a declared dependency of core[agents].
+.tiktoken_cache/
 
 # Local build output, logs, and stray virtualenvs
 /_winbuild/
@@ -53,5 +59,6 @@ nuitka-crash-report.xml
 
 # Local editor / agent config (not part of the public release).
 /.claude/
+/.cursor/
 .vscode/
 
