@@ -598,9 +598,20 @@ export function lifetimeFrames(
 ): Map<number, string> {
 	const rowsFor = buildComponentMatcher(nodes);
 	const out = new Map<number, string>();
-	// Per request: the depth-0 root's duration, and each component's total.
+	// Per request: the depth-0 root's duration, and per component the LONGEST
+	// single call plus how many times it ran.
+	//
+	// Longest-single-call, never the sum. A pass-through is one call that wraps
+	// the run; summing cannot tell that apart from a hot function called many
+	// times, because both reach 100% of the root. Under a sum, `embed_chunk`
+	// called 500 times at 4ms inside a 2000ms root reads as "spans 100% of its
+	// request root" and is excluded from cache candidates AND from the per-call,
+	// fanout and staircase kinds — losing the N+1 detector its single best
+	// target. Recursive frames are worse still: each level's duration includes
+	// its children, so a 10-deep recursion sums past 1000% and every recursive
+	// function in the workspace is exempted from optimization.
 	const rootMs = new Map<string, number>();
-	const compMs = new Map<string, Map<string, number>>();
+	const compMs = new Map<string, Map<string, { maxMs: number; calls: number }>>();
 	const depthZero = new Set<string>();
 	for (const file of findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'))) {
 		for (const ev of eventsOf(file)) {
@@ -614,8 +625,14 @@ export function lifetimeFrames(
 				depthZero.add(ev.component);
 				rootMs.set(rid, Math.max(rootMs.get(rid) ?? 0, ms));
 			}
-			const byComp = compMs.get(rid) ?? new Map<string, number>();
-			byComp.set(ev.component, (byComp.get(ev.component) ?? 0) + ms);
+			const byComp = compMs.get(rid) ?? new Map<string, { maxMs: number; calls: number }>();
+			const acc = byComp.get(ev.component);
+			byComp.set(
+				ev.component,
+				acc
+					? { maxMs: Math.max(acc.maxMs, ms), calls: acc.calls + 1 }
+					: { maxMs: ms, calls: 1 },
+			);
 			compMs.set(rid, byComp);
 		}
 	}
@@ -633,11 +650,16 @@ export function lifetimeFrames(
 		if (!root || root <= 0) {
 			continue; // no depth-0 root observed for this request — no denominator
 		}
-		for (const [component, ms] of byComp) {
-			if (ms / root >= LIFETIME_SHARE) {
+		for (const [component, { maxMs, calls }] of byComp) {
+			// ONE call, and that call spans the root. The call count is the whole
+			// discriminator: a pass-through is entered once and returns when the
+			// request does, while a hot function reaching the same share got there
+			// by running repeatedly — which is work, and the most reclaimable kind.
+			// Recursion lands here too (many calls), and correctly stays eligible.
+			if (calls === 1 && maxMs / root >= LIFETIME_SHARE) {
 				mark(
 					component,
-					`spans ${Math.round((ms / root) * 100)}% of its request root — a pass-through whose duration is the lifetime, not work`,
+					`spans ${Math.round((maxMs / root) * 100)}% of its request root in a single call — a pass-through whose duration is the lifetime, not work`,
 				);
 			}
 		}

@@ -2482,6 +2482,54 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 		}
 	});
 
+	test('a hot function called many times is NOT a lifetime frame, however much of the root it adds up to', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-hotloop-'));
+		try {
+			// The inverse of the test above, and the case a SUM cannot distinguish
+			// from it. fn1 is entered once and wraps the run (a pass-through);
+			// fn2 runs 20 times at 50ms inside the same 1000ms root. Both reach
+			// 100% of the root — only one of them is lifetime.
+			//
+			// fn2 is the shape of an N+1: the batching candidate, the fanout
+			// signal and the staircase signal all live here. Excluding it would
+			// blind the optimizer to its single most reclaimable target while
+			// reporting nothing at all.
+			const lines: string[] = [];
+			for (const req of ['r0', 'r1']) {
+				lines.push(JSON.stringify({ event: 'enter', component: 'src.mod0.fn0', args_hash: 'aaaa', request_id: req, depth: 0 }));
+				lines.push(JSON.stringify({ event: 'enter', component: 'src.mod1.fn1', args_hash: 'bbbb', request_id: req, depth: 1 }));
+				for (let i = 0; i < 20; i++) {
+					lines.push(JSON.stringify({ event: 'enter', component: 'src.mod2.fn2', args_hash: 'cccc', request_id: req, depth: 2 }));
+					lines.push(JSON.stringify({ event: 'exit', component: 'src.mod2.fn2', error_type: 'None', request_id: req, depth: 2, duration_ms: 50, result_hash: 'h2' }));
+				}
+				lines.push(JSON.stringify({ event: 'exit', component: 'src.mod1.fn1', error_type: 'None', request_id: req, depth: 1, duration_ms: 1000, result_hash: 'h1' }));
+				lines.push(JSON.stringify({ event: 'exit', component: 'src.mod0.fn0', error_type: 'None', request_id: req, depth: 0, duration_ms: 1000, result_hash: 'h0' }));
+			}
+			writeTrace(ws, 's0', lines, Math.floor(Date.now() / 1000));
+			const nodes = [makeNode(0), makeNode(1), makeNode(2)];
+
+			const lifetime = lifetimeFrames(ws, nodes);
+			// 20 × 50ms = 1000ms = 100% of the root by SUM, but no single call is
+			// more than 5% of it.
+			assert.ok(!lifetime.has(2), 'a function called 20x is work, not lifetime');
+			// The genuine pass-through beside it must still be caught, so this
+			// test cannot pass by simply disabling the gate.
+			assert.ok(lifetime.has(1), 'the single-call pass-through is still a lifetime frame');
+			assert.ok(lifetime.has(0), 'the depth-0 root is still a lifetime frame');
+			assert.match(lifetime.get(1)!, /in a single call/);
+
+			// And it stays dispatchable: identical args and result across both
+			// requests, so it is exactly the memoization candidate.
+			assert.deepStrictEqual(
+				collectCacheCandidates(ws, nodes).map((c) => c.row),
+				[2],
+				'the hot function must remain an optimization candidate',
+			);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
 	test('a duplicated call that always returns None has nothing to memoize', () => {
 		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-none-'));
 		try {
