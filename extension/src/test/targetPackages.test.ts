@@ -419,6 +419,18 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 		return fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-tracecheck-'));
 	}
 
+	/**
+	 * Seeds a capture plus a recorded command carrying `--target-package
+	 * smolagents` against an `examples.server.main` entrypoint.
+	 *
+	 * Callers wanting "traced nothing of its OWN" must pass a frame under
+	 * neither root — a third-party framework frame such as `fastapi.routing.run`
+	 * is the realistic shape, since that is precisely what a service whose own
+	 * code never runs looks like. A `smolagents.*` frame will NOT do: smolagents
+	 * is a recorded target, and a frame under a deliberately-targeted package
+	 * counts as own code (see the own-code-verdict suite above), so seeding one
+	 * here asserts the opposite of what these tests mean.
+	 */
 	function seed(root: string, spans: string[]): void {
 		const trace = path.join(root, '.vinv', 'captures', 'vinv-bringup', 'api', 'trace.jsonl');
 		fs.mkdirSync(path.dirname(trace), { recursive: true });
@@ -449,7 +461,7 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 
 	test('a green bring-up that traced nothing of its own is recorded as failed', () => {
 		const root = repo();
-		seed(root, ['POST /chat', 'smolagents.agents.run']);
+		seed(root, ['POST /chat', 'fastapi.routing.run']);
 
 		const verdict = auditOwnCodeTracing(root, service);
 		assert.strictEqual(verdict.state, 'absent');
@@ -511,7 +523,7 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 	// while the re-run had already happened and already failed.
 	test('the recorded symptom matches what actually happened', () => {
 		const root = repo();
-		seed(root, ['POST /chat', 'smolagents.agents.run']);
+		seed(root, ['POST /chat', 'fastapi.routing.run']);
 		const verdict = auditOwnCodeTracing(root, service);
 		assert.strictEqual(verdict.state, 'absent');
 		const v = verdict as Extract<typeof verdict, { state: 'absent' }>;
@@ -526,7 +538,7 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 
 		// Repaired AND re-run, own code still absent: the flags are exonerated and
 		// "run again" must not be the advice.
-		seed(root, ['POST /chat', 'smolagents.agents.run']);
+		seed(root, ['POST /chat', 'fastapi.routing.run']);
 		markUntracedBringup(root, 'api', v, { package: 'examples', rerunTraced: true });
 		out = readBringupOutcome(root, 'api');
 		const symptom = String(out.state === 'failed' && out.symptom);
