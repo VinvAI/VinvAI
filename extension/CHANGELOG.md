@@ -4,6 +4,95 @@ All notable changes to the **Vinv** extension are documented here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-07-31
+
+### ✨ Added
+
+- **Dead code is a finding you can act on, not a filter on the graph.** The old
+  Dead Code button could say *where* untraced nodes were and nothing else. Dead
+  code now arrives in Findings as **sections** — connected islands of untraced
+  symbols, not lint rows — each with the live callers that still reference it,
+  a stable identity that survives a reindex, and its own report tab with a
+  stop-by-stop walkthrough over the stored source the ranking actually
+  describes. Your coding agent answers what each section does, why it is dead,
+  how it would integrate, and what the risk is; sections are asked in batches so
+  the bill does not grow one run per section, and a section the agent never
+  answered keeps **no** verdict rather than a fabricated "probably safe to
+  delete".
+- **"Run this Path" — prove a dead section executable, or prove it is not.**
+  Analysis asks what code *is*; this asks the one thing analysis cannot settle.
+  The harness writes a Python driver for the section, Vinv runs it under
+  tracelens with your workspace's own recorded configuration, and the capture
+  lands where every scan already looks. The verdict is **counted, not inferred**:
+  a green run that never reached the section reports "not reached", and a run
+  that raised but did reach it reports the section revived. When there is no
+  driver, the reason is now specific — the harness never answered, the agent
+  judged the section undrivable, or the reply did not parse — each with the
+  transcript path to read.
+- **Every running service gets exercised.** Target selection returned one
+  service, so a workspace running an API, a worker and an admin backend had two
+  of the three silently unexercised behind a confident clean scorecard. All live
+  targets are now driven, with each service's findings and coverage folded into
+  the union before the next service overwrites them, and a service that fails to
+  run no longer discards its siblings' results.
+- **`relevant_to` for coding agents.** The relevance walk that powers Vinv's own
+  context is exposed as an MCP tool, so your agent can ask what else is
+  implicated by a symbol — and gets back what the walk reached, what it returned,
+  and what stopped it.
+
+### 🔁 Changed
+
+- **Every bounded selection now states its bound, and states it as a chain.** A
+  panel reporting "6 of 11" while an earlier, unmentioned cap had already removed
+  20 is the failure this closes. Selections carry a lineage from the source
+  population through every stage that dropped something, each residual carrying
+  magnitude as well as count, and a cap anywhere makes the whole chain say so.
+  The Optimize report was the last surface printing a bare count; it now renders
+  the bound like the MCP tools and Ask Vinv already did.
+- **The Flow rail is four stages**, findings are attributed to the service they
+  came from, and the compass no longer offers an "Install Vinv engines" rung —
+  the startup pin check already does that job, and does it knowing which commit
+  this build needs.
+- **The tracelens HTML report** follows the Vinv design system.
+- **Vinv is described as what it is:** an autonomous swarm of nine oracles that
+  finds bugs, dead code and performance problems and proves every fix. Both
+  READMEs and the marketplace listing were rewritten around the named roster.
+
+### 🐛 Fixed
+
+- **Every verification verdict in a Vinv-registered workspace could come back
+  empty.** One-shot dispatches — the audit judge, test authors, stall judge,
+  driver authoring — loaded the workspace's MCP servers, including the three
+  Vinv registers itself. A 61-byte prompt produced zero output in 240 seconds,
+  the dispatch cap expired, and the null verdict looked like an answer. Those
+  dispatches now run with an empty MCP config. Fix episodes keep their servers:
+  an agent that is editing your code genuinely wants them.
+- **A driver that was written, saved and ready to run never produced a trace.**
+  Bring-up records the command it verified *in a shell*, so it routinely begins
+  `PATH="…/.venv/Scripts:$PATH"` and names `/c/…` paths. Vinv now peels the
+  environment prefix off, resolves it against the live environment, and rewrites
+  Git-Bash path spellings the OS cannot open.
+- **Containment says "unknown" when the evidence is ambiguous.** A component that
+  ran more than once in one request had no single exit outcome, and two code
+  paths were each quietly inventing a different one — which could mark a real,
+  propagating exception as handled and stop any fix from ever being dispatched
+  for it.
+- **The engine stops reporting unverified inferences as findings**, the UI says
+  what the evidence actually supports, and blocked time is no longer counted
+  toward a speedup that cannot be delivered.
+- **Bring-up on Windows.** A stop path that actually stops, probing by binding
+  rather than by guess, `taskkill` spelled the way Git Bash needs, the entrypoint
+  package derived in the engine instead of only the extension, tracelens targets
+  no longer deleted when the tracer accepts them, a discovered launch command
+  passed through and re-verified after repair, and requests counted once.
+- **The right capture is overlaid.** Trace selection reads every capture for a
+  repo-wide summary, passes the capture service on the poll that rewrites the
+  snapshot, and lets probes run at all.
+- **The extension suite no longer fails on load rather than on defect** — an
+  I/O-bound suite was tripping Mocha's 2 s default under full-suite load on
+  Windows, failing a different test each run — and the extension host now starts
+  on a headless Linux CI runner.
+
 ## [0.1.5] — 2026-07-30
 
 ### ✨ Added
