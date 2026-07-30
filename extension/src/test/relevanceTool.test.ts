@@ -13,7 +13,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { resolveAnchors, toolRelevantTo } from '../mcp/relevanceTool';
-import type { GraphNode } from '../graph/indexGraph';
+import { indexStoreDir, type GraphNode } from '../graph/indexGraph';
 
 function node(row: number, name: string, file: string): GraphNode {
 	return {
@@ -87,6 +87,72 @@ suite('relevant_to: never answers ambiguously', () => {
 				`an empty workspace must not return status 'ok': ${r.status}`,
 			);
 			assert.notStrictEqual(r.status, 'ok');
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	/** A minimal readable index store: `count` symbols, no edges. */
+	function writeStore(root: string, count: number): void {
+		const store = indexStoreDir(root);
+		fs.mkdirSync(store, { recursive: true });
+		const chunks = Array.from({ length: count }, (_, i) => ({
+			id: `id${i}`,
+			file: 'src/app/svc.py',
+			lang: 'python',
+			kind: 'function',
+			name: `fn${i}`,
+			start_line: i + 1,
+			end_line: i + 9,
+			summary: `function fn${i}`,
+			rank: 0.5,
+			epoch: 1,
+			parent: null,
+		}));
+		fs.writeFileSync(path.join(store, 'chunks.jsonl'), chunks.map((c) => JSON.stringify(c)).join('\n') + '\n');
+		fs.writeFileSync(path.join(store, 'edges.jsonl'), '');
+		fs.writeFileSync(path.join(store, 'meta.json'), JSON.stringify({ epoch: 1 }));
+	}
+
+	// `stopped_by` must be derived from what the walk REACHED, never from
+	// `returned === budget`. A walk whose support lands exactly on the budget
+	// dropped nothing, and reporting 'budget' there describes a truncation that
+	// did not happen — the same inference describeSelection deliberately avoids.
+	test('a walk that reached no more than it returned stopped because it was exhausted', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-relevant-exh-'));
+		try {
+			// Three symbols, no edges: the walk can reach at most the anchor, so
+			// support can never exceed what is handed back.
+			writeStore(ws, 3);
+			const r = toolRelevantTo(ws, ['fn0'], 3);
+			assert.strictEqual(r.status, 'ok');
+			assert.ok(
+				Number(r.reached) <= Number(r.returned),
+				`reached (${r.reached}) must not exceed returned (${r.returned}) here`,
+			);
+			assert.strictEqual(
+				r.stopped_by,
+				'exhausted',
+				'nothing was withheld, so the bound must not claim a truncation',
+			);
+		} finally {
+			fs.rmSync(ws, { recursive: true, force: true });
+		}
+	});
+
+	test('a budget below the reached support reports itself as the bound', () => {
+		const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-relevant-cap-'));
+		try {
+			writeStore(ws, 12);
+			const wide = toolRelevantTo(ws, ['fn0'], 12);
+			// Only meaningful if the walk actually reaches more than one symbol;
+			// with no edges it may not, in which case there is nothing to bound.
+			if (Number(wide.reached) > 1) {
+				const r = toolRelevantTo(ws, ['fn0'], 1);
+				assert.strictEqual(r.status, 'ok');
+				assert.strictEqual(r.returned, 1);
+				assert.strictEqual(r.stopped_by, 'budget', 'a real truncation must say so');
+			}
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}

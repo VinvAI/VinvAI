@@ -180,6 +180,12 @@ export function toolRelevantTo(
 	// is what we handed back. Reporting both is the difference between "40
 	// relevant symbols" and "40 of 312, ranked" — the second is a fact, the
 	// first is an impression.
+	//
+	// Compared against `reached`, never inferred from `returned === budget`.
+	// A walk whose support happens to land exactly on the budget dropped
+	// nothing, and saying 'budget' there reports a truncation that did not
+	// happen — the same mistake `describeSelection` avoids by recording
+	// `stopped_by` AT the break rather than deriving it from the count.
 	const support = walked.mass.size;
 	return {
 		status: 'ok',
@@ -187,7 +193,7 @@ export function toolRelevantTo(
 		unresolved: unresolved.length ? unresolved : undefined,
 		returned: items.length,
 		reached: support,
-		stopped_by: items.length < effectiveBudget ? 'exhausted' : 'budget',
+		stopped_by: support > items.length ? 'budget' : 'exhausted',
 		budget: effectiveBudget,
 		max_hops: maxHops ?? null,
 		ranking: 'typed-edge personalized PageRank (walk mass), anchors restarted at weight 1',
