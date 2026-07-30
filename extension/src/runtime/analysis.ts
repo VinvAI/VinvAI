@@ -18,6 +18,7 @@ import {
 	cmpSessionMark,
 	containmentVerdict,
 	mergeContainment,
+	mergeExitOutcome,
 	loadCorpus,
 	resolveSymbol,
 	TraceCorpus,
@@ -297,21 +298,28 @@ export function toolCoverageOf(workspaceRoot: string, symbol?: string): Record<s
 		// requests and threads never cross-contaminate. Innermost caller first.
 		const ancestorExits = (
 			x: ExitRow,
-		): { oks: Array<boolean | undefined>; chain: string[] } => {
-			const out: Array<boolean | undefined> = [];
+		): { oks: Array<boolean | null | undefined>; chain: string[] } => {
+			const out: Array<boolean | null | undefined> = [];
 			const chain: string[] = [];
 			const seen = new Set<string>();
 			let cursor = x.parent_component;
 			while (cursor && out.length < 32 && !seen.has(cursor)) {
 				seen.add(cursor);
 				chain.push(cursor);
-				const pexit = corpus.bySymbol
-					.get(cursor)
-					?.exits.find(
-						(e) => e.request_id === x.request_id && e.thread_id === x.thread_id,
-					);
-				out.push(pexit ? pexit.status === 'ok' : undefined);
-				cursor = pexit?.parent_component ?? null;
+				// EVERY exit of this ancestor in the same (request, thread), folded
+				// — not `.find`, which silently answered with whichever call
+				// happened to be first. A component that ran several times with
+				// mixed outcomes has no single answer here, and guessing one is
+				// what let the graph overlay and this tool disagree on one capture.
+				const pexits = (corpus.bySymbol.get(cursor)?.exits ?? []).filter(
+					(e) => e.request_id === x.request_id && e.thread_id === x.thread_id,
+				);
+				let ok: boolean | null | undefined;
+				for (const e of pexits) {
+					ok = mergeExitOutcome(ok, e.status === 'ok');
+				}
+				out.push(ok);
+				cursor = pexits[0]?.parent_component ?? null;
 			}
 			return { oks: out, chain };
 		};

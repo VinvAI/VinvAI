@@ -112,7 +112,9 @@ export interface SymbolRecord {
  *
  * `ancestorExitedOk` is ordered innermost-caller-first, one entry per frame of
  * the observed caller chain: `true` = that frame exited `ok`, `false` = it also
- * exited with an error, `undefined` = its exit was not in the capture.
+ * exited with an error, `undefined`/`null` = no usable evidence for that frame —
+ * either its exit was not in the capture, or it ran several times in the request
+ * with conflicting outcomes (see `mergeExitOutcome`).
  *
  *  - `true`  — some ancestor exited `ok` while the callee raised, so a
  *    `try/except` upstream handled it. The raise is control flow.
@@ -127,12 +129,12 @@ export interface SymbolRecord {
  * question identically — the same reason their session ordering is shared.
  */
 export function containmentVerdict(
-	ancestorExitedOk: Array<boolean | undefined>,
+	ancestorExitedOk: Array<boolean | null | undefined>,
 ): boolean | null {
 	let verdict: boolean | null = null;
 	for (const ok of ancestorExitedOk) {
-		if (ok === undefined) {
-			continue; // no evidence from this frame
+		if (ok === undefined || ok === null) {
+			continue; // no usable evidence from this frame
 		}
 		if (ok) {
 			return true; // absorbed here — no need to look further out
@@ -140,6 +142,52 @@ export function containmentVerdict(
 		verdict = false; // observed, and it errored too: still escaping
 	}
 	return verdict;
+}
+
+/**
+ * Fold repeated observations of ONE frame's exit outcome within a single
+ * (request, thread) into one answer to "did this frame exit ok?".
+ *
+ * `ExitRow` carries no span or call id — only `call_count_in_request`, which
+ * does not identify WHICH call a given row belongs to. So when a component runs
+ * more than once inside one request its exit rows cannot be told apart, and
+ * asking "did my ancestor exit ok" has no single answer:
+ *
+ *   dashboard()                      exits ok      <- catches, per widget
+ *     build_panel(w1) -> render(w1)  exits ok
+ *     build_panel(w2) -> render(w2)  exits ERROR   <- propagated through
+ *     build_panel(w3) -> render(w3)  exits ok
+ *
+ * `build_panel` is observed exiting both ok and error. Picking either one is a
+ * guess: last-write-wins says ok, first-match says error, and those are the two
+ * answers the two producers used to give for the same capture.
+ *
+ *  - first observation      -> that outcome
+ *  - all observations agree -> that outcome
+ *  - observations conflict  -> `null`, AMBIGUOUS
+ *
+ * `null` is deliberately the same "no usable evidence" value `containmentVerdict`
+ * already skips, so an ambiguous frame neither claims to have caught the
+ * exception nor blocks a genuine catch further out. On the trace above,
+ * `build_panel` folds to null and `dashboard` — unambiguously ok — is correctly
+ * credited, which is both the right verdict AND the right `contained_by`.
+ *
+ * Erring toward ambiguity is the safe direction: the cost of a wrong `true` is a
+ * real defect deleted from `current_errors` and filtered out of
+ * `collectRuntimeErrorClusters`, while the cost of a wrong `null` is a handled
+ * exception staying on the list. Unknown must read as escaped.
+ */
+export function mergeExitOutcome(
+	prev: boolean | null | undefined,
+	ok: boolean,
+): boolean | null {
+	if (prev === undefined) {
+		return ok; // first observation of this frame in this request
+	}
+	if (prev === null) {
+		return null; // already ambiguous — nothing makes it unambiguous again
+	}
+	return prev === ok ? ok : null;
 }
 
 /**

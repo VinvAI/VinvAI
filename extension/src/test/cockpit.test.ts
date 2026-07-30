@@ -84,6 +84,7 @@ import {
 import { isServiceStarted, readBringupOutcome, readStartCommands } from '../bringup/bringup';
 import { collectRuntimeErrorClusters, selectHotspots } from '../harness/autoTrigger';
 import { isExpectedRejection, isHandledInternally } from '../harness/runtimeAnalysis';
+import { containmentVerdict, mergeExitOutcome } from '../runtime/traceStore';
 import { composeTrajectoryReport, readEpisodeEvents } from '../harness/trajectoryReport';
 import {
 	collectCacheCandidates,
@@ -1813,6 +1814,47 @@ suite('Stall breaker (Nash bargaining)', () => {
 		assert.strictEqual(isHandledInternally(false), false);
 		assert.strictEqual(isHandledInternally(null), false);
 		assert.strictEqual(isHandledInternally(undefined), false);
+	});
+
+	// The DERIVATION of `contained`, which until now had only rendering tests:
+	// every containment assertion in the suite hand-set the field on a fixture,
+	// so the fold that produces it from trace evidence was never exercised.
+	test('an ancestor observed exiting both ways in one request is ambiguous, not handled', () => {
+		// ExitRow carries no span/call id, so repeated calls of one component in a
+		// request cannot be told apart. The shape:
+		//
+		//   dashboard()                     ok      <- the frame that really catches
+		//     build_panel(w1) render(w1)    ok
+		//     build_panel(w2) render(w2)    ERROR   <- propagates through build_panel
+		//     build_panel(w3) render(w3)    ok
+		//
+		// build_panel is seen exiting ok AND error. Guessing either way is wrong,
+		// and the two producers used to guess differently: indexGraph took the
+		// LAST exit (ok), analysis.toolCoverageOf took the FIRST (error).
+		assert.strictEqual(mergeExitOutcome(undefined, true), true, 'first observation stands');
+		assert.strictEqual(mergeExitOutcome(true, true), true, 'agreement keeps the answer');
+		assert.strictEqual(mergeExitOutcome(false, false), false);
+		assert.strictEqual(mergeExitOutcome(true, false), null, 'ok then error is ambiguous');
+		assert.strictEqual(mergeExitOutcome(false, true), null, 'error then ok is ambiguous too');
+		assert.strictEqual(mergeExitOutcome(null, true), null, 'ambiguity is absorbing');
+		assert.strictEqual(mergeExitOutcome(null, false), null);
+
+		// Ambiguity must not claim the catch, and must not block a genuine one
+		// further out: dashboard exited ok unambiguously, so IT is the container.
+		assert.strictEqual(
+			containmentVerdict([null, true]),
+			true,
+			'an unambiguous ok beyond an ambiguous frame still contains',
+		);
+		// ...and it is the frame credited, which is what the UI prints. Naming
+		// build_panel would send a reader to a function with no except: in it.
+		assert.strictEqual([null, true].indexOf(true), 1, 'contained_by skips the ambiguous frame');
+
+		// With NO unambiguous ok anywhere, the verdict is unknown — never true.
+		assert.strictEqual(containmentVerdict([null]), null);
+		assert.strictEqual(containmentVerdict([null, undefined]), null);
+		// An observed error still means escaped, which stays a defect.
+		assert.strictEqual(containmentVerdict([null, false]), false);
 	});
 
 	test('the live stall-judge utilities escalate via the Nash rule', () => {

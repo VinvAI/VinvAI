@@ -14,6 +14,7 @@ import {
 	cmpSessionMark,
 	containmentVerdict,
 	mergeContainment,
+	mergeExitOutcome,
 	readSessionTag,
 	type SessionMark,
 } from '../runtime/traceStore';
@@ -858,7 +859,14 @@ function absorbRawCaptures(
 		// absorbed (that ancestor exited `ok`) is handled control flow, not a
 		// defect. Populated on exit rows; read in the post-pass below, because a
 		// caller's exit is written AFTER the callee's as the stack unwinds.
-		const exitOkOf = new Map<string, boolean>(); // req\0thread\0comp → exited ok
+		//
+		// `null` = observed exiting BOTH ok and error in this request, which the
+		// key cannot tell apart (see mergeExitOutcome). This map used to hold a
+		// plain boolean and be overwritten on every exit, so a component with
+		// mixed outcomes silently reported whichever ran LAST — while
+		// analysis.toolCoverageOf, folding the same evidence with `.find`,
+		// reported whichever ran FIRST. Same capture, two answers.
+		const exitOkOf = new Map<string, boolean | null>(); // req\0thread\0comp → exited ok
 		/**
 		 * The (request, thread, component) key shape shared by `lastArgs`,
 		 * `parentOf` and `exitOkOf`. Must stay byte-identical to the inline
@@ -913,8 +921,10 @@ function absorbRawCaptures(
 			const errType = ev.error_type && ev.error_type !== 'None' ? ev.error_type : null;
 			// A frame that exits without an error type absorbed whatever its
 			// callees raised. Recorded for every exit, not just clean ones, so a
-			// re-raising parent reads as `false` rather than unknown.
-			exitOkOf.set(reqKey, !errType);
+			// re-raising parent reads as `false` rather than unknown. Folded
+			// rather than overwritten, so a frame seen exiting both ways in one
+			// request collapses to ambiguous instead of to its last call.
+			exitOkOf.set(reqKey, mergeExitOutcome(exitOkOf.get(reqKey), !errType));
 			const callArgs = lastArgs.get(reqKey) ?? null;
 			for (const row of rowsFor(ev.component)) {
 				const cur = overlay[row] ?? {
