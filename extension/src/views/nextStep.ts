@@ -56,8 +56,13 @@ function openPendingEdges(workspaceRoot: string): number {
  *
  * Auto-Pilot schedules these from an in-memory ledger (planPipelineAction),
  * which a compass reading a cold workspace cannot see — so these read the
- * artifact each pass actually writes. Same order the scheduler drains them in,
- * so driving manually walks the same path Auto-Pilot would.
+ * artifact each pass actually writes.
+ *
+ * Order matches what the scheduler EFFECTIVELY does, which is not the order its
+ * ledger lists: it drains probes before exercise, but a probe stage that skipped
+ * for want of traffic is re-armed once exercise has produced some
+ * (rearmProbesAfterExercise). So the probes rung here is gated on traffic
+ * existing, which lands a manual driver in the same sequence.
  *
  * Insights is deliberately absent: pipelineRunners rebuilds it automatically
  * whenever new capture spans land, so it is never something the user has to be
@@ -71,6 +76,38 @@ function hasProbes(workspaceRoot: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Whether any endpoint has actually been exercised, per the insight manifest.
+ *
+ * The gate that makes the probes rung honest. Probes REPLAY requests a capture
+ * already recorded; exercise is what creates the first ones. So on a workspace
+ * with no endpoint traffic, "Run probes" is a dead end — the pass skips
+ * immediately and the user is bounced back here. Read straight off disk (a tiny
+ * JSON) rather than through insightRunner, keeping this module's rule that it
+ * only ever consults observable workspace facts.
+ */
+function hasObservedEndpoints(workspaceRoot: string): boolean {
+	try {
+		const manifest = JSON.parse(
+			fs.readFileSync(path.join(workspaceRoot, '.vinv', 'reports', 'index.json'), 'utf8'),
+		) as { endpoints?: unknown[] };
+		return Array.isArray(manifest.endpoints) && manifest.endpoints.length > 0;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether "Run probes" is worth showing: outstanding AND able to do something.
+ *
+ * Exported so the ordering rule is testable on its own — the rest of the ladder
+ * needs an ExtensionContext and installed engines, and this is the part that was
+ * wrong.
+ */
+export function probesAreActionable(workspaceRoot: string): boolean {
+	return !hasProbes(workspaceRoot) && hasObservedEndpoints(workspaceRoot);
 }
 
 
@@ -169,11 +206,18 @@ export async function computeNextStep(
 	// missing entirely: Auto-Pilot ran insights → probes → exercise, but a user
 	// driving manually went straight from "a capture exists" to "everything is
 	// wired" and was never told any of it was outstanding.
-	if (!hasProbes(workspaceRoot)) {
+	// Probes come first ONLY once something has been observed. They replay
+	// requests a capture already recorded, and exercise is what creates the first
+	// ones — so on a workspace with no endpoint traffic this rung sent the user
+	// at a pass that skips on arrival, then put them right back here. The
+	// Auto-Pilot scheduler already knows this (rearmProbesAfterExercise); without
+	// the same gate the compass was telling a manual driver to walk an order the
+	// scheduler had stopped walking.
+	if (probesAreActionable(workspaceRoot)) {
 		return {
 			label: 'Run probes',
 			detail:
-				'Exercises each green service to find what actually breaks — the evidence issues and episodes are built from.',
+				'Replays the requests your traces already recorded against the live service, to find what actually breaks — the evidence issues and episodes are built from.',
 			command: 'vinv-vs.runProbes',
 		};
 	}

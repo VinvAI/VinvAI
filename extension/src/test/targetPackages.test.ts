@@ -22,6 +22,7 @@ import {
 	targetPackagesFor,
 } from '../bringup/targetPackages';
 import { auditOwnCodeTracing, markUntracedBringup, readBringupOutcome } from '../bringup/bringup';
+import { probesAreActionable } from '../views/nextStep';
 
 suite('targetPackages: reading the entrypoint out of a start command', () => {
 	test('an ASGI app spec behind `-m uvicorn` is the app module, not uvicorn', () => {
@@ -100,6 +101,53 @@ suite('targetPackages: what actually gets instrumented', () => {
 		const { packages, added } = targetPackagesFor({ command: 'python app.py', modules: ['acme'] });
 		assert.deepStrictEqual(packages, ['acme']);
 		assert.strictEqual(added, null);
+	});
+});
+
+// The compass told a manual driver to "Run probes" on a workspace with no
+// endpoint traffic. Probes replay requests a capture already recorded, so the
+// pass skipped on arrival and put the user straight back on the same rung. The
+// Auto-Pilot scheduler had already been fixed for this (probes re-arm after
+// exercise); the compass had not, while its own comment claimed it walked the
+// same path.
+suite('compass: probes only lead when there is traffic to replay', () => {
+	function repo(opts: { probes?: boolean; observed?: number }): string {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-compass-'));
+		if (opts.probes) {
+			const d = path.join(root, '.vinv', 'probes');
+			fs.mkdirSync(d, { recursive: true });
+			fs.writeFileSync(path.join(d, 'api.json'), '{}', 'utf8');
+		}
+		if (opts.observed !== undefined) {
+			const d = path.join(root, '.vinv', 'reports');
+			fs.mkdirSync(d, { recursive: true });
+			fs.writeFileSync(
+				path.join(d, 'index.json'),
+				JSON.stringify({
+					version: 1,
+					endpoints: Array.from({ length: opts.observed }, (_, i) => ({ id: `E${i}` })),
+				}),
+				'utf8',
+			);
+		}
+		return root;
+	}
+
+	test('no traffic observed yet: the rung stands down so exercise can lead', () => {
+		// The exact state that produced the complaint: an empty probes dir and a
+		// manifest the insight pass rewrote with zero endpoints.
+		assert.strictEqual(probesAreActionable(repo({ observed: 0 })), false);
+		// And with no manifest at all (nothing has ever run).
+		assert.strictEqual(probesAreActionable(repo({})), false);
+	});
+
+	test('traffic observed and probes outstanding: the rung leads', () => {
+		assert.strictEqual(probesAreActionable(repo({ observed: 2 })), true);
+	});
+
+	test('probes already run: the rung is done regardless of traffic', () => {
+		assert.strictEqual(probesAreActionable(repo({ probes: true, observed: 2 })), false);
+		assert.strictEqual(probesAreActionable(repo({ probes: true, observed: 0 })), false);
 	});
 });
 
