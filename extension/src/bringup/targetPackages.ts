@@ -266,17 +266,49 @@ const INBOUND_RE = /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \S*$/;
 export function judgeOwnCode(
 	components: Iterable<string>,
 	entrypoint: string | null,
+	options: {
+		/**
+		 * Every `--target-package` the RECORDED command carries. The entrypoint's
+		 * own root is not the only thing that counts as own code: a launcher whose
+		 * real work lives in a sibling package (`examples/gradio_ui.py` building a
+		 * `smolagents.GradioUI`) traces that package and nothing else, and judging
+		 * only the entrypoint's root calls a fully-traced service untraced.
+		 *
+		 * Deliberately the recorded targets and not "any non-stdlib package":
+		 * a target was CHOSEN, so frames under it are the instrumentation doing
+		 * its job, whereas incidental library spans would make the check pass for
+		 * a service whose own code really is missing.
+		 */
+		targets?: readonly string[];
+		/**
+		 * True when the command runs a bare `.py` path. Python executes such a
+		 * file as `__main__`, so its frames never carry the package prefix its
+		 * path implies — matching on that prefix is guaranteed to find nothing,
+		 * which is a fact about how it was launched, not evidence of a defect.
+		 */
+		scriptEntrypoint?: boolean;
+	} = {},
 ): OwnCodeVerdict {
-	if (!entrypoint) {
+	const entryRoot = entrypoint ? rootPackage(entrypoint) : null;
+	const roots = new Set<string>();
+	if (entryRoot) {
+		roots.add(entryRoot);
+	}
+	for (const t of options.targets ?? []) {
+		const r = rootPackage(t);
+		if (r) {
+			roots.add(r);
+		}
+	}
+	if (roots.size === 0) {
 		return { state: 'unknown', why: 'the start command names no importable module' };
 	}
-	const root = rootPackage(entrypoint);
 	let requests = 0;
 	let ownFrames = 0;
 	for (const comp of components) {
 		if (INBOUND_RE.test(comp)) {
 			requests++;
-		} else if (comp === root || comp.startsWith(`${root}.`)) {
+		} else if ([...roots].some((r) => comp === r || comp.startsWith(`${r}.`))) {
 			ownFrames++;
 		}
 	}
@@ -286,5 +318,38 @@ export function judgeOwnCode(
 	if (requests === 0) {
 		return { state: 'unknown', why: 'no request reached the service while it was traced' };
 	}
-	return { state: 'absent', requests, rootPackage: root };
+	if (options.scriptEntrypoint) {
+		return {
+			state: 'unknown',
+			why: 'the entrypoint is a script run as __main__, so its frames carry no package prefix to match',
+		};
+	}
+	// The remaining downgrade is only honest when the package is genuinely
+	// absent from the flags. If it is already there, "add it" is advice nobody
+	// can act on, and the real state is "instrumented, but nothing under it runs
+	// per request" — not a defect this file can repair.
+	if (entryRoot && (options.targets ?? []).some((t) => rootPackage(t) === entryRoot)) {
+		return {
+			state: 'unknown',
+			why: `'${entryRoot}' is already instrumented but ran no code during a request`,
+		};
+	}
+	return { state: 'absent', requests, rootPackage: entryRoot ?? [...roots][0] };
+}
+
+/**
+ * True when a start command launches a bare `.py` path rather than a module.
+ * Such a file runs as `__main__` — see judgeOwnCode's `scriptEntrypoint`.
+ */
+export function isScriptEntrypoint(command: string): boolean {
+	const tokens = tokenize(command);
+	for (let i = 0; i < tokens.length; i++) {
+		if (tokens[i] === '-m') {
+			return false;
+		}
+		if (tokens[i].endsWith('.py')) {
+			return true;
+		}
+	}
+	return false;
 }

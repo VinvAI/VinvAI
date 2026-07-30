@@ -3,8 +3,10 @@ import * as fs from 'fs';
 
 import {
 	entrypointModule,
+	isScriptEntrypoint,
 	judgeOwnCode,
 	missingTargetPackage,
+	recordedTargetPackages,
 	serviceForEndpointFile,
 	withTargetPackage,
 	type OwnCodeVerdict,
@@ -295,9 +297,21 @@ export function auditOwnCodeTracing(
 	workspaceRoot: string,
 	service: ServiceEntry,
 ): OwnCodeVerdict {
+	// Judge against the command that was actually RECORDED, not the inventory's
+	// `command`: the recorded one is what ran, and it is the only place the
+	// --target-package flags exist. Falling back to the inventory keeps the old
+	// behaviour for a service with no recorded command yet.
+	const recorded = readStartCommands(workspaceRoot, service.name)
+		.map((c) => c.command)
+		.filter((c): c is string => typeof c === 'string' && c.includes('tracelens'));
+	const command = recorded[recorded.length - 1] ?? service.command ?? '';
 	return judgeOwnCode(
 		traceComponents(recordedTracePath(workspaceRoot, service.name)),
-		service.command ? entrypointModule(service.command) : null,
+		command ? entrypointModule(command) : null,
+		{
+			targets: recordedTargetPackages(command),
+			scriptEntrypoint: isScriptEntrypoint(command),
+		},
 	);
 }
 

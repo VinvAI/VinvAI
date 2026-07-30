@@ -16,6 +16,7 @@ import * as path from 'path';
 
 import {
 	entrypointModule,
+	isScriptEntrypoint,
 	judgeOwnCode,
 	missingTargetPackage,
 	recordedTargetPackages,
@@ -312,6 +313,66 @@ suite('targetPackages: repairing a recorded command in place', () => {
 	test('a missing record is not a crash', () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-repair-none-'));
 		assert.strictEqual(repairRecordedTargetPackages(root, service), null);
+	});
+});
+
+suite('targetPackages: own-code verdict against the recorded flags', () => {
+	// The gradio-ui false negative: `python examples/gradio_ui.py` builds a
+	// Blocks app and hands every request to Gradio's own routes, so `examples`
+	// has no request-time code AND runs as __main__ anyway. Its real work is in
+	// smolagents, which the command deliberately targets and which traced fine —
+	// yet the verdict called the service untraced and told the operator to add a
+	// flag the command already carried.
+	const GRADIO_SPANS = [
+		'GET /config',
+		'GET /config http send',
+		'HEAD /',
+		...Array.from({ length: 170 }, (_, i) => `smolagents.agents.step${i}`),
+	];
+
+	test('a targeted package that traced counts as own code', () => {
+		const v = judgeOwnCode(GRADIO_SPANS, 'examples.gradio_ui', {
+			targets: ['smolagents', 'examples'],
+			scriptEntrypoint: true,
+		});
+		assert.strictEqual(v.state, 'traced');
+		assert.strictEqual(v.state === 'traced' && v.ownFrames, 170);
+	});
+
+	test('judging the entrypoint root alone is what produced the false negative', () => {
+		// Kept as a guard: if this ever returns 'traced', the regression test
+		// above stops proving anything.
+		assert.strictEqual(judgeOwnCode(GRADIO_SPANS, 'examples.gradio_ui').state, 'absent');
+	});
+
+	test('a script entrypoint is never downgraded — __main__ carries no prefix', () => {
+		const v = judgeOwnCode(['GET /', 'gradio.routes.main'], 'examples.gradio_ui', {
+			targets: ['examples'],
+			scriptEntrypoint: true,
+		});
+		assert.strictEqual(v.state, 'unknown');
+	});
+
+	test('a package already in the flags is never reported as missing from them', () => {
+		const v = judgeOwnCode(['POST /chat', 'fastapi.routing.run'], 'app.server.main', {
+			targets: ['app'],
+		});
+		// Advice to add a flag that is present is advice nobody can act on.
+		assert.strictEqual(v.state, 'unknown');
+		assert.ok(v.state === 'unknown' && v.why.includes('already instrumented'));
+	});
+
+	test('a genuinely missing package still downgrades, with the actionable name', () => {
+		const v = judgeOwnCode(['POST /chat', 'fastapi.routing.run'], 'app.server.main', {
+			targets: ['someotherpkg'],
+		});
+		assert.strictEqual(v.state, 'absent');
+		assert.strictEqual(v.state === 'absent' && v.rootPackage, 'app');
+	});
+
+	test('isScriptEntrypoint distinguishes a script from -m', () => {
+		assert.strictEqual(isScriptEntrypoint('python examples/gradio_ui.py'), true);
+		assert.strictEqual(isScriptEntrypoint('python -m uvicorn app.main:app'), false);
 	});
 });
 
