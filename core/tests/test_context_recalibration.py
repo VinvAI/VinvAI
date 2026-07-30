@@ -28,19 +28,17 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from core.components.context_compressor import unified_compression as uc  # noqa: E402
 from core.components.context_compressor.model_context_registry import (  # noqa: E402
     ModelContextRegistry,
 )
 from core.components.context_compressor.token_utils import count_tokens  # noqa: E402
-from core.components.context_compressor import unified_compression as uc  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def fresh_registry(tmp_path, monkeypatch):
     """Reset the singleton and sandbox the persisted catalog per test."""
-    monkeypatch.setenv(
-        "VINV_ENGINE_MODEL_LIMITS_PATH", str(tmp_path / "learned_model_limits.json")
-    )
+    monkeypatch.setenv("VINV_ENGINE_MODEL_LIMITS_PATH", str(tmp_path / "learned_model_limits.json"))
     ModelContextRegistry._instance = None
     yield
     ModelContextRegistry._instance = None
@@ -49,6 +47,7 @@ def fresh_registry(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Overflow detection (provider-agnostic)
 # ---------------------------------------------------------------------------
+
 
 class TestOverflowDetection:
     def test_openai_400_message(self):
@@ -83,6 +82,7 @@ class TestOverflowDetection:
 # ---------------------------------------------------------------------------
 # Number extraction from provider messages
 # ---------------------------------------------------------------------------
+
 
 class TestOverflowNumberParsing:
     def test_openai_incident_numbers(self):
@@ -133,11 +133,13 @@ class TestOverflowNumberParsing:
 # Registry learning
 # ---------------------------------------------------------------------------
 
+
 class TestRegistryLearning:
     def test_learns_limit_and_inflation(self):
         reg = ModelContextRegistry()
-        reg.record_overflow("m1", estimated_tokens=155000, reported_tokens=277851,
-                            reported_limit=272000)
+        reg.record_overflow(
+            "m1", estimated_tokens=155000, reported_tokens=277851, reported_limit=272000
+        )
         assert reg.observed_input_limit("m1") == 272000
         assert reg.effective_input_limit("m1") == 272000
         assert reg.token_inflation("m1") == pytest.approx(277851 / 155000)
@@ -186,6 +188,7 @@ class TestCatalogPersistence:
 
     def test_catalog_is_valid_json_with_model_names(self, tmp_path):
         import json
+
         reg = ModelContextRegistry()
         reg.record_overflow("claude-x", 100000, 210000, 200000)
         data = json.loads((tmp_path / "learned_model_limits.json").read_text())
@@ -202,6 +205,7 @@ class TestCatalogPersistence:
 # ---------------------------------------------------------------------------
 # Recalibrating map/reduce (no truncation, resplit on overflow)
 # ---------------------------------------------------------------------------
+
 
 def _make_compressor(monkeypatch, fallback_limit: int = 200000):
     monkeypatch.setenv("VINV_ENGINE_MODEL_FALLBACK_LIMIT", str(fallback_limit))
@@ -256,9 +260,13 @@ class TestPerCallBudgetFloor:
 
         # ~700K tokens across 10 chunks of 70K; final target only 2000 tokens.
         content = "\n".join(f"L{i} " + "x " * 50 for i in range(70000))
-        asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=2000, model_id="m-floor",
-        ))
+        asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=2000,
+                model_id="m-floor",
+            )
+        )
 
         assert seen_budgets, "compression must have been called"
         for input_tokens, budget in seen_budgets:
@@ -291,13 +299,17 @@ class TestPerCallBudgetFloor:
 
         content = "\n".join(f"R{i} " + "y " * 40 for i in range(40000))  # ~440K tokens
         target = 10000
-        result = asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=target, model_id="m-converge",
-        ))
-        result_tokens = count_tokens(result)
-        assert result_tokens <= int(target * 1.5), (
-            f"tree failed to converge: {result_tokens} tokens vs target {target}"
+        result = asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=target,
+                model_id="m-converge",
+            )
         )
+        result_tokens = count_tokens(result)
+        assert result_tokens <= int(
+            target * 1.5
+        ), f"tree failed to converge: {result_tokens} tokens vs target {target}"
 
 
 class TestMapRecalibration:
@@ -314,9 +326,11 @@ class TestMapRecalibration:
             if count_tokens(content) > provider_capacity:
                 calls["overflows"] += 1
                 raise uc._ContextOverflow(
-                    count_tokens(content), provider_capacity + 100,
+                    count_tokens(content),
+                    provider_capacity + 100,
                     # Learned limit small enough that 25% fill → feasible chunks
-                    provider_capacity * 4, RuntimeError("maximum context length"),
+                    provider_capacity * 4,
+                    RuntimeError("maximum context length"),
                 )
             # "Compression": keep the first line of the chunk (marker survives).
             return content.split("\n", 1)[0]
@@ -331,9 +345,13 @@ class TestMapRecalibration:
         lines = [f"MARK-{i} " + "x " * 40 for i in range(4000)]
         content = "\n".join(lines)
 
-        result = asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=1000, model_id="m-test",
-        ))
+        result = asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=1000,
+                model_id="m-test",
+            )
+        )
 
         assert calls["overflows"] >= 1, "first round must overflow (default capacity too big)"
         assert result, "must produce output after recalibration"
@@ -351,7 +369,9 @@ class TestMapRecalibration:
         async def fake_compress_direct(content, max_tokens, **kwargs):
             if count_tokens(content) > provider_capacity:
                 raise uc._ContextOverflow(
-                    count_tokens(content), None, None,
+                    count_tokens(content),
+                    None,
+                    None,
                     RuntimeError("context window exceeded"),
                 )
             return content.split("\n", 1)[0]
@@ -365,9 +385,13 @@ class TestMapRecalibration:
         lines = [f"ROW-{i} " + "y " * 30 for i in range(3000)]
         content = "\n".join(lines)
 
-        result = asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=800, model_id="m-blind",
-        ))
+        result = asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=800,
+                model_id="m-blind",
+            )
+        )
         assert result
         assert "ROW-0" in result
 
@@ -378,16 +402,23 @@ class TestMapRecalibration:
 
         async def always_overflow(content, max_tokens, **kwargs):
             raise uc._ContextOverflow(
-                count_tokens(content), None, None, RuntimeError("context window"),
+                count_tokens(content),
+                None,
+                None,
+                RuntimeError("context window"),
             )
 
         monkeypatch.setattr(comp, "_compress_direct", always_overflow)
 
         content = "\n".join("z " * 50 for _ in range(2000))
         with pytest.raises(uc.InfeasibleCompressionError):
-            asyncio.run(comp._map_reduce_recalibrating(
-                content=content, max_tokens=100, model_id="m-dead",
-            ))
+            asyncio.run(
+                comp._map_reduce_recalibrating(
+                    content=content,
+                    max_tokens=100,
+                    model_id="m-dead",
+                )
+            )
 
 
 async def _identity_compress(content, max_tokens, **kwargs):
@@ -414,14 +445,18 @@ class TestReducePacking:
         monkeypatch.setattr(comp, "_synthesize_chunks", fake_synthesize)
 
         parts = [f"part-{i} " + "w " * 400 for i in range(12)]  # ~400 tokens each
-        result = asyncio.run(comp._reduce_recalibrating(
-            parts, max_tokens=500, model_id="m-pack",
-        ))
+        result = asyncio.run(
+            comp._reduce_recalibrating(
+                parts,
+                max_tokens=500,
+                model_id="m-pack",
+            )
+        )
         assert result
         assert seen_group_sizes, "synthesis must have been called"
-        assert all(s <= 2000 for s in seen_group_sizes), (
-            f"a reduce group exceeded per-request capacity: {seen_group_sizes}"
-        )
+        assert all(
+            s <= 2000 for s in seen_group_sizes
+        ), f"a reduce group exceeded per-request capacity: {seen_group_sizes}"
 
     def test_reduce_overflow_recalibrates_and_repacks(self, monkeypatch):
         monkeypatch.setenv("VINV_ENGINE_MODEL_FALLBACK_LIMIT", "8000")
@@ -433,7 +468,9 @@ class TestReducePacking:
             group_tokens = sum(count_tokens(p) for p in parts)
             if group_tokens > provider_capacity:
                 raise uc._ContextOverflow(
-                    group_tokens, group_tokens + 50, provider_capacity * 4,
+                    group_tokens,
+                    group_tokens + 50,
+                    provider_capacity * 4,
                     RuntimeError("maximum context length"),
                 )
             return parts[0][:200]
@@ -441,9 +478,13 @@ class TestReducePacking:
         monkeypatch.setattr(comp, "_synthesize_chunks", fake_synthesize)
 
         parts = [f"seg-{i} " + "v " * 300 for i in range(10)]
-        result = asyncio.run(comp._reduce_recalibrating(
-            parts, max_tokens=400, model_id="m-reduce",
-        ))
+        result = asyncio.run(
+            comp._reduce_recalibrating(
+                parts,
+                max_tokens=400,
+                model_id="m-reduce",
+            )
+        )
         assert result
         assert ModelContextRegistry().observed_input_limit("m-reduce") == provider_capacity * 4
 
@@ -460,9 +501,13 @@ class TestReducePacking:
         monkeypatch.setattr(comp, "_synthesize_chunks", broken_synthesize)
 
         parts = [f"keep-{i} " + "u " * 100 for i in range(6)]
-        result = asyncio.run(comp._reduce_recalibrating(
-            parts, max_tokens=50, model_id="m-stall",
-        ))
+        result = asyncio.run(
+            comp._reduce_recalibrating(
+                parts,
+                max_tokens=50,
+                model_id="m-stall",
+            )
+        )
         for i in range(6):
             assert f"keep-{i}" in result, "verbatim join must preserve every part"
 
@@ -512,6 +557,7 @@ class TestDirectCompressOverflowSignal:
 # Artifact-backed observations for massive outputs (grep, don't compress)
 # ---------------------------------------------------------------------------
 
+
 class TestLogArtifact:
     def test_full_content_preserved_on_disk(self, tmp_path, monkeypatch):
         from core.components.context_compressor import log_artifact
@@ -522,7 +568,7 @@ class TestLogArtifact:
         lines[40000] = "Traceback (most recent call last):"
         content = "\n".join(lines)
 
-        digest = log_artifact.store_and_digest(content, "terminal-cmd", 5000)
+        log_artifact.store_and_digest(content, "terminal-cmd", 5000)
 
         artifacts = list(tmp_path.glob("*.log"))
         assert len(artifacts) == 1
@@ -555,9 +601,9 @@ class TestLogArtifact:
         budget = 8000
         digest = log_artifact.store_and_digest(content, "flood", budget)
         # Head/tail/diagnostics are line-derived; allow modest overhead.
-        assert count_tokens(digest) <= budget * 2, (
-            f"digest {count_tokens(digest)} tokens far exceeds budget {budget}"
-        )
+        assert (
+            count_tokens(digest) <= budget * 2
+        ), f"digest {count_tokens(digest)} tokens far exceeds budget {budget}"
 
     def test_incident_scale_17M_tokens_no_llm_needed(self, tmp_path, monkeypatch):
         """The incident's 17.5M-token capture becomes a bounded digest with
@@ -565,10 +611,21 @@ class TestLogArtifact:
         from core.components.context_compressor import log_artifact
 
         monkeypatch.setenv("VINV_ENGINE_ARTIFACT_DIR", str(tmp_path))
-        # ~17.5M tokens ≈ 70M chars (token ≈ chars/4, consistently).
+        # 70M chars of filler. The assertion is a SCALE floor, not a token count:
+        # this test is about handling an incident-scale capture with zero LLM
+        # calls, and the exact token total is tokenizer-dependent scaffolding.
+        #
+        # It previously asserted >= 17.5M on the stated assumption "token ≈
+        # chars/4, consistently" — which was the CHARACTER FALLBACK's arithmetic,
+        # not the tokenizer's. tiktoken was soft-imported and declared in no
+        # manifest, so count_tokens silently returned len // 4 and the assumption
+        # held by construction. With the real BPE tokenizer declared and present,
+        # long runs of one character compress into multi-char tokens and the same
+        # 70M chars measure ~11M tokens. Both are incident scale; the floor is set
+        # below the tokenizer-sensitive range so it holds either way.
         block = ("x" * 69 + "\n") * 1000  # 70K chars
         content = block * 1000  # 70M chars
-        assert count_tokens(content) >= 17_000_000
+        assert count_tokens(content) >= 10_000_000
 
         digest = log_artifact.store_and_digest(content, "monster", 50000)
         assert count_tokens(digest) <= 100000
@@ -580,19 +637,25 @@ class TestLogArtifact:
 # different windows, different failure shapes — same guarantees.
 # ---------------------------------------------------------------------------
 
+
 class TestStressConditions:
     @pytest.mark.parametrize(
         "window,provider_message",
         [
-            (272000, "This model's maximum context length is {limit} tokens. "
-                     "However, your messages resulted in {count} tokens."),
+            (
+                272000,
+                "This model's maximum context length is {limit} tokens. "
+                "However, your messages resulted in {count} tokens.",
+            ),
             (200000, "prompt is too long: {count} tokens > {limit} maximum"),
-            (131072, "input length exceeds the maximum of {limit} tokens "
-                     "(requested {count})"),
+            (131072, "input length exceeds the maximum of {limit} tokens " "(requested {count})"),
         ],
     )
     def test_any_provider_error_shape_recalibrates(
-        self, monkeypatch, window, provider_message,
+        self,
+        monkeypatch,
+        window,
+        provider_message,
     ):
         comp = _make_compressor(monkeypatch, fallback_limit=1000000)  # wrong prior
         provider_content_capacity = window // 4
@@ -600,9 +663,7 @@ class TestStressConditions:
         async def fake_compress_direct(content, max_tokens, **kwargs):
             tokens = count_tokens(content)
             if tokens > provider_content_capacity:
-                err = RuntimeError(
-                    provider_message.format(limit=window, count=tokens + 500)
-                )
+                err = RuntimeError(provider_message.format(limit=window, count=tokens + 500))
                 reported, limit = uc._parse_overflow_numbers(err)
                 raise uc._ContextOverflow(tokens, reported, limit, err)
             return content.split("\n", 1)[0]
@@ -614,18 +675,24 @@ class TestStressConditions:
         monkeypatch.setattr(comp, "_synthesize_chunks", fake_synthesize)
 
         content = "\n".join(f"E{i} " + "z " * 60 for i in range(30000))  # ~500K tokens
-        result = asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=5000, model_id=f"m-{window}",
-        ))
+        result = asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=5000,
+                model_id=f"m-{window}",
+            )
+        )
         assert result
         assert ModelContextRegistry().observed_input_limit(f"m-{window}") == window
 
     def test_learned_numbers_prevent_repeat_failures_next_process(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """After one overflow, a NEW process must plan feasible chunks
         immediately from the persisted catalog — before any failure."""
-        comp = _make_compressor(monkeypatch, fallback_limit=1000000)
+        _make_compressor(monkeypatch, fallback_limit=1000000)
         reg = ModelContextRegistry()
         reg.record_overflow("gpt-5.4-nano", 250000, 277851, 272000)
 
@@ -647,7 +714,8 @@ class TestStressConditions:
         big = "\n".join(f"install line {i}" for i in range(20000))
         big += "\nERROR: dependency conflict detected\nfinal line"
         result = _bounded_output(
-            {"status": "success", "output": big}, "terminal-cmd",
+            {"status": "success", "output": big},
+            "terminal-cmd",
         )
 
         assert result["output"] != big, "raw megabytes must not pass through"
@@ -659,6 +727,7 @@ class TestStressConditions:
 
     def test_terminal_small_output_passes_through(self, monkeypatch):
         from core.components.tools.terminal.terminal_tools import _bounded_output
+
         small = {"status": "success", "output": "ok\n"}
         assert _bounded_output(dict(small), "terminal-cmd") == small
 
@@ -672,8 +741,12 @@ class TestStressConditions:
 
         monkeypatch.setattr(comp, "_compress_direct", never_called)
         content = "\n".join("c " * 50 for _ in range(20000))
-        result = asyncio.run(comp._map_reduce_recalibrating(
-            content=content, max_tokens=100, model_id="m-cancel",
-            cancel_event=cancel,
-        ))
+        result = asyncio.run(
+            comp._map_reduce_recalibrating(
+                content=content,
+                max_tokens=100,
+                model_id="m-cancel",
+                cancel_event=cancel,
+            )
+        )
         assert result == content  # cancelled before any work — lossless
