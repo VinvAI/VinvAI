@@ -237,9 +237,16 @@ suite('COMA counterfactual credit assignment (episodePolicyUpdater)', () => {
 		const next = computeUpdatedPolicy({ ...POLICY_PRIORS }, episodes);
 		assert.ok(next.attribution, 'attribution report still computed');
 		assert.ok(next.attribution!.include_runtime > 0.4, `runtime credited (${next.attribution!.include_runtime})`);
-		// slice_depth is the untoggled feature here (both episodes use arms whose
-		// depth level differs only with runtime), so it must stay near zero.
-		assert.ok(Math.abs(next.attribution!.slice_depth) < 0.6, 'untoggled feature bounded');
+		// slice_depth is EXACTLY zero here, not merely small. Both arms pulled (3 =
+		// 0b11 and 1 = 0b01) carry slice_depth 1, so its pairs (1,0) and (3,2) each
+		// have an unpulled side, every pair is half-empty, and all are skipped —
+		// the same rule asserted at 1e-12 above. A loose bound here would pass even
+		// if the untoggled feature were credited at 0.5, which is the whole thing
+		// this assertion exists to rule out.
+		assert.ok(
+			Math.abs(next.attribution!.slice_depth) < 1e-12,
+			`untoggled feature must be exactly zero, got ${next.attribution!.slice_depth}`,
+		);
 	});
 });
 
