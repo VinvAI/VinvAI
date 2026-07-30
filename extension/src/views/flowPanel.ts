@@ -15,7 +15,10 @@
  */
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
+import { apiIdFromCallTreePath, buildCallTreeReport, captureServiceFor } from '../harness/insightRunner';
+import { readEntryPoints } from '../identification/identification';
 import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
 import { openPathInEditor, resolveOpenTarget } from '../support/openDocument';
 import type { FlowStateSource } from './flowStateSource';
@@ -110,7 +113,7 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 		post(this.source.getModel());
 
 		const actions: FlowActions = {
-			openLink,
+			openLink: (link) => openLink(link, this.context),
 			openFileAt: (fsPath, line) => openFileAt(fsPath, line),
 			runCommand: async (command, ...args) => {
 				await vscode.commands.executeCommand(command, ...args);
@@ -126,9 +129,12 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 }
 
 /** Executes a rail link: a command, a markdown preview, or a file open. */
-async function openLink(link: FlowLink): Promise<void> {
+async function openLink(link: FlowLink, context?: vscode.ExtensionContext): Promise<void> {
 	if (link.command) {
 		await vscode.commands.executeCommand(link.command, ...(link.args ?? []));
+		return;
+	}
+	if (link.openPath && context && (await rebuildIfMissing(link.openPath, context))) {
 		return;
 	}
 	if (!link.openPath) {
@@ -151,6 +157,52 @@ async function openLink(link: FlowLink): Promise<void> {
 	// vscode.open resolves the registered default editor, so calltree-*.json
 	// and smoke-*.html land in their custom viewers, plain files in the editor.
 	await openFileAt(link.openPath, link.openLine);
+}
+
+/**
+ * Rebuilds a call-tree snapshot the rail lists but disk does not have, then
+ * opens it. Returns true when it handled the click.
+ *
+ * The rail's report list comes from the insight manifest, which records where
+ * each snapshot WAS written — so a report deleted since (or one whose write
+ * failed while its manifest entry landed) answered a click with "file not
+ * found". That is an error about our own bookkeeping, and the user cannot act
+ * on it. The snapshot is reproducible from the index and the capture, so
+ * reproduce it.
+ */
+async function rebuildIfMissing(
+	openPath: string,
+	context: vscode.ExtensionContext,
+): Promise<boolean> {
+	const apiId = apiIdFromCallTreePath(openPath);
+	if (!apiId || fs.existsSync(openPath)) {
+		return false;
+	}
+	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!root) {
+		return false;
+	}
+	// Pick the capture from the service that DEFINES this endpoint; without it
+	// the engine overlays whichever service traced most recently.
+	const file = readEntryPoints(root).find((e) => e.id === apiId)?.file;
+	try {
+		const built = await vscode.window.withProgress(
+			// Status bar: this takes no cancellation token, and a notification-location
+			// progress without `cancellable` has no close button at all — an
+			// undismissable toast for a build that ends by opening its own result.
+			{ location: vscode.ProgressLocation.Window, title: `Vinv: Building the call tree for ${apiId}…` },
+			() => buildCallTreeReport(context, root, apiId, captureServiceFor(root, file)),
+		);
+		await openFileAt(built);
+	} catch (e) {
+		// Naming the endpoint matters: the usual cause is that nothing has traced
+		// it yet, which is a thing the user can fix.
+		void vscode.window.showErrorMessage(
+			`Vinv: could not build the call tree for ${apiId} — ${e instanceof Error ? e.message : String(e)}. ` +
+				'Run the service under tracing so there is a capture to overlay.',
+		);
+	}
+	return true;
 }
 
 async function openFileAt(fsPath: string | undefined, line?: number): Promise<void> {

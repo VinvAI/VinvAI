@@ -292,11 +292,44 @@ export interface PipelineLedger {
 	exercise: StagePhase;
 	/** Fix episodes spent on stage failures, keyed by failure signature. */
 	fixEpisodes: Record<string, number>;
+	/**
+	 * Whether probes have already been re-armed once after exercise produced the
+	 * workspace's first endpoint traffic. Bounds the re-arm to a single extra
+	 * attempt — see rearmProbesAfterExercise.
+	 */
+	probesRearmed?: boolean;
 }
 
 /** A fresh ledger: all post-green stages pending. */
 export function initialPipelineLedger(): PipelineLedger {
 	return { probes: 'pending', exercise: 'pending', fixEpisodes: {} };
+}
+
+/**
+ * Give probes a second chance once exercise has produced traffic to replay.
+ *
+ * The scheduler runs probes BEFORE exercise, and on a cold workspace that order
+ * can never work: probes replay requests a trace already saw, exercise is what
+ * CREATES the first ones. So the first run always went probes → 'skipped'
+ * (nothing observed) → exercise → traffic at last exists → and probes was
+ * already terminal, so it never ran. Every first pipeline run burned the stage
+ * and left "no observed endpoints to probe" as the only trace of it; you needed
+ * a second Auto-Pilot run before probes did anything at all.
+ *
+ * Deliberately narrow:
+ *   - only a stage that SKIPPED is re-armed. 'failed' means it ran and found
+ *     real problems, which the fix-episode budget already governs; 'done' means
+ *     it did its job.
+ *   - only when exercise actually finished ('done'). A failed or skipped
+ *     exercise has produced no new traffic, so probes would skip again.
+ *   - once per run, via `probesRearmed`. Without the flag, probes skipping a
+ *     second time (a service that serves nothing) would re-arm forever.
+ */
+export function rearmProbesAfterExercise(ledger: PipelineLedger): PipelineLedger {
+	if (ledger.probesRearmed || ledger.probes !== 'skipped' || ledger.exercise !== 'done') {
+		return ledger;
+	}
+	return { ...ledger, probes: 'pending', probesRearmed: true };
 }
 
 /** The next thing the FULL pipeline (services + post-green stages) should do. */

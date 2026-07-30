@@ -19,6 +19,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { evidenceFileForKind, isDispatchableKind } from '../harness/issueKinds';
+
 export interface FindingsEpisodeAttempt {
 	approach: string;
 	behaviorSuitePassed: boolean;
@@ -39,6 +41,40 @@ export interface FindingsEpisode {
 	filesChanged: string[];
 }
 
+/**
+ * One behavioral failure cluster, with the evidence that makes it actionable.
+ *
+ * The view used to get kind/title/signature and nothing else, so "POST /chat —
+ * HTTP 500" was the whole story: no input to reproduce it, no expectation it
+ * violated, no pointer to the rows behind it. issues.json has carried all of
+ * that from the start — it was simply dropped on the way to the surface.
+ */
+export interface FindingsIssue {
+	kind: string;
+	title: string;
+	signature: string;
+	/** `METHOD /path` for an HTTP cluster; `ORACLE target` for the others. */
+	endpoint: string;
+	/** How many failing cases collapsed into this cluster. */
+	count: number;
+	/** Whether a fix episode can be dispatched for it (diagnostics cannot). */
+	dispatchable: boolean;
+	/** `.vinv/exercise/<file>` holding the failing rows for this kind. */
+	evidenceFile: string;
+	/** The representative failure: what was sent, what came back, what was expected. */
+	exemplar: {
+		strategy: string;
+		status: number | null;
+		detail: string;
+		expected: string;
+		error: string;
+		/** The request that triggered it, JSON-rendered for display. */
+		input: string;
+	} | null;
+	/** Functions the failing case reached — where to start reading. */
+	coveredFrames: string[];
+}
+
 export interface Findings {
 	schemaVersion: 1;
 	root: string;
@@ -55,7 +91,7 @@ export interface Findings {
 		stateCreated: number;
 		stateCleaned: number;
 	};
-	issues: Array<{ kind: string; title: string; signature: string }>;
+	issues: FindingsIssue[];
 	episodes: FindingsEpisode[];
 	opportunities: Array<{ kind: string; endpoint: string; detail: string; value: number }>;
 	regress: {
@@ -122,6 +158,54 @@ const MAX_EPISODES = 50;
 const MAX_LEDGER_ROWS = 100;
 const MAX_HISTORY = 40;
 
+/** Renders an exemplar's request payload compactly enough to read at a glance. */
+function renderInput(input: any): string {
+	if (input === null || input === undefined) {
+		return '';
+	}
+	// Drop the empty halves: an exemplar carries body/path_params/query whether or
+	// not they were used, and three empty objects bury the one that mattered.
+	if (typeof input === 'object' && !Array.isArray(input)) {
+		const kept = Object.entries(input).filter(([, v]) => {
+			if (v === null || v === undefined || v === '') {
+				return false;
+			}
+			return typeof v !== 'object' || Object.keys(v as object).length > 0;
+		});
+		if (kept.length === 0) {
+			// Every field empty IS the input — a bodyless POST is the whole test.
+			return JSON.stringify(input);
+		}
+		return JSON.stringify(Object.fromEntries(kept), null, 1);
+	}
+	return JSON.stringify(input);
+}
+
+function toFindingsIssue(c: any): FindingsIssue {
+	const ex = c.exemplar ?? null;
+	const where = `${c.method ?? ''} ${c.path ?? ''}`.trim();
+	return {
+		kind: String(c.kind ?? ''),
+		title: String(c.title ?? ''),
+		signature: String(c.signature ?? ''),
+		endpoint: where || String(c.endpoint_id ?? ''),
+		count: Number(c.count ?? 1),
+		dispatchable: isDispatchableKind(String(c.kind ?? '')),
+		evidenceFile: evidenceFileForKind(String(c.kind ?? '')),
+		exemplar: ex
+			? {
+					strategy: String(ex.strategy ?? ''),
+					status: typeof ex.status === 'number' ? ex.status : null,
+					detail: String(ex.detail ?? ''),
+					expected: String(ex.expected ?? ''),
+					error: String(ex.error ?? ''),
+					input: renderInput(ex.input),
+				}
+			: null,
+		coveredFrames: (c.covered_frames ?? []).map(String),
+	};
+}
+
 export function buildFindings(workspaceRoot: string): Findings {
 	const ex = path.join(workspaceRoot, '.vinv', 'exercise');
 	const scorecard = readJson(path.join(ex, 'scorecard.json')) ?? {};
@@ -130,6 +214,7 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const episodesRaw = readJsonl(path.join(ex, 'optimize.jsonl'));
 	const regressRaw = readJsonl(path.join(ex, 'regress.jsonl'));
 	const ledger = readJsonl(path.join(ex, 'state_ledger.jsonl'));
+	const clusters: any[] = Array.isArray(issuesDoc.clusters) ? issuesDoc.clusters : [];
 
 	const episodes: FindingsEpisode[] = episodesRaw.slice(-MAX_EPISODES).map((e: any) => ({
 		at: Number(e.at ?? 0),
@@ -191,7 +276,12 @@ export function buildFindings(workspaceRoot: string): Findings {
 			endpointsTotal: Number(after.endpoints_total ?? 0),
 			symbolsCovered: Number(after.symbols_covered ?? 0),
 			symbolsTotal: Number(after.symbols_total ?? 0),
-			issuesFound: Number(scorecard.issue_clusters ?? (issuesDoc.clusters ?? []).length),
+			// issues.json is authoritative — it is the list rendered below, and the
+			// exerciser rewrites it every pass. `scorecard.issue_clusters` is a copy
+			// taken later, so a pass that dies before its `scorecard` step (or a
+			// scorecard left behind by an imported run) leaves the two disagreeing:
+			// the tile said 0 while the section under it listed six clusters.
+			issuesFound: clusters.length,
 			episodesAccepted: accepted,
 			episodesReverted: episodes.length - accepted,
 			regressCases: regress.latest?.cases ?? 0,
@@ -202,11 +292,7 @@ export function buildFindings(workspaceRoot: string): Findings {
 			stateCreated: Number(pollution.created ?? 0),
 			stateCleaned: Number(pollution.cleaned ?? 0),
 		},
-		issues: (issuesDoc.clusters ?? []).map((c: any) => ({
-			kind: String(c.kind ?? ''),
-			title: String(c.title ?? ''),
-			signature: String(c.signature ?? ''),
-		})),
+		issues: clusters.map(toFindingsIssue),
 		episodes,
 		opportunities: (profile.opportunities ?? []).map((o: any) => ({
 			kind: String(o.kind ?? ''),

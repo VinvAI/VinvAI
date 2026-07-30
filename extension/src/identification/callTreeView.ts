@@ -313,9 +313,15 @@ async function runSmokeReport(
 	try {
 		const report = await vscode.window.withProgress(
 			{
-				location: vscode.ProgressLocation.Notification,
+				// Status bar, not a toast. A notification-location progress with
+				// `cancellable: false` renders NO close button, so the user cannot
+				// dismiss or minimize it — it simply occupies the corner until the
+				// engine finishes. `generateSmokeReport` takes no cancellation token,
+				// so `cancellable: true` would only add a Cancel that does nothing.
+				// The status bar is dismissed by nature and the finished report opens
+				// itself, which is the actual signal the user is waiting for.
+				location: vscode.ProgressLocation.Window,
 				title: `Generating Smoke Report for ${label}…`,
-				cancellable: false,
 			},
 			() => generateSmokeReport(context, workspaceRoot, apiId),
 		);
@@ -616,12 +622,21 @@ function getHtml(label: string): string {
 					const hasErr = rt.error > 0;
 					const tag = el('span', 'rt ' + (hasErr ? 'err' : 'ok'));
 					let txt = '✓ ×' + rt.calls + ' (' + rt.total_ms + 'ms)';
-					if (typeof rt.mem_bytes === 'number') { txt += ' · ' + fmtBytes(rt.mem_bytes); }
+					// Wall time alone cannot tell "slow because it computes" from
+					// "slow because it waits", and only the first is worth
+					// optimizing here. Shown once waiting dominates the call.
+					const blocked = typeof rt.blocked_ms === 'number' ? rt.blocked_ms : null;
+					const mostlyWaiting = blocked !== null && rt.total_ms > 0 && blocked / rt.total_ms >= 0.5;
+					if (mostlyWaiting) { txt += ' · ' + blocked + 'ms waiting'; }
+					const mem = typeof rt.mem_bytes === 'number' ? rt.mem_bytes : rt.mem_delta_bytes;
+					if (typeof mem === 'number') { txt += ' · ' + fmtBytes(mem); }
 					if (hasErr) {
 						txt += ' ⚠ ' + rt.error + ' err' + (rt.errors && rt.errors.length ? ' [' + rt.errors.join(', ') + ']' : '');
 					}
 					tag.textContent = txt;
-					tag.title = 'This function executed ' + rt.calls + ' time(s) during the captured traffic, spending ' + rt.total_ms + 'ms total' + (hasErr ? '; ' + rt.error + ' call(s) raised an exception' : '');
+					tag.title = 'This function executed ' + rt.calls + ' time(s) during the captured traffic, spending ' + rt.total_ms + 'ms total' +
+						(blocked !== null ? ', of which ' + blocked + 'ms was spent waiting on I/O rather than computing' : '') +
+						(hasErr ? '; ' + rt.error + ' call(s) raised an exception' : '');
 					row.appendChild(tag);
 				} else {
 					const notRun = el('span', 'rt no', '✗ not run');

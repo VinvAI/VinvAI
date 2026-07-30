@@ -311,14 +311,17 @@ suite('the exercise pass: a service is up', () => {
 		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
 
 		assert.strictEqual(result.outcome, 'done');
-		// plan → run → campaign → profile → scorecard. `campaign` runs AFTER `run`
-		// because `run` rewrites issues.json wholesale.
+		// plan → run → campaign → regress → profile → scorecard. `campaign` runs
+		// AFTER `run` because `run` rewrites issues.json wholesale; `regress`
+		// replays the pairs `run` recorded, so it cannot precede it either.
 		assert.deepStrictEqual(
 			rec.calls.map((c) => c.args[0]),
-			['plan', 'run', 'campaign', 'profile', 'scorecard'],
+			['plan', 'run', 'campaign', 'regress', 'profile', 'scorecard'],
 		);
 		const campaign = rec.calls.find((c) => c.args[0] === 'campaign');
 		assert.ok(campaign?.args.includes('--base-url'), 'the HTTP oracle arms when a service is up');
+		const regress = rec.calls.find((c) => c.args[0] === 'regress');
+		assert.ok(regress?.args.includes('--base-url'), 'the replay needs the live service');
 		assert.strictEqual(rec.dispatched.length, 1);
 		assert.strictEqual(result.invariants, 5, 'the profile is read back into the result');
 	});
@@ -363,6 +366,34 @@ suite('the exercise pass: a service is up', () => {
 
 		assert.strictEqual(result.outcome, 'done', 'the earned findings were thrown away');
 		assert.strictEqual(rec.dispatched.length, 1);
+	});
+
+	// Same contract as campaign: the replay is a history-builder, not a gate. A
+	// first pass in a fresh workspace has no prior baseline to differ from, and
+	// failing the pass over that would throw away everything `run` earned.
+	test('a regress failure does NOT fail the pass', async () => {
+		// Overriding runEngine replaces the recorder's own recording one, so the
+		// override has to keep recording or rec.calls silently stays empty.
+		const ran: string[] = [];
+		const rec = recorder({
+			pickTarget: () => ({ service: 'api', port: 8000 }),
+			serviceRunning: () => true,
+			runEngine: async (_b, args) => {
+				ran.push(String(args[0]));
+				return {
+					ok: args[0] !== 'regress',
+					error: args[0] === 'regress' ? 'no suite to replay' : undefined,
+				};
+			},
+		});
+
+		const result = await exercisePassOnce(fakeContext(), workspace(), rec.ports);
+
+		assert.strictEqual(result.outcome, 'done');
+		assert.ok(
+			ran.includes('scorecard'),
+			`the pass must carry on to the scorecard after a failed replay; ran: ${ran.join(' → ')}`,
+		);
 	});
 });
 

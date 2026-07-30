@@ -23,6 +23,7 @@ import {
 	applyStageOutcome,
 	decideOnFailure,
 	decideOnStageFailure,
+	rearmProbesAfterExercise,
 	DEFAULT_BUDGETS,
 	failureSignature,
 	initialPipelineLedger,
@@ -411,6 +412,17 @@ async function drive(
 				ledger = applyStageOutcome(ledger, stage, outcome);
 				if (outcome === 'skipped') {
 					report(`${stage} skipped${failureDetail ? ` — ${failureDetail}` : ''}`);
+				}
+				// Exercise is what CREATES the first endpoint traffic, so a probe stage
+				// that skipped for want of it becomes runnable the moment exercise
+				// finishes. Without this, the scheduler's probes-then-exercise order
+				// meant probes never ran at all on a cold workspace: it skipped for
+				// lack of traffic, exercise then produced the traffic, and the stage
+				// was already terminal.
+				const rearmed = rearmProbesAfterExercise(ledger);
+				if (rearmed !== ledger) {
+					ledger = rearmed;
+					report('probes re-armed — exercise produced traffic for them to replay');
 				}
 				continue;
 			}

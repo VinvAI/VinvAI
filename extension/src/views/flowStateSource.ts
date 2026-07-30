@@ -44,6 +44,7 @@ import {
 	onProbeStateChange,
 } from '../harness/pipelineState';
 import { collectRuntimeErrorClusters } from '../harness/runtimeAnalysis';
+import { readScorecardSummary } from '../harness/exerciseRunner';
 import {
 	findTraceFiles,
 	hasIndexStore,
@@ -381,16 +382,25 @@ export class FlowStateSource implements vscode.Disposable {
 		// Behavioral exercise: coverage/invariants/issues from the exerciser, plus
 		// the scorecard artifact when it has been written.
 		const exercise = getExerciseState();
-		if (exercise.total > 0 || exercise.phase !== 'idle') {
-			const scorecard = path.join(root, '.vinv', 'exercise', 'scorecard.md');
+		// In-memory state dies with the window, so a completed pass vanished from
+		// the rail on reload while the compass — reading disk — still called the
+		// stage done. Fall back to the scorecard so both surfaces answer alike.
+		const scored = exercise.total > 0 ? null : readScorecardSummary(root);
+		if (exercise.total > 0 || exercise.phase !== 'idle' || scored) {
+			// The exerciser writes both; an ingested run writes only the JSON.
+			const scorecard = ['scorecard.md', 'scorecard.json']
+				.map((n) => path.join(root, '.vinv', 'exercise', n))
+				.find((p) => fs.existsSync(p));
 			facts.exercise = {
 				phase: exercise.phase,
-				label: exercise.label,
-				endpointsCovered: exercise.endpointsCovered,
-				total: exercise.total,
-				invariants: exercise.invariants,
-				issues: exercise.issues,
-				scorecardPath: fs.existsSync(scorecard) ? scorecard : undefined,
+				label:
+					exercise.label ||
+					(scored?.ingestedBy ? `imported from ${scored.source} — not a vinv exercise pass` : ''),
+				endpointsCovered: scored?.endpointsCovered ?? exercise.endpointsCovered,
+				total: scored?.total ?? exercise.total,
+				invariants: scored?.invariants ?? exercise.invariants,
+				issues: scored?.issues ?? exercise.issues,
+				scorecardPath: scorecard,
 			};
 		}
 

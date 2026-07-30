@@ -34,6 +34,7 @@ import {
 	type ExerciseState,
 } from './pipelineState';
 import { dispatchIssueEpisode } from './autoTrigger';
+import { evidenceFileForKind, isAssertShapedKind, isDispatchableKind } from './issueKinds';
 import { drainAgentChannels, type DrainReport } from './agentChannel';
 import { runHarnessPrompt } from './harnessRunner';
 import { getHarnessId } from '../config/settings';
@@ -52,6 +53,60 @@ export function readExerciseJson<T>(workspaceRoot: string, name: string): T | nu
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The on-disk scorecard reduced to what the compass and the Flow rail need.
+ *
+ * `ingestedBy` is the load-bearing field. `vinv_ingest_run` (exerciseIngest)
+ * writes the SAME artifact from an EXTERNAL harness run — it fills the Journey
+ * and Findings views, but it is not a vinv exercise pass and it stamps itself
+ * as such precisely so the two stay distinguishable.
+ */
+export interface ScorecardSummary {
+	/** The service the run covered, or the external harness that produced it. */
+	source: string;
+	/** Set only when the artifact came from vinv_ingest_run, not the exerciser. */
+	ingestedBy?: string;
+	endpointsCovered: number;
+	total: number;
+	invariants: number;
+	issues: number;
+}
+
+/** Reads .vinv/exercise/scorecard.json into the shape both surfaces render. */
+export function readScorecardSummary(workspaceRoot: string): ScorecardSummary | null {
+	const sc = readExerciseJson<Record<string, any>>(workspaceRoot, 'scorecard.json');
+	if (!sc) {
+		return null;
+	}
+	const after = (sc.coverage?.after_exercised ?? {}) as Record<string, number>;
+	const endpoints: Array<Record<string, unknown>> = Array.isArray(sc.endpoints) ? sc.endpoints : [];
+	return {
+		source: String(sc.service ?? sc.source ?? 'unknown'),
+		ingestedBy: sc.ingested_by ? String(sc.ingested_by) : undefined,
+		endpointsCovered: Number(after.endpoints_with_coverage ?? 0),
+		total: Number(after.endpoints_total ?? endpoints.length),
+		// The exerciser totals invariants itself; an imported run has only the
+		// per-endpoint counts, so sum them rather than reporting zero.
+		invariants: Number(
+			sc.invariants_learned ?? endpoints.reduce((n, e) => n + Number(e.invariants ?? 0), 0),
+		),
+		issues: Number(sc.issue_clusters ?? (Array.isArray(sc.issues) ? sc.issues.length : 0)),
+	};
+}
+
+/**
+ * True when vinv's OWN exerciser has completed a pass over this workspace.
+ *
+ * Deliberately NOT `fs.existsSync(scorecard.json)`: that treats an imported
+ * external run as the stage being done, which silently dropped "Exercise the
+ * services" out of the compass ladder in any workspace where the coding harness
+ * had ingested a run first.
+ */
+export function hasExercisePass(workspaceRoot: string): boolean {
+	const sc = readScorecardSummary(workspaceRoot);
+	return !!sc && !sc.ingestedBy;
 }
 
 /** The exercise profile shape the runner + views read (subset). */
@@ -102,82 +157,10 @@ export function exerciseStateFromArtifacts(
 	};
 }
 
-/**
- * Assert-shaped cluster kinds: the service ANSWERED (usually 2xx) but its
- * output broke a learned invariant or regressed against the golden baseline —
- * "output changed but nothing raised". These dispatch with value-shaped
- * success criteria; "no longer produces these errors" would be vacuous.
- */
-export function isAssertShapedKind(kind: string): boolean {
-	return ASSERT_SHAPED_KINDS.has(kind);
-}
-
-/**
- * Kinds where the code ANSWERED and the answer was wrong — no exception, no 5xx.
- *
- * The HTTP oracle contributes two. The five newer oracles contribute three more,
- * and getting them into this set is not cosmetic: an error-shaped dispatch tells
- * the fixing agent "these calls no longer raise", which is VACUOUS against a
- * silent wrong value — the target never raised in the first place, so the
- * criterion is satisfied by changing nothing.
- */
-const ASSERT_SHAPED_KINDS: ReadonlySet<string> = new Set([
-	'invariant-violation', // learned invariant broken on a 2xx
-	'baseline-degraded', // value changed against a value-stable golden
-	'differential-mismatch', // computed a different value than the reference
-	'fault-divergence', // aggregate differs by chunk-split point
-	'concurrency-divergence', // concurrent results collapse vs the serial baseline
-]);
-
-/**
- * Kinds that are DIAGNOSTICS about the environment, never defects in this repo —
- * so they must never become a fix episode.
- *
- * `signature-drift` is an upstream dependency changing its own API. There is no
- * edit to this repo that "fixes" it, and dispatching an agent at it burns a fix
- * budget on something it cannot resolve. It still belongs in issues.json as
- * evidence; it just must not be actioned.
- */
-const NON_DISPATCHABLE_KINDS: ReadonlySet<string> = new Set(['signature-drift']);
-
-/** Whether a cluster kind should become a fix episode at all. */
-export function isDispatchableKind(kind: string): boolean {
-	return !NON_DISPATCHABLE_KINDS.has(kind);
-}
-
-/**
- * Where the evidence for a cluster kind actually lives.
- *
- * The dispatch text used to hardcode "results.jsonl" for everything, which is
- * the HTTP oracle's artifact. Pointing a fixing agent at an empty file is worse
- * than pointing it nowhere — it reads the miss as "no evidence exists".
- */
-export function evidenceFileForKind(kind: string): string {
-	switch (kind) {
-		case 'function-crash':
-		case 'function-sandboxed':
-		// An import failure is produced by the FUNCTION oracle and its rows live
-		// in that oracle's artifact, like every other kind here. Missing from
-		// this switch, it fell through to the HTTP oracle's `results.jsonl` —
-		// the exact "points a fixing agent at an empty file" failure this
-		// function was written to stop, reproduced for the one kind that fires
-		// most on an unconfigured repo.
-		case 'import-error':
-			return 'function_results.jsonl';
-		case 'differential-mismatch':
-			return 'differential_results.jsonl';
-		case 'fault-crash':
-		case 'fault-divergence':
-			return 'fault_results.jsonl';
-		case 'concurrency-divergence':
-		case 'concurrency-hang':
-			return 'concurrency_results.jsonl';
-		case 'signature-drift':
-			return 'signatures.json';
-		default:
-			return 'results.jsonl';
-	}
-}
+// Cluster-kind semantics moved to a pure module so the Findings surface — which
+// must stay vscode-free — can classify a cluster the same way the dispatch path
+// does. Re-exported here because this is where callers and tests already look.
+export { isAssertShapedKind, isDispatchableKind, evidenceFileForKind } from './issueKinds';
 
 /** Success criteria for an assert-shaped (silent wrong-value) dispatch. */
 export const ASSERT_SUCCESS_CRITERIA: readonly string[] = [
@@ -483,6 +466,49 @@ export async function dispatchFreshClusters(
 	}
 }
 
+/** How a user-initiated dispatch from the Findings view settled. */
+export type ClusterDispatch =
+	| { outcome: 'dispatched' }
+	| { outcome: 'unknown-cluster' | 'not-actionable' | 'busy' };
+
+/**
+ * Dispatch ONE cluster the user picked in the Findings view.
+ *
+ * Deliberately not `dispatchFreshClusters`: that is the automatic path, and it
+ * is signature-deduped so a cluster it has already handed off is skipped
+ * forever. A human clicking "Fix this" on a cluster that a previous episode
+ * failed to fix means "try again" — honouring the dedup there would make the
+ * button silently do nothing. It still RECORDS the dispatch, so the automatic
+ * path does not re-dispatch what the user just asked for.
+ */
+export async function dispatchClusterFix(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	signature: string,
+): Promise<ClusterDispatch> {
+	const issues = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+	const cluster = issues?.clusters.find((c) => c.signature === signature);
+	if (!cluster) {
+		return { outcome: 'unknown-cluster' };
+	}
+	if (!isDispatchableKind(cluster.kind)) {
+		return { outcome: 'not-actionable' };
+	}
+	const handedOff = await dispatchIssueEpisode(
+		context,
+		workspaceRoot,
+		issueEpisodesFromClusters([cluster]),
+		isAssertShapedKind(cluster.kind)
+			? { trigger: 'invariant-violation', successCriteria: [...ASSERT_SUCCESS_CRITERIA] }
+			: undefined,
+	);
+	if (!handedOff) {
+		return { outcome: 'busy' };
+	}
+	await recordDispatched(context, [cluster.signature]);
+	return { outcome: 'dispatched' };
+}
+
 /**
  * The exercise pass for a repo with nothing serving: `campaign` alone, without
  * `--base-url`, so the HTTP oracle stays unarmed and the four service-free
@@ -750,6 +776,30 @@ export async function exercisePassOnce(
 	);
 	if (!campaign.ok) {
 		console.warn(`Vinv: campaign step failed (HTTP findings still published): ${campaign.error}`);
+	}
+
+	// Regression replay. The engine has always had this command and nothing ever
+	// invoked it, so `regress.jsonl` was never written and the Findings view's
+	// "Regression checks" tile read 0 in every workspace, forever — a permanently
+	// empty panel that looked like "no regressions" rather than "never ran".
+	//
+	// It runs AFTER `run`, which is what records the request/response pairs the
+	// suite is built from, and BEFORE `profile` so the profile reflects a
+	// settled service. Like `campaign`, a failure is a diagnostic and not fatal:
+	// the findings already earned are worth publishing either way, and the first
+	// pass in a fresh workspace is establishing the baseline rather than
+	// detecting drift against one.
+	publishExerciseState(
+		exerciseStateFromArtifacts(null, null, 'running', 'replaying the recorded suite…'),
+	);
+	const regress = await ports.runEngine(
+		bin,
+		['regress', workspaceRoot, '--base-url', baseUrl, '--service', slug],
+		workspaceRoot,
+		env,
+	);
+	if (!regress.ok) {
+		console.warn(`Vinv: regress step failed (findings still published): ${regress.error}`);
 	}
 
 	publishExerciseState(exerciseStateFromArtifacts(null, null, 'running', 'profiling behavior…'));

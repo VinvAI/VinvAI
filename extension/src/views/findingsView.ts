@@ -14,21 +14,25 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO, VINV_FONT_SERIF } from './webviewTheme';
 import { buildFindings, writeFindingsSummary } from './findingsModel';
 import { openPathInEditor } from '../support/openDocument';
+import { dispatchClusterFix } from '../harness/exerciseRunner';
 
 export const FINDINGS_VIEW_TYPE = 'vinv.findings';
 
 export interface FindingsOutbound {
-	type: 'openSource' | 'refresh';
+	type: 'openSource' | 'refresh' | 'dispatchFix';
 	file?: string;
 	line?: number;
+	/** Cluster fingerprint for 'dispatchFix'. */
+	signature?: string;
 }
 
 export interface FindingsActions {
 	openSource: (file: string | undefined, line?: number) => Promise<void>;
 	refresh: () => Promise<void>;
+	dispatchFix: (signature: string) => Promise<void>;
 }
 
 export async function handleFindingsMessage(
@@ -39,6 +43,8 @@ export async function handleFindingsMessage(
 		await actions.openSource(msg.file, msg.line);
 	} else if (msg.type === 'refresh') {
 		await actions.refresh();
+	} else if (msg.type === 'dispatchFix' && msg.signature) {
+		await actions.dispatchFix(msg.signature);
 	}
 }
 
@@ -65,10 +71,10 @@ export async function openFindings(workspaceRoot: string): Promise<void> {
 }
 
 export class FindingsEditorProvider implements vscode.CustomReadonlyEditorProvider {
-	public static register(_context: vscode.ExtensionContext): vscode.Disposable {
+	public static register(context: vscode.ExtensionContext): vscode.Disposable {
 		return vscode.window.registerCustomEditorProvider(
 			FINDINGS_VIEW_TYPE,
-			new FindingsEditorProvider(),
+			new FindingsEditorProvider(context),
 			{
 				webviewOptions: { retainContextWhenHidden: true },
 				supportsMultipleEditorsPerDocument: false,
@@ -76,18 +82,26 @@ export class FindingsEditorProvider implements vscode.CustomReadonlyEditorProvid
 		);
 	}
 
+	// The context is the dispatch path's dedup store — "Fix this" cannot record
+	// what it handed off without it.
+	private constructor(private readonly context: vscode.ExtensionContext) {}
+
 	openCustomDocument(uri: vscode.Uri): vscode.CustomDocument {
 		return { uri, dispose: () => undefined };
 	}
 
 	resolveCustomEditor(document: vscode.CustomDocument, webviewPanel: vscode.WebviewPanel): void {
 		const workspaceRoot = path.resolve(path.dirname(document.uri.fsPath), '..', '..');
-		const wiring = wireFindings(workspaceRoot, webviewPanel.webview);
+		const wiring = wireFindings(this.context, workspaceRoot, webviewPanel.webview);
 		webviewPanel.onDidDispose(() => wiring.dispose());
 	}
 }
 
-function wireFindings(workspaceRoot: string, webview: vscode.Webview): vscode.Disposable {
+function wireFindings(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	webview: vscode.Webview,
+): vscode.Disposable {
 	webview.options = { enableScripts: true };
 	webview.html = getHtml();
 
@@ -116,6 +130,26 @@ function wireFindings(workspaceRoot: string, webview: vscode.Webview): vscode.Di
 			});
 		},
 		refresh: push,
+		dispatchFix: async (signature) => {
+			const result = await dispatchClusterFix(context, workspaceRoot, signature);
+			const say = {
+				dispatched: 'Vinv: fix episode dispatched — watch the harness log for progress.',
+				busy:
+					'Vinv: the harness is already running something. This cluster stays eligible — ' +
+					'try again once the current episode finishes.',
+				'not-actionable':
+					'Vinv: this cluster is a diagnostic about the environment or an upstream ' +
+					'dependency — no edit to this repo fixes it.',
+				'unknown-cluster':
+					'Vinv: that cluster is no longer in issues.json — a newer exercise pass replaced it.',
+			}[result.outcome];
+			void (result.outcome === 'dispatched'
+				? vscode.window.showInformationMessage(say)
+				: vscode.window.showWarningMessage(say));
+			// Re-render either way: on success the button should not stay clickable,
+			// on failure it must come back so the user can retry.
+			await push();
+		},
 	};
 
 	const sub = webview.onDidReceiveMessage((msg: FindingsOutbound | { type: 'webviewError' }) => {
@@ -202,6 +236,20 @@ function getHtml(): string {
 		.spark i.env { background: var(--muted-2); }
 		.empty { color: var(--muted); font-size: 11px; padding: 6px 0; }
 		.hint { color: var(--muted-2); font-size: 10.5px; margin-top: 6px; }
+		.grow { flex: 1; }
+		/* Evidence table inside a cluster: label column narrow, value wraps. */
+		.kv { margin-top: 8px; font-size: 11px; }
+		.kv th { width: 74px; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--line);
+			vertical-align: top; white-space: nowrap; }
+		.kv td { white-space: pre-wrap; overflow-wrap: anywhere; font-family: ${VINV_FONT_MONO};
+			font-size: 10.5px; }
+		button.act { font: inherit; font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+			padding: 3px 10px; cursor: pointer; background: var(--ink); color: var(--bg);
+			border: 1px solid var(--ink); }
+		button.act:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
+		button.act:disabled { cursor: default; background: var(--bg-2); color: var(--muted);
+			border-color: var(--line-strong); }
+		.files a { color: var(--muted-2); }
 	</style>
 </head>
 <body>
@@ -267,9 +315,36 @@ function getHtml(): string {
 		html += '<h2>Issue clusters (' + f.issues.length + ')</h2>';
 		html += f.issues.length === 0 ? '<div class="empty">No failures found in anything that was exercised.</div>' : '';
 		for (const i of f.issues) {
+			const ex = i.exemplar;
 			html += '<div class="epi"><div class="head"><span class="badge revert">' + esc(i.kind) + '</span>' +
-				'<span class="label">' + esc(i.title) + '</span></div>' +
-				'<div class="files" title="A stable id for this failure — the same root cause keeps this fingerprint across runs, so fixes and re-checks line up">fingerprint ' + esc(i.signature) + '</div></div>';
+				'<span class="label">' + esc(i.title) + '</span>' +
+				(i.count > 1 ? '<span class="badge" title="Failing cases that collapsed into this one root cause">' + i.count + '&times;</span>' : '') +
+				'<span class="grow"></span>' +
+				(i.dispatchable
+					? '<button class="act" data-fix="' + esc(i.signature) + '" title="Hand this cluster to your coding harness as a fix episode, with its evidence attached">Fix this</button>'
+					: '<span class="badge env" title="A diagnostic about the environment or an upstream dependency — no edit to this repo fixes it, so it is never dispatched">not actionable</span>') +
+				'</div>';
+			if (ex) {
+				html += '<table class="kv">';
+				const row = (k, v, tip) => v
+					? '<tr><th' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(k) + '</th><td>' + esc(v) + '</td></tr>'
+					: '';
+				html += row('Where', i.endpoint, 'The endpoint or oracle target that was driven');
+				html += row('Sent', ex.input, 'The exact request that reproduced this failure');
+				html += row('Strategy', ex.strategy, 'How the exerciser generated that input');
+				html += row('Got', (ex.status != null ? 'HTTP ' + ex.status : '') + (ex.detail && ex.detail !== 'HTTP ' + ex.status ? (ex.status != null ? ' — ' : '') + ex.detail : ''), 'What the service actually answered');
+				html += row('Expected', ex.expected, 'What a correct service would have answered');
+				html += row('Error', ex.error, 'The exception the call raised, when it raised one');
+				html += '</table>';
+			}
+			if (i.coveredFrames.length) {
+				html += '<div class="files" title="Functions the failing request actually reached — start reading here">reached ' +
+					i.coveredFrames.slice(0, 6).map(esc).join(' · ') +
+					(i.coveredFrames.length > 6 ? ' +' + (i.coveredFrames.length - 6) + ' more' : '') + '</div>';
+			}
+			html += '<div class="files"><span title="A stable id for this failure — the same root cause keeps this fingerprint across runs, so fixes and re-checks line up">fingerprint ' + esc(i.signature) + '</span>' +
+				' · <a href="#" data-open=".vinv/exercise/' + esc(i.evidenceFile) + '" title="The artifact holding every failing row behind this cluster">' + esc(i.evidenceFile) + '</a></div>';
+			html += '</div>';
 		}
 
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';
@@ -373,6 +448,25 @@ function getHtml(): string {
 		html += '<div class="hint">Machine-readable copy of everything above: .vinv/reports/findings.json (this tab\\'s backing file).</div>';
 		document.getElementById('content').innerHTML = html;
 	}
+
+	// One delegated listener: the content is re-rendered wholesale on every push,
+	// so per-element handlers would be rebound (and leak) on each refresh.
+	document.getElementById('content').addEventListener('click', (e) => {
+		const fix = e.target.closest('[data-fix]');
+		if (fix) {
+			// Disable on click: the dispatch is a single hand-off and the harness
+			// runs one episode at a time — a second click cannot start a second.
+			fix.disabled = true;
+			fix.textContent = 'Dispatching…';
+			vscode.postMessage({ type: 'dispatchFix', signature: fix.getAttribute('data-fix') });
+			return;
+		}
+		const open = e.target.closest('[data-open]');
+		if (open) {
+			e.preventDefault();
+			vscode.postMessage({ type: 'openSource', file: open.getAttribute('data-open') });
+		}
+	});
 
 	window.addEventListener('message', (event) => {
 		if (event.data.type === 'findings') render(event.data.findings);

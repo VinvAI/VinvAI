@@ -9,7 +9,14 @@ import { hiddenBackgroundOptions, killProcessTree } from '../proc';
 import { evidenceSimilarity } from './stallBreaker';
 import { isIdeChatAvailable, runIdeChatPrompt } from './ideChat';
 import { isHandbookGenerated } from '../handbook/handbook';
-import { isServicesListed, serviceSlug, type ServiceEntry } from '../bringup/bringup';
+import {
+	auditOwnCodeTracing,
+	isServicesListed,
+	markUntracedBringup,
+	serviceSlug,
+	type ServiceEntry,
+} from '../bringup/bringup';
+import { entrypointModule, targetPackagesFor } from '../bringup/targetPackages';
 
 /**
  * Coding-harness adapters: instead of the bundled engines calling a cloud LLM
@@ -1675,7 +1682,19 @@ export function runBringupStartViaHarness(
 	const binPath = getBinPath(context, 'bringup');
 	const harness = getHarness(harnessId);
 	const promptArgs = ['start', workspaceRoot, '--service', service.name];
-	for (const m of service.modules ?? []) {
+	// NOT `service.modules` verbatim. Discovery can name the repo's distribution
+	// package while the service's entrypoint lives outside it, and tracelens then
+	// instruments everything except the code that serves the requests — see
+	// targetPackages. The entrypoint's own package is appended when missing.
+	const { packages, added } = targetPackagesFor(service);
+	if (added) {
+		console.warn(
+			`Vinv: ${service.name} declares modules [${(service.modules ?? []).join(', ')}] but its ` +
+				`start command runs '${entrypointModule(service.command ?? '')}' — instrumenting ` +
+				`'${added}' as well, or its handlers would produce no spans.`,
+		);
+	}
+	for (const m of packages) {
 		promptArgs.push('--module', m);
 	}
 	if (startHint?.trim()) {
@@ -1704,5 +1723,24 @@ export function runBringupStartViaHarness(
 		},
 		onProgress,
 		extToken,
-	);
+	).then((ok) => {
+		// A green bring-up that traced none of the service's own code is worse
+		// than a red one: everything downstream reads it as usable evidence and
+		// reports confident zeros. Audited here, once, so all three callers
+		// (auto-setup, the Set up command, Auto-Pilot) are covered.
+		if (!ok) {
+			return ok;
+		}
+		const verdict = auditOwnCodeTracing(workspaceRoot, service);
+		if (verdict.state !== 'absent') {
+			return ok;
+		}
+		markUntracedBringup(workspaceRoot, service.name, verdict);
+		void vscode.window.showWarningMessage(
+			`Vinv: ${service.name} started and served ${verdict.requests} request(s), but nothing ` +
+				`from '${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
+				'so coverage and latency would all read zero. Recorded as not verified; set it up again.',
+		);
+		return false;
+	});
 }

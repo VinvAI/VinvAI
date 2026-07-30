@@ -1,6 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 
+import { entrypointModule, judgeOwnCode, type OwnCodeVerdict } from './targetPackages';
+
 /** Project-local service inventory: <workspace>/.vinv/services.json */
 export function getServicesPath(workspaceRoot: string): string {
 	return path.join(workspaceRoot, '.vinv', 'services.json');
@@ -171,11 +173,17 @@ export function readBringupOutcome(workspaceRoot: string, service: string): Brin
 			verified?: boolean;
 			commands?: StartCommand[];
 			failure_symptom?: string;
+			failure_kind?: string;
 		};
 		if (parsed.verified === true && (parsed.commands?.length ?? 0) > 0) {
 			return { state: 'verified' };
 		}
 		const symptom = parsed.failure_symptom;
+		// A recorded kind is a fact; the prose heuristic below is a guess. Where
+		// we wrote the record ourselves, don't re-derive it from the wording.
+		if (parsed.failure_kind === 'untraced') {
+			return { state: 'failed', symptom };
+		}
 		const noCommand = !Array.isArray(parsed.commands) || parsed.commands.length === 0;
 		const libraryClues = /library|no module named .*__main__|cannot be directly executed|no.*entrypoint/i;
 		if (noCommand || (symptom !== undefined && libraryClues.test(symptom))) {
@@ -184,6 +192,101 @@ export function readBringupOutcome(workspaceRoot: string, service: string): Brin
 		return { state: 'failed', symptom };
 	} catch {
 		return { state: 'unattempted' };
+	}
+}
+
+/** Pulls span component names out of a trace without parsing every line. */
+const COMPONENT_RE = /"component"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+
+function traceComponents(traceFile: string): string[] {
+	let text: string;
+	try {
+		text = fs.readFileSync(traceFile, 'utf8');
+	} catch {
+		return [];
+	}
+	const out: string[] = [];
+	for (const m of text.matchAll(COMPONENT_RE)) {
+		out.push(m[1]);
+	}
+	return out;
+}
+
+/** Where this service's bring-up capture landed, per its own record. */
+function recordedTracePath(workspaceRoot: string, service: string): string {
+	try {
+		const parsed = JSON.parse(
+			fs.readFileSync(getStartCommandPath(workspaceRoot, service), 'utf8'),
+		) as { verification?: { trace_jsonl?: unknown } };
+		const recorded = parsed.verification?.trace_jsonl;
+		if (typeof recorded === 'string' && recorded.trim()) {
+			return recorded;
+		}
+	} catch {
+		// fall through to the conventional location
+	}
+	return path.join(
+		workspaceRoot, '.vinv', 'captures', 'vinv-bringup', serviceSlug(service), 'trace.jsonl',
+	);
+}
+
+/**
+ * Did this service's OWN code actually get traced?
+ *
+ * A bring-up passes on "the port answered and spans exist", which both hold
+ * when tracelens instrumented the wrong package: the framework's inbound spans
+ * land, the handlers under them do not, and every downstream surface reports
+ * zero coverage with no error to explain it. This asks the question that
+ * distinguishes them, and only where the answer is unambiguous — see
+ * judgeOwnCode, which refuses to call a port-only probe a failure.
+ */
+export function auditOwnCodeTracing(
+	workspaceRoot: string,
+	service: ServiceEntry,
+): OwnCodeVerdict {
+	return judgeOwnCode(
+		traceComponents(recordedTracePath(workspaceRoot, service.name)),
+		service.command ? entrypointModule(service.command) : null,
+	);
+}
+
+/**
+ * Records a bring-up as NOT verified because its own code was never traced.
+ *
+ * Downgrading rather than warning is deliberate: `verified: true` is what makes
+ * the Run button, the exercise pass and Auto-Pilot treat the service as usable
+ * evidence, and a service that serves requests while tracing none of its own
+ * code produces confident, empty findings. The symptom text is what the fixing
+ * agent reads, so it names the concrete defect and the file to repair.
+ */
+export function markUntracedBringup(
+	workspaceRoot: string,
+	service: string,
+	verdict: Extract<OwnCodeVerdict, { state: 'absent' }>,
+): void {
+	const file = getStartCommandPath(workspaceRoot, service);
+	let parsed: Record<string, unknown>;
+	try {
+		parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+	} catch {
+		return;
+	}
+	parsed.verified = false;
+	// Explicit, because readBringupOutcome otherwise classifies from the symptom
+	// PROSE — and a sentence about the module a start command runs trips its
+	// "this is a library with nothing to start" heuristic, which would park the
+	// service as unstartable instead of queueing the repair.
+	parsed.failure_kind = 'untraced';
+	parsed.failure_symptom =
+		`The service started and served ${verdict.requests} request(s), but every span came from ` +
+		`somewhere other than its own package '${verdict.rootPackage}' — tracelens instrumented ` +
+		`the wrong code. Fix the '--target-package' flags in this file's start command so they ` +
+		`include '${verdict.rootPackage}'. Until they do, every endpoint reports 0% coverage and ` +
+		`no latency, with nothing raising an error to explain it.`;
+	try {
+		fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+	} catch {
+		// The in-memory verdict still reaches the caller.
 	}
 }
 

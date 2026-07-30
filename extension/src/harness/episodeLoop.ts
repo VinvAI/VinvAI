@@ -2579,7 +2579,12 @@ export async function disputeVerifiedEpisode(
 		? path.dirname(reusable.acceptance)
 		: acceptanceDir(newAcceptanceToken());
 	const cx = await vscode.window.withProgress(
-		{ location: vscode.ProgressLocation.Notification, title: 'Vinv: building a counterexample test from your report…' },
+		// Status bar, not a toast. This spawns an agent and can run for minutes,
+		// `strengthenAcceptanceFromNote` takes no cancellation token, and a
+		// notification-location progress without `cancellable` has no close button —
+		// so as a toast it was minutes of corner real estate the user could not
+		// dismiss. Every outcome below ends in its own message or opened file.
+		{ location: vscode.ProgressLocation.Window, title: 'Vinv: building a counterexample test from your report…' },
 		() =>
 			strengthenAcceptanceFromNote(
 				agentSpawn,

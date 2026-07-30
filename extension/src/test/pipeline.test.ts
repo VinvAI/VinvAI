@@ -17,6 +17,7 @@ import {
 	initialPipelineLedger,
 	initialServiceState,
 	planPipelineAction,
+	rearmProbesAfterExercise,
 	settleUnreachableStages,
 	type PipelineLedger,
 	type ServiceState,
@@ -76,6 +77,59 @@ suite('pipeline machine: scheduling', () => {
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
 		ledger = applyStageOutcome(ledger, 'exercise', 'done');
 		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'done' });
+	});
+
+	// The scheduler runs probes BEFORE exercise, and on a cold workspace that
+	// order can never work: probes replay requests a trace already saw, exercise
+	// is what CREATES the first ones. So every first run went probes → skipped →
+	// exercise → traffic finally exists → and probes was already terminal, so it
+	// never ran. You needed a second Auto-Pilot run before probes did anything.
+	test('probes re-arm once exercise has produced traffic to replay', () => {
+		let ledger = initialPipelineLedger();
+		const services = [svc()];
+
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'probes' });
+		// Cold workspace: nothing has hit an endpoint, so probes has nothing.
+		ledger = applyStageOutcome(ledger, 'probes', 'skipped');
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
+
+		// Exercise drives every discovered endpoint itself — that IS the traffic.
+		ledger = applyStageOutcome(ledger, 'exercise', 'done');
+		ledger = rearmProbesAfterExercise(ledger);
+		assert.deepStrictEqual(
+			planPipelineAction(true, services, ledger),
+			{ kind: 'probes' },
+			'probes must get its one real chance',
+		);
+
+		// And it is ONE chance: a second skip must not re-arm again, or the
+		// scheduler ping-pongs between the two stages forever.
+		ledger = applyStageOutcome(ledger, 'probes', 'skipped');
+		ledger = rearmProbesAfterExercise(ledger);
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'done' });
+	});
+
+	test('re-arming touches nothing it should not', () => {
+		const base = initialPipelineLedger();
+		// A probe stage that RAN is governed by its own outcome, not by this.
+		for (const phase of ['done', 'failed', 'pending'] as const) {
+			const ledger = { ...base, probes: phase, exercise: 'done' as const };
+			assert.strictEqual(
+				rearmProbesAfterExercise(ledger),
+				ledger,
+				`a '${phase}' probe stage must be left alone`,
+			);
+		}
+		// Exercise that did not finish produced no traffic, so probes would just
+		// skip again — re-arming there only burns a stage.
+		for (const phase of ['pending', 'failed', 'skipped'] as const) {
+			const ledger = { ...base, probes: 'skipped' as const, exercise: phase };
+			assert.strictEqual(
+				rearmProbesAfterExercise(ledger),
+				ledger,
+				`exercise '${phase}' must not re-arm probes`,
+			);
+		}
 	});
 
 	test('a workspace of libraries still exercises — nothing to serve is not nothing to drive', () => {

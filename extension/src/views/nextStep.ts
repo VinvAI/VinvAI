@@ -18,6 +18,7 @@ import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
 import { readEnhanceRecord, shouldAutoEnhance } from '../index/enhanceRunner';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { getAutoPilotStatus } from '../harness/autoPilot';
+import { hasExercisePass } from '../harness/exerciseRunner';
 import { getPipelinePhase } from '../harness/pipelineState';
 import { autoPilotStage, pipelineStage, type FlowStageId } from './flowModel';
 import type { FlowStateSource } from './flowStateSource';
@@ -72,9 +73,6 @@ function hasProbes(workspaceRoot: string): boolean {
 	}
 }
 
-function hasExerciseScorecard(workspaceRoot: string): boolean {
-	return fs.existsSync(path.join(workspaceRoot, '.vinv', 'exercise', 'scorecard.json'));
-}
 
 /**
  * Enhancement is once-per-epoch and TERMINAL, so a raw pending count is the
@@ -179,7 +177,10 @@ export async function computeNextStep(
 			command: 'vinv-vs.runProbes',
 		};
 	}
-	if (!hasExerciseScorecard(workspaceRoot)) {
+	// Gated on a scorecard vinv's OWN exerciser wrote. An ingested external run
+	// leaves the same artifact behind, and taking it at face value skipped this
+	// rung entirely — the compass jumped from probes straight to "Ask Vinv".
+	if (!hasExercisePass(workspaceRoot)) {
 		return {
 			label: 'Exercise the services',
 			detail:

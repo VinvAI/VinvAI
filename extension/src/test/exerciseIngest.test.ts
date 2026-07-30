@@ -9,6 +9,7 @@ import * as os from 'os';
 import * as path from 'path';
 
 import { apiIdFor, ingestRun, validateRun } from '../harness/exerciseIngest';
+import { hasExercisePass, readScorecardSummary } from '../harness/exerciseRunner';
 
 function tmpRepo(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-ingest-'));
@@ -177,6 +178,52 @@ suite('exerciseIngest: artifacts and provenance', () => {
 		const issues = JSON.parse(fs.readFileSync(path.join(ex, 'issues.json'), 'utf8'));
 		assert.strictEqual(issues.cluster_count, 1, 'the single failure forms one cluster');
 		assert.strictEqual(issues.clusters[0].kind, 'high');
+	});
+
+	// The compass gated "Exercise the services" on scorecard.json EXISTING, so an
+	// ingested run — which writes the same file — silently deleted that rung from
+	// the ladder: probes, then straight to "Ask Vinv about this codebase".
+	test('an ingested run is not counted as a vinv exercise pass', () => {
+		const root = tmpRepo();
+		assert.strictEqual(hasExercisePass(root), false, 'no scorecard yet');
+		ingestRun(root, {
+			source: 'claude-code e2e',
+			checks: [{ endpoint: 'POST /a', name: 'ok', passed: true, status: 200 }],
+		});
+		assert.ok(
+			fs.existsSync(path.join(root, '.vinv', 'exercise', 'scorecard.json')),
+			'the ingest writes the same artifact the exerciser does',
+		);
+		assert.strictEqual(
+			hasExercisePass(root),
+			false,
+			'an imported run must still leave the exercise rung outstanding',
+		);
+		assert.strictEqual(readScorecardSummary(root)?.ingestedBy, 'vinv_ingest_run');
+	});
+
+	test("the exerciser's own scorecard does count as a pass", () => {
+		const root = tmpRepo();
+		fs.writeFileSync(
+			path.join(root, '.vinv', 'exercise', 'scorecard.json'),
+			JSON.stringify({
+				version: 1,
+				service: 'api',
+				coverage: { after_exercised: { endpoints_with_coverage: 2, endpoints_total: 3 } },
+				invariants_learned: 7,
+				issue_clusters: 1,
+			}),
+			'utf8',
+		);
+		assert.strictEqual(hasExercisePass(root), true);
+		assert.deepStrictEqual(readScorecardSummary(root), {
+			source: 'api',
+			ingestedBy: undefined,
+			endpointsCovered: 2,
+			total: 3,
+			invariants: 7,
+			issues: 1,
+		});
 	});
 
 	test('failures sharing a root cause collapse into one cluster', () => {

@@ -86,9 +86,67 @@ function writeInsightManifest(workspaceRoot: string, manifest: InsightManifest):
 	fs.renameSync(tmp, target);
 }
 
+import { readServices, serviceSlug } from '../bringup/bringup';
+import { serviceForEndpointFile } from '../bringup/targetPackages';
+
 /** Filename-safe id, mirroring the smoke report's own sanitization. */
 function safeId(apiId: string): string {
 	return apiId.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/**
+ * The capture subdirectory to overlay an endpoint from — the slug of whichever
+ * service defines it, or undefined when the join is ambiguous.
+ */
+export function captureServiceFor(workspaceRoot: string, file: string | undefined): string | undefined {
+	if (!file) {
+		return undefined;
+	}
+	const name = serviceForEndpointFile(readServices(workspaceRoot), file);
+	// Captures are keyed by the SLUG (.vinv/captures/<session>/<slug>/), which is
+	// what the engine matches the directory name against.
+	return name ? serviceSlug(name) : undefined;
+}
+
+/** Where an endpoint's call-tree snapshot lives. */
+export function callTreeReportPath(workspaceRoot: string, apiId: string): string {
+	return path.join(workspaceRoot, '.vinv', 'reports', `calltree-${safeId(apiId)}.json`);
+}
+
+/**
+ * Recovers the api id from a `calltree-<id>.json` path.
+ *
+ * Lossy in principle — `safeId` collapses characters — but every id the
+ * consolidator emits is already filename-safe, so the round trip is exact for
+ * anything that produced one of these files.
+ */
+export function apiIdFromCallTreePath(file: string): string | null {
+	const m = /^calltree-(.+)\.json$/.exec(path.basename(file));
+	return m ? m[1] : null;
+}
+
+/**
+ * Builds ONE endpoint's call tree + runtime overlay and writes its snapshot.
+ *
+ * Split out of the insight pass so a missing report can be produced on demand:
+ * the Flow rail lists reports from the insight manifest, and a snapshot that
+ * was never written (or has since been deleted) used to answer a click with
+ * "file not found" — an error about our own bookkeeping, presented to the user
+ * as if they had done something wrong. Rebuilding is the same work the pass
+ * would do, for one endpoint.
+ */
+export async function buildCallTreeReport(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	apiId: string,
+	/** Capture to overlay from; see captureServiceFor. */
+	service?: string,
+): Promise<string> {
+	const map = await getTraceMap(context, workspaceRoot, apiId, service);
+	const file = callTreeReportPath(workspaceRoot, apiId);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${JSON.stringify(map, null, '\t')}\n`, 'utf8');
+	return file;
 }
 
 /** Content signature for issue dedup — same family as failureSignature. */
@@ -307,8 +365,9 @@ async function insightPassOnce(
 			let map: TraceMapResult | null = null;
 			let calltreePath: string | null = null;
 			try {
-				map = await getTraceMap(context, workspaceRoot, ep.id);
-				calltreePath = path.join(reportsDir, `calltree-${safeId(ep.id)}.json`);
+				map = await getTraceMap(context, workspaceRoot, ep.id, captureServiceFor(workspaceRoot, ep.file));
+				calltreePath = callTreeReportPath(workspaceRoot, ep.id);
+				fs.mkdirSync(path.dirname(calltreePath), { recursive: true });
 				fs.writeFileSync(calltreePath, `${JSON.stringify(map, null, '\t')}\n`, 'utf8');
 			} catch {
 				calltreePath = null;

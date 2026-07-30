@@ -215,6 +215,18 @@ export interface RuntimeFact {
 	calls?: number;
 	/** Total wall time across those invocations, ms. */
 	total_ms?: number;
+	/**
+	 * Of that wall time, the part spent WAITING on I/O, ms. Without it a function
+	 * that blocks on a network call is indistinguishable from one burning CPU for
+	 * the same duration — and only one of those is worth optimizing in-process.
+	 */
+	blocked_ms?: number;
+	/**
+	 * Net bytes allocated across those invocations, from the engine's own
+	 * overlay. Absent unless the capture ran with memory attribution on (the
+	 * `standard` preset leaves it off), so it is never a misleading 0.
+	 */
+	mem_delta_bytes?: number;
 	ok?: number;
 	error?: number;
 	/** Distinct error types observed (when any invocation failed). */
@@ -339,7 +351,14 @@ export interface TraceMapResult extends CallTreeResult {
 		pct: number;
 	};
 	/** Components that ran under the handler but the static tree didn't predict. */
-	runtime_only?: { component: string; calls: number; total_ms: number; errors: string[] }[];
+	runtime_only?: {
+		component: string;
+		calls: number;
+		total_ms: number;
+		blocked_ms?: number;
+		mem_delta_bytes?: number;
+		errors: string[];
+	}[];
 }
 
 /**
@@ -352,12 +371,20 @@ export function getTraceMap(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	apiId: string,
+	/**
+	 * Capture subdirectory to overlay from — the service that serves this
+	 * endpoint. Omitting it makes the engine fall back to the freshest capture
+	 * ANYWHERE under .vinv/captures, which in a multi-service repo is whichever
+	 * service ran last and usually not this one.
+	 */
+	service?: string,
 ): Promise<TraceMapResult> {
 	return runIdentification<TraceMapResult>(context, workspaceRoot, [
 		'tracemap',
 		workspaceRoot,
 		'--api-id',
 		apiId,
+		...(service ? ['--service', service] : []),
 		'--json',
 	]);
 }

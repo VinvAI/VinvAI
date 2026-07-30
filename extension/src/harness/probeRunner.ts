@@ -863,7 +863,16 @@ async function probePassOnce(
 		endpoints = endpoints.filter((e) => wanted.has(e.id));
 	}
 	if (endpoints.length === 0) {
-		return skip('no observed endpoints to probe (insight pass has not produced any)');
+		// "the insight pass produced none" reads as a failure of the insight pass,
+		// which is almost never what happened: probes REPLAY requests a trace
+		// already recorded, and on a fresh workspace nothing has hit an endpoint
+		// yet. Bring-up's own smoke check does not count — it proves the port
+		// answers, it never calls a real endpoint. Name the thing that fixes it.
+		return skip(
+			'no endpoint traffic recorded yet — probes replay requests a trace already saw. ' +
+				'Exercise the services first (Auto-Pilot does this): that drives every ' +
+				'discovered endpoint and produces the traffic probes then replay.',
+		);
 	}
 	const target = pickProbeTarget(workspaceRoot);
 	if (!target) {

@@ -123,9 +123,85 @@ suite('findings: message routing', () => {
 		const a: FindingsActions = {
 			openSource: async (f, l) => void log.push(`open:${f}:${l}`),
 			refresh: async () => void log.push('refresh'),
+			dispatchFix: async (sig) => void log.push(`fix:${sig}`),
 		};
 		await handleFindingsMessage({ type: 'openSource', file: 'x.py', line: 3 }, a);
 		await handleFindingsMessage({ type: 'refresh' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh']);
+		await handleFindingsMessage({ type: 'dispatchFix', signature: 'abc123' }, a);
+		// A fix message with no signature names no cluster — routing it would
+		// dispatch against `undefined`.
+		await handleFindingsMessage({ type: 'dispatchFix' }, a);
+		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123']);
+	});
+});
+
+suite('findings: issue clusters carry their evidence', () => {
+	// The tile read scorecard.issue_clusters while the list read issues.json, so
+	// a pass that died before its `scorecard` step (or an imported run that wrote
+	// one) showed "Issues found 0" above a list of six.
+	test('the headline counts issues.json, not a stale scorecard', () => {
+		const root = tmpRepo();
+		seed(root);
+		write(root, '.vinv/exercise/scorecard.json', { issue_clusters: 0 });
+		const f = buildFindings(root);
+		assert.strictEqual(f.headline.issuesFound, 2);
+		assert.strictEqual(f.headline.issuesFound, f.issues.length, 'tile and list must agree');
+	});
+
+	test('a cluster surfaces its exemplar, evidence file and actionability', () => {
+		const root = tmpRepo();
+		write(root, '.vinv/exercise/issues.json', {
+			clusters: [
+				{
+					kind: 'server-error',
+					title: 'POST /chat — HTTP 500',
+					signature: '77a9224c',
+					method: 'POST',
+					path: '/chat',
+					count: 3,
+					exemplar: {
+						input: { body: null, path_params: {}, query: {} },
+						strategy: 'schema_negative',
+						status: 500,
+						error: null,
+						detail: 'HTTP 500',
+						expected: '4xx (a correct service rejects this)',
+					},
+					covered_frames: ['main.chat', 'main.parse'],
+				},
+				// A diagnostic about an upstream dependency: no edit here fixes it.
+				{ kind: 'signature-drift', title: 'urllib3 changed', signature: 'dd00', method: 'CALL', path: 'urllib3.request' },
+			],
+		});
+		const [http, drift] = buildFindings(root).issues;
+
+		assert.strictEqual(http.endpoint, 'POST /chat');
+		assert.strictEqual(http.count, 3);
+		assert.strictEqual(http.dispatchable, true);
+		assert.strictEqual(http.evidenceFile, 'results.jsonl');
+		assert.strictEqual(http.exemplar?.expected, '4xx (a correct service rejects this)');
+		assert.strictEqual(http.exemplar?.status, 500);
+		assert.strictEqual(http.exemplar?.strategy, 'schema_negative');
+		// Every field of the input was empty — that IS the test case (a bodyless
+		// POST), so it must render as the payload rather than collapse to nothing.
+		assert.ok(http.exemplar?.input.includes('body'), `expected the payload, got: ${http.exemplar?.input}`);
+		assert.deepStrictEqual(http.coveredFrames, ['main.chat', 'main.parse']);
+
+		assert.strictEqual(drift.dispatchable, false, 'a diagnostic must not offer a fix');
+		assert.strictEqual(drift.evidenceFile, 'signatures.json');
+		assert.strictEqual(drift.exemplar, null);
+	});
+
+	test('a populated input drops only the empty halves', () => {
+		const root = tmpRepo();
+		write(root, '.vinv/exercise/issues.json', {
+			clusters: [{
+				kind: 'server-error', title: 't', signature: 's', method: 'GET', path: '/x',
+				exemplar: { input: { body: { name: 'ada' }, path_params: {}, query: {} }, status: 500 },
+			}],
+		});
+		const input = buildFindings(root).issues[0].exemplar?.input ?? '';
+		assert.ok(input.includes('ada'), `expected the body, got: ${input}`);
+		assert.ok(!input.includes('path_params'), `empty halves must be dropped, got: ${input}`);
 	});
 });
