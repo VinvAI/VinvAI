@@ -47,6 +47,31 @@ export interface HarnessDef {
 	/** Flags for a headless, full-auto run that reads its prompt from stdin. */
 	args: string;
 	/**
+	 * Extra flags for a ONE-SHOT verification dispatch (dispatchAgentPrompt):
+	 * render a prompt, get JSON back, no tools needed.
+	 *
+	 * These runs must not load the workspace's MCP servers. Vinv registers three
+	 * of its own into every project it touches, and a headless run pays their
+	 * whole startup — three Electron processes, their tool schemas, and their
+	 * injected instructions telling the agent to go use them — before it emits a
+	 * single byte. Measured on a real workspace: a 61-BYTE prompt produced zero
+	 * output in 240s with them loaded and answered instantly without, so the
+	 * 300s dispatch cap expired and every verdict, driver and judgment in that
+	 * workspace silently came back null.
+	 *
+	 * Episodes are deliberately NOT given this: a fixing agent genuinely wants
+	 * vinv-index and vinv-runtime. It is one-shot JSON askers that pay for tools
+	 * they never call.
+	 *
+	 * `{emptyMcpConfig}` expands to a path written on demand (see oneShotFlags).
+	 * It must be a FILE and never inline JSON: dispatch spawns with `shell: true`,
+	 * and both cmd.exe and sh strip the inner quotes out of `{"mcpServers":{}}`,
+	 * handing the CLI `{mcpServers:{}}` — which it then reads as a FILENAME and
+	 * exits 1 on in under four seconds. Measured both ways; the inline form turns
+	 * the silent hang above into an instant, equally silent, null.
+	 */
+	oneShotArgs?: string;
+	/**
 	 * How the CLI encodes stdout. 'claude-stream-json': one JSON event per line
 	 * while the agent works (assistant/tool_use/result envelopes) — decoded into
 	 * the live thinking feed, with the final `result` envelope becoming the
@@ -115,6 +140,11 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 		// the very end, which froze the live thinking feed for entire episodes.
 		bin: 'claude',
 		args: '-p --output-format stream-json --verbose --permission-mode bypassPermissions',
+		// --strict-mcp-config makes --mcp-config authoritative, so the project's
+		// servers in ~/.claude.json are ignored rather than merged. It does NOT
+		// stand alone: without a config to be strict ABOUT, the project's servers
+		// still load and the run still hangs (measured — 150s, zero output).
+		oneShotArgs: '--strict-mcp-config --mcp-config "{emptyMcpConfig}"',
 		stream: 'claude-stream-json',
 		installHint:
 			'Install the CLI with the native installer (the desktop app / IDE extension does not include it), then run `claude` once to sign in.',
@@ -850,6 +880,40 @@ function agentDispatchTimeoutMs(): number {
 	return (Number.isFinite(raw) && raw > 0 ? raw : 300) * 1000;
 }
 
+/** Placeholder in `oneShotArgs` for the empty MCP config file's path. */
+const EMPTY_MCP_TOKEN = '{emptyMcpConfig}';
+
+/**
+ * Renders a harness's `oneShotArgs` for one dispatch, materializing the empty
+ * MCP config file the flags point at (see HarnessDef.oneShotArgs for why it is
+ * a file and not inline JSON).
+ *
+ * Returns '' — the plain, MCP-loading command line — when the harness declares
+ * no one-shot flags or the file cannot be written. That path is slow in a
+ * Vinv-registered workspace, but slow-and-correct beats a command line naming a
+ * config file that is not there, which the CLI rejects outright.
+ */
+export function oneShotFlags(harness: HarnessDef, workspaceRoot: string): string {
+	if (!harness.oneShotArgs) {
+		return '';
+	}
+	if (!harness.oneShotArgs.includes(EMPTY_MCP_TOKEN)) {
+		return ` ${harness.oneShotArgs}`;
+	}
+	let file: string;
+	try {
+		// Beside the other per-workspace scratch (driver scripts land here too):
+		// inspectable next to the .vinv/logs transcript when a dispatch is argued
+		// about, and cleaned by the same sweep.
+		file = path.join(workspaceRoot, '.vinv', 'tmp', 'empty-mcp.json');
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, '{"mcpServers":{}}', 'utf8');
+	} catch {
+		return '';
+	}
+	return ` ${harness.oneShotArgs.split(EMPTY_MCP_TOKEN).join(file)}`;
+}
+
 /**
  * Lock-free, headless dispatch for the VERIFICATION agents (audit judge, test
  * authors, stall judge, goal suggestion): the goal engine renders a prompt
@@ -888,7 +952,9 @@ export function dispatchAgentPrompt(
 	if (!exe) {
 		return Promise.resolve(null);
 	}
-	const commandLine = `"${exe}" ${harness.args}`;
+	// The one-shot flags belong HERE and nowhere else: runHarnessPrompt drives
+	// episodes, and a fixing agent genuinely wants vinv-index and vinv-runtime.
+	const commandLine = `"${exe}" ${harness.args}${oneShotFlags(harness, workspaceRoot)}`;
 	const childEnv: NodeJS.ProcessEnv = {
 		...process.env,
 		PATH: [path.dirname(exe), ...wellKnownBinDirs(), process.env.PATH ?? '']

@@ -3,20 +3,20 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — runs, benchmarks and optimizes your agent-written Python code until it's production-ready." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance problems in your Python codebase and proves every fix." width="880">
 </picture>
 
 <br><br>
 
-**Vinv runs, benchmarks and optimizes your agent-written Python code until it's production-ready.**
+**An autonomous swarm that finds bugs, dead code and performance problems in your codebase — and fixes them in a closed loop that proves every fix.**
 
-Coding agents know your code. They have never understood how it behaves when it runs. Vinv's **context bandits** build one context graph — your code, your traces, and the metrics derived from them — and serve it to your agent.
+Nine oracles hunt a real run of your code in parallel. Findings go to the coding agent you already pay for. Nothing lands unless it survives acceptance tests written *before* the fix that the agent never sees — and every outcome trains what the swarm hunts next, locally.
 
-<sub>Judgement comes from what the code actually did, not from what the agent claims.</sub>
+<sub>Python first — services **and** plain libraries. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine.</sub>
 
 <br><br>
 
-<img src="https://images.vinv.ai/vinv-loop.jpeg" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
+<img src="https://images.vinv.ai/vinv-loop.svg" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
 
 <sub>One command starts it. Vinv drives the other eight stages — every arrow is evidence, not a guess.</sub>
 
@@ -31,6 +31,8 @@ Coding agents know your code. They have never understood how it behaves when it 
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
 **Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**one-click, pick your editor**](https://vinv.ai/#install)
+
+**[01 FIND](#01-find--what-actually-ran) · [02 FIX](#02-fix--through-the-agent-you-already-pay-for) · [03 PROVE](#03-prove--or-revert-it) · [04 LEARN](#04-learn--from-what-survived)**
 
 </div>
 
@@ -60,9 +62,95 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 
 84% of developers now use or plan to use AI coding tools. More of them **actively distrust** the output (46%) than trust it (33%) — and distrust nearly doubled in a year ([Stack Overflow 2025, 49k developers](https://survey.stackoverflow.co/2025/ai/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
 
-Or it enters the **doom loop** — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
+Or it gets stuck — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
 
 Both failures have one root cause: **the agent has never watched your code run.** It argues from static text.
+
+The industry automated *writing* and left *proving* entirely manual. Vinv automates the proving — and only then the finding and the fixing.
+
+## The swarm, named
+
+A "swarm" with no structure is a slogan. Here is the actual roster: **nine oracles**, each with a distinct way of breaking your code, each writing findings into the same `issues.json` and the same fix-dispatch path.
+
+| Oracle | What it finds | Finding kinds |
+|---|---|---|
+| **HTTP exerciser** | Drives every discovered endpoint itself — schema-valid, boundary, negative, values mined from real traces, multi-step auth scenarios | `server-error` · `crash` · `invariant-violation` |
+| **Function harness** | Calls your functions **in process** — no routes, no server. This is what makes a plain **library** exercisable | `function-crash` · `import-error` |
+| **Differential oracle** | Compares a function against a reference implementation. For an evaluator or parser, the reference is CPython itself — disagreement *is* the bug report | `differential-mismatch` |
+| **Fault injection** | Adversarial-but-**legal** shapes at a dependency boundary (`None`, `""`, lone surrogate, reordered list), plus a sweep of every chunk-split point on a stream | `fault-crash` · `fault-divergence` |
+| **Concurrency oracle** | Deterministic interleavings and timeout injection — shared state that corrupts under parallel calls, and lock orderings that deadlock | `concurrency-divergence` · `concurrency-hang` |
+| **Environment oracle** | A dependency-resolution matrix, and upstream symbols whose signature moved under you | `signature-drift` *(reported, never dispatched — no edit here fixes it)* |
+| **Golden I/O baselines** | A "faster" change that quietly dropped a response field or changed a status class | `baseline-degraded` |
+| **Dead code** | Untraced **islands** — connected sections nothing executed in any recorded run — with the live callers that still reference them | dead sections |
+| **Runtime analysis** | Latency hotspots from live spans, memory-leak suspects (Theil–Sen slope), duplicate recomputation worth caching, throughput ceiling (USL fit) | hotspots · leaks · cache candidates · `throughput-ceiling` |
+
+**The dispatcher is real, and it is a bandit.** `exerciser campaign` allocates **one budget** across every *armed* oracle by Thompson sampling over `(target × technique × oracle)` — rather than driving each one exhaustively. Cost is *measured* (wall-clock normalized to probe-equivalents plus subprocesses spawned), so an oracle that takes forty seconds to find what another finds in one loses. Credit is paid **once per defect signature**, within a run and across runs, so a deterministic oracle can't re-earn credit for the same bug forever. Posteriors persist in `campaign.json` — *which technique pays on your repo* is learned.
+
+Unverified code runs behind a **containment ladder**: a kernel-enforced OS sandbox (`sandbox-exec` / `bwrap` / `unshare`) where the host offers one, otherwise a process shim — always with a disposable repo copy, redirected `HOME`/`TMPDIR`, blocked network and subprocess spawning. Tier is decided by a *probe* that verifies a write outside the root really failed, never by a binary being on `PATH`. Postgres, Redis and S3 are substituted **inside** the jail so code that needs them runs instead of failing to connect.
+
+## Dead code, from what actually ran
+
+Static tools (Vulture, `deadcode`, Knip, ts-prune) can only prove *"nothing statically references this."* They can't see dynamic dispatch, feature flags, registries or environment drift — so they emit candidates a human has to adjudicate, which is why the cleanup never happens.
+
+Vinv can say something they can't:
+
+> **"No capture ever executed this. Here is what still references it, here is the traced neighbourhood it would wire back into, and here is what your agent thinks it is."**
+
+The unit is a **section** — a connected island of untraced symbols — not a lint row, because dead code is almost never one function. Each section gets:
+
+- **Reachability evidence** — `REACHED FROM LIVE CODE` (executing code references it; the path was never taken — usually a guard or an unshipped feature) versus `NO REFERENCES` at all. Opposite verdicts, and a filtered canvas can't tell you which.
+- **The live neighbourhood** — Personalized PageRank seeded at the section's symbols over the code graph, keeping the highest-mass **traced** symbols. HippoRAG's retrieval idea, run over a graph Vinv already has. That's the place an integration would wire into.
+- **Your agent's verdict** — `integrate` · `reimagine` · `delete` · `keep` · `unclear`, each with what it does, why nothing reaches it, and what breaks if it's removed. Sections travel five to a prompt so the agent can say *"this is the older copy of the section below"* — a judgment a per-section run structurally cannot reach.
+- **A try-run driver** — **"Vinv: Try Run Dead Code"** asks your agent to write a script that drives the section, runs it under the tracer, and counts which symbols came alive. Revival is *counted*, not asserted.
+
+Two things it refuses to do: call anything dead with **no trace on disk** (with zero captures every symbol is untraced, so the list would be your codebase), and drop anything silently — both caps are recorded as lineage, so "12 sections" is distinguishable from "12 is the cap and 300 were dropped".
+
+And the second-order reason to care: **dead code makes your coding agent worse.** Every unused module competes for the context window, burns tokens, and offers wrong patterns to copy.
+
+## The four acts
+
+### 01 FIND — what actually ran
+
+Static scanners guess. Vinv records a real run and ranks what failed, what never executed, and what was slow. No "possible issue" — every finding names a symbol, a line, and the trace behind it.
+
+```bash
+# from the repo, no service needed — the service-free oracles do the work
+exerciser campaign <repo> --budget 20
+# with a service up, the HTTP oracle arms too
+exerciser plan <repo> --base-url http://127.0.0.1:PORT && exerciser run <repo> --base-url http://127.0.0.1:PORT
+```
+
+### 02 FIX — through the agent you already pay for
+
+Findings become evidence packs and go to your own agent — Claude Code, Codex, Cursor, Gemini CLI, Copilot Chat, Windsurf Cascade. **Your agent is Vinv's only LLM.** No new bill, no model picker, no provider keys.
+
+The pack is composed from a **context graph**: your code, your traces, and the metrics derived from them, joined on the exact function that handled each request. The artefacts are commodities; the join is not.
+
+### 03 PROVE — or revert it
+
+Replayed start. Live port. Acceptance tests authored **before** the fix, stored outside the workspace under an opaque token, and required to fail deterministically *twice* on the pre-fix code — the SWE-bench fail-to-pass discipline. A test that passes on broken code is discarded.
+
+Around that: a static pre-gate (every changed `.py` must `ast.parse` before a test budget is spent), a deterministic **anti-cheat diff audit** over the snapshot ref plus untracked files (test edits, `except` swallows, interpreter shadow modules, `.vinv` tampering — hard flags block eligibility outright), a **bounded LLM judge** that can push toward scrutiny but can never rescue a failed gate, and an advisory **mutation smoke** whose survivors are never revealed to the fixing agent — the Goodhart guard.
+
+One click reverts everything an episode touched, untracked files included.
+
+### 04 LEARN — from what survived
+
+Two ledgers, both local, neither uploaded.
+
+**Context-pack composition** is a factored `2³` arm grid (graph-slice depth × runtime-evidence inclusion × snippet budget). Selection is Thompson sampling with an ε-floor mixture, and the **exact mixture propensity is logged with each decision** — the requirement for unbiased IPS/SNIPS/DR later. The ε-floor decays but never reaches zero, so importance weights stay bounded. Posteriors count **only objective episodes** — a user abort or an "approve as done" click is not evidence about arm quality. Attribution is **exact Shapley** over the grid of posterior means: *"did runtime evidence help"* is a computed number, not a claim.
+
+**Retrieval serving** is a separate contextual bandit with its own ledger. A candidate config is promotable only when *all* hold: ESS ≥ 25, n ≥ 40 joined samples, ≥ 8 logged pulls per compared action, BCa-bootstrap 95% lower bound of the doubly-robust delta ≥ 0, zero clipped weights, and no epoch contradicting the pooled delta (the Simpson-artifact guard). A promoted policy then serves at **5% canary only**, and three consecutive negative canary rewards roll it back automatically.
+
+Measured on this repo's own ledger (800 logged decisions, 770 joined, 12 index epochs — [`docs/learning.md`](docs/learning.md)):
+
+| candidate | DR delta | 95% BCa CI | ESS | promoted |
+|---|---|---|---|---|
+| top-k 10 | **+0.173** | [+0.081, +0.317] | 577 | **yes** |
+| top-k 3 | +0.081 | [−0.057, +0.226] | 68 | no — LCB < 0, epoch guard fails |
+| top-k 20 | +0.148 | [+0.062, +0.283] | 0 | no — zero support, never logged |
+
+**The gate admitted exactly the measured winner and blocked both the uncertain and the unsupported candidate.** That is what "closed-loop" is being asked to mean here — and the parts that are *not* online learning (the referee's thresholds, the oracle catalogue, the fault shapes) are fixed policy, deliberately.
 
 ## Case study: commodity models out-fix frontier ones
 
@@ -78,8 +166,6 @@ Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fast
 
 The claim isn't a model ranking — blind, the commodity model scored zero. The claim is that **a model holding the failing frame, the caller chain, and the real argument values beats a stronger model guessing from static code.** The evidence is what moved, not the weights.
 
-**Why the pass rate means something:** Vinv grades, and it doesn't take the agent's word. Acceptance tests are written before the fix and the agent never sees them. Any change that alters observable output is reverted automatically, even when it's faster: the behavior replay has to come back byte-identical, and the paired-bootstrap 95% CI on a speedup has to exclude zero.
-
 **And the loop keeps finding real ones.** On the same pristine template, the optimization loop later surfaced — and statistically proved — a fix nobody planted: the app's default database pool (SQLAlchemy's 5+10) makes requests **queue for connection checkouts** under concurrent load, so a 7-row indexed lookup measured 22× the typical symbol's cost. Pool sized to the worker concurrency: sustained-load median **75.6ms → 41.2ms — 45.4% faster, 95% CI [36.3%, 45.8%]** — responses byte-identical. The same engine auto-reverted two earlier attempts whose measurement windows couldn't certify the win; the accept only landed when the evidence did.
 
 <div align="center">
@@ -88,40 +174,48 @@ The claim isn't a model ranking — blind, the commodity model scored zero. The 
 
 ## If any of these is your open tab
 
-| Symptom | What Vinv does about it |
+| Symptom | Which oracle answers it |
 |---|---|
-| *"claude code says done but tests fail"* | independent verification: replayed start, live port, acceptance tests the agent never sees |
-| *"cursor agent stuck in a loop"* | Vinv notices the agent repeating itself, forces a different approach, and hands you a verdict instead of burning tokens |
-| *"how to test fastapi endpoints automatically"* | the behavior exerciser drives every endpoint with schema/boundary/negative/auth inputs, banks every response as a regression case |
+| *"claude code says done but tests fail"* | the referee: replayed start, live port, acceptance tests the agent never sees |
+| *"cursor agent stuck in a loop"* | doom-loop guard — token-set self-similarity catches a repeating agent and forces a different approach |
+| *"how to find dead code in python from real usage"* | dead-code sections: never executed in any capture, with live callers and an agent verdict |
+| *"how to test fastapi endpoints automatically"* | the HTTP exerciser — schema/boundary/negative/auth inputs, every response banked as a regression case |
+| *"how to test a python library without writing tests"* | the function harness — drives exported functions in process, no service required |
+| *"python deadlock only under load"* | the concurrency oracle — deterministic schedules and timeout injection |
+| *"my parser accepts input CPython rejects"* | the differential oracle — disagreement with the reference *is* the bug report |
 | *"AI broke code that was working"* | byte-identical behavior replay gates every change; one-click revert of everything an episode touched |
-| *"find memory leak python without profiler"* | names the functions holding memory that never got released, from real runs — no profiler, no instrumentation |
-| *"why is my api slow"* | per-call flamegraphs from live traffic + Pareto hotspots + CI-gated optimization episodes |
+| *"find memory leak python without profiler"* | Theil–Sen slope over per-session retention — names the functions holding memory, from real runs |
+| *"why is my api slow"* | per-call flamegraphs from live traffic, Pareto hotspots, and a USL fit that names the throughput ceiling |
+| *"my dependency changed and nothing told me"* | the environment oracle — resolution matrix plus upstream signature drift |
 
 ## What Vinv does
 
-Give your coding agent runtime context — ten capabilities, one loop:
+Give your coding agent runtime context — one loop, these capabilities:
 
 - **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
-- **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph.gif" alt="interactive Code Graph" width="640">
+- **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph-light.gif" alt="interactive Code Graph" width="640">
 - **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
 - **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
 - **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
+- **Dead code sections** — *"Analyze Dead Code"* explains every untraced island; *"Try Run Dead Code"* asks your agent for a driver and re-traces to see what came alive. Sections split into **no references** and **reached from live code but never taken**, each with the callers that still point at it and a keep-or-cut verdict with its reasoning.<br><img src="https://images.vinv.ai/dead-code.gif" alt="a dead-code section report: reachable but untested, the live code that references it, and the keep-or-cut verdict with reasoning" width="640">
+- **Recoverable time** — latency hotspots ranked by the milliseconds you would actually get back, each dispatched as a predicted-then-proven optimization instead of a guess about what is slow.<br><img src="https://images.vinv.ai/optimize.gif" alt="the Optimize panel: open opportunities, recoverable milliseconds, and per-call latency against the whole-flow ceiling" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
-- **Behavior exerciser** *(new)* — Vinv doesn't wait for traffic: it drives **every endpoint itself** — schema-derived valid/boundary/negative inputs, values mined from real traces, multi-step auth scenarios — picks strategies with a Thompson-sampling bandit rewarded by oracle violations first and new coverage only as a bonus, and turns every response into a permanent regression case.
-- **Journey** *(new)* — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
+- **Behavior exerciser** — Vinv doesn't wait for traffic: it drives **every endpoint and every exported function itself**, picks strategies with a Thompson-sampling bandit rewarded by oracle violations first and new coverage only as a bonus, and turns every response into a permanent regression case.
+- **Journey** — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
 - **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph. The budget is yours: set attempts per service in **Configure**, and when a run exhausts them Vinv asks whether to grant more instead of quietly giving up.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
-- **Findings** *(new)* — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
+- **Findings** — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
-> **Honest scope:** Python backends first — other stacks get the index, graph, and QnA, but no runtime evidence yet (TS & Go next).
+> **Honest scope:** Python first, for both services **and** plain libraries — a repo with nothing serving still gets the five service-free oracles. Other languages get the index, graph and grounded QnA, but no runtime evidence yet. TypeScript and Go next.
 
 ## Why agents don't reward-hack under Vinv
 
 Vinv ties **every runtime trace to the exact code segment that produced it** and hands your agent a context graph built from that join — so the agent argues from evidence, not vibes. And when the agent claims victory, Vinv doesn't take its word:
 
-- **Acceptance tests are authored *before* the fix** and never shown to the agent — it can't train to the test.
+- **Acceptance tests are authored *before* the fix**, stored outside the workspace under an opaque token, and must fail deterministically twice on the broken code — it can't train to the test, and a test that passes pre-fix is thrown away.
 - **A "faster" fix that changes any observable output is auto-reverted** — the behavior suite must replay byte-identical, and the speedup's paired-bootstrap 95% CI must exclude zero. Faster-but-wrong never lands.
-- **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game.
+- **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows the difference between a service saying *no* correctly and a service breaking, so the agent is never handed a fake goal it can only game. Same rule in the newer oracles: a sandbox that refuses `nonlocal` is enforcing a documented limit, not failing.
+- **Silent-wrong-value findings dispatch with value-shaped criteria** — for `differential-mismatch`, `fault-divergence`, `concurrency-divergence`, `invariant-violation` and `baseline-degraded`, "these calls no longer raise" would be vacuous, because the target never raised. The criterion is the *value*.
 - **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
 ## The same run, in detail
@@ -185,7 +279,7 @@ The harness then **fixed all four**, and the regression suite now distinguishes 
 
 ## Works with your agent
 
-Vinv is an MCP server for Claude Code and Cursor — and every other MCP client you already use. One command (**Register Vinv MCP in Agent Tools**) writes both servers into every agent it detects:
+Vinv is an MCP server for Claude Code and Cursor — and every other MCP client you already use. One command (**Register Vinv MCP in Agent Tools**) writes the servers into every agent it detects:
 
 | Agent | Fix dispatch | MCP tools |
 |---|:---:|:---:|
@@ -198,14 +292,14 @@ Vinv is an MCP server for Claude Code and Cursor — and every other MCP client 
 
 <details><summary><b>Where the config lands, per client — and how to verify</b></summary>
 
-Registration is idempotent and never commits secrets. Both servers (`vinv-index`, `vinv-runtime`) launch over stdio via the editor's own runtime.
+Registration is idempotent and never commits secrets. The servers (`vinv-index`, `vinv-runtime`, `vinv-exercise`) launch over stdio via the editor's own runtime.
 
-- **Claude Code** — `~/.claude.json`, project-local scope (no trust prompt). Verify: `claude mcp list` shows `vinv-index` and `vinv-runtime`.
-- **Cursor** — `<repo>/.cursor/mcp.json`. Verify: Settings → MCP shows both servers green.
+- **Claude Code** — `~/.claude.json`, project-local scope (no trust prompt). Verify: `claude mcp list` shows the Vinv servers.
+- **Cursor** — `<repo>/.cursor/mcp.json`. Verify: Settings → MCP shows them green.
 - **Codex CLI** — `~/.codex/config.toml` under `[mcp_servers.vinv-index]` / `[mcp_servers.vinv-runtime]`.
 - **Copilot Chat** — native VS Code MCP provider (auto), `.vscode/mcp.json` on older builds.
 - **Windsurf Cascade** — `~/.codeium/windsurf/mcp_config.json`.
-- **Gemini CLI** — dispatch works out of the box; for MCP tools, add the same two stdio servers to `~/.gemini/settings.json`.
+- **Gemini CLI** — dispatch works out of the box; for MCP tools, add the same stdio servers to `~/.gemini/settings.json`.
 
 **Your agent is also Vinv's only LLM** — every analysis step routes through the coding-agent CLI you already pay for. No provider keys, no model picker.
 </details>
@@ -219,11 +313,13 @@ Registration is idempotent and never commits secrets. Both servers (`vinv-index`
 | Memory | forgets every session | persistent index + graph, updated on save |
 | Runtime | can't see it | real traces, values, flamegraphs per call |
 | Debugging | reads source, speculates | fault-ranked suspects with real error messages |
+| Dead code | can't tell used from unused | never-executed islands with live callers and a try-run driver |
 | Bad fix | you diff and pray | one-click revert of everything the episode touched |
 | API testing | writes tests it then grades itself | exercises every endpoint, banks each response as an unseen regression case |
+| Library testing | writes unit tests from the signature | drives real functions in a sandbox, diffs against a reference implementation |
 | Perf claims | "should be faster now" | paired-bootstrap 95% CI must exclude zero, behavior byte-identical, or auto-revert |
 | Test data | pollutes your dev DB and forgets | state ledger: created resources tracked, torn down via your own API, drift labeled |
-| Cost | burns tokens re-exploring | evidence pack composed once, locally |
+| Cost | burns tokens re-exploring | evidence pack composed once, locally; the bandit learns which pack composition pays |
 
 ## Proven on itself
 
@@ -235,8 +331,8 @@ Vinv's release gate is Vinv — these numbers come from running the loop on this
 | Search | file hit@10 **0.90** · symbol MRR 0.51 · p50 81ms |
 | Crash recovery | indexer, embedder, and traced service all kill-tested mid-run |
 | Self-found waste | 83% duplicate compute found → now cached |
-| Retrieval tuning | off-policy evaluation (doubly-robust, BCa bootstrap) runs continuously over logged queries and **promotes nothing that can't clear a 95% lower bound above zero** — to date it has declined every candidate |
-| Test suite | 1,738 tests green (1,186 Python · 552 extension) |
+| Retrieval tuning | off-policy evaluation (doubly-robust, BCa bootstrap) over 800 logged decisions promoted **top-k 10** (+0.173, 95% CI [+0.081, +0.317]) and blocked both other candidates — one for an uncertain lower bound, one for zero support |
+| Test suite | **2,376 tests** — 1,575 Python · 801 extension |
 
 ## How it works
 
@@ -245,11 +341,11 @@ flowchart LR
   T[Trace] --> I[Index] --> S[Serve MCP] --> V[Verify] --> L[Learn] --> T
 ```
 
-1. **Trace** — run your Python service under the bundled tracer: no SDK, no code changes.
+1. **Trace** — run your Python service under the bundled tracer: no SDK, no code changes. (No service? The function, differential, fault, concurrency and environment oracles need none.)
 2. **Index** — every function embedded locally into a semantic index + call graph.
-3. **Serve** — two MCP servers hand the evidence to your agent.
+3. **Serve** — MCP servers hand the evidence to your agent.
 4. **Verify** — replayed start, live port, acceptance tests generated *before* the fix.
-5. **Learn** — propensity-logged decisions; retrieval updates only on off-policy-evaluation wins.
+5. **Learn** — propensity-logged decisions; retrieval and pack composition update only on off-policy-evaluation wins, behind a 5% canary with automatic rollback.
 
 <details><summary><b>🧠 The algorithms, named (for the skeptics)</b></summary>
 
@@ -257,36 +353,65 @@ No black boxes — every decision Vinv makes has a published method behind it, a
 
 | Decision | Algorithm | Why |
 |---|---|---|
-| Which input strategy to try next, per endpoint | **Thompson sampling** over Beta posteriors; reward = oracle violations, with new coverage worth a **0.25 bonus** so exploring stays subordinate to finding; posteriors persist across runs with **50% evidence decay** | explores boundary/negative/auth inputs where they pay, without a hand-tuned schedule — the loop can't be captured by a cheap coverage treadmill, and old lessons expire instead of ossifying |
+| Which oracle to spend the next unit of budget on | **Thompson sampling** over `(target × technique × oracle)`, cost measured in probe-equivalents, credit paid once per defect signature | which technique pays is a property of *your* repo, learned across runs — not a fixed running order |
+| Which input strategy to try next, per endpoint | **Thompson sampling** over Beta posteriors; reward = oracle violations, with new coverage worth a **0.25 bonus** so exploring stays subordinate to finding; posteriors persist with **50% evidence decay** | explores boundary/negative/auth inputs where they pay — the loop can't be captured by a cheap coverage treadmill, and old lessons expire instead of ossifying |
+| Which live code a dead section belongs to | **Personalized PageRank** seeded at the section's symbols, keeping traced neighbours (HippoRAG's retrieval step over the code graph) | single-hop similarity misses the associative neighbourhood an integration would wire into |
 | Accept or revert an optimization | **Paired bootstrap** 95% CI on relative improvement **and** byte-identical behavior replay | "faster" must be statistically real and observably harmless |
+| Throughput ceiling | **Universal Scalability Law** fit (Gunther) over a bounded concurrency sweep — contention σ and coherency κ | names *why* it stops scaling, not just that it did |
 | Behavioral invariants | **Daikon-style** dynamic invariants, support ≥ 5, zero counterexamples, **Laplace** `(s+1)/(n+2)` confidence | properties earn their confidence from evidence, not assertion |
 | Memory-leak suspects | **Theil–Sen** slope over per-session retention (robust to 29% outliers) | one noisy session can't fabricate or hide a leak |
 | Cache opportunities | argument-hash distinctness × time share, **Pareto-relative** — no absolute thresholds | "expensive" is defined by *your* app's trace, 5ms service or 5s batch job |
 | Hung harness detection | **φ-accrual-inspired** adaptive silence watchdog (cadence-relative, startup grace) | a slow run isn't killed; a dead one doesn't spin |
 | Stall deadlock-breaking | **Nash-bargaining** unanimity: continue only if explorer *and* auditor stances both beat escalation | autonomy exactly when it's justified; a human panel when it's not |
-| Retrieval config promotion | **Off-policy evaluation** gates: promoted only on CI-backed wins over logged propensities | the learner can't grade its own homework either |
+| Context-pack composition | **Thompson sampling** with ε-floor over a `2³` arm grid, exact propensity logged, **exact Shapley** attribution | "did runtime evidence help" is computed, not asserted |
+| Retrieval config promotion | **Off-policy evaluation** (cross-fitted DM/IPS/SNIPS/DR) behind ESS, support, BCa-LCB and Simpson guards; 5% canary, auto-rollback | the learner can't grade its own homework either |
 | Fault localization | spectrum-based suspect ranking over real pass/fail requests | suspects come from executions, not embeddings |
 
-The whole test ontology — what exists, where it lives on disk, and the walk order an agent follows to know it covered everything — is one document: [`docs/testing-ontology.md`](docs/testing-ontology.md).
+The full learning walk — reward, propensity, gating math, with `file:line` for every claim — is [`docs/learning.md`](docs/learning.md). The test ontology is [`docs/testing-ontology.md`](docs/testing-ontology.md).
 </details>
 
 <details><summary><b>Deeper: the context graph, Auto-Pilot, and repo layout</b></summary>
 
-Vinv indexes **the code** and generates — from your own run — **the traces** and **the metrics derived from them**, then ties all three to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → probe → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
+Vinv indexes **the code** and generates — from your own run — **the traces** and **the metrics derived from them**, then ties all three to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → exercise → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`exerciser/`](exerciser/) (the oracle swarm + campaign bandit), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
 </details>
 
-## After install: the five things to try
+## After install: the things to try
 
-1. **Exercise your API** — `exerciser plan <repo> && exerciser run <repo> --base-url http://127.0.0.1:PORT` (or let Auto-Pilot's `exercise` phase do it). An **environment canary** first dry-runs your login chains and tells you *loudly* if the database was reset or credentials unseeded — no more silently-401 runs.
-2. **Walk everything** — Command Palette → **"Vinv: Open Journey"**. Overview first (services, coverage, open issues), then `Next`/`→` through every endpoint: call tree with live runtime, flamegraph, and the exact inputs → outputs driven. Hover anything cryptic — every marker explains itself in plain language.
-3. **Add your own test input** — on any Journey endpoint step, fill body/params/expected status and hit *Add input*. It lands in the same plan layer the AI-authored scenarios use, runs with the endpoint's auth setup on the next exercise, and becomes a permanent regression case.
-4. **See what got fixed** — Command Palette → **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The tab's backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
-5. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
-6. **Hunt waste on demand** — **"Vinv: Optimize Latency Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** (recomputed-work finder) each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
+1. **Hunt without a server** — `exerciser campaign <repo> --budget 20`. No service, no `--base-url`: the function, differential, fault, concurrency and environment oracles do the work, and the bandit reports which technique paid.
+2. **Exercise your API** — `exerciser plan <repo> && exerciser run <repo> --base-url http://127.0.0.1:PORT` (or let Auto-Pilot's `exercise` phase do it). An **environment canary** first dry-runs your login chains and tells you *loudly* if the database was reset or credentials unseeded — no more silently-401 runs.
+3. **Find your dead code** — Command Palette → **"Vinv: Analyze Dead Code"**, then **"Vinv: Try Run Dead Code"** on any section to see whether it can execute at all.
+4. **Walk everything** — **"Vinv: Open Journey"**. Overview first (services, coverage, open issues), then `Next`/`→` through every endpoint: call tree with live runtime, flamegraph, and the exact inputs → outputs driven. Hover anything cryptic — every marker explains itself.
+5. **Add your own test input** — on any Journey endpoint step, fill body/params/expected status and hit *Add input*. It lands in the same plan layer the AI-authored scenarios use, runs with the endpoint's auth setup on the next exercise, and becomes a permanent regression case.
+6. **See what got fixed** — **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
+7. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
+8. **Hunt waste on demand** — **"Optimize Latency Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
+
+## Engine CLI reference
+
+<details><summary><b><code>exerciser</code> — the oracle swarm, runnable standalone</b></summary>
+
+| Command | What it does |
+|---|---|
+| `exerciser campaign <repo> [--base-url URL] [--budget N]` | **Start here.** One budget across every armed oracle by Thompson sampling; reports which technique paid |
+| `exerciser plan <repo> [--base-url URL]` | Per-endpoint input plan (schema + observed + semantic layers) |
+| `exerciser run <repo> --base-url URL` | Execute the plan against the live traced service, coverage-guided |
+| `exerciser functions <repo> [--require-tier os-sandbox]` | Drive entry points and exported functions in process, contained |
+| `exerciser differential <repo> [--target M:f --reference cpython-exec]` | Compare a function against a reference implementation |
+| `exerciser faults <repo> [--auto-target M:f]` | Legal-but-adversarial shapes at a dependency boundary |
+| `exerciser concurrency <repo> --target M:f` | Deterministic schedules + timeout injection |
+| `exerciser environment <repo>` | Dependency-resolution matrix + upstream signature drift |
+| `exerciser containment` | Which containment tier *this host* can actually provide, and why — decided by probe |
+| `exerciser throughput-sweep <repo> --base-url URL` | Concurrency sweep + USL fit → `throughput-ceiling` opportunities |
+| `exerciser profile <repo>` | Behavioral profile + learned invariants |
+| `exerciser regress <repo> --base-url URL` | Replay the accumulated behavior suite, report diffs by kind |
+| `exerciser scorecard <repo>` | Per-service scorecard: coverage before→after, invariants, issues, latency |
+
+Requires `identification consolidate` first for `apis.json`, and — for real coverage — a service running under `tracelens`.
+</details>
 
 ## MCP tools reference
 
-<details><summary><b>10 tools, 19 capabilities — few names on purpose (agents pick better from short menus; the session tool multiplexes)</b></summary>
+<details><summary><b>Few tool names on purpose — agents pick better from short menus; the session tool multiplexes</b></summary>
 
 **`vinv-index`** — the codebase and the session:
 
@@ -305,6 +430,8 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 | `slice` | Observed caller chain from request root, values at each frame |
 | `coverage_of` | What ran, how often, ok/error, timing |
 | `callers_of` / `blast_radius` / `why_did_this_run` | Observed callers · transitive impact · entry-point paths |
+
+**`vinv-exercise`** — closes the endpoint-testing loop: your agent exercises your service and reports the run back, and Vinv grades what came back.
 </details>
 
 ## FAQ
@@ -314,7 +441,15 @@ No. Vinv runs everything locally. The semantic index and code embedder run on yo
 </details>
 
 <details><summary><b>Is there any telemetry or data collection?</b></summary>
-No. Vinv is 100% local with zero telemetry. It operates entirely on your machine, storing per-repo state in `.vinv/` and per-machine state in `~/.vinv/`. Sensitive data in traces is redacted and never sent anywhere.
+No telemetry, no analytics, no usage pings, no crash reports. Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>, and sensitive data in traces is redacted and never sent anywhere. The extension makes exactly <b>one</b> outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a release that leaves your install broken can tell you. No query string, no identifiers, no version, nothing uploaded — all filtering happens on your machine, at most once every 12 hours. Turn it off with <code>vinv.notices.enabled</code>.
+</details>
+
+<details><summary><b>Does it work on a library, or only on a web service?</b></summary>
+Both. A repo with nothing serving still gets the five service-free oracles — the function harness, the differential oracle, fault injection, the concurrency prober and the environment matrix — driven by <code>exerciser campaign</code> with no <code>--base-url</code>. The HTTP oracle simply stays unarmed. Findings land in the same <code>issues.json</code> and go to the same fix-dispatch path.
+</details>
+
+<details><summary><b>Is it safe to let it call my functions?</b></summary>
+Targets the purity guard can't verify are routed through a containment ladder: a kernel-enforced OS sandbox (<code>sandbox-exec</code>, <code>bwrap</code>, <code>unshare</code>) where the host offers one, otherwise the Python process shim — always with a disposable copy of the repo, redirected <code>HOME</code>/<code>TMPDIR</code>/<code>XDG_*</code>, blocked network and subprocess spawning, and POSIX rlimits. Which tier you got is decided by a probe that checks a write outside the root really failed, and it's reported honestly. <code>--no-sandbox</code> leaves that set refused and undriven; it never runs them loose. <code>exerciser containment</code> tells you what your host can provide.
 </details>
 
 <details><summary><b>Why is the first run slow? (Build time)</b></summary>
@@ -326,24 +461,25 @@ No. Vinv uses a zero-edit tracer. It instruments your Python backend at runtime 
 </details>
 
 <details><summary><b>Which languages are supported?</b></summary>
-Currently, Vinv fully supports Python backends with runtime tracing, semantic code search, and verified fixes. TypeScript and Go support are coming next. Other stacks can still use the index, graph, and QnA features.
+Runtime evidence — tracing, the oracle swarm, verified fixes — is Python today, for services and libraries alike. Other stacks still get the semantic index, code graph, and grounded QnA. TypeScript and Go are next.
 </details>
 
 <details><summary><b>How does it know if a fix worked?</b></summary>
-Vinv generates acceptance tests before the fix and hides them from the agent. It runs these tests alongside checking the live port and verifying that any observable behavior (other than the bug fix) remains byte-identical.
+Acceptance tests are authored before the fix, stored outside your workspace under an opaque token, and required to fail deterministically twice on the broken code — a test that passes pre-fix is discarded. The fix must then pass them, with a replayed start, a live port, and every other observable behavior byte-identical. A deterministic anti-cheat audit over the diff blocks test edits, swallowed exceptions and shadow modules outright.
 </details>
 
 <details><summary><b>Which editors and coding agents work?</b></summary>
-Editors: VS Code, Cursor, Windsurf, VSCodium, Trae, VS Code Insiders. Agents it drives: Claude Code, Cursor CLI, Codex CLI, Gemini CLI, Copilot Chat, Windsurf Cascade. See [Works with your agent](#works-with-your-agent).
+Editors: VS Code, Cursor, Windsurf, VSCodium, Trae, VS Code Insiders. Agents it drives: Claude Code, Cursor CLI, Codex CLI, Gemini CLI, Copilot Chat, Windsurf Cascade. See <a href="#works-with-your-agent">Works with your agent</a>.
 </details>
 
 <details><summary><b>Is it really free and open source?</b></summary>
-Yes — [Apache 2.0](LICENSE), every engine builds from source in this repo.
+Yes — <a href="LICENSE">Apache 2.0</a>, every engine builds from source in this repo.
 </details>
 
 ## Privacy
 
 - **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
+- **One outbound request, and you can read it**: a GET of a static JSON file at `notices.vinv.ai` on activation, for broken-release and security notices only. No query string, no identifiers, no version, nothing uploaded; at most once per 12 hours; the URL is a constant no setting can repoint; disable with `vinv.notices.enabled`.
 - The only download is the embedding model (Hugging Face, once, ~500 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.
 - The only LLM Vinv talks to is the coding-agent CLI **you** configured, through its own auth.
@@ -353,6 +489,9 @@ Yes — [Apache 2.0](LICENSE), every engine builds from source in this repo.
 See [CONTRIBUTING.md](CONTRIBUTING.md) — `uv sync`, `cargo build` in `index/`, `npm install && npm run check` in `extension/`, keep `tests/e2e/planted_bug_golden/run.py` green. Good first issues are labeled. By taking part you agree to our [Code of Conduct](CODE_OF_CONDUCT.md); to report a vulnerability, see [SECURITY.md](SECURITY.md). [Apache License 2.0](LICENSE) © 2026 VinvAI.
 
 <div align="center">
+
+**Your agent says it's done. Vinv says prove it.**
+
 <sub>If Vinv caught something your agent missed — <a href="https://open-vsx.org/extension/VinvAI/VinvAI/reviews">leave a review on Open VSX</a> and ⭐ star this repo.</sub>
 
 <sub><a href="https://vinv.ai">vinv.ai</a> · <a href="https://open-vsx.org/extension/VinvAI/VinvAI">Open VSX</a> · <a href="https://www.linkedin.com/company/vinvai/">LinkedIn</a> · <a href="mailto:support@vinv.ai">support@vinv.ai</a> · Python first, TS &amp; Go next · <b>Context beats model size.</b></sub>

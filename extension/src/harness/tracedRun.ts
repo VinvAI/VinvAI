@@ -19,6 +19,7 @@
  */
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { readServices, readStartCommands } from '../bringup/bringup';
 
 /** tracelens + interpreter + target packages, parsed from the start command. */
@@ -27,11 +28,78 @@ interface TracedConfig {
 	python: string;
 	targetPackages: string[];
 	cwd: string;
+	/** Leading `VAR=value` assignments the recorded command carried (see below). */
+	env: Record<string, string>;
 }
 
 /** Strips one layer of surrounding quotes from a shell token. */
 function unquote(s: string): string {
 	return s.replace(/^["']|["']$/g, '');
+}
+
+/** One leading `VAR=value` shell assignment, quoted or bare. */
+const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)\s+/;
+
+/**
+ * Splits the leading `VAR=value` assignments off a recorded command.
+ *
+ * Bring-up records what it ran in a SHELL, and what it ran routinely begins
+ * `PATH="…/.venv/Scripts:$PATH" /path/to/tracelens run …`. A shell reads that
+ * prefix as environment; `spawn` does not — it took the whole string as the
+ * program name and failed ENOENT, so a driver that was written, saved and ready
+ * to run never produced a trace. Observed live on the first end-to-end try-run.
+ */
+export function splitEnvPrefix(command: string): { env: Record<string, string>; rest: string } {
+	const env: Record<string, string> = {};
+	let rest = command.trimStart();
+	for (let m = ENV_ASSIGNMENT.exec(rest); m; m = ENV_ASSIGNMENT.exec(rest)) {
+		env[m[1]] = unquote(m[2]);
+		rest = rest.slice(m[0].length);
+	}
+	return { env, rest };
+}
+
+/**
+ * Rewrites an MSYS/Git-Bash absolute path (`/c/Anshul/…`) as a native Windows
+ * one (`C:\Anshul\…`). Identity everywhere else, and on anything that is not a
+ * single-letter drive root — a genuine POSIX path must survive untouched.
+ *
+ * Same root cause as the env prefix: bring-up drives Git Bash on Windows, so
+ * the commands it records are spelled the way bash spells them, and
+ * CreateProcess cannot resolve that spelling.
+ */
+export function nativePath(p: string): string {
+	if (process.platform !== 'win32') {
+		return p;
+	}
+	const m = /^\/([A-Za-z])\/(.*)$/.exec(p);
+	return m ? path.win32.join(`${m[1].toUpperCase()}:\\`, m[2]) : p;
+}
+
+/** Env var names whose values are `:`-separated path lists in a shell. */
+const PATH_LIST = /(^|_)PATH$/;
+
+/**
+ * Resolves one recorded assignment against the live environment: expands `$VAR`
+ * / `${VAR}` (only a shell would have done it), rewrites MSYS spellings, and
+ * re-joins list-valued vars with the platform's own separator.
+ */
+function resolveEnvValue(name: string, value: string, base: NodeJS.ProcessEnv): string {
+	const expand = (v: string): string =>
+		v.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g, (_all, a, b) =>
+			base[a ?? b] ?? '',
+		);
+	if (!PATH_LIST.test(name)) {
+		return nativePath(expand(value));
+	}
+	// Split BEFORE expanding: an expanded $PATH already uses the platform
+	// separator, and re-splitting it on ':' would cut every `C:\` in half.
+	return value
+		.split(':')
+		.map((seg) => expand(seg))
+		.filter((seg) => seg.length > 0)
+		.map((seg) => (seg.includes(path.delimiter) ? seg : nativePath(seg)))
+		.join(path.delimiter);
 }
 
 /**
@@ -44,13 +112,13 @@ export function parseTracedCommand(
 	workingDirectory: string | undefined,
 	fallbackCwd: string,
 ): TracedConfig | null {
-	const cmd = command ?? '';
+	const { env, rest: cmd } = splitEnvPrefix(command ?? '');
 	const runIdx = cmd.indexOf(' run ');
 	const dashIdx = cmd.indexOf(' -- ');
 	if (!/tracelens/i.test(cmd) || runIdx < 0 || dashIdx < 0) {
 		return null;
 	}
-	const tracelens = unquote(cmd.slice(0, runIdx).trim());
+	const tracelens = nativePath(unquote(cmd.slice(0, runIdx).trim()));
 	const flags = cmd.slice(runIdx + 5, dashIdx);
 	// Both spellings tracelens accepts (launcher/run.py: `("--target-package", "-t")`).
 	// Matching only the long form silently yielded ZERO target packages for a
@@ -59,11 +127,17 @@ export function parseTracedCommand(
 		unquote(m[1]),
 	);
 	const after = cmd.slice(dashIdx + 4).trim();
-	const python = unquote(after.split(/\s+/)[0] ?? '');
+	const python = nativePath(unquote(after.split(/\s+/)[0] ?? ''));
 	if (!tracelens || !python) {
 		return null;
 	}
-	return { tracelens, python, targetPackages, cwd: workingDirectory ?? fallbackCwd };
+	return {
+		tracelens,
+		python,
+		targetPackages,
+		cwd: nativePath(workingDirectory ?? fallbackCwd),
+		env,
+	};
 }
 
 /**
@@ -140,7 +214,15 @@ export async function runDriverUnderTracing(
 	return new Promise<TracedRunResult>((resolve) => {
 		let child;
 		try {
-			child = spawn(argv[0], argv.slice(1), { cwd: cfg.cwd, env: process.env, windowsHide: true });
+			// The recorded command's own env prefix, resolved against this process's
+			// environment — that prefix is usually what puts the venv's Scripts dir
+			// ahead of everything else, which is how tracelens finds the interpreter
+			// and its DLLs.
+			const childEnv: NodeJS.ProcessEnv = { ...process.env };
+			for (const [k, v] of Object.entries(cfg.env)) {
+				childEnv[k] = resolveEnvValue(k, v, process.env);
+			}
+			child = spawn(argv[0], argv.slice(1), { cwd: cfg.cwd, env: childEnv, windowsHide: true });
 		} catch (e) {
 			resolve({ ...base, outputTail: e instanceof Error ? e.message : String(e) });
 			return;

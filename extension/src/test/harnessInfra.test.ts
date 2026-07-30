@@ -30,6 +30,7 @@ import {
 	harnessBlockRemediation,
 	INFRA_BLOCK_LABELS,
 	markHarnessBlocked,
+	oneShotFlags,
 	preflightHarnessAuth,
 	resetHarnessBlockStateForTests,
 	runHarnessPrompt,
@@ -174,6 +175,58 @@ suite('harness block registry + preflight', () => {
 		const reply = await dispatchAgentPrompt('cursor', os.tmpdir(), 'infra-test', 'hello');
 		assert.strictEqual(reply, null);
 		assert.ok(Date.now() - t0 < 1000, 'must short-circuit, not spawn a doomed CLI');
+	});
+});
+
+/**
+ * One-shot dispatches must not load the workspace's MCP servers: Vinv registers
+ * three of its own into every project it touches, and a headless `-p` run pays
+ * their whole startup before emitting a byte. Measured live in a real
+ * workspace: a 61-byte prompt produced ZERO output in 240s with them loaded and
+ * answered in seconds without, so the 300s cap expired and every verdict,
+ * driver and judgment came back null with no visible cause.
+ */
+suite('oneShotFlags: MCP bypass for one-shot dispatches', () => {
+	const claude = getHarness('claude-code');
+	let root: string;
+
+	setup(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-oneshot-'));
+	});
+	teardown(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	test('the flags name a real file holding an empty server map', () => {
+		const flags = oneShotFlags(claude, root);
+		const quoted = /--mcp-config "([^"]+)"/.exec(flags);
+		assert.ok(quoted, `expected a quoted --mcp-config path, got: ${flags}`);
+		assert.ok(flags.includes('--strict-mcp-config'), 'strictness is what ignores the project');
+		assert.deepStrictEqual(JSON.parse(fs.readFileSync(quoted[1], 'utf8')), { mcpServers: {} });
+	});
+
+	test('the config is a FILE, never inline JSON', () => {
+		// The regression this pins: `--mcp-config {"mcpServers":{}}` reads fine in
+		// source and dies in the shell. dispatchAgentPrompt spawns with
+		// shell:true, and both cmd.exe and sh strip the inner quotes, handing the
+		// CLI `{mcpServers:{}}` — which it takes as a FILENAME and exits 1 on in
+		// under four seconds. Measured: that turns a silent hang into an equally
+		// silent null, which is not an improvement.
+		const flags = oneShotFlags(claude, root);
+		assert.ok(!flags.includes('{"mcpServers"'), 'inline JSON does not survive the shell');
+		assert.ok(!flags.includes('{emptyMcpConfig}'), 'the placeholder must be expanded');
+	});
+
+	test('an unwritable workspace degrades to the plain command line', () => {
+		// A command line naming a config file that is not there is rejected
+		// outright, so the fallback must drop the flags entirely: slow-but-working
+		// beats fast-and-broken.
+		fs.writeFileSync(path.join(root, 'afile'), 'not a directory', 'utf8');
+		assert.strictEqual(oneShotFlags(claude, path.join(root, 'afile', 'under-a-file')), '');
+	});
+
+	test('a harness with no one-shot flags contributes nothing', () => {
+		assert.strictEqual(oneShotFlags(getHarness('cursor'), root), '');
 	});
 });
 
