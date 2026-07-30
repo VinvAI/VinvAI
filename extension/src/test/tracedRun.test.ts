@@ -73,12 +73,20 @@ suite('tracedRun: a command recorded by a shell', () => {
 		const cfg = parseTracedCommand(LIVE, undefined, 'C:/p');
 		assert.ok(cfg);
 		assert.ok(!cfg!.tracelens.includes('PATH='), `env prefix leaked: ${cfg!.tracelens}`);
-		assert.ok(!cfg!.tracelens.startsWith('/c/'), `unconverted MSYS path: ${cfg!.tracelens}`);
 		assert.deepStrictEqual(cfg!.targetPackages, ['smolagents', 'examples']);
 		assert.deepStrictEqual(cfg!.env, { PATH: '/c/p/.venv/Scripts:$PATH' });
+		// The MSYS rewrite is win32-only BY DESIGN, so assert it only there.
+		// Asserting `!startsWith('/c/')` unconditionally failed the Linux CI job:
+		// off Windows `/c/p/…` is a perfectly good absolute POSIX path and
+		// nativePath is deliberately the identity, so the "unconverted spelling"
+		// it was pinning does not exist there. The two equalities below say the
+		// same thing more precisely on the platform where it means something.
 		if (process.platform === 'win32') {
 			assert.strictEqual(cfg!.tracelens, path.win32.join('C:\\', 'p/.venv/Scripts/tracelens'));
 			assert.strictEqual(cfg!.python, path.win32.join('C:\\', 'p/.venv/Scripts/python.exe'));
+		} else {
+			assert.strictEqual(cfg!.tracelens, '/c/p/.venv/Scripts/tracelens');
+			assert.strictEqual(cfg!.python, '/c/p/.venv/Scripts/python.exe');
 		}
 	});
 
