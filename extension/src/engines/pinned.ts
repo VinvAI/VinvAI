@@ -21,7 +21,7 @@
  * which is what a local `npm run bundle` dev build wants — the developer's
  * checkout is theirs to move.
  */
-export const ENGINE_REF = 'ec1252b97e9f1bbbdd4e4a95db70240265cb0278';
+export const ENGINE_REF = 'e3772a7931f77eb790013ad8abf3ddb3d2ac6311';
 
 /**
  * What an unconfigured install does when the stamped ref and the checkout
