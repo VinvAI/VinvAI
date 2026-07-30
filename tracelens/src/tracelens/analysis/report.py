@@ -216,7 +216,6 @@ _OUTCOME_LABEL = {"ok": "OK", "slow": "Slow", "fail": "Fail", "wrong": "Wrong"}
 
 def _donut(counts: dict[str, int]) -> str:
     total = sum(counts.values()) or 1
-    palette = {"ok": "#3fb950", "slow": "#d29922", "fail": "#f85149", "wrong": "#a371f7"}
     r = 60.0
     circ = 2 * math.pi * r
     offset = 0.0
@@ -227,16 +226,19 @@ def _donut(counts: dict[str, int]) -> str:
         if n <= 0:
             continue
         frac = n / total
-        color = palette.get(key, "#8b949e")
         dash = frac * circ
+        # Colour comes from the `.seg-*` / `.dot.*` rules in _CSS, not from a
+        # literal here: the palette is theme-dependent (prefers-color-scheme),
+        # and a hex baked into the markup could not follow it. Classes also keep
+        # the arc and its legend dot from drifting apart.
         segs.append(
-            f"<circle r='{r}' cx='80' cy='80' fill='none' stroke='{color}' "
+            f"<circle r='{r}' cx='80' cy='80' fill='none' class='seg-{key}' "
             f"stroke-width='24' stroke-dasharray='{dash:.2f} {circ - dash:.2f}' "
             f"stroke-dashoffset='{-offset:.2f}' transform='rotate(-90 80 80)'></circle>"
         )
         offset += dash
         legend.append(
-            f"<div class='lg'><span class='dot' style='background:{color}'></span>"
+            f"<div class='lg'><span class='dot {key}'></span>"
             f"{_esc(_OUTCOME_LABEL.get(key, key))} <b>{n}</b> "
             f"<span class='muted'>({100 * frac:.0f}%)</span></div>"
         )
@@ -313,95 +315,148 @@ def _details_json(title: str, obj: Any) -> str:
 # main
 # ---------------------------------------------------------------------------
 
+# Vinv design system, mirroring `extension/src/views/webviewTheme.ts` and the
+# vinv.ai site: white/black/red, JetBrains Mono body, serif-italic display
+# headings, uppercase micro-labels, sharp corners, grid + grain backdrop.
+#
+# Self-theming through `prefers-color-scheme` rather than the `vscode-dark` body
+# class the extension's own webviews key off. This document is standalone — it is
+# handed to a sandboxed `srcdoc` iframe, and is also opened straight from disk in
+# a browser — so it never sees the classes VS Code stamps on a webview body, and
+# a palette keyed off them would be stuck on its default forever.
+#
+# Semantic tones (good / warn / bad / info) are retuned per theme rather than
+# shared: the GitHub-dark values they replaced were picked against a #0d1117
+# panel and fall under 4.5:1 on white. `bad` is the brand red in both themes,
+# which is why it doubles as `--accent-fg`.
 _CSS = """
-:root{--bg:#0d1117;--panel:#161b22;--panel2:#1c2330;--bd:#30363d;--fg:#e6edf3;
---muted:#8b949e;--accent:#58a6ff;--green:#3fb950;--amber:#d29922;--red:#f85149;--purple:#a371f7}
+:root{
+--bg:#ffffff;--bg-2:#f4f4f4;--ink:#0a0a0a;--ink-soft:#1a1a1a;
+--muted:#616161;--muted-2:#7a7a7a;
+--accent:#d71921;--accent-fg:#d71921;
+--line:rgba(10,10,10,.14);--line-strong:rgba(10,10,10,.32);
+--grid:rgba(10,10,10,.05);--grain:rgba(10,10,10,.05);--grain-blend:multiply;
+--good:#0f7a34;--warn:#8a5a00;--bad:#d71921;--info:#6b3fc9;
+--shadow:rgba(10,10,10,.18);
+--mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+--serif:'Instrument Serif','Iowan Old Style',Georgia,'Times New Roman',serif}
+@media (prefers-color-scheme:dark){:root{
+--bg:#000000;--bg-2:#0b0b0b;--ink:#ffffff;--ink-soft:#ededed;
+--muted:#8f8f8f;--muted-2:#6e6e6e;
+--accent:#d71921;--accent-fg:#ff4048;
+--line:rgba(255,255,255,.14);--line-strong:rgba(255,255,255,.32);
+--grid:rgba(255,255,255,.05);--grain:rgba(255,255,255,.05);--grain-blend:screen;
+--good:#3fca6a;--warn:#e0a33a;--bad:#ff4048;--info:#b98cff;
+--shadow:rgba(0,0,0,.55)}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
-a{color:var(--accent)}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:13px/1.6 var(--mono);-webkit-font-smoothing:antialiased;
+font-feature-settings:'ss01','ss02','cv11'}
+/* grid texture + film grain across the page, like the site */
+body::before{content:'';position:fixed;inset:0;pointer-events:none;
+background-image:linear-gradient(var(--grid) 1px,transparent 1px),
+linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+background-size:24px 24px;mix-blend-mode:var(--grain-blend);z-index:0}
+body::after{content:'';position:fixed;inset:0;pointer-events:none;
+background-image:radial-gradient(var(--grain) 1px,transparent 1px);
+background-size:3px 3px;opacity:.35;mix-blend-mode:var(--grain-blend);z-index:0}
+body>*{position:relative;z-index:1}
+a{color:var(--accent-fg)}
+::selection{background:var(--accent);color:#ffffff}
 .wrap{max-width:1180px;margin:0 auto;padding:28px 22px 80px}
 header.top{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
-border-bottom:1px solid var(--bd);padding-bottom:16px;margin-bottom:22px}
-header.top h1{font-size:22px;margin:0;letter-spacing:.2px}
-header.top .tag{background:var(--panel2);border:1px solid var(--bd);border-radius:20px;
-padding:2px 10px;font-size:12px;color:var(--muted)}
-.meta{color:var(--muted);font-size:12px;margin-left:auto}
+border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:22px}
+header.top h1{font-family:var(--serif);font-style:italic;font-weight:400;
+font-size:30px;margin:0;letter-spacing:-.01em;color:var(--ink)}
+header.top .tag{background:transparent;border:1px solid var(--line-strong);border-radius:0;
+padding:2px 8px;font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.meta{color:var(--muted);font-size:11px;margin-left:auto;letter-spacing:.04em}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:26px}
-.kpi{background:var(--panel);border:1px solid var(--bd);border-radius:10px;padding:16px}
-.kpi-val{font-size:26px;font-weight:600}
-.kpi-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.6px;margin-top:2px}
-.kpi-sub{font-size:12px;color:var(--muted);margin-top:6px}
-.kpi.good .kpi-val{color:var(--green)}.kpi.warn .kpi-val{color:var(--amber)}
-.kpi.bad .kpi-val{color:var(--red)}
+.kpi{background:var(--bg-2);border:1px solid var(--line);border-radius:0;padding:16px}
+.kpi-val{font-size:26px;font-weight:500;letter-spacing:-.02em}
+.kpi-label{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.24em;margin-top:4px}
+.kpi-label::before{content:'// ';color:var(--accent-fg)}
+.kpi-sub{font-size:11px;color:var(--muted-2);margin-top:6px}
+.kpi.good .kpi-val{color:var(--good)}.kpi.warn .kpi-val{color:var(--warn)}
+.kpi.bad .kpi-val{color:var(--bad)}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:18px}
-.card{background:var(--panel);border:1px solid var(--bd);border-radius:12px;padding:18px}
-.card h2{margin:0 0 14px;font-size:14px;text-transform:uppercase;letter-spacing:.7px;
+.card{background:var(--bg-2);border:1px solid var(--line);border-radius:0;padding:18px}
+.card h2{margin:0 0 14px;font-size:10px;text-transform:uppercase;letter-spacing:.24em;
 color:var(--muted)}
+.card h2::before{content:'// ';color:var(--accent-fg)}
 .card.full{grid-column:1 / -1}
-.muted{color:var(--muted)}.small{font-size:12px}
+.muted{color:var(--muted)}.small{font-size:11px}
 .donut-wrap{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
-.donut-c{fill:var(--fg);font-size:26px;font-weight:700;text-anchor:middle}
-.donut-s{fill:var(--muted);font-size:11px;text-anchor:middle;text-transform:uppercase;letter-spacing:1px}
+.donut-c{fill:var(--ink);font-size:26px;font-weight:500;text-anchor:middle}
+.donut-s{fill:var(--muted);font-size:10px;text-anchor:middle;text-transform:uppercase;letter-spacing:.24em}
 .legend .lg{margin:4px 0}
-.legend .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px}
+.legend .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px}
+/* one source of truth for outcome colour: the donut arc and its legend dot
+   both key off these, so a palette edit here cannot desync the two. */
+.seg-ok{stroke:var(--good)}.seg-slow{stroke:var(--warn)}
+.seg-fail{stroke:var(--bad)}.seg-wrong{stroke:var(--info)}
+.dot.ok{background:var(--good)}.dot.slow{background:var(--warn)}
+.dot.fail{background:var(--bad)}.dot.wrong{background:var(--info)}
 .bar-row{display:grid;grid-template-columns:220px 1fr 120px;gap:10px;align-items:center;
 margin:7px 0}
-.bar-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
-white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg)}
-.bar-track{background:var(--panel2);border-radius:6px;height:16px;overflow:hidden}
-.bar-fill{height:100%;background:linear-gradient(90deg,#1f6feb,#58a6ff);border-radius:6px}
-.bar-fill.amber{background:linear-gradient(90deg,#9e6a02,#d29922)}
-.bar-fill.red{background:linear-gradient(90deg,#a5271f,#f85149)}
-.bar-fill.purple{background:linear-gradient(90deg,#6e40c9,#a371f7)}
-.bar-meta{text-align:right;font-size:12px;color:var(--muted);font-family:ui-monospace,monospace}
+.bar-label{font-family:var(--mono);font-size:11px;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+.bar-track{background:var(--bg);border:1px solid var(--line);border-radius:0;height:16px;overflow:hidden}
+.bar-fill{height:100%;background:var(--ink-soft);border-radius:0}
+.bar-fill.amber{background:var(--warn)}
+.bar-fill.red{background:var(--bad)}
+.bar-fill.purple{background:var(--info)}
+.bar-meta{text-align:right;font-size:11px;color:var(--muted);font-family:var(--mono)}
 .hist{display:flex;align-items:flex-end;gap:2px;height:130px;padding-top:8px}
-.hist .hbar{flex:1;background:linear-gradient(180deg,#58a6ff,#1f6feb);
-border-radius:3px 3px 0 0;min-height:2px}
-.hist .hbar.empty{background:var(--panel2);min-height:2px}
-.hist-axis{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px}
-.tbl{width:100%;border-collapse:collapse;font-size:13px}
-.tbl th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;
-letter-spacing:.5px;border-bottom:1px solid var(--bd);padding:7px 8px}
-.tbl td{border-bottom:1px solid var(--panel2);padding:7px 8px;vertical-align:top}
-.tbl td code{font-size:12px}
-.pill{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:600}
-.pill.good{background:rgba(63,185,80,.15);color:var(--green)}
-.pill.warn{background:rgba(210,153,34,.15);color:var(--amber)}
-.pill.bad{background:rgba(248,81,73,.15);color:var(--red)}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.callout{border-left:3px solid var(--accent);background:var(--panel2);padding:12px 14px;
-border-radius:0 8px 8px 0;margin-bottom:12px}
-.callout.bad{border-color:var(--red)}.callout.warn{border-color:var(--amber)}
+.hist .hbar{flex:1;background:var(--ink-soft);border-radius:0;min-height:2px}
+.hist .hbar.empty{background:var(--line);min-height:2px}
+.hist-axis{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);
+margin-top:6px;letter-spacing:.08em}
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{text-align:left;color:var(--muted);font-weight:500;font-size:10px;text-transform:uppercase;
+letter-spacing:.18em;border-bottom:1px solid var(--line-strong);padding:7px 8px}
+.tbl td{border-bottom:1px solid var(--line);padding:7px 8px;vertical-align:top}
+.tbl td code{font-size:11px}
+.pill{display:inline-block;padding:2px 7px;border-radius:0;font-size:9px;font-weight:500;
+letter-spacing:.18em;text-transform:uppercase;border:1px solid currentColor}
+.pill.good{color:var(--good)}
+.pill.warn{color:var(--warn)}
+.pill.bad{color:var(--bad)}
+code{font-family:var(--mono)}
+.callout{border-left:3px solid var(--accent-fg);background:var(--bg-2);padding:12px 14px;
+border-radius:0;margin-bottom:12px}
+.callout.bad{border-color:var(--bad)}.callout.warn{border-color:var(--warn)}
 details{margin:10px 0}summary{cursor:pointer;color:var(--muted)}
-pre.raw{background:#010409;border:1px solid var(--bd);border-radius:8px;padding:12px;
-overflow:auto;font-size:12px;max-height:340px}
-.note{font-size:12px;color:var(--muted);margin-top:8px}
+pre.raw{background:var(--bg);border:1px solid var(--line);border-radius:0;padding:12px;
+overflow:auto;font-size:11px;max-height:340px}
+.note{font-size:11px;color:var(--muted);margin-top:8px}
 .help{position:relative;display:inline-flex;align-items:center;justify-content:center;
-width:15px;height:15px;margin-left:6px;border-radius:50%;border:1px solid var(--bd);
+width:15px;height:15px;margin-left:6px;border-radius:50%;border:1px solid var(--line-strong);
 color:var(--muted);font-size:10px;font-weight:700;font-style:italic;cursor:help;
 vertical-align:middle;text-transform:none;letter-spacing:0;
-font-family:Georgia,'Times New Roman',serif;line-height:1;user-select:none}
-.help:hover,.help:focus{border-color:var(--accent);color:var(--accent);outline:none}
+font-family:var(--serif);line-height:1;user-select:none}
+.help:hover,.help:focus{border-color:var(--accent-fg);color:var(--accent-fg);outline:none}
 .help .tip{position:absolute;bottom:150%;left:50%;transform:translateX(-50%);
-width:250px;max-width:70vw;background:#010409;border:1px solid var(--bd);border-radius:8px;
-padding:9px 11px;font-size:12px;line-height:1.5;color:var(--fg);font-weight:400;
-font-style:normal;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+width:250px;max-width:70vw;background:var(--bg);border:1px solid var(--line-strong);border-radius:0;
+padding:9px 11px;font-size:11px;line-height:1.5;color:var(--ink);font-weight:400;
+font-style:normal;font-family:var(--mono);
 text-transform:none;letter-spacing:0;text-align:left;white-space:normal;
 opacity:0;visibility:hidden;transition:opacity .12s ease;z-index:30;
-box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none}
+box-shadow:0 8px 24px var(--shadow);pointer-events:none}
 .help.r .tip{left:auto;right:-4px;transform:none}
 .help .tip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);
-border:6px solid transparent;border-top-color:var(--bd)}
+border:6px solid transparent;border-top-color:var(--line-strong)}
 .help.r .tip::after{left:auto;right:8px;transform:none}
 .help:hover .tip,.help:focus .tip{opacity:1;visibility:visible}
 .card h2{display:flex;align-items:center}
 .epbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 22px}
-.epbar label{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);
+.epbar label{font-size:10px;text-transform:uppercase;letter-spacing:.24em;color:var(--muted);
 display:flex;align-items:center}
-.epbar select{background:var(--panel);color:var(--fg);border:1px solid var(--bd);
-border-radius:8px;padding:7px 10px;font-size:13px;max-width:520px;cursor:pointer}
-.epbar select:hover,.epbar select:focus{border-color:var(--accent);outline:none}
+.epbar label::before{content:'// ';color:var(--accent-fg)}
+.epbar select{background:var(--bg-2);color:var(--ink);border:1px solid var(--line-strong);
+border-radius:0;padding:7px 10px;font-size:12px;font-family:var(--mono);
+max-width:520px;cursor:pointer}
+.epbar select:hover,.epbar select:focus{border-color:var(--accent-fg);outline:none}
 """
 
 _JS_SEL = """
