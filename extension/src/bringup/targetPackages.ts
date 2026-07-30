@@ -211,6 +211,30 @@ export function missingTargetPackage(
 }
 
 /**
+ * The same command with `pkg` added to its `--target-package` flags.
+ *
+ * Purely additive, and that is what makes repairing a recorded command safe to
+ * do without asking: instrumenting MORE code cannot stop a service starting, and
+ * the flag list is computed, not judged. The extension already passes the right
+ * `--module` values to `bringup start` and the prompt says to use them verbatim —
+ * but an agent that drops one produces a record which comes up green forever
+ * while tracing none of the service's own code. A deterministic fact should not
+ * depend on a model repeating it correctly.
+ *
+ * Inserted after the LAST existing target flag, which is always before the `--`
+ * separator, so the appended flag lands on tracelens and never on the child.
+ */
+export function withTargetPackage(command: string, pkg: string): string {
+	const flags = [...command.matchAll(/(?:--target-package|-t)\s+\S+/g)];
+	if (flags.length === 0) {
+		return command; // not a tracelens invocation — nothing to extend
+	}
+	const last = flags[flags.length - 1];
+	const end = (last.index ?? 0) + last[0].length;
+	return `${command.slice(0, end)} --target-package ${pkg}${command.slice(end)}`;
+}
+
+/**
  * Whether a trace shows the service's OWN code running, and can say so.
  *
  * Answers three ways on purpose. `unknown` (no entrypoint package, or no

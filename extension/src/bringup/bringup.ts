@@ -4,7 +4,9 @@ import * as fs from 'fs';
 import {
 	entrypointModule,
 	judgeOwnCode,
+	missingTargetPackage,
 	serviceForEndpointFile,
+	withTargetPackage,
 	type OwnCodeVerdict,
 } from './targetPackages';
 
@@ -276,6 +278,51 @@ export function auditOwnCodeTracing(
 		traceComponents(recordedTracePath(workspaceRoot, service.name)),
 		service.command ? entrypointModule(service.command) : null,
 	);
+}
+
+/**
+ * Adds the entrypoint's package to a recorded start command that omits it.
+ *
+ * The extension already computes the right `--module` values and the bring-up
+ * prompt tells the agent to use them verbatim; an agent that drops one leaves a
+ * record that starts the service green and traces none of its own code, forever,
+ * because the record is replayed exactly as written and lives outside the repo
+ * where no later fix pass reaches it. Observed on three of four services in one
+ * workspace, so this is not a rare miss.
+ *
+ * Repairing rather than re-asking, because the value is derived, not judged, and
+ * the edit is additive — see withTargetPackage. Returns the package it added, or
+ * null when there was nothing to fix.
+ */
+export function repairRecordedTargetPackages(
+	workspaceRoot: string,
+	service: ServiceEntry,
+): string | null {
+	const file = getStartCommandPath(workspaceRoot, service.name);
+	let parsed: { commands?: StartCommand[] } & Record<string, unknown>;
+	try {
+		parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as typeof parsed;
+	} catch {
+		return null;
+	}
+	const commands = Array.isArray(parsed.commands) ? parsed.commands : [];
+	let added: string | null = null;
+	for (const c of commands) {
+		const missing = missingTargetPackage(c.command, service);
+		if (missing) {
+			c.command = withTargetPackage(c.command, missing);
+			added = missing;
+		}
+	}
+	if (!added) {
+		return null;
+	}
+	try {
+		fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
+	} catch {
+		return null; // the caller must not claim a repair that never landed
+	}
+	return added;
 }
 
 /**

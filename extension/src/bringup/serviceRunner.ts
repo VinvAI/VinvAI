@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
 import { spawn, type ChildProcess } from 'child_process';
-import { readServices, readStartCommands, type StartCommand } from './bringup';
+import {
+	readServices,
+	readStartCommands,
+	repairRecordedTargetPackages,
+	serviceSlug,
+	type StartCommand,
+} from './bringup';
 import { missingTargetPackage } from './targetPackages';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
 
@@ -336,19 +342,21 @@ function warnOnStaleTargetPackage(
 		return;
 	}
 	staleTargetWarned.add(service);
-	void vscode.window
-		.showWarningMessage(
-			`Vinv: ${service} will be traced without its own package '${missing}' — its recorded ` +
-				'start command instruments something else, so its handlers produce no spans and ' +
-				'every endpoint will report 0% coverage. Re-running setup re-records the command.',
-			'Re-run Setup',
-			'Run Anyway',
-		)
-		.then((choice) => {
-			if (choice === 'Re-run Setup') {
-				void vscode.commands.executeCommand('vinv-vs.serviceSetup', service);
-			}
-		});
+	// Repaired, not merely reported. This run is the one the user asked for, and
+	// starting it under the wrong target package wastes it — the capture would
+	// hold inbound spans and no application frames, which every surface
+	// downstream reads as 0% coverage on a healthy service.
+	const added = repairRecordedTargetPackages(workspaceRoot, entry);
+	void vscode.window.showWarningMessage(
+		added
+			? `Vinv: ${service}'s recorded start command left out its own package '${added}' — its ` +
+					'handlers would have produced no spans. Corrected before starting, so this run ' +
+					'traces its own code.'
+			: `Vinv: ${service} is about to be traced without its own package '${missing}', so its ` +
+					'handlers will produce no spans. The recorded command could not be corrected ' +
+					`automatically — add '--target-package ${missing}' to ` +
+					`.vinv/start_commands/${serviceSlug(service)}.json.`,
+	);
 }
 
 export function startService(workspaceRoot: string, service: string): boolean {

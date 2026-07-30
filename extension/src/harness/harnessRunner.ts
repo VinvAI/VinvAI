@@ -13,6 +13,7 @@ import {
 	auditOwnCodeTracing,
 	isServicesListed,
 	markUntracedBringup,
+	repairRecordedTargetPackages,
 	serviceSlug,
 	type ServiceEntry,
 } from '../bringup/bringup';
@@ -1730,6 +1731,19 @@ export function runBringupStartViaHarness(
 		// (auto-setup, the Set up command, Auto-Pilot) are covered.
 		if (!ok) {
 			return ok;
+		}
+		// Repair the record BEFORE judging the capture. The agent is told to use
+		// the computed --module values verbatim and does not always; when it drops
+		// the entrypoint's package the recorded command is wrong in a way that
+		// re-running bring-up will not reliably fix, so correct it here and say so
+		// rather than reporting a failure the user cannot act on.
+		const repaired = repairRecordedTargetPackages(workspaceRoot, service);
+		if (repaired) {
+			void vscode.window.showWarningMessage(
+				`Vinv: ${service.name}'s recorded start command left out its own package ` +
+					`'${repaired}', so its handlers would produce no spans. The command has been ` +
+					'corrected — run the service again to capture its own code.',
+			);
 		}
 		const verdict = auditOwnCodeTracing(workspaceRoot, service);
 		if (verdict.state !== 'absent') {

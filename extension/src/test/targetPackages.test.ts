@@ -22,8 +22,14 @@ import {
 	rootPackage,
 	serviceForEndpointFile,
 	targetPackagesFor,
+	withTargetPackage,
 } from '../bringup/targetPackages';
-import { auditOwnCodeTracing, markUntracedBringup, readBringupOutcome } from '../bringup/bringup';
+import {
+	auditOwnCodeTracing,
+	markUntracedBringup,
+	readBringupOutcome,
+	repairRecordedTargetPackages,
+} from '../bringup/bringup';
 import { probesAreActionable } from '../views/nextStep';
 
 suite('targetPackages: reading the entrypoint out of a start command', () => {
@@ -241,6 +247,71 @@ suite('targetPackages: a recorded command that instruments the wrong package', (
 			recordedTargetPackages('tracelens run -t a --target-package b -t c -o x.jsonl -- py m.py'),
 			['a', 'b', 'c'],
 		);
+	});
+});
+
+// The extension computes the right --module values and the bring-up prompt says
+// to use them verbatim. An agent dropped one on three of four services in a real
+// workspace, and the resulting record starts the service green while tracing none
+// of its own code — forever, because the record is replayed exactly as written.
+// A derived value must not depend on a model repeating it.
+suite('targetPackages: repairing a recorded command in place', () => {
+	const service = {
+		name: 'api',
+		command: 'python -m uvicorn examples.async_agent.main:app --host 0.0.0.0 --port 8000',
+		modules: ['smolagents'],
+	};
+	const recorded =
+		'PATH="/c/p/.venv/Scripts:$PATH" /c/p/.venv/Scripts/tracelens run ' +
+		'--target-package smolagents --output C:/p/.vinv/captures/x/trace.jsonl --sample-rate 1.0 ' +
+		'-- /c/p/.venv/Scripts/python.exe -m uvicorn examples.async_agent.main:app --port 8000';
+
+	test('the flag lands on tracelens, never past the `--` separator', () => {
+		const fixed = withTargetPackage(recorded, 'examples');
+		const sep = fixed.indexOf(' -- ');
+		assert.ok(
+			fixed.indexOf('--target-package examples') < sep,
+			`the added flag must precede the child command:\n${fixed}`,
+		);
+		// Additive: the original target survives.
+		assert.ok(fixed.includes('--target-package smolagents'));
+		assert.strictEqual(missingTargetPackage(fixed, service), null, 'and the gap is closed');
+	});
+
+	test('a command with no target flags is left alone', () => {
+		const plain = 'python -m uvicorn examples.async_agent.main:app';
+		assert.strictEqual(withTargetPackage(plain, 'examples'), plain);
+	});
+
+	test('the record on disk is rewritten, and the repair is idempotent', () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-repair-'));
+		const file = path.join(root, '.vinv', 'start_commands', 'api.json');
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(
+			file,
+			JSON.stringify({ service: 'api', verified: true, commands: [{ command: recorded }] }),
+			'utf8',
+		);
+
+		assert.strictEqual(repairRecordedTargetPackages(root, service), 'examples');
+		const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+		assert.ok(after.commands[0].command.includes('--target-package examples'));
+		// Untouched fields survive the rewrite — this file drives the Run button.
+		assert.strictEqual(after.verified, true);
+		assert.strictEqual(after.service, 'api');
+
+		// Second pass has nothing to do, and must not stack duplicate flags.
+		assert.strictEqual(repairRecordedTargetPackages(root, service), null);
+		const twice = JSON.parse(fs.readFileSync(file, 'utf8'));
+		assert.strictEqual(
+			(twice.commands[0].command.match(/--target-package examples/g) ?? []).length,
+			1,
+		);
+	});
+
+	test('a missing record is not a crash', () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-repair-none-'));
+		assert.strictEqual(repairRecordedTargetPackages(root, service), null);
 	});
 });
 
