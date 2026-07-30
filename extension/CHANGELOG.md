@@ -529,7 +529,7 @@ here, with ~290 new tests weighted toward proving what must *not* be flagged.
 ### Changed
 
 - **Relicensed to the Apache License 2.0.** Vinv is now open source under Apache
-  2.0 (previously the Elastic License 2.0).
+  2.0.
 
 ## [0.0.6] — 2026-07-23
 
