@@ -33,11 +33,11 @@ function stage(model: FlowModel, id: string) {
 }
 
 suite('flowModel: rail stages', () => {
-	test('the rail is always the same five stages in flow order', () => {
+	test('the rail is always the same four stages in flow order', () => {
 		const model = computeFlowModel(facts());
 		assert.deepStrictEqual(
 			model.stages.map((s) => s.id),
-			['discover', 'services', 'traces', 'insights', 'verify'],
+			['discover', 'services', 'test', 'findings'],
 		);
 	});
 
@@ -116,56 +116,44 @@ suite('flowModel: rail stages', () => {
 		assert.deepStrictEqual(f.links[0].args, ['api']);
 	});
 
-	test('traces stage: live while something runs, done once captured', () => {
-		const live = computeFlowModel(
+	test('test stage offers the trigger once a service can be driven', () => {
+		const idle = computeFlowModel(facts({ discovered: true }));
+		const t0 = stage(idle, 'test');
+		assert.strictEqual(t0.status, 'waiting');
+		assert.ok(!t0.links.some((l) => l.command === 'vinv-vs.runExercise'));
+
+		const ready = computeFlowModel(
 			facts({ discovered: true, services: [{ name: 'api', state: 'running' }] }),
 		);
-		assert.strictEqual(stage(live, 'traces').status, 'running');
+		const t1 = stage(ready, 'test');
+		assert.strictEqual(t1.links[0].command, 'vinv-vs.runExercise');
+		assert.strictEqual(t1.links[0].label, 'Test it');
+	});
 
-		const captured = computeFlowModel(facts({ discovered: true, sessionCount: 2 }));
-		const t = stage(captured, 'traces');
+	test('test stage reports coverage and offers a re-run once a pass has landed', () => {
+		const model = computeFlowModel(
+			facts({
+				discovered: true,
+				services: [{ name: 'api', state: 'running' }],
+				exercise: {
+					phase: 'done',
+					label: '',
+					endpointsCovered: 9,
+					total: 9,
+					invariants: 4,
+					issues: 0,
+					scorecardPath: '/w/.vinv/exercise/scorecard.json',
+				},
+			}),
+		);
+		const t = stage(model, 'test');
 		assert.strictEqual(t.status, 'done');
-		assert.ok(t.summary.includes('2'));
-		assert.ok(t.links.some((l) => l.command === 'vinv.sessions.focus'));
+		assert.ok(t.summary.includes('9/9 endpoints exercised'));
+		assert.strictEqual(t.links[0].label, 'Test again');
+		assert.ok(t.links.some((l) => l.openPath === '/w/.vinv/exercise/scorecard.json'));
 	});
 
-	test('busiest traced endpoints open their call tree directly', () => {
-		const model = computeFlowModel(
-			facts({
-				discovered: true,
-				sessionCount: 1,
-				tracedEndpoints: [
-					{ apiId: 'get-health', label: 'GET /health', traceCount: 9 },
-					{ apiId: 'never-hit', label: 'GET /unused', traceCount: 0 },
-				],
-			}),
-		);
-		const links = stage(model, 'traces').links;
-		const ep = links.find((l) => l.label === 'GET /health');
-		assert.strictEqual(ep?.command, 'vinv-vs.openCallTree');
-		assert.deepStrictEqual(ep?.args, [{ apiId: 'get-health', label: 'GET /health' }]);
-		assert.ok(!links.some((l) => l.label === 'GET /unused'), 'never-hit endpoints stay out');
-	});
-
-	test('insights stage lists every report with a plain-language label', () => {
-		const model = computeFlowModel(
-			facts({
-				discovered: true,
-				sessionCount: 1,
-				reports: [
-					{ kind: 'calltree', label: 'GET /health', path: '/w/.vinv/reports/calltree-a.json' },
-					{ kind: 'smoke', label: 'GET /health', path: '/w/.vinv/reports/smoke-a.html' },
-				],
-			}),
-		);
-		const i = stage(model, 'insights');
-		assert.strictEqual(i.status, 'done');
-		assert.strictEqual(i.links[0].label, 'Where time went — GET /health');
-		assert.strictEqual(i.links[1].label, 'Health report — GET /health');
-		assert.strictEqual(i.links[1].openPath, '/w/.vinv/reports/smoke-a.html');
-	});
-
-	test('verify stage prefers probe results, else derives from issues', () => {
+	test('test stage falls back to probe results when no exercise has run', () => {
 		const probes = computeFlowModel(
 			facts({
 				discovered: true,
@@ -176,26 +164,48 @@ suite('flowModel: rail stages', () => {
 				],
 			}),
 		);
-		const v = stage(probes, 'verify');
-		assert.strictEqual(v.status, 'error');
-		assert.strictEqual(v.summary, '1/2 checks passing');
+		const t = stage(probes, 'test');
+		assert.strictEqual(t.status, 'error');
+		assert.strictEqual(t.summary, '1/2 checks passing');
+	});
 
-		const clean = computeFlowModel(facts({ discovered: true, sessionCount: 1 }));
-		assert.strictEqual(stage(clean, 'verify').status, 'done');
-
-		const broken = computeFlowModel(
+	test('findings stage groups by service and opens the view filtered', () => {
+		const model = computeFlowModel(
 			facts({
 				discovered: true,
 				sessionCount: 1,
-				issues: [{ id: 'runtime:a', title: 'load_cart is failing in live runs' }],
+				issues: [
+					{ id: 'a', title: 'load_cart is failing', service: 'api' },
+					{ id: 'b', title: 'timeout in checkout', service: 'api' },
+					{ id: 'c', title: 'orphan capture' },
+				],
 			}),
 		);
-		assert.strictEqual(stage(broken, 'verify').status, 'error');
+		const f = stage(model, 'findings');
+		assert.strictEqual(f.status, 'error');
+		assert.ok(f.summary.includes('3 findings'));
+		const api = f.links.find((l) => l.label === 'api');
+		assert.strictEqual(api?.command, 'vinv-vs.openFindings');
+		assert.deepStrictEqual(api?.args, [{ service: 'api' }]);
+		assert.ok(api?.detail?.includes('2 findings'));
+		// An unattributed finding must not filter on the empty string.
+		const loose = f.links.find((l) => l.label === 'Workspace');
+		assert.deepStrictEqual(loose?.args, [{ service: undefined }]);
+	});
+
+	test('findings stage is clean once something ran without problems', () => {
+		const clean = computeFlowModel(facts({ discovered: true, sessionCount: 1 }));
+		const f = stage(clean, 'findings');
+		assert.strictEqual(f.status, 'done');
+		assert.strictEqual(f.links[0].command, 'vinv-vs.openFindings');
 	});
 });
 
 suite('flowModel: pipeline hub overlays', () => {
-	test('a running insight build pulses the Insights stage with its label', () => {
+	// Insights lost its stage — pipelineRunners rebuilds reports in the
+	// background whenever new spans land, so it is not a step anyone waits on
+	// and it must not claim the rail's pulsing slot.
+	test('an insight build does not claim a rail stage', () => {
 		const model = computeFlowModel(
 			facts({
 				discovered: true,
@@ -203,42 +213,14 @@ suite('flowModel: pipeline hub overlays', () => {
 				insight: { phase: 'running', label: 'building call tree for GET /orders (2/5)…' },
 			}),
 		);
-		const i = stage(model, 'insights');
-		assert.strictEqual(i.status, 'running');
-		assert.strictEqual(i.summary, 'building call tree for GET /orders (2/5)…');
-	});
-
-	test('a failed insight build is an error with the failure detail', () => {
-		const model = computeFlowModel(
-			facts({
-				discovered: true,
-				sessionCount: 1,
-				insight: { phase: 'failed', label: '', error: 'identification binary missing' },
-			}),
+		assert.deepStrictEqual(
+			model.stages.map((s) => s.id),
+			['discover', 'services', 'test', 'findings'],
 		);
-		const i = stage(model, 'insights');
-		assert.strictEqual(i.status, 'error');
-		assert.strictEqual(i.summary, 'identification binary missing');
+		assert.ok(!model.stages.some((s) => s.summary.includes('building call tree')));
 	});
 
-	test('stale reports say the code changed and stop claiming freshness', () => {
-		const model = computeFlowModel(
-			facts({
-				discovered: true,
-				sessionCount: 1,
-				reports: [
-					{ kind: 'calltree', label: 'GET /a', path: '/w/a.json', stale: true },
-					{ kind: 'calltree', label: 'GET /b', path: '/w/b.json' },
-				],
-			}),
-		);
-		const links = stage(model, 'insights').links;
-		assert.ok(links[0].detail?.includes('code changed since'));
-		assert.strictEqual(links[0].state, 'muted');
-		assert.strictEqual(links[1].state, 'ok');
-	});
-
-	test('a running probe pass pulses Verify with its label', () => {
+	test('a running probe pass pulses Test with its label', () => {
 		const model = computeFlowModel(
 			facts({
 				discovered: true,
@@ -246,16 +228,17 @@ suite('flowModel: pipeline hub overlays', () => {
 				probe: { phase: 'running', label: 'probing api (3/9)…' },
 			}),
 		);
-		const v = stage(model, 'verify');
-		assert.strictEqual(v.status, 'running');
-		assert.strictEqual(v.summary, 'probing api (3/9)…');
+		const t = stage(model, 'test');
+		assert.strictEqual(t.status, 'running');
+		assert.strictEqual(t.summary, 'probing api (3/9)…');
 	});
 
 	test('the coarse pipeline phase maps onto rail stages', () => {
 		assert.strictEqual(pipelineStage('discovering'), 'discover');
 		assert.strictEqual(pipelineStage('services'), 'services');
-		assert.strictEqual(pipelineStage('insights'), 'insights');
-		assert.strictEqual(pipelineStage('probes'), 'verify');
+		assert.strictEqual(pipelineStage('insights'), undefined);
+		assert.strictEqual(pipelineStage('probes'), 'test');
+		assert.strictEqual(pipelineStage('exercise'), 'test');
 		assert.strictEqual(pipelineStage('idle'), undefined);
 		assert.strictEqual(pipelineStage('done'), undefined);
 		assert.strictEqual(pipelineStage(undefined), undefined);
@@ -267,11 +250,11 @@ suite('flowModel: pipeline hub overlays', () => {
 				discovered: true,
 				sessionCount: 1,
 				autoPilot: { running: true, label: 'Setting up api (attempt 1/2)…' },
-				pipelinePhase: 'insights',
+				pipelinePhase: 'exercise',
 			}),
 		);
-		assert.strictEqual(stage(model, 'insights').status, 'running');
-		assert.ok(stage(model, 'insights').activity?.includes('Auto-Pilot'));
+		assert.strictEqual(stage(model, 'test').status, 'running');
+		assert.ok(stage(model, 'test').activity?.includes('Auto-Pilot'));
 		assert.notStrictEqual(stage(model, 'services').status, 'running');
 	});
 });
@@ -280,9 +263,9 @@ suite('flowModel: Auto-Pilot spine', () => {
 	test('live labels map onto rail stages', () => {
 		assert.strictEqual(autoPilotStage('Discovering the project…'), 'discover');
 		assert.strictEqual(autoPilotStage('Setting up api (attempt 1/2)…'), 'services');
-		assert.strictEqual(autoPilotStage('Starting api under tracing…'), 'traces');
-		assert.strictEqual(autoPilotStage('Verifying api serves (replaying its start command)…'), 'verify');
-		assert.strictEqual(autoPilotStage('Dispatching a fix episode for api…'), 'verify');
+		assert.strictEqual(autoPilotStage('Starting api under tracing…'), 'services');
+		assert.strictEqual(autoPilotStage('Verifying api serves (replaying its start command)…'), 'test');
+		assert.strictEqual(autoPilotStage('Dispatching a fix episode for api…'), 'findings');
 		assert.strictEqual(autoPilotStage(''), undefined);
 	});
 
@@ -356,7 +339,7 @@ suite('flowModel: issues + agent mirror', () => {
 			next_action: { command: string } | null;
 		};
 		assert.strictEqual(json.updated_at, '2026-07-23T00:00:00Z');
-		assert.strictEqual(json.stages.length, 5);
+		assert.strictEqual(json.stages.length, 4);
 		assert.strictEqual(json.stages[0].id, 'discover');
 		assert.ok(json.stages[0].items.some((i) => i.path === '/w/.vinv/vinv.md'));
 		assert.strictEqual(json.issues[0].evidence, '/w/a.py:3');

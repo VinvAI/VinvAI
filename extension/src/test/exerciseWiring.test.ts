@@ -207,20 +207,23 @@ suite('exercise facts render into the Verify stage', () => {
 				},
 			}),
 		);
-		const verify = model.stages.find((s) => s.id === 'verify');
-		assert.ok(verify);
-		const row = verify.links.find((l) => l.label.includes('Behavior coverage'));
-		assert.ok(row, 'a behavior-coverage row should be present');
-		assert.ok(row.label.includes('14/23 endpoints'));
-		assert.ok(row.label.includes('41 invariants'));
-		assert.strictEqual(row.state, 'error'); // issues > 0
+		// Coverage is the Test stage's SUMMARY now, not a link row: the rail line
+		// is what the user reads at a glance, and the links below it are things
+		// to click (run it again, open the scorecard).
+		const test = model.stages.find((s) => s.id === 'test');
+		assert.ok(test);
+		assert.ok(test.summary.includes('14/23 endpoints exercised'));
+		assert.ok(test.summary.includes('41 invariants'));
+		assert.ok(test.summary.includes('3 behavioral issues'));
+		assert.strictEqual(test.status, 'error'); // issues > 0
 	});
 
-	test('no exercise facts → no behavior row (unchanged rail)', () => {
+	test('no exercise facts → Test stage reports nothing driven yet', () => {
 		const model = computeFlowModel(facts());
-		const verify = model.stages.find((s) => s.id === 'verify');
-		assert.ok(verify);
-		assert.ok(!verify.links.some((l) => l.label.includes('Behavior coverage')));
+		const test = model.stages.find((s) => s.id === 'test');
+		assert.ok(test);
+		assert.ok(!test.summary.includes('exercised'));
+		assert.strictEqual(test.status, 'waiting');
 	});
 });
 

@@ -470,6 +470,18 @@
 				"title": "Export Diagnostics (for Support)",
 				"category": "Vinv",
 				"icon": "$(report)"
+			},
+			{
+				"command": "vinv-vs.runExercise",
+				"title": "Test Every Endpoint (Behavioral Exercise)",
+				"category": "Vinv",
+				"icon": "$(beaker)"
+			},
+			{
+				"command": "vinv-vs.openTraces",
+				"title": "View Traces (all traced endpoints)",
+				"category": "Vinv",
+				"icon": "$(pulse)"
 			}
 		],
 		"keybindings": [
@@ -516,6 +528,11 @@
 				},
 				{
 					"command": "vinv-vs.openFindings",
+					"when": "view == vinv.flow",
+					"group": "navigation@2"
+				},
+				{
+					"command": "vinv-vs.openTraces",
 					"when": "view == vinv.flow",
 					"group": "navigation@2"
 				},

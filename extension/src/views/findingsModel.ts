@@ -20,6 +20,53 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { evidenceFileForKind, isDispatchableKind } from '../harness/issueKinds';
+import { serviceForEndpointFile } from '../bringup/targetPackages';
+
+/**
+ * Resolves `METHOD /path` → owning service, for every endpoint the workspace
+ * knows about.
+ *
+ * Findings are produced per-endpoint by the exerciser, which has no concept of
+ * a service — so the attribution is reconstructed here from two artifacts that
+ * do: `.vinv/identification/apis.json` maps an endpoint to the FILE its handler
+ * lives in, and `.vinv/services.json` maps a file back to the service whose
+ * entrypoint module contains it (serviceForEndpointFile, shared with the
+ * capture-directory join so both agree).
+ *
+ * Keyed on BOTH the trigger and the endpoint id, because issues.json spells the
+ * endpoint as `METHOD /path` while the scorecard and profile sometimes carry
+ * the id form (`GET_homepage`). An endpoint whose file resolves to no service —
+ * or to more than one, which serviceForEndpointFile reports as null rather than
+ * guessing — is simply absent, and its findings stay unattributed instead of
+ * being filed under a service that may not own them.
+ */
+export function buildServiceIndex(workspaceRoot: string): Map<string, string> {
+	const index = new Map<string, string>();
+	const apis = readJson(path.join(workspaceRoot, '.vinv', 'identification', 'apis.json'));
+	const services = readJson(path.join(workspaceRoot, '.vinv', 'services.json'));
+	const list: Array<{ name: string; command?: string }> = Array.isArray(services)
+		? services
+		: (services?.services ?? []);
+	if (!apis || list.length === 0) {
+		return index;
+	}
+	for (const e of apis.entrypoints ?? []) {
+		const file = typeof e?.file === 'string' ? e.file : '';
+		if (!file) {
+			continue;
+		}
+		const owner = serviceForEndpointFile(list, file);
+		if (!owner) {
+			continue;
+		}
+		for (const key of [e.trigger, e.id]) {
+			if (typeof key === 'string' && key) {
+				index.set(key, owner);
+			}
+		}
+	}
+	return index;
+}
 
 export interface FindingsEpisodeAttempt {
 	approach: string;
@@ -55,6 +102,13 @@ export interface FindingsIssue {
 	signature: string;
 	/** `METHOD /path` for an HTTP cluster; `ORACLE target` for the others. */
 	endpoint: string;
+	/**
+	 * The service that owns this endpoint, when it can be established from
+	 * apis.json + services.json (see buildServiceIndex). Absent when the
+	 * endpoint maps to no service or to several — the filter treats that as
+	 * "unattributed" rather than pretending to know.
+	 */
+	service?: string;
 	/** How many failing cases collapsed into this cluster. */
 	count: number;
 	/** Whether a fix episode can be dispatched for it (diagnostics cannot). */
@@ -91,9 +145,17 @@ export interface Findings {
 		stateCreated: number;
 		stateCleaned: number;
 	};
+	/** Every service owning at least one finding, sorted — drives the filter. */
+	services: string[];
 	issues: FindingsIssue[];
 	episodes: FindingsEpisode[];
-	opportunities: Array<{ kind: string; endpoint: string; detail: string; value: number }>;
+	opportunities: Array<{
+		kind: string;
+		endpoint: string;
+		service?: string;
+		detail: string;
+		value: number;
+	}>;
 	regress: {
 		latest: {
 			at: number;
@@ -109,6 +171,7 @@ export interface Findings {
 	};
 	endpoints: Array<{
 		endpoint: string;
+		service?: string;
 		p50Ms: number;
 		p95Ms: number;
 		coverage: string;
@@ -181,14 +244,16 @@ function renderInput(input: any): string {
 	return JSON.stringify(input);
 }
 
-function toFindingsIssue(c: any): FindingsIssue {
+function toFindingsIssue(c: any, services: Map<string, string>): FindingsIssue {
 	const ex = c.exemplar ?? null;
 	const where = `${c.method ?? ''} ${c.path ?? ''}`.trim();
+	const endpoint = where || String(c.endpoint_id ?? '');
 	return {
 		kind: String(c.kind ?? ''),
 		title: String(c.title ?? ''),
 		signature: String(c.signature ?? ''),
-		endpoint: where || String(c.endpoint_id ?? ''),
+		endpoint,
+		service: services.get(endpoint) ?? services.get(String(c.endpoint_id ?? '')),
 		count: Number(c.count ?? 1),
 		dispatchable: isDispatchableKind(String(c.kind ?? '')),
 		evidenceFile: evidenceFileForKind(String(c.kind ?? '')),
@@ -211,10 +276,12 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const scorecard = readJson(path.join(ex, 'scorecard.json')) ?? {};
 	const issuesDoc = readJson(path.join(ex, 'issues.json')) ?? {};
 	const profile = readJson(path.join(ex, 'profile.json')) ?? {};
+	const serviceIndex = buildServiceIndex(workspaceRoot);
 	const episodesRaw = readJsonl(path.join(ex, 'optimize.jsonl'));
 	const regressRaw = readJsonl(path.join(ex, 'regress.jsonl'));
 	const ledger = readJsonl(path.join(ex, 'state_ledger.jsonl'));
 	const clusters: any[] = Array.isArray(issuesDoc.clusters) ? issuesDoc.clusters : [];
+	const issues = clusters.map((c) => toFindingsIssue(c, serviceIndex));
 
 	const episodes: FindingsEpisode[] = episodesRaw.slice(-MAX_EPISODES).map((e: any) => ({
 		at: Number(e.at ?? 0),
@@ -292,17 +359,20 @@ export function buildFindings(workspaceRoot: string): Findings {
 			stateCreated: Number(pollution.created ?? 0),
 			stateCleaned: Number(pollution.cleaned ?? 0),
 		},
-		issues: clusters.map(toFindingsIssue),
+		issues,
+		services: [...new Set(issues.map((i) => i.service).filter((s): s is string => !!s))].sort(),
 		episodes,
 		opportunities: (profile.opportunities ?? []).map((o: any) => ({
 			kind: String(o.kind ?? ''),
 			endpoint: String(o.endpoint ?? ''),
+			service: serviceIndex.get(String(o.endpoint ?? '')),
 			detail: String(o.detail ?? ''),
 			value: Number(o.value ?? 0),
 		})),
 		regress,
 		endpoints: (scorecard.endpoints ?? []).map((e: any) => ({
 			endpoint: String(e.endpoint ?? ''),
+			service: serviceIndex.get(String(e.endpoint ?? '')),
 			p50Ms: Number(e.p50_ms ?? 0),
 			p95Ms: Number(e.p95_ms ?? 0),
 			coverage: String(e.coverage ?? ''),

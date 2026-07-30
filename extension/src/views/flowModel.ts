@@ -104,7 +104,15 @@ export interface FlowFacts {
 
 // ---- outputs ---------------------------------------------------------------
 
-export type FlowStageId = 'discover' | 'services' | 'traces' | 'insights' | 'verify';
+/**
+ * The rail is four stages: find the code, get it running, drive it, read what
+ * came back. Traces/Insights/Verify used to sit between the last two and were
+ * cut — they reported machinery (captures recorded, reports built, probes run)
+ * rather than anything the user decides on, and the one genuinely useful view
+ * among them (the per-endpoint trace list) now has its own panel behind the
+ * title-bar "View Traces" button instead of a rail stage nobody clicked.
+ */
+export type FlowStageId = 'discover' | 'services' | 'test' | 'findings';
 export type FlowStageStatus = 'done' | 'running' | 'waiting' | 'error';
 
 /** A clickable row inside a stage. Exactly one of `command`/`openPath` is set. */
@@ -174,12 +182,16 @@ export function pipelineStage(
 			return 'discover';
 		case 'services':
 			return 'services';
+		// Insights has no stage of its own any more: pipelineRunners rebuilds
+		// reports whenever new spans land, so it is background work, not a step
+		// anyone waits on. Leaving it unmapped means the rail keeps pulsing on
+		// whichever stage the user actually cares about.
 		case 'insights':
-			return 'insights';
+			return undefined;
 		case 'probes':
-			return 'verify';
+			return 'test';
 		case 'exercise':
-			return 'verify';
+			return 'test';
 		default:
 			return undefined;
 	}
@@ -201,17 +213,21 @@ export function autoPilotStage(label: string): FlowStageId | undefined {
 	if (l.includes('setting up') || l.includes('set up')) {
 		return 'services';
 	}
+	// Bring-up owns "starting under tracing": the capture is a side effect of
+	// getting the service up, not a step of its own.
 	if (l.includes('under tracing') || l.includes('starting') || l.includes('already running')) {
-		return 'traces';
+		return 'services';
+	}
+	if (l.includes('verifying') || l.includes('probing') || l.includes('exercising')) {
+		return 'test';
 	}
 	if (
-		l.includes('verifying') ||
 		l.includes('fix episode') ||
 		l.includes('dispatch') ||
 		l.includes('giving up') ||
 		l.includes('green')
 	) {
-		return 'verify';
+		return 'findings';
 	}
 	return undefined;
 }
@@ -367,179 +383,152 @@ function servicesStage(f: FlowFacts): FlowStage {
 	};
 }
 
-function tracesStage(f: FlowFacts): FlowStage {
-	const live = f.services.some((s) => s.state === 'running');
-	let status: FlowStageStatus;
-	let summary: string;
-	if (live) {
-		status = 'running';
-		summary = 'Recording live — every call, timing, and error';
-	} else if (f.sessionCount > 0) {
-		status = 'done';
-		summary = `${f.sessionCount} traced run${f.sessionCount === 1 ? '' : 's'} captured`;
-	} else {
-		status = 'waiting';
-		summary = 'Waiting for the first traced run';
-	}
-	const links: FlowLink[] = [];
-	if (f.sessionCount > 0 || live) {
-		links.push({
-			label: 'What actually ran',
-			detail: 'Every entry point that was hit, busiest first',
-			command: 'vinv.sessions.focus',
-			state: 'ok',
-		});
-	}
-	const busiest = [...f.tracedEndpoints]
-		.filter((e) => e.traceCount > 0)
-		.sort((a, b) => b.traceCount - a.traceCount)
-		.slice(0, 3);
-	for (const e of busiest) {
-		links.push({
-			label: e.label,
-			detail: `${e.traceCount} traced request${e.traceCount === 1 ? '' : 's'}`,
-			command: 'vinv-vs.openCallTree',
-			args: [{ apiId: e.apiId, label: e.label }],
-			state: 'ok',
-		});
-	}
-	return {
-		id: 'traces',
-		title: 'Traces',
-		blurb: 'What actually ran, recorded call by call',
-		status,
-		summary,
-		links,
-	};
-}
-
-function insightsStage(f: FlowFacts): FlowStage {
-	const links: FlowLink[] = f.reports.map((r) => ({
-		label: r.kind === 'smoke' ? `Health report — ${r.label}` : `Where time went — ${r.label}`,
-		detail:
-			(r.kind === 'smoke'
-				? 'Pass/fail, slow spots, and errors for this endpoint'
-				: 'Call tree and flamegraph for this endpoint') +
-			(r.stale ? ' · code changed since this was built' : ''),
-		openPath: r.path,
-		state: r.stale ? 'muted' : 'ok',
-	}));
-	let status: FlowStageStatus;
-	let summary: string;
-	if (f.insight?.phase === 'running') {
-		status = 'running';
-		summary = f.insight.label || 'Building call trees and reports…';
-	} else if (f.insight?.phase === 'failed') {
-		status = 'error';
-		summary = f.insight.error || 'Report building failed';
-	} else if (f.reports.length > 0) {
-		status = 'done';
-		summary = `${f.reports.length} report${f.reports.length === 1 ? '' : 's'} ready`;
-	} else if (f.sessionCount > 0) {
-		status = 'waiting';
-		summary = 'Reports build on their own after a traced run';
-	} else {
-		status = 'waiting';
-		summary = 'Reports appear once something has run';
-	}
-	if (f.diffImpact && f.diffImpact.changedSymbols > 0) {
-		links.push({
-			label: 'What your latest changes touch',
-			detail: `${f.diffImpact.changedSymbols} changed, ${f.diffImpact.impactedSymbols} affected — shown on the code map`,
-			command: 'vinv-vs.openGraphExplorer',
-			state: 'ok',
-		});
-	}
-	return {
-		id: 'insights',
-		title: 'Insights',
-		blurb: 'Call trees, flamegraphs, and health reports',
-		status,
-		summary,
-		links: capLinks(links, 8),
-	};
-}
-
-/** The behavioral-coverage summary row + scorecard link for the Verify stage. */
-function exerciseLinks(f: FlowFacts): FlowLink[] {
+/**
+ * The Test stage: Vinv drives every discovered endpoint itself (the exercise
+ * pass) and reports what came back. Triggerable — unlike the old Verify stage,
+ * which only ever reflected whatever Auto-Pilot had already decided to run,
+ * this one hands the user the button.
+ */
+function testStage(f: FlowFacts): FlowStage {
 	const ex = f.exercise;
-	if (!ex || (ex.total === 0 && ex.phase === 'idle')) {
-		return [];
-	}
-	const parts = [`Behavior coverage ${ex.endpointsCovered}/${ex.total} endpoints`];
-	if (ex.invariants > 0) {
-		parts.push(`${ex.invariants} invariants`);
-	}
-	if (ex.issues > 0) {
-		parts.push(`${ex.issues} behavioral issue${ex.issues === 1 ? '' : 's'}`);
-	}
-	const links: FlowLink[] = [
-		{
-			label: parts.join(' · '),
-			detail:
-				ex.phase === 'running'
-					? ex.label || 'exercising every discovered endpoint…'
-					: 'Vinv drove every discovered endpoint itself, not just observed traffic',
-			openPath: ex.scorecardPath,
-			state: ex.phase === 'running' ? 'running' : ex.issues > 0 ? 'error' : 'ok',
-		},
-	];
-	return links;
-}
+	const runnable = f.services.some((s) => s.state === 'running' || s.state === 'ready');
+	const running = ex?.phase === 'running' || f.probe?.phase === 'running';
+	const links: FlowLink[] = [];
 
-function verifyStage(f: FlowFacts): FlowStage {
-	const links: FlowLink[] = exerciseLinks(f);
+	// The trigger is the first row, and it is present whenever there is
+	// something to drive — including after a finished pass, because re-running
+	// after a fix is the common case.
+	if (runnable) {
+		links.push({
+			label: running ? 'Testing…' : ex && ex.total > 0 ? 'Test again' : 'Test it',
+			detail: 'Drives every discovered endpoint, not just what traffic happened to hit',
+			command: 'vinv-vs.runExercise',
+			state: running ? 'running' : 'ok',
+		});
+	}
+
 	let status: FlowStageStatus;
 	let summary: string;
-	if (f.probe?.phase === 'running') {
+	if (ex?.phase === 'running') {
+		status = 'running';
+		summary = ex.label || 'Driving every discovered endpoint…';
+	} else if (f.probe?.phase === 'running') {
 		status = 'running';
 		summary = f.probe.label || 'Checking the live endpoints…';
-		for (const p of f.probes) {
-			links.push({
-				label: p.label,
-				detail: p.detail ?? (p.passed ? 'passing' : 'failing'),
-				state: p.passed ? 'ok' : 'error',
-			});
+	} else if (ex && ex.total > 0) {
+		status = ex.issues > 0 ? 'error' : 'done';
+		const parts = [`${ex.endpointsCovered}/${ex.total} endpoints exercised`];
+		if (ex.invariants > 0) {
+			parts.push(`${ex.invariants} invariant${ex.invariants === 1 ? '' : 's'}`);
 		}
+		if (ex.issues > 0) {
+			parts.push(`${ex.issues} behavioral issue${ex.issues === 1 ? '' : 's'}`);
+		}
+		summary = parts.join(' · ');
 	} else if (f.probes.length > 0) {
 		const passed = f.probes.filter((p) => p.passed).length;
-		status = passed === f.probes.length && f.issues.length === 0 ? 'done' : 'error';
+		status = passed === f.probes.length ? 'done' : 'error';
 		summary = `${passed}/${f.probes.length} checks passing`;
-		for (const p of f.probes) {
-			links.push({
-				label: p.label,
-				detail: p.detail ?? (p.passed ? 'passing' : 'failing'),
-				state: p.passed ? 'ok' : 'error',
-			});
-		}
-	} else if (f.issues.length > 0) {
-		status = 'error';
-		summary = `${f.issues.length} problem${f.issues.length === 1 ? '' : 's'} found in live runs`;
-	} else if (f.sessionCount > 0) {
-		status = 'done';
-		summary = 'No failures seen in what ran';
+	} else if (runnable) {
+		status = 'waiting';
+		summary = 'Ready to test — nothing has been driven yet';
 	} else {
 		status = 'waiting';
-		summary = 'Checks run once something has been traced';
+		summary = 'Set a service up first, then test it';
+	}
+
+	if (ex?.scorecardPath) {
+		links.push({
+			label: 'Behavior scorecard',
+			detail: 'Per-endpoint coverage, invariants, and what came back',
+			openPath: ex.scorecardPath,
+			state: ex.issues > 0 ? 'error' : 'ok',
+		});
+	}
+	for (const p of f.probes) {
+		links.push({
+			label: p.label,
+			detail: p.detail ?? (p.passed ? 'passing' : 'failing'),
+			state: p.passed ? 'ok' : 'error',
+		});
 	}
 	return {
-		id: 'verify',
-		title: 'Verify',
-		blurb: 'Does it actually work? Problems land here',
+		id: 'test',
+		title: 'Test',
+		blurb: 'Drive every endpoint and see what comes back',
 		status,
 		summary,
 		links: capLinks(links, 8),
 	};
 }
+
+/**
+ * The Findings stage: what Vinv found, grouped by the service it belongs to.
+ * Each row opens the Findings view already filtered to that service, so the
+ * rail answers "which service is unhappy" and the view answers "why".
+ */
+function findingsStage(f: FlowFacts): FlowStage {
+	const byService = new Map<string, number>();
+	for (const i of f.issues) {
+		const key = i.service ?? '';
+		byService.set(key, (byService.get(key) ?? 0) + 1);
+	}
+
+	let status: FlowStageStatus;
+	let summary: string;
+	if (f.issues.length > 0) {
+		status = 'error';
+		const svcCount = byService.size;
+		summary =
+			`${f.issues.length} finding${f.issues.length === 1 ? '' : 's'}` +
+			(svcCount > 1 ? ` across ${svcCount} services` : '');
+	} else if (f.exercise?.total || f.probes.length > 0 || f.sessionCount > 0) {
+		status = 'done';
+		summary = 'Nothing outstanding';
+	} else {
+		status = 'waiting';
+		summary = 'Findings appear once something has been tested';
+	}
+
+	const links: FlowLink[] = [];
+	for (const [service, n] of byService) {
+		links.push({
+			label: service || 'Workspace',
+			detail: `${n} finding${n === 1 ? '' : 's'}`,
+			command: 'vinv-vs.openFindings',
+			// An empty key means the finding is not attributable to one service;
+			// pass undefined so the view opens unfiltered rather than filtering
+			// on the empty string and showing nothing.
+			args: [{ service: service || undefined }],
+			state: 'error',
+		});
+	}
+	if (links.length === 0) {
+		links.push({
+			label: 'Open findings',
+			detail: 'Everything Vinv has found and fixed',
+			command: 'vinv-vs.openFindings',
+			state: 'ok',
+		});
+	}
+	return {
+		id: 'findings',
+		title: 'Findings',
+		blurb: 'What Vinv found, per service',
+		status,
+		summary,
+		links: capLinks(links, 8),
+	};
+}
+
 
 /** Computes the whole rail from observable facts. Pure. */
 export function computeFlowModel(f: FlowFacts): FlowModel {
 	const stages = [
 		discoverStage(f),
 		servicesStage(f),
-		tracesStage(f),
-		insightsStage(f),
-		verifyStage(f),
+		testStage(f),
+		findingsStage(f),
 	];
 
 	// Auto-Pilot's live step is the spine: its current stage pulses with the

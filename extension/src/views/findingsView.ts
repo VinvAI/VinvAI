@@ -52,7 +52,19 @@ function backingFile(workspaceRoot: string): string {
 	return path.join(workspaceRoot, '.vinv', 'reports', 'findings.json');
 }
 
-export async function openFindings(workspaceRoot: string): Promise<void> {
+/**
+ * The service the next resolveCustomEditor should open filtered to.
+ *
+ * Threaded through module state rather than the document URI: the custom editor
+ * is keyed on findings.json, so encoding the filter in the URI would either make
+ * VS Code treat each service as a different document (a tab per service) or be
+ * dropped entirely. The filter is a VIEW preference, not a different document,
+ * so it rides alongside and is consumed once.
+ */
+let pendingServiceFilter: string | undefined;
+
+export async function openFindings(workspaceRoot: string, service?: string): Promise<void> {
+	pendingServiceFilter = service;
 	const backing = backingFile(workspaceRoot);
 	try {
 		fs.mkdirSync(path.dirname(backing), { recursive: true });
@@ -105,13 +117,18 @@ function wireFindings(
 	webview.options = { enableScripts: true };
 	webview.html = getHtml();
 
+	// Consumed once: a later refresh of the same panel must not silently snap the
+	// user back to the service the rail happened to open it with.
+	const initialService = pendingServiceFilter;
+	pendingServiceFilter = undefined;
+
 	let disposed = false;
 	const push = async (): Promise<void> => {
 		const findings = buildFindings(workspaceRoot);
 		if (disposed) {
 			return;
 		}
-		void webview.postMessage({ type: 'findings', findings });
+		void webview.postMessage({ type: 'findings', findings, service: initialService });
 		try {
 			writeFindingsSummary(workspaceRoot, findings);
 		} catch {
@@ -235,6 +252,16 @@ function getHtml(): string {
 		.spark i { display: inline-block; width: 7px; background: var(--ink); }
 		.spark i.env { background: var(--muted-2); }
 		.empty { color: var(--muted); font-size: 11px; padding: 6px 0; }
+		.svcbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+		.svclabel { font-size: 9px; letter-spacing: .24em; text-transform: uppercase; color: var(--muted); margin-right: 2px; }
+		.svclabel::before { content: '// '; color: var(--accent-fg); }
+		.chip { font-family: inherit; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+			padding: 3px 9px; border: 1px solid var(--line-strong); background: transparent;
+			color: var(--muted); border-radius: 0; cursor: pointer; }
+		.chip:hover { border-color: var(--ink); color: var(--ink); }
+		.chip.on { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+		.chip .n { opacity: .65; margin-left: 3px; }
+		.svcnote { font-size: 10px; color: var(--muted-2); margin-left: 4px; cursor: help; }
 		.hint { color: var(--muted-2); font-size: 10.5px; margin-top: 6px; }
 		.grow { flex: 1; }
 		/* Evidence table inside a cluster: label column narrow, value wraps. */
@@ -258,6 +285,7 @@ function getHtml(): string {
 		<div class="meta">WHAT VINV FOUND · WHAT IT FIXED · THE EVIDENCE</div>
 		<div class="tiles" id="tiles"></div>
 	</header>
+	<div id="svcbar" class="svcbar" hidden></div>
 	<div id="content"><div class="empty">Assembling findings…</div></div>
 
 	<script>
@@ -306,6 +334,66 @@ function getHtml(): string {
 		if (a.ciLow == null || a.ciHigh == null) return '';
 		return '<span class="cin" title="Paired-bootstrap 95% confidence interval of the relative speedup over the frozen probe set; the claim only counts when the whole interval is above zero">' +
 			pct(a.rel ?? 0) + ' [' + pct(a.ciLow) + ', ' + pct(a.ciHigh) + ']</span>';
+	}
+
+	// The active service filter. '' = every service (including unattributed
+	// findings, which carry no service at all).
+	let SERVICE = '';
+	let RAW = null;
+
+	/**
+	 * Narrows a findings document to one service.
+	 *
+	 * Every per-endpoint collection is filtered, not just the issue list, so the
+	 * headline tiles, the latency table and the opportunity list all describe the
+	 * same subset the issues do. Collections with no service attribution
+	 * (episodes, regress history, the state ledger) are left whole rather than
+	 * dropped, because hiding them would read as "this service has none" when the
+	 * truth is "we cannot tell whose they are".
+	 */
+	function narrow(f, service) {
+		if (!service) return f;
+		const issues = f.issues.filter(i => i.service === service);
+		const endpoints = (f.endpoints || []).filter(e => e.service === service);
+		return Object.assign({}, f, {
+			issues,
+			endpoints,
+			opportunities: (f.opportunities || []).filter(o => o.service === service),
+			headline: Object.assign({}, f.headline, {
+				issuesFound: issues.length,
+				endpointsTotal: endpoints.length || f.headline.endpointsTotal,
+			}),
+		});
+	}
+
+	function svcbar(f) {
+		const bar = document.getElementById('svcbar');
+		const services = f.services || [];
+		if (services.length === 0) { bar.hidden = true; return; }
+		bar.hidden = false;
+		const unattributed = f.issues.some(i => !i.service);
+		const chip = (val, label, count) =>
+			'<button class="chip' + (SERVICE === val ? ' on' : '') + '" data-svc="' + esc(val) + '">' +
+			esc(label) + (count === null ? '' : ' <span class="n">' + count + '</span>') + '</button>';
+		let html = '<span class="svclabel">Service</span>' +
+			chip('', 'All', f.issues.length);
+		for (const s of services) {
+			html += chip(s, s, f.issues.filter(i => i.service === s).length);
+		}
+		if (unattributed) {
+			html += '<span class="svcnote" title="These findings could not be traced to a single service — their endpoint maps to none, or to more than one">' +
+				f.issues.filter(i => !i.service).length + ' unattributed</span>';
+		}
+		bar.innerHTML = html;
+		bar.querySelectorAll('.chip').forEach(b => b.addEventListener('click', () => {
+			SERVICE = b.getAttribute('data-svc');
+			draw();
+		}));
+	}
+
+	function draw() {
+		svcbar(RAW);
+		render(narrow(RAW, SERVICE));
 	}
 
 	function render(f) {
@@ -469,7 +557,15 @@ function getHtml(): string {
 	});
 
 	window.addEventListener('message', (event) => {
-		if (event.data.type === 'findings') render(event.data.findings);
+		if (event.data.type === 'findings') {
+			RAW = event.data.findings;
+			// An explicit filter only applies if that service actually has findings;
+			// otherwise the panel would open looking empty for no stated reason.
+			if (event.data.service && (RAW.services || []).includes(event.data.service)) {
+				SERVICE = event.data.service;
+			}
+			draw();
+		}
 	});
 	</script>
 </body>

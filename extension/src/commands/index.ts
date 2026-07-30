@@ -47,6 +47,8 @@ import { classifyIntent, criteriaFor } from '../harness/taskIntent';
 import { registerPipelineRunners } from '../harness/pipelineRunners';
 import { runInsightPass } from '../harness/insightRunner';
 import { runProbePass } from '../harness/probeRunner';
+import { runExercisePass } from '../harness/exerciseRunner';
+import { registerTracesPanel } from '../views/tracesPanel';
 import { writeEnhanceRecord, stateFromRecord } from '../index/enhanceRunner';
 import { publishEnhanceState } from '../harness/pipelineState';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
@@ -118,6 +120,33 @@ export function registerCommands(
 					: `Vinv: Probe pass ${result.outcome}${result.error ? ` — ${result.error}` : ''}.`,
 			);
 		}),
+		// The Flow rail's Test stage. Auto-Pilot schedules this pass on its own,
+		// but the rail hands the user the button so testing is not something
+		// that only ever happens when the pilot decides to.
+		vscode.commands.registerCommand('vinv-vs.runExercise', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
+				return;
+			}
+			const result = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Vinv: exercising every endpoint…' },
+				() => runExercisePass(context, folder.uri.fsPath),
+			);
+			if (result.outcome === 'done') {
+				void vscode.window.showInformationMessage(
+					`Vinv: exercised ${result.endpointsCovered}/${result.total} endpoints — ` +
+						`${result.invariants} invariant(s), ` +
+						(result.issues > 0 ? `${result.issues} behavioral issue(s).` : 'no issues.'),
+				);
+			} else {
+				void vscode.window.showWarningMessage(
+					`Vinv: exercise pass ${result.outcome}${result.error ? ` — ${result.error}` : ''}.`,
+				);
+			}
+		}),
+		// The Flow title bar's "View Traces" button.
+		registerTracesPanel(context),
 		vscode.commands.registerCommand('vinv-vs.refreshSessions', () => sessionsProvider.refresh()),
 		// Filter the Sessions trace-hit counts to a time window (ES-style quick
 		// ranges plus a custom "last N"). "All time" clears the filter.
@@ -222,13 +251,16 @@ export function registerCommands(
 		}),
 		// "What Vinv found and fixed" — issues, optimization episodes with CI
 		// evidence, regress diff kinds, latency profile, state ledger.
-		vscode.commands.registerCommand('vinv-vs.openFindings', async () => {
+		// `arg.service` opens the view already narrowed to one service — that is
+		// how the Flow rail's Findings rows hand off. Invoked from the title bar
+		// or the palette there is no arg, and the view opens unfiltered.
+		vscode.commands.registerCommand('vinv-vs.openFindings', async (arg?: { service?: string }) => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showErrorMessage('Open a workspace folder to view findings.');
 				return;
 			}
-			await openFindings(folder.uri.fsPath);
+			await openFindings(folder.uri.fsPath, arg?.service);
 		}),
 		vscode.commands.registerCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
 		vscode.commands.registerCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),

@@ -149,9 +149,8 @@ export async function computeNextStep(
 		const stageTitles: Record<FlowStageId, string> = {
 			discover: 'Discover',
 			services: 'Services',
-			traces: 'Traces',
-			insights: 'Insights',
-			verify: 'Verify',
+			test: 'Test',
+			findings: 'Findings',
 		};
 		// Same precedence as the Flow rail's spine: the hub's coarse phase when
 		// published, the step label otherwise — so compass and rail always agree.

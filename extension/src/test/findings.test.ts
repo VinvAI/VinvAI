@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { buildFindings, writeFindingsSummary } from '../views/findingsModel';
+import { buildFindings, buildServiceIndex, writeFindingsSummary } from '../views/findingsModel';
 import { handleFindingsMessage, type FindingsActions } from '../views/findingsView';
 
 function tmpRepo(): string {
@@ -203,5 +203,62 @@ suite('findings: issue clusters carry their evidence', () => {
 		const input = buildFindings(root).issues[0].exemplar?.input ?? '';
 		assert.ok(input.includes('ada'), `expected the body, got: ${input}`);
 		assert.ok(!input.includes('path_params'), `empty halves must be dropped, got: ${input}`);
+	});
+});
+
+suite('findings: service attribution', () => {
+	/** Two services whose handlers live in distinct entrypoint modules. */
+	function twoServiceRepo(): string {
+		const root = tmpRepo();
+		write(root, '.vinv/services.json', [
+			{ name: 'api', command: 'python -m uvicorn app.server.main:app --port 8000' },
+			{ name: 'worker', command: 'python -m uvicorn app.worker.main:app --port 8001' },
+		]);
+		write(root, '.vinv/identification/apis.json', {
+			entrypoints: [
+				{ id: 'GET_home', trigger: 'GET /', file: 'app/server/main.py' },
+				{ id: 'POST_job', trigger: 'POST /jobs', file: 'app/worker/main.py' },
+				{ id: 'GET_orphan', trigger: 'GET /orphan', file: 'scripts/adhoc.py' },
+			],
+		});
+		return root;
+	}
+
+	test('an endpoint resolves to the service whose entrypoint module owns its file', () => {
+		const idx = buildServiceIndex(twoServiceRepo());
+		assert.strictEqual(idx.get('GET /'), 'api');
+		assert.strictEqual(idx.get('POST /jobs'), 'worker');
+		// Keyed on the id form too — the scorecard and profile spell it that way.
+		assert.strictEqual(idx.get('GET_home'), 'api');
+		// Owned by neither entrypoint module: absent, not guessed.
+		assert.strictEqual(idx.get('GET /orphan'), undefined);
+	});
+
+	test('issues carry their service, and unattributable ones stay unattributed', () => {
+		const root = twoServiceRepo();
+		write(root, '.vinv/exercise/issues.json', {
+			clusters: [
+				{ kind: 'server-error', title: 'boom', signature: 'a', method: 'GET', path: '/' },
+				{ kind: 'server-error', title: 'slow', signature: 'b', method: 'POST', path: '/jobs' },
+				{ kind: 'server-error', title: 'huh', signature: 'c', method: 'GET', path: '/orphan' },
+			],
+		});
+		const f = buildFindings(root);
+		assert.deepStrictEqual(
+			f.issues.map((i) => i.service),
+			['api', 'worker', undefined],
+		);
+		// Only services that actually own a finding drive the filter chips.
+		assert.deepStrictEqual(f.services, ['api', 'worker']);
+	});
+
+	test('no identification or services artifact leaves everything unattributed', () => {
+		const root = tmpRepo();
+		write(root, '.vinv/exercise/issues.json', {
+			clusters: [{ kind: 'server-error', title: 'boom', signature: 'a', method: 'GET', path: '/' }],
+		});
+		const f = buildFindings(root);
+		assert.strictEqual(f.issues[0].service, undefined);
+		assert.deepStrictEqual(f.services, []);
 	});
 });
