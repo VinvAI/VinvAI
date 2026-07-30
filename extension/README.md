@@ -1,6 +1,10 @@
 <div align="center">
 
-<img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv wordmark and tagline" width="700" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
+  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv wordmark and tagline" width="700" />
+</picture>
 
 ### An autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL.
 
@@ -72,7 +76,7 @@ One trial per condition — a demonstration, not a benchmark. [Full story and sc
 
 The loop keeps finding real ones on the same template: it detected from live traces that the app's **default database pool makes requests queue for connection checkouts** under concurrent load, dispatched the pool-sizing fix, and proved it — sustained-load median **75.6ms → 41.2ms (45.4% faster, 95% CI [36.3%, 45.8%])**, responses byte-identical. Two earlier attempts whose measurement windows couldn't certify the win were auto-reverted; only the evidence-backed change landed.
 
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof.gif" alt="Vinv detects connection-pool starvation on the FastAPI template, dispatches the fix, and proves a 45.4% median improvement with a paired-bootstrap 95% confidence interval" width="720" />
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv detects connection-pool starvation on the FastAPI template, dispatches the fix, and proves a 45.4% median improvement with a paired-bootstrap 95% confidence interval" width="720" />
 
 **Before you install:** the extension is one click, but Vinv builds its engines on first run (`git clone` + `uv sync` + `cargo build` in a terminal you can watch) and fetches a one-time ~500 MB local embedding model. You need [uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs), plus a coding-agent CLI you already pay for. No account, no API keys, about four minutes.
 
@@ -84,7 +88,7 @@ The engines it drives — the zero-edit Python tracer (`tracelens`), the semanti
 
 ## See it in action
 
-<img src="https://images.vinv.ai/vinv-journey.gif" alt="Vinv journey — discover the project, run it under tracing, ask questions with citations, and dispatch a verified fix" width="100%" />
+<img src="https://images.vinv.ai/vinv-journey-light.gif" alt="Vinv journey — discover the project, run it under tracing, ask questions with citations, and dispatch a verified fix" width="100%" />
 <p align="center"><sub>✦ The whole loop: <b>discover</b> the project → <b>run</b> it under tracing → <b>ask</b> questions answered from real runtime evidence → <b>fix</b> what breaks and let Vinv re-run it to verify.</sub></p>
 
 ---
@@ -127,7 +131,7 @@ Already have the monorepo checked out? Vinv finds it automatically.
 
 ### 👁 Watches your code run — zero-edit tracing
 
-<img src="https://images.vinv.ai/runtime-tracing.gif" alt="Zero-edit Python tracing: timing, memory, arguments, returns and errors per call" width="720" />
+<img src="https://images.vinv.ai/runtime-tracing-light.gif" alt="Zero-edit Python tracing: timing, memory, arguments, returns and errors per call" width="720" />
 
 Vinv traces your Python service with **no code changes**. Every call is recorded with timing, memory, arguments, returns, errors, and the request behind it — then joined back to the exact symbol in your source. Run your service under tracing with one keystroke (`Cmd+Alt+R` / `Ctrl+Alt+R`) or the **Open Trace Terminal** command.
 
@@ -160,7 +164,7 @@ A persistent semantic index and an interactive **Code Graph**, updated increment
 
 ### 💬 Ask Vinv — answers with evidence
 
-<img src="https://images.vinv.ai/semantic-code-search.gif" alt="Semantic code search: ask by meaning, get ranked symbols with line numbers" width="720" />
+<img src="https://images.vinv.ai/semantic-code-search-light.gif" alt="Semantic code search: ask by meaning, get ranked symbols with line numbers" width="720" />
 
 Ask questions about your codebase and get answers grounded in the code map **plus** real runtime evidence. Ask Vinv cites the exact symbols behind every claim and marks runtime facts that have gone stale, so you always know whether an answer reflects what actually ran. The comment icon at the top of the Flow panel opens it.
 
@@ -168,7 +172,7 @@ Ask questions about your codebase and get answers grounded in the code map **plu
 
 ### 🔁 Closes the loop — fix, then verify
 
-<img src="https://images.vinv.ai/verified-fixes.gif" alt="Independent fix verification: replayed start, live port, tests the agent never sees" width="720" />
+<img src="https://images.vinv.ai/verified-fixes-light.gif" alt="Independent fix verification: replayed start, live port, tests the agent never sees" width="720" />
 
 Hand an issue to the coding agent you already use. Vinv composes the evidence pack, dispatches it (**Fix with Harness**), and then **verifies the result itself**: replayed start, live port, and acceptance tests the agent never sees — stored outside your workspace under an opaque token and required to fail deterministically *twice* on the broken code, so a test that passes pre-fix is thrown away. A deterministic anti-cheat audit over the diff blocks test edits, swallowed exceptions and shadow modules outright. If a "verified" fix is still wrong, **dispute** it and the loop reopens.
 
@@ -217,7 +221,7 @@ Acceptance tests are authored **before** the fix and never shown to the agent; a
 
 ### 📈 Insights & analysis
 
-<img src="https://images.vinv.ai/rank-suspects.gif" alt="Fault-ranked suspects over real pass/fail requests, with the error messages attached" width="720" />
+<img src="https://images.vinv.ai/rank-suspects-light.gif" alt="Fault-ranked suspects over real pass/fail requests, with the error messages attached" width="720" />
 
 - **Build Insights Now** — call trees, flamegraphs, and health reports of where time went.
 - **Run Endpoint I/O Probes** — capture real inputs and outputs at your service boundaries.

@@ -3,7 +3,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL." width="880">
 </picture>
 
 <br><br>
@@ -54,7 +54,7 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 ```
 
 <div align="center">
-<img src="https://images.vinv.ai/vinv-journey.gif" alt="Runtime tracing for AI coding agents: Vinv installs, discovers and runs every service under tracing, catches a real bug, dispatches the fix, and verifies it — on its own repo" width="720">
+<img src="https://images.vinv.ai/vinv-journey-light.gif" alt="Runtime tracing for AI coding agents: Vinv installs, discovers and runs every service under tracing, catches a real bug, dispatches the fix, and verifies it — on its own repo" width="720">
 <br><sub>The whole loop on Vinv's own repo: install → discover → trace → catch a real bug → dispatch → verified fix, zero clicks.</sub>
 </div>
 
@@ -169,7 +169,7 @@ The claim isn't a model ranking — blind, the commodity model scored zero. The 
 **And the loop keeps finding real ones.** On the same pristine template, the optimization loop later surfaced — and statistically proved — a fix nobody planted: the app's default database pool (SQLAlchemy's 5+10) makes requests **queue for connection checkouts** under concurrent load, so a 7-row indexed lookup measured 22× the typical symbol's cost. Pool sized to the worker concurrency: sustained-load median **75.6ms → 41.2ms — 45.4% faster, 95% CI [36.3%, 45.8%]** — responses byte-identical. The same engine auto-reverted two earlier attempts whose measurement windows couldn't certify the win; the accept only landed when the evidence did.
 
 <div align="center">
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof.gif" alt="Vinv optimization loop on the FastAPI template: detects connection-pool starvation from real traces, dispatches the pool-sizing fix, proves 45.4% median improvement with a paired-bootstrap 95% CI, and records the episode with its reverted attempts in Findings" width="720">
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv optimization loop on the FastAPI template: detects connection-pool starvation from real traces, dispatches the pool-sizing fix, proves 45.4% median improvement with a paired-bootstrap 95% CI, and records the episode with its reverted attempts in Findings" width="720">
 </div>
 
 ## If any of these is your open tab
@@ -192,11 +192,11 @@ The claim isn't a model ranking — blind, the commodity model scored zero. The 
 
 Give your coding agent runtime context — one loop, these capabilities:
 
-- **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search.gif" alt="semantic code search MCP in action" width="640">
+- **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model (no cloud keys).<br><img src="https://images.vinv.ai/semantic-code-search-light.gif" alt="semantic code search MCP in action" width="640">
 - **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.<br><img src="https://images.vinv.ai/code-graph-light.gif" alt="interactive Code Graph" width="640">
-- **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing.gif" alt="zero-edit Python tracing" width="640">
-- **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects.gif" alt="fault-ranked suspects" width="640">
-- **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes.gif" alt="independent fix verification" width="640">
+- **Runtime tracing** — zero-edit runtime tracing for AI coding agents: timing, memory, args, returns, errors — per call, joined to source.<br><img src="https://images.vinv.ai/runtime-tracing-light.gif" alt="zero-edit Python tracing" width="640">
+- **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, error messages attached.<br><img src="https://images.vinv.ai/rank-suspects-light.gif" alt="fault-ranked suspects" width="640">
+- **Verified fixes** — verify AI-generated code actually works: replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.<br><img src="https://images.vinv.ai/verified-fixes-light.gif" alt="independent fix verification" width="640">
 - **Dead code sections** — *"Analyze Dead Code"* explains every untraced island; *"Try Run Dead Code"* asks your agent for a driver and re-traces to see what came alive. Sections split into **no references** and **reached from live code but never taken**, each with the callers that still point at it and a keep-or-cut verdict with its reasoning.<br><img src="https://images.vinv.ai/dead-code.gif" alt="a dead-code section report: reachable but untested, the live code that references it, and the keep-or-cut verdict with reasoning" width="640">
 - **Recoverable time** — latency hotspots ranked by the milliseconds you would actually get back, each dispatched as a predicted-then-proven optimization instead of a guess about what is slow.<br><img src="https://images.vinv.ai/optimize.gif" alt="the Optimize panel: open opportunities, recoverable milliseconds, and per-call latency against the whole-flow ceiling" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
@@ -234,7 +234,7 @@ Everything above came from one all-local pass on that template, on an M-series M
 - The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
 
 <div align="center">
-<img src="https://images.vinv.ai/demo-fastapi-run.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
+<img src="https://images.vinv.ai/demo-fastapi-run-light.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
 </div>
 
 *The actual run, captured frame by frame: install → 855-symbol graph → search hits → trace hotspots → the failing frame named → verified.*
