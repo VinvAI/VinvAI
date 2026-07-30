@@ -18,7 +18,7 @@ import { findTraceFiles } from '../graph/indexGraph';
 import { openCallTree } from '../identification/callTreeView';
 import { openJourney } from '../views/journeyView';
 import { openFindings } from '../views/findingsView';
-import { analyzeDeadCodeSections } from '../harness/deadCodeRunner';
+import { analyzeDeadCodeSections, tryRunDeadSection } from '../harness/deadCodeRunner';
 import type { CallSiteContext } from '../identification/callSiteContext';
 import { loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
@@ -279,6 +279,26 @@ export function registerCommands(
 					sectionId: arg?.sectionId ?? undefined,
 					reanalyseAll: arg?.all,
 				});
+			},
+		),
+		// "Try run this path": the harness writes a driver for one dead section,
+		// the driver runs under vinv tracing, and the fresh capture proves (or
+		// refutes) that the code can execute — reached symbols leave the dead list.
+		vscode.commands.registerCommand(
+			'vinv-vs.tryRunDeadCode',
+			async (arg?: { sectionId?: string | null }) => {
+				const folder = vscode.workspace.workspaceFolders?.[0];
+				if (!folder) {
+					void vscode.window.showErrorMessage('Open a workspace folder to run dead code.');
+					return;
+				}
+				if (!arg?.sectionId) {
+					void vscode.window.showWarningMessage(
+						'Vinv: open a dead-code section report and use its "Try run this path" button.',
+					);
+					return;
+				}
+				await tryRunDeadSection(folder.uri.fsPath, arg.sectionId);
 			},
 		),
 		// The values the exerciser could not derive. This panel used to open only

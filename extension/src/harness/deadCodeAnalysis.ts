@@ -416,6 +416,89 @@ export function parseVerdicts(stdout: string, asked: Set<string>): Record<string
 	return out;
 }
 
+/** What the traced-run driver prompt needs to know about the workspace. */
+export interface DriverEnvironment {
+	python: string;
+	targetPackages: string[];
+	cwd: string;
+}
+
+/**
+ * The prompt that asks the harness to WRITE a driver for one dead section —
+ * the "try run this path" half of the surface, where analysis asks what the
+ * code is and this asks whether it can be made to execute at all.
+ *
+ * The driver runs under tracelens with the workspace's own recorded
+ * configuration, so the deliverable is deliberately narrow: one standalone
+ * Python script that imports the real modules and drives the section's
+ * symbols. A driver that RAISES is still useful — tracelens records every
+ * function that ran before the raise — so the prompt says so; an agent that
+ * believes only a green run counts will fabricate scaffolding to swallow
+ * errors, which hides exactly the evidence the trace exists to capture.
+ */
+export function buildDriverPrompt(
+	section: DeadSection,
+	sources: Map<number, string>,
+	env: DriverEnvironment,
+	context?: LiveContextSymbol[],
+): string {
+	return [
+		'Vinv traced this repository at runtime and the section below never',
+		'executed. Write a DRIVER that tries to run it, so a fresh trace can',
+		'prove whether this code is executable at all.',
+		'',
+		renderSection(section, sources, context),
+		'',
+		'The driver will be executed as:',
+		`  ${env.python} <driver.py>     (under tracelens, cwd: ${env.cwd})`,
+		`Instrumented packages: ${env.targetPackages.join(', ') || '(none recorded)'}`,
+		'',
+		'Rules:',
+		'- ONE standalone Python script. Import the real modules from this',
+		'  repository and call the section’s symbols (or the live callers that',
+		'  lead into them) with plausible arguments. Read the code first to build',
+		'  the minimum real scaffolding — objects, fixtures, temp files.',
+		'- Prefer driving the code IN-PROCESS over the network: import the handler',
+		'  and call it, rather than starting a server.',
+		'- A driver that raises is still a useful driver — every function that ran',
+		'  before the raise is traced. Do NOT wrap everything in try/except to make',
+		'  the run look green; let real failures propagate.',
+		'- No destructive operations: nothing that deletes, migrates, or mutates',
+		'  state outside temp directories.',
+		'- It must finish within 60 seconds.',
+		'',
+		'Reply with ONE json object and nothing else:',
+		'{"driver": {"code": "<the complete python script>",',
+		'  "notes": "what it drives and any setup it fakes"}}',
+		'If this section genuinely cannot be driven from a script (e.g. it is',
+		'dead build-tool config), reply {"driver": null} and nothing else.',
+	].join('\n');
+}
+
+/** The driver out of a reply; null when the agent declined or replied unusably. */
+export function parseDriver(stdout: string): { code: string; notes: string } | null {
+	const raw = parseEnvelope(stdout, 'driver');
+	if (!raw || typeof raw !== 'object') {
+		return null;
+	}
+	const code = String((raw as Record<string, unknown>).code ?? '').trim();
+	if (!code) {
+		return null;
+	}
+	return { code, notes: String((raw as Record<string, unknown>).notes ?? '').trim() };
+}
+
+/**
+ * Which of a section's symbols a runtime overlay now covers — the verdict of a
+ * try-run, counted rather than asserted. Pure so the claim is testable.
+ */
+export function revivedSymbols(
+	section: DeadSection,
+	runtime: Record<number, unknown>,
+): string[] {
+	return section.symbols.items.filter((s) => runtime[s.row]).map((s) => s.name);
+}
+
 /** Splits into batches of at most `size`, preserving order. */
 export function batchSections(sections: DeadSection[], size = SECTIONS_PER_BATCH): DeadSection[][] {
 	const out: DeadSection[][] = [];

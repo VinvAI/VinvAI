@@ -281,6 +281,11 @@
 				"category": "Vinv"
 			},
 			{
+				"command": "vinv-vs.tryRunDeadCode",
+				"title": "Try Run Dead Code (drive one section under trace)",
+				"category": "Vinv"
+			},
+			{
 				"command": "vinv-vs.refreshSessions",
 				"title": "Refresh",
 				"category": "Vinv",

@@ -36,7 +36,7 @@ import { openPathInEditor } from '../support/openDocument';
 export const DEAD_SECTION_VIEW_TYPE = 'vinv.deadCodeSection';
 
 export interface DeadSectionOutbound {
-	type: 'openSource' | 'refresh' | 'analyze';
+	type: 'openSource' | 'refresh' | 'analyze' | 'tryRun';
 	file?: string;
 	line?: number;
 }
@@ -46,6 +46,8 @@ export interface DeadSectionActions {
 	refresh: () => Promise<void>;
 	/** Ask the harness about this one section (a batch of one). */
 	analyze: () => Promise<void>;
+	/** Have the harness write a driver and run this section under trace. */
+	tryRun: () => Promise<void>;
 }
 
 export async function handleDeadSectionMessage(
@@ -58,6 +60,8 @@ export async function handleDeadSectionMessage(
 		await actions.refresh();
 	} else if (msg.type === 'analyze') {
 		await actions.analyze();
+	} else if (msg.type === 'tryRun') {
+		await actions.tryRun();
 	}
 }
 
@@ -179,6 +183,13 @@ function wireDeadSection(
 			await vscode.commands.executeCommand('vinv-vs.analyzeDeadCode', { sectionId: id });
 			await push();
 		},
+		// The re-push matters most on THIS path: a revived symbol changes the
+		// section's membership, and the tab must show that rather than keep
+		// calling executed code dead.
+		tryRun: async () => {
+			await vscode.commands.executeCommand('vinv-vs.tryRunDeadCode', { sectionId: id });
+			await push();
+		},
 	};
 
 	const sub = webview.onDidReceiveMessage(
@@ -286,11 +297,17 @@ function getHtml(): string {
 		unclear: 'needs a human',
 	};
 
+	// Shared between both card variants: the empirical counterpart to analysis —
+	// instead of asking what the code is, ask whether it can be made to RUN.
+	const TRY_RUN_BTN =
+		'<button class="act" id="tryrun" title="Have the coding harness write a driver that exercises this section, run it under vinv tracing, and report which symbols actually executed — a reached symbol leaves the dead list">Try run this path</button>';
+
 	function verdictCard(v) {
 		if (!v) {
 			return '<div class="card"><div class="row">' +
 				'<span class="badge">not analysed yet</span>' +
 				'<span class="grow"></span>' +
+				TRY_RUN_BTN +
 				'<button class="act" id="analyze" title="Hand this section to your coding harness: it reads the code and reports what it does, why nothing reaches it, and how to integrate or re-imagine it">Ask the agent</button>' +
 				'</div><div class="hint">Nothing here is a verdict until the agent has read the code. ' +
 				'Analysing every section at once is faster — the Findings panel batches them.</div></div>';
@@ -300,6 +317,7 @@ function getHtml(): string {
 			'<span class="badge' + cls + '">' + esc(ACTION_LABEL[v.action] || v.action) + '</span>' +
 			'<span class="badge" title="How sure the agent was, by its own account">confidence ' + esc(v.confidence) + '</span>' +
 			'<span class="grow"></span>' +
+			TRY_RUN_BTN +
 			'<button class="act" id="analyze" title="Ask again — useful after the code or the traces changed">Re-analyse</button>' +
 			'</div><table class="kv">';
 		const row = (k, val, tip) => val
@@ -394,6 +412,14 @@ function getHtml(): string {
 			btn.disabled = true;
 			btn.textContent = 'Asking…';
 			vscode.postMessage({ type: 'analyze' });
+		});
+		on('tryrun', () => {
+			// Minutes of agent + traced-run time; a live button would race a second
+			// driver against the first for the same capture.
+			const btn = document.getElementById('tryrun');
+			btn.disabled = true;
+			btn.textContent = 'Running under trace…';
+			vscode.postMessage({ type: 'tryRun' });
 		});
 	}
 

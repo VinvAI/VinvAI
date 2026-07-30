@@ -25,9 +25,12 @@ import {
 	batchSections,
 	buildBatchPrompt,
 	buildContextRetriever,
+	buildDriverPrompt,
+	parseDriver,
 	parseVerdicts,
 	pooled,
 	readAnalysis,
+	revivedSymbols,
 	writeAnalysis,
 	type DeadSectionVerdict,
 } from '../harness/deadCodeAnalysis';
@@ -435,10 +438,56 @@ suite('dead code: report view routing', () => {
 			openSource: async (f, l) => void log.push(`open:${f}:${l}`),
 			refresh: async () => void log.push('refresh'),
 			analyze: async () => void log.push('analyze'),
+			tryRun: async () => void log.push('tryRun'),
 		};
 		await handleDeadSectionMessage({ type: 'openSource', file: 'x.py', line: 4 }, a);
 		await handleDeadSectionMessage({ type: 'refresh' }, a);
 		await handleDeadSectionMessage({ type: 'analyze' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:4', 'refresh', 'analyze']);
+		await handleDeadSectionMessage({ type: 'tryRun' }, a);
+		assert.deepStrictEqual(log, ['open:x.py:4', 'refresh', 'analyze', 'tryRun']);
+	});
+});
+
+suite('dead code: try-run driver', () => {
+	function wiredSection() {
+		const report = buildDeadCode(tmpRepo(), fixture());
+		const section = report.sections.items.find((s) => s.reason === 'reachable-untested');
+		assert.ok(section);
+		return section;
+	}
+
+	test('the driver prompt carries the run environment, the section and the honesty rules', () => {
+		const prompt = buildDriverPrompt(
+			wiredSection(),
+			new Map(),
+			{ python: '/venv/bin/python', targetPackages: ['app'], cwd: '/repo' },
+		);
+		assert.ok(prompt.includes('/venv/bin/python'));
+		assert.ok(prompt.includes('Instrumented packages: app'));
+		assert.ok(prompt.includes('### section `'));
+		// A raising driver still traces — the prompt must forbid green-washing.
+		assert.ok(prompt.includes('Do NOT wrap everything in try/except'));
+		assert.ok(prompt.includes('{"driver": null}'), 'declining is an allowed reply');
+	});
+
+	test('parseDriver reads a fenced reply and rejects empty or declined ones', () => {
+		const good = parseDriver(
+			'sure!\n```json\n' +
+				JSON.stringify({ driver: { code: 'import app\napp.helper_a()', notes: 'direct call' } }) +
+				'\n```',
+		);
+		assert.ok(good);
+		assert.ok(good.code.includes('helper_a'));
+		assert.strictEqual(good.notes, 'direct call');
+		assert.strictEqual(parseDriver(JSON.stringify({ driver: null })), null);
+		assert.strictEqual(parseDriver(JSON.stringify({ driver: { code: '   ' } })), null);
+		assert.strictEqual(parseDriver('no json at all'), null);
+	});
+
+	test('revivedSymbols counts from the overlay, not from the run outcome', () => {
+		const section = wiredSection();
+		// helper_a (row 1) traced, helper_b (row 2) still dead.
+		assert.deepStrictEqual(revivedSymbols(section, { 1: { executed: true } }), ['helper_a']);
+		assert.deepStrictEqual(revivedSymbols(section, {}), []);
 	});
 });

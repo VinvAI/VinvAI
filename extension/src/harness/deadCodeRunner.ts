@@ -14,17 +14,30 @@ import * as vscode from 'vscode';
 import { getHarnessId } from '../config/settings';
 import { dispatchAgentPrompt } from './harnessRunner';
 import { ensureHarnessChosen } from './harnessPicker';
+import * as fs from 'fs';
+import * as path from 'path';
+
 import {
 	MAX_CONCURRENT_BATCHES,
 	SECTIONS_PER_BATCH,
 	analyzeDeadSections,
 	batchSections,
+	buildContextRetriever,
+	buildDriverPrompt,
+	parseDriver,
 	readAnalysis,
+	revivedSymbols,
 	writeAnalysis,
 	type BatchOutcome,
 } from './deadCodeAnalysis';
+import { runDriverUnderTracing, tracedConfig } from './tracedRun';
 import { enqueueDeadCodeBatch, readPendingBatches, removeBatch } from './deadCodeQueue';
-import { buildGraphSnapshot, type GraphSnapshot } from '../graph/indexGraph';
+import {
+	buildGraphSnapshot,
+	indexStoreDir,
+	loadChunkTexts,
+	type GraphSnapshot,
+} from '../graph/indexGraph';
 import { buildDeadCode, writeDeadCodeReport, type DeadSection } from '../views/deadCodeModel';
 
 export interface AnalyzeOptions {
@@ -39,6 +52,168 @@ let running = false;
 
 export function isDeadCodeAnalysisRunning(): boolean {
 	return running;
+}
+
+/** One try-run at a time — a second driver would race the first for the trace. */
+let tryRunInFlight = false;
+
+/** How one try-run of a dead section settled. */
+export interface TryRunOutcome {
+	outcome:
+		| 'revived' // the trace reached section symbols — they are no longer dead
+		| 'not-reached' // the driver ran and traced, but none of the section executed
+		| 'no-driver' // the agent declined or replied unusably
+		| 'run-failed' // the driver produced no trace at all
+		| 'unavailable'; // preconditions missing (section gone, no tracelens config…)
+	detail: string;
+	/** Section symbols the fresh trace covered, when any. */
+	revived: string[];
+}
+
+/**
+ * "Try run this path": ask the harness to WRITE a driver for the section, run
+ * it under tracelens with the workspace's own recorded configuration, and
+ * report which of the section's symbols the fresh trace actually reached.
+ *
+ * The trace lands under .vinv/captures/, which is where every scan already
+ * looks — so a revived symbol leaves the dead list by the normal join, not by
+ * this function editing any verdict. The section id then changes (ids hash the
+ * member identities), which is correct: a half-alive section is a different
+ * finding than the one the driver was written against.
+ */
+export async function tryRunDeadSection(
+	workspaceRoot: string,
+	sectionId: string,
+): Promise<TryRunOutcome> {
+	const unavailable = (detail: string): TryRunOutcome => {
+		void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+		return { outcome: 'unavailable', detail, revived: [] };
+	};
+	if (tryRunInFlight) {
+		return unavailable('a dead-code try-run is already in flight — one driver at a time.');
+	}
+
+	const scan = buildDeadCode(workspaceRoot);
+	const section = scan.sections.items.find((s) => s.id === sectionId);
+	if (!section) {
+		return unavailable(
+			'that dead-code section is no longer in the index — the code it covered changed.',
+		);
+	}
+	const env = tracedConfig(workspaceRoot);
+	if (!env) {
+		return unavailable(
+			'no tracelens-wrapped start command is recorded for this workspace, so nothing can run ' +
+				'under trace. Bring a service up once (Services panel ▶) first.',
+		);
+	}
+	const harnessId = await ensureHarnessChosen(
+		'Which coding agent should write the driver? (change anytime in Configure)',
+	);
+	if (!harnessId) {
+		return { outcome: 'unavailable', detail: 'harness picker dismissed', revived: [] };
+	}
+
+	tryRunInFlight = true;
+	try {
+		// Same context the analysis prompt gets: the live neighbourhood is where
+		// the driver's imports and scaffolding will come from.
+		let sources = new Map<number, string>();
+		try {
+			sources = loadChunkTexts(
+				indexStoreDir(workspaceRoot),
+				section.symbols.items.map((s) => s.row),
+			);
+		} catch {
+			// summaries alone still make a writable prompt
+		}
+		let context;
+		try {
+			context = buildContextRetriever(buildGraphSnapshot(workspaceRoot))(section);
+		} catch {
+			context = undefined;
+		}
+
+		return await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Window,
+				title: `Vinv: trying to run dead section ${section.title} under trace…`,
+			},
+			async (): Promise<TryRunOutcome> => {
+				const reply = await dispatchAgentPrompt(
+					getHarnessId() || harnessId,
+					workspaceRoot,
+					`deadcode-driver-${section.id}`,
+					buildDriverPrompt(section, sources, env, context),
+				);
+				const driver = reply ? parseDriver(reply) : null;
+				if (!driver) {
+					const detail =
+						'the agent produced no driver for this section — it may not be drivable from a ' +
+						'script, or the harness reply was unusable.';
+					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+					return { outcome: 'no-driver', detail, revived: [] };
+				}
+
+				// A real file, never inline: tracelens degrades AST coverage for
+				// `python -c` (see tracedRun's module doc).
+				const tmpDir = path.join(workspaceRoot, '.vinv', 'tmp');
+				fs.mkdirSync(tmpDir, { recursive: true });
+				const driverFile = path.join(tmpDir, `deadcode-driver-${section.id}.py`);
+				fs.writeFileSync(driverFile, driver.code, 'utf8');
+				// Under captures/ so the very next scan joins it — the same discovery
+				// path every service capture takes.
+				const outTrace = path.join(
+					workspaceRoot,
+					'.vinv',
+					'captures',
+					`deadcode-${section.id}-${Date.now()}`,
+					'trace.jsonl',
+				);
+				fs.mkdirSync(path.dirname(outTrace), { recursive: true });
+
+				const run = await runDriverUnderTracing(workspaceRoot, driverFile, [], outTrace);
+				if (!run.ok) {
+					const detail =
+						`the driver produced no trace (exit ${run.exitCode ?? 'none'}` +
+						`${run.timedOut ? ', timed out' : ''}). Tail: ${run.outputTail.slice(-300) || '(no output)'}`;
+					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+					return { outcome: 'run-failed', detail, revived: [] };
+				}
+
+				// The verdict is counted from the re-scan, never inferred from the
+				// driver's exit code: a green run that never reached the section is
+				// still "not reached", and a raising run that did reach it is revived.
+				let revived: string[] = [];
+				try {
+					revived = revivedSymbols(section, buildGraphSnapshot(workspaceRoot).runtime);
+				} catch {
+					revived = [];
+				}
+				try {
+					writeDeadCodeReport(workspaceRoot, buildDeadCode(workspaceRoot));
+				} catch {
+					// the surfaces re-derive on their next push anyway
+				}
+				if (revived.length > 0) {
+					const detail =
+						`the driver executed ${revived.length} of ${section.symbols.items.length} section ` +
+						`symbol(s) under trace (${revived.slice(0, 5).join(', ')}${revived.length > 5 ? '…' : ''}) — ` +
+						'they are no longer dead. This section re-forms around what is still untraced.';
+					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
+					return { outcome: 'revived', detail, revived };
+				}
+				const detail =
+					`the driver ran and traced${run.exitCode === 0 ? '' : ` (exit ${run.exitCode})`}, but ` +
+					'none of this section’s symbols executed — the path stayed dead even when driven. ' +
+					`Driver notes: ${driver.notes || '(none)'}`;
+				void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+				return { outcome: 'not-reached', detail, revived: [] };
+			},
+		);
+	} finally {
+		tryRunInFlight = false;
+	}
 }
 
 /**
