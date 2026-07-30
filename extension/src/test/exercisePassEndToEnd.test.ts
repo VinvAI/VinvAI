@@ -26,6 +26,8 @@ import type * as vscode from 'vscode';
 import {
 	dispatchFreshClusters,
 	exercisePassOnce,
+	mergeIssueDocuments,
+	mergeProfiles,
 	readExerciseJson,
 	type ExerciseIssuesDoc,
 	type ExercisePassPorts,
@@ -67,7 +69,7 @@ function recorder(over: Partial<ExercisePassPorts> = {}): Recorder {
 				return { ok: true };
 			},
 			// No service by default: the case the branch existed to fix.
-			pickTarget: () => null,
+			pickTargets: () => [],
 			serviceRunning: () => false,
 			autoEpisodesEnabled: () => true,
 			dispatch: async (_ctx, _root, issues, opts) => {
@@ -304,7 +306,7 @@ suite('the exercise pass: a service is up', () => {
 			},
 		});
 		const rec = recorder({
-			pickTarget: () => ({ service: 'api', port: 8000 }),
+			pickTargets: () => [{ service: 'api', port: 8000 }],
 			serviceRunning: () => true,
 		});
 
@@ -328,7 +330,7 @@ suite('the exercise pass: a service is up', () => {
 
 	test('a failed plan stops the pass before it can report coverage', async () => {
 		const rec = recorder({
-			pickTarget: () => ({ service: 'api', port: 8000 }),
+			pickTargets: () => [{ service: 'api', port: 8000 }],
 			serviceRunning: () => true,
 			runEngine: async (_b, args) => ({ ok: args[0] !== 'plan', error: 'plan blew up' }),
 		});
@@ -354,7 +356,7 @@ suite('the exercise pass: a service is up', () => {
 			},
 		});
 		const rec = recorder({
-			pickTarget: () => ({ service: 'api', port: 8000 }),
+			pickTargets: () => [{ service: 'api', port: 8000 }],
 			serviceRunning: () => true,
 			runEngine: async (_b, args) => ({
 				ok: args[0] !== 'campaign',
@@ -376,7 +378,7 @@ suite('the exercise pass: a service is up', () => {
 		// override has to keep recording or rec.calls silently stays empty.
 		const ran: string[] = [];
 		const rec = recorder({
-			pickTarget: () => ({ service: 'api', port: 8000 }),
+			pickTargets: () => [{ service: 'api', port: 8000 }],
 			serviceRunning: () => true,
 			runEngine: async (_b, args) => {
 				ran.push(String(args[0]));
@@ -394,6 +396,314 @@ suite('the exercise pass: a service is up', () => {
 			ran.includes('scorecard'),
 			`the pass must carry on to the scorecard after a failed replay; ran: ${ran.join(' → ')}`,
 		);
+	});
+});
+
+// =========================================================================
+// A workspace with more than one service
+//
+// The engine is single-service by construction: `run` rewrites issues.json
+// wholesale, and `profile` joins coverage against ONE capture directory. So the
+// naive `for (const target of targets)` around the whole pass reports a
+// confident, clean scorecard for the service that ran last and silently
+// discards every other. These are the tests that fail on that implementation.
+// =========================================================================
+
+/** The cluster `run --service <slug>` pretends to have found for that service. */
+function clusterFor(slug: string): Record<string, unknown> {
+	return {
+		signature: `sig-${slug}`,
+		kind: 'server-error',
+		title: `GET /${slug} — HTTP 500`,
+		endpoint_id: `GET_${slug}`,
+		method: 'GET',
+		path: `/${slug}`,
+	};
+}
+
+/**
+ * A fake engine that behaves the way the real one does about these two files:
+ * `run` REPLACES issues.json with only its own service's cluster, and `profile`
+ * REBUILDS profile.json with every endpoint but real coverage only for the
+ * service whose capture it was pointed at.
+ */
+function wholesaleWritingEngine(
+	root: string,
+	slugs: readonly string[],
+	calls: EngineCall[],
+	fail: (command: string, slug: string | undefined) => string | undefined = () => undefined,
+): ExercisePassPorts['runEngine'] {
+	const write = (name: string, doc: unknown): void =>
+		fs.writeFileSync(
+			path.join(root, '.vinv', 'exercise', name),
+			JSON.stringify(doc, null, 2),
+			'utf8',
+		);
+	return async (_bin, args, cwd) => {
+		calls.push({ args, cwd });
+		const command = String(args[0]);
+		const at = args.indexOf('--service');
+		const slug = at >= 0 ? args[at + 1] : undefined;
+		const error = fail(command, slug);
+		if (error) {
+			return { ok: false, error };
+		}
+		if (command === 'run' && slug) {
+			write('issues.json', { version: 1, cluster_count: 1, clusters: [clusterFor(slug)] });
+		}
+		if (command === 'profile' && slug) {
+			write('profile.json', {
+				status: 'ok',
+				endpoint_count: slugs.length,
+				endpoints_with_coverage: 1,
+				total_symbols_covered: 4,
+				total_symbols: 4 * slugs.length,
+				invariants_learned: 2,
+				opportunities: [{ kind: 'p95-outlier', endpoint: `GET /${slug}` }],
+				endpoints: slugs.map((s) => ({
+					api_id: `GET_${s}`,
+					method: 'GET',
+					path: `/${s}`,
+					// Only the service whose capture this run read can be seen.
+					coverage: { covered: s === slug ? 4 : 0, total: 4, pct: s === slug ? 100 : 0 },
+					invariants: s === slug ? [{ kind: 'shape' }, { kind: 'status' }] : [],
+				})),
+			});
+		}
+		return { ok: true };
+	};
+}
+
+suite('the exercise pass: several services', () => {
+	test('drives EVERY running service, not just the first', async () => {
+		const root = workspace();
+		const calls: EngineCall[] = [];
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => true,
+			runEngine: wholesaleWritingEngine(root, ['api', 'worker'], calls),
+		});
+
+		await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		const planned = calls.filter((c) => c.args[0] === 'plan');
+		assert.deepStrictEqual(
+			planned.map((c) => c.args[c.args.indexOf('--service') + 1]),
+			['api', 'worker'],
+			'a second service was discovered and never planned',
+		);
+		assert.deepStrictEqual(
+			calls.filter((c) => c.args[0] === 'run').map((c) => c.args[c.args.indexOf('--base-url') + 1]),
+			['http://127.0.0.1:8000', 'http://127.0.0.1:9000'],
+			'each service must be driven on its OWN port',
+		);
+		// Assembly over the merged artifacts describes the workspace, so it runs
+		// once — running it per service would just overwrite itself N times.
+		assert.strictEqual(calls.filter((c) => c.args[0] === 'scorecard').length, 1);
+	});
+
+	test("a service's findings survive the next service's run", async () => {
+		const root = workspace();
+		const calls: EngineCall[] = [];
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => true,
+			runEngine: wholesaleWritingEngine(root, ['api', 'worker'], calls),
+		});
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		// The whole point. `run --service worker` overwrote issues.json with only
+		// its own cluster; the pass had to have read api's back first.
+		const issues = readExerciseJson<ExerciseIssuesDoc>(root, 'issues.json');
+		assert.deepStrictEqual(
+			issues?.clusters.map((c) => c.signature).sort(),
+			['sig-api', 'sig-worker'],
+			'the first service’s findings were overwritten by the second’s run',
+		);
+		assert.strictEqual(issues?.cluster_count, 2);
+		assert.strictEqual(result.issues, 2, 'the pass reported fewer findings than it holds');
+		assert.deepStrictEqual(
+			rec.dispatched.flatMap((d) => d.titles).sort(),
+			['Behavior: GET /api — HTTP 500', 'Behavior: GET /worker — HTTP 500'],
+			'a defect in the service that ran first reached nobody',
+		);
+	});
+
+	test('coverage is merged per endpoint, from the capture that actually saw it', async () => {
+		const root = workspace();
+		const calls: EngineCall[] = [];
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => true,
+			runEngine: wholesaleWritingEngine(root, ['api', 'worker'], calls),
+		});
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		// `profile --service worker` scored GET /api at 0 because it read the
+		// wrong capture. Reporting that as the answer is the silent under-report
+		// this merge exists to remove.
+		assert.strictEqual(result.endpointsCovered, 2, 'an exercised endpoint was reported uncovered');
+		assert.strictEqual(result.total, 2);
+		assert.strictEqual(result.invariants, 4, 'invariants learned per service were not totalled');
+		const profile = readExerciseJson<Record<string, any>>(root, 'profile.json');
+		assert.strictEqual(profile?.total_symbols_covered, 8);
+		assert.strictEqual(
+			profile?.opportunities.length,
+			2,
+			'opportunities must be union-deduped, not concatenated per service',
+		);
+	});
+
+	test('one wedged service does not discard the others’ findings', async () => {
+		const root = workspace();
+		const calls: EngineCall[] = [];
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => true,
+			runEngine: wholesaleWritingEngine(root, ['api', 'worker'], calls, (command, slug) =>
+				command === 'run' && slug === 'worker' ? 'connection refused' : undefined,
+			),
+		});
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		// Partial coverage of a workspace is not a clean pass...
+		assert.strictEqual(result.outcome, 'failed');
+		assert.match(String(result.error), /worker: run failed — connection refused/);
+		// ...but what api earned is real, published, and handed on.
+		assert.strictEqual(result.issues, 1);
+		assert.deepStrictEqual(rec.dispatched.flatMap((d) => d.titles), [
+			'Behavior: GET /api — HTTP 500',
+		]);
+		assert.ok(
+			calls.some((c) => c.args[0] === 'scorecard'),
+			'the pass stopped at the wedged service instead of reporting what worked',
+		);
+	});
+
+	test('the campaign budget is split across services, not spent once per service', async () => {
+		const root = workspace();
+		const calls: EngineCall[] = [];
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => true,
+			runEngine: wholesaleWritingEngine(root, ['api', 'worker'], calls),
+		});
+
+		await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		const budgets = calls
+			.filter((c) => c.args[0] === 'campaign')
+			.map((c) => Number(c.args[c.args.indexOf('--budget') + 1]));
+		assert.strictEqual(budgets.length, 2, 'each service needs its own HTTP oracle armed');
+		// The oracles a campaign arms are workspace-scoped apart from the HTTP
+		// one, so N full budgets would re-drive the same targets for the same
+		// findings — and every play can fork a worker that imports target code.
+		assert.ok(
+			budgets.reduce((a, b) => a + b, 0) <= 12,
+			`the workspace budget must not multiply by service count; got ${budgets.join(' + ')}`,
+		);
+	});
+
+	test('several services discovered but none running still takes the service-free pass', async () => {
+		const root = workspace({ 'issues.json': { cluster_count: 0, clusters: [] } });
+		const rec = recorder({
+			pickTargets: () => [
+				{ service: 'api', port: 8000 },
+				{ service: 'worker', port: 9000 },
+			],
+			serviceRunning: () => false,
+		});
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		assert.strictEqual(result.outcome, 'done');
+		assert.deepStrictEqual(rec.calls.map((c) => c.args[0]), ['campaign']);
+	});
+});
+
+// =========================================================================
+// The merges themselves, as pure functions
+// =========================================================================
+
+suite('merging artifacts across services', () => {
+	test('clusters dedupe by signature, first sighting wins', () => {
+		const merged = mergeIssueDocuments([
+			{ clusters: [{ signature: 'a', kind: 'server-error', path: '/x', count: 3 }] },
+			{ clusters: [{ signature: 'a', kind: 'server-error', path: '/x', count: 1 }] },
+			{ clusters: [{ signature: 'b', kind: 'function-crash', path: 'm:f' }] },
+			null,
+		]);
+		assert.deepStrictEqual(merged.clusters.map((c) => c.signature), ['b', 'a']);
+		assert.strictEqual(merged.cluster_count, 2);
+		assert.strictEqual(merged.clusters.find((c) => c.signature === 'a')?.count, 3);
+	});
+
+	test('a cluster keeps the evidence fields the Findings view renders', () => {
+		const merged = mergeIssueDocuments([
+			{
+				clusters: [
+					{
+						signature: 's',
+						kind: 'server-error',
+						exemplar: { status: 500, input: { q: 1 } },
+						covered_frames: ['app.main:handler'],
+					},
+				],
+			},
+		]);
+		assert.deepStrictEqual(merged.clusters[0].covered_frames, ['app.main:handler']);
+		assert.deepStrictEqual(merged.clusters[0].exemplar, { status: 500, input: { q: 1 } });
+	});
+
+	test('an unsigned cluster is not collapsed into another unsigned one', () => {
+		const merged = mergeIssueDocuments([
+			{ clusters: [{ kind: 'k', endpoint_id: 'e1', title: 't' }, { kind: 'k', endpoint_id: 'e2', title: 't' }] },
+		]);
+		assert.strictEqual(merged.cluster_count, 2);
+	});
+
+	test('a single profile is returned byte-identical', () => {
+		const doc = { endpoint_count: 3, endpoints: [], invariants_learned: 5 };
+		assert.strictEqual(mergeProfiles([doc]), doc);
+	});
+
+	test('the merged profile totals the endpoints once, not once per service', () => {
+		const shape = (covered: number, other: number) => ({
+			status: 'ok',
+			endpoints: [
+				{ api_id: 'A', coverage: { covered, total: 4 }, invariants: covered ? [{}, {}] : [] },
+				{ api_id: 'B', coverage: { covered: other, total: 6 }, invariants: other ? [{}] : [] },
+			],
+		});
+		const merged = mergeProfiles([shape(4, 0), shape(0, 6)]);
+		assert.strictEqual(merged?.endpoint_count, 2, 'the shared endpoints were counted twice');
+		assert.strictEqual(merged?.endpoints_with_coverage, 2);
+		assert.strictEqual(merged?.total_symbols_covered, 10);
+		assert.strictEqual(merged?.total_symbols, 10);
+		assert.strictEqual(merged?.invariants_learned, 3);
+	});
+
+	test('nothing to merge is null, not an empty profile reported as a clean run', () => {
+		assert.strictEqual(mergeProfiles([]), null);
+		assert.strictEqual(mergeProfiles([null, null]), null);
 	});
 });
 
