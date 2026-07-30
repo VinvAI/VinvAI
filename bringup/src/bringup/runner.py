@@ -1234,9 +1234,13 @@ def render_start_prompt(
 ) -> str:
     """Render the Stage 2b task prompt for printing (constructs no agent, makes no LLM call).
 
-    Hint resolution takes the explicit ``start_hint`` first, else the one
-    recorded at ``.vinv/start_hints/<service>.json``, so a printed runbook
-    piped into a coding agent carries the operator's knowledge either way.
+    Launch-command resolution, most authoritative first: the explicit
+    ``start_hint``, then the operator's answer at
+    ``.vinv/start_hints/<service>.json``, then the ``command`` discovery recorded
+    in ``services.json``. The last rung is what stops the agent inferring a value
+    the repo already states — previously the prompt carried no command at all
+    unless a human had been asked, so a bring-up failed, the extension asked the
+    operator, and the operator re-typed what was already on disk.
     """
     project_root = project_root.resolve()
     modules = _default_modules(project_root, service, modules)
@@ -1244,10 +1248,18 @@ def render_start_prompt(
     hint = start_hint if (start_hint and start_hint.strip()) else _read_start_hint(
         project_root, service
     )
+    start_commands_json = str(_start_commands_path(project_root, service))
     if hint:
-        prompt = _user_hint_instruction(
-            prompt, service, hint, str(_start_commands_path(project_root, service))
-        )
+        prompt = _user_hint_instruction(prompt, service, hint, start_commands_json)
+    else:
+        # No operator hint — fall back to what discovery already recorded rather
+        # than making the agent re-derive it. The operator still wins when they
+        # have answered, because they may know discovery got it wrong.
+        discovered = _discovered_command(project_root, service)
+        if discovered:
+            prompt = _discovered_command_instruction(
+                prompt, service, discovered, start_commands_json
+            )
     if inline_handbook:
         block = _handbook_inline_block(project_root)
         if block:
@@ -2274,6 +2286,91 @@ def _user_hint_instruction(
         f"`failure_symptom` and save `{start_commands_json}` anyway — an honest "
         "`verified:false` is worth more than a start command that traces nothing."
     )
+
+
+def _discovered_command_instruction(
+    base_instruction: str, service: str, command: str, start_commands_json: str
+) -> str:
+    """Extend the start instruction with the command DISCOVERY recorded.
+
+    Separate from :func:`_user_hint_instruction` on purpose. That block tells the
+    agent a human said this and that a previous bring-up failed to work it out —
+    both true for an operator hint, neither true here. Overstating provenance is
+    how an agent gets told to stop thinking about a value that was itself a guess:
+    discovery also wrote the handbook, so this does not "beat" it, and a
+    discovered command that does not work must be diagnosed rather than trusted.
+
+    Passing it at all is the point. Stage 2a records a ``command`` per service in
+    ``services.json``, and this prompt never forwarded it — so the agent inferred
+    the launch command from handbook prose, and when that failed the extension
+    asked the operator, who typed the string that was already on disk. One
+    workspace produced a hint byte-identical to the recorded command.
+    """
+    return (
+        f"{base_instruction}\n\n"
+        "### 📋 DISCOVERY RECORDED A LAUNCH COMMAND FOR THIS SERVICE — start from it\n\n"
+        f"Vinv's discovery stage recorded that `{service}` starts with:\n\n"
+        f"```bash\n{command.strip()}\n```\n\n"
+        "**This is a strong starting point, not an authority.** It was derived from this "
+        "repo by an earlier stage, so it is usually right about the module, port and "
+        "arguments — but it has NOT been executed and verified yet, and it may be a "
+        "wrapper rather than the underlying process. Do not treat it the way you would "
+        "treat a human's answer.\n\n"
+        "Use it in this order:\n\n"
+        "1. **Run it as given first** (correct working directory, deps installed per the "
+        "install rules above) and confirm it serves — port LISTENing + a real request "
+        "answered.\n"
+        "2. **If it does not work, diagnose before replacing it.** A wrong port or a "
+        "missing `.env` is a fix to make, not a reason to invent a different command. "
+        "Only derive your own if this one is genuinely not the way this service starts, "
+        "and say so in your notes.\n"
+        "3. **Then convert it to the tracelens-wrapped form** per \"How to start a Python "
+        "service under tracelens\" above — unwrap it to the real `python -m <module> "
+        "<args>` invocation, drop `--reload`, and wrap THAT with the exact "
+        "`--target-package` flags and the session-scoped `--output` path. Keep its env "
+        "vars, working directory, port and arguments intact.\n"
+        "4. **Verify the WRAPPED form serves** (port + request + growing `trace.jsonl`) "
+        "and record that traced command in `commands`.\n\n"
+        "**This does NOT relax the deliverable — no trace, no `verified:true`.** If you "
+        "cannot get the traced form working, record `verified:false` with the specific "
+        f"blocker in `failure_symptom` and save `{start_commands_json}` anyway."
+    )
+
+
+def _discovered_command(project_root: Path, service: str) -> str | None:
+    """The ``command`` Stage 2a recorded for ``service``, if it is usable.
+
+    Best-effort like :func:`_read_start_hint`: a missing or malformed inventory is
+    "no command", never an error, because a bring-up that would have run without
+    one must still run. ``_read_services`` raises by design, so it is contained
+    here.
+
+    A ``-m module:attr`` command is rejected rather than forwarded. That form can
+    never run (``-m`` takes a module; ``module:attr`` is uvicorn's app-factory
+    syntax) and agents splice the two together routinely — the inventory is
+    agent-written, so it carries the same risk as any other agent output, and
+    handing the mistake onward would only launder it.
+    """
+    try:
+        services = _read_services(project_root)
+    except RuntimeError:
+        return None
+    for svc in services:
+        if not isinstance(svc, dict) or svc.get("name") != service:
+            continue
+        command = svc.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
+        if _MODULE_COLON_RE.search(command):
+            logger.warning(
+                "bringup: services.json command for %r is a `-m module:attr` form that "
+                "cannot run (%r); not forwarding it to the start prompt",
+                service,
+                command.strip(),
+            )
+            return None
+        return command.strip()
+    return None
 
 
 def _replay_feedback_instruction(

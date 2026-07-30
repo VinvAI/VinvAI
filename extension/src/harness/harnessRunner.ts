@@ -1724,7 +1724,7 @@ export function runBringupStartViaHarness(
 		},
 		onProgress,
 		extToken,
-	).then((ok) => {
+	).then(async (ok) => {
 		// A green bring-up that traced none of the service's own code is worse
 		// than a red one: everything downstream reads it as usable evidence and
 		// reports confident zeros. Audited here, once, so all three callers
@@ -1738,12 +1738,33 @@ export function runBringupStartViaHarness(
 		// re-running bring-up will not reliably fix, so correct it here and say so
 		// rather than reporting a failure the user cannot act on.
 		const repaired = repairRecordedTargetPackages(workspaceRoot, service);
+		// A repair invalidates the capture the agent just took: that trace was
+		// produced by the command BEFORE the fix, so auditing it can only ever say
+		// "your own code was not traced" — true, unactionable, and the reason this
+		// loop kept ending with "run it again". Replay the corrected command
+		// ourselves so the capture describes what is now recorded, then judge THAT.
+		// Costly (a real service boot) but only on the path where we changed the
+		// command out from under the evidence.
+		if (repaired) {
+			try {
+				// Imported lazily on purpose: episodeLoop imports THIS module, so a
+				// static import here would close a cycle and leave one of the two
+				// partially initialised at load time. The call is already lazy, so
+				// deferring the resolve costs nothing.
+				const { verifyServiceReplay } = await import('./episodeLoop.js');
+				await verifyServiceReplay(workspaceRoot, service.name, extToken);
+			} catch {
+				// A failed replay is not fatal here — the audit below still reports
+				// what the capture shows, and a broken command is bring-up's own
+				// verdict to record, not this repair's.
+			}
+		}
 		const verdict = auditOwnCodeTracing(workspaceRoot, service);
 		if (verdict.state !== 'absent') {
 			if (repaired) {
 				void vscode.window.showInformationMessage(
 					`Vinv: ${service.name}'s recorded start command left out its own package ` +
-						`'${repaired}'. Corrected — later runs will trace its own code.`,
+						`'${repaired}'. Corrected and re-verified — its own code is traced.`,
 				);
 			}
 			return ok;
@@ -1754,10 +1775,11 @@ export function runBringupStartViaHarness(
 		// user to redo the very step that had just been fixed for them.
 		void vscode.window.showWarningMessage(
 			repaired
-				? `Vinv: ${service.name} served ${verdict.requests} request(s) while tracing none of ` +
-						`its own package '${verdict.rootPackage}' — its recorded command left ` +
-						`'${repaired}' out. That is now fixed, so nothing needs setting up again: RUN ` +
-						'the service to capture its own code.'
+				? `Vinv: ${service.name}'s recorded command left out its own package '${repaired}'. ` +
+						'That has been corrected and the service re-run, but its handlers still ' +
+						`produced no spans across ${verdict.requests} request(s) — so the target package ` +
+						'is not the only thing wrong here. Check the "Vinv" output channel for what ' +
+						'tracelens reported.'
 				: `Vinv: ${service.name} served ${verdict.requests} request(s) but nothing from ` +
 						`'${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
 						'so coverage and latency would read zero. Recorded as not verified.',
