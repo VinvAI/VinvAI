@@ -75,13 +75,13 @@ On that same pristine template the optimization loop later detected — from liv
 
 ### Same discipline, upstream on Hugging Face
 
-Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 agent framework, no affiliation — the allocation loop proved a fast-path in `sanitize_for_rich`: **~37,137× less** transient allocation on a realistic 4&nbsp;KB log line, `log_task` measured **~615.7&nbsp;KB → ~125&nbsp;B** across 3 calls, byte-identical across **2,015** inputs. That fix is open upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572) (*open, not merged* — maintainers' call).
+Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 agent framework, no affiliation — the allocation loop found and proved a fast-path in `sanitize_for_rich`. Benchmarked with `tracemalloc` on a realistic 4&nbsp;KB log line: transient per-call allocation **36.27&nbsp;KB → 0.00&nbsp;KB (~37,137× less)**; end-to-end on `log_task`, **~615.7&nbsp;KB → ~125&nbsp;B** across 3 calls; output byte-identical across **2,015** inputs. Upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572).
 
 <div align="center">
-<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="docs/media/smolagents-pr-2572.png" alt="Open PR #2572 on huggingface/smolagents — perf fast-path for sanitize_for_rich, +10 on the production file" width="720"></a>
+<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="docs/media/smolagents-pr-2572.png" alt="PR #2572 on huggingface/smolagents — benchmarked perf fast-path for sanitize_for_rich" width="720"></a>
 <br>
-<img src="docs/media/smolagents-pr-2572-diff.png" alt="Light-theme GitHub Files changed view for smolagents PR #2572 — the +10 fast-path in src/smolagents/utils.py" width="720">
-<br><sub><a href="https://github.com/huggingface/smolagents/pull/2572">huggingface/smolagents#2572</a> · allocation win, not a latency claim · open PR</sub>
+<img src="docs/media/smolagents-pr-2572-diff.png" alt="Light-theme GitHub Files changed view for smolagents PR #2572 — the fast-path in src/smolagents/utils.py" width="720">
+<br><sub><a href="https://github.com/huggingface/smolagents/pull/2572">huggingface/smolagents#2572</a> · benchmarked allocation improvement · reproducible proof in the PR</sub>
 </div>
 
 That is *how come after it*: oracles find the waste, your agent proposes the edit, paired-bootstrap + byte-identical replay decide accept or revert, and only then does anything go upstream. The rest of this README is the machinery behind those receipts.

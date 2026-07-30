@@ -78,10 +78,10 @@ On the same template: live traces showed the default DB pool making requests **q
 
 <img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: 45.4% sustained-load median improvement with paired-bootstrap 95% CI" width="720" />
 
-Same discipline on [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★): allocation fast-path in `sanitize_for_rich` (~37,137× less transient allocation on a 4&nbsp;KB log line; `log_task` ~615.7&nbsp;KB → ~125&nbsp;B; byte-identical across 2,015 inputs), open upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572) (*open, not merged*).
+Same discipline on [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★): benchmarked allocation fast-path in `sanitize_for_rich` — `tracemalloc` on a 4&nbsp;KB log line **36.27&nbsp;KB → 0.00&nbsp;KB (~37,137× less)**; `log_task` **~615.7&nbsp;KB → ~125&nbsp;B** across 3 calls; byte-identical across 2,015 inputs. Upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572).
 
 <p align="center">
-<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/smolagents-pr-2572.png" alt="Open PR #2572 on huggingface/smolagents" width="720"></a><br>
+<a href="https://github.com/huggingface/smolagents/pull/2572"><img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/smolagents-pr-2572.png" alt="PR #2572 on huggingface/smolagents — benchmarked perf fast-path" width="720"></a><br>
 <img src="https://raw.githubusercontent.com/VinvAI/VinvAI/main/docs/media/smolagents-pr-2572-diff.png" alt="Light-theme Files changed view for smolagents PR #2572" width="720">
 </p>
 
