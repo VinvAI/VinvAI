@@ -2,7 +2,7 @@
 
 <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv wordmark and tagline" width="700" />
 
-### An autonomous swarm that finds bugs, dead code and performance problems in your Python code — and proves every fix.
+### An autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL.
 
 Nine oracles hunt a real run of your code. Findings go to the coding agent you already pay for. Nothing lands unless it survives acceptance tests written **before** the fix that the agent never sees — and every outcome trains what the swarm hunts next, on your machine.
 

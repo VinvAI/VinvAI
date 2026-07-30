@@ -3,12 +3,12 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance problems in your Python codebase and proves every fix." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-dark.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL." width="880">
 </picture>
 
 <br><br>
 
-**An autonomous swarm that finds bugs, dead code and performance problems in your codebase — and fixes them in a closed loop that proves every fix.**
+**An autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL.**
 
 Nine oracles hunt a real run of your code in parallel. Findings go to the coding agent you already pay for. Nothing lands unless it survives acceptance tests written *before* the fix that the agent never sees — and every outcome trains what the swarm hunts next, locally.
 
