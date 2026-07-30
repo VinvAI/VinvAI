@@ -1738,22 +1738,29 @@ export function runBringupStartViaHarness(
 		// re-running bring-up will not reliably fix, so correct it here and say so
 		// rather than reporting a failure the user cannot act on.
 		const repaired = repairRecordedTargetPackages(workspaceRoot, service);
-		if (repaired) {
-			void vscode.window.showWarningMessage(
-				`Vinv: ${service.name}'s recorded start command left out its own package ` +
-					`'${repaired}', so its handlers would produce no spans. The command has been ` +
-					'corrected — run the service again to capture its own code.',
-			);
-		}
 		const verdict = auditOwnCodeTracing(workspaceRoot, service);
 		if (verdict.state !== 'absent') {
+			if (repaired) {
+				void vscode.window.showInformationMessage(
+					`Vinv: ${service.name}'s recorded start command left out its own package ` +
+						`'${repaired}'. Corrected — later runs will trace its own code.`,
+				);
+			}
 			return ok;
 		}
-		markUntracedBringup(workspaceRoot, service.name, verdict);
+		markUntracedBringup(workspaceRoot, service.name, verdict, repaired ?? undefined);
+		// ONE message, and it must not contradict the repair. Two notifications —
+		// "the command has been corrected" followed by "set it up again" — told the
+		// user to redo the very step that had just been fixed for them.
 		void vscode.window.showWarningMessage(
-			`Vinv: ${service.name} started and served ${verdict.requests} request(s), but nothing ` +
-				`from '${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
-				'so coverage and latency would all read zero. Recorded as not verified; set it up again.',
+			repaired
+				? `Vinv: ${service.name} served ${verdict.requests} request(s) while tracing none of ` +
+						`its own package '${verdict.rootPackage}' — its recorded command left ` +
+						`'${repaired}' out. That is now fixed, so nothing needs setting up again: RUN ` +
+						'the service to capture its own code.'
+				: `Vinv: ${service.name} served ${verdict.requests} request(s) but nothing from ` +
+						`'${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
+						'so coverage and latency would read zero. Recorded as not verified.',
 		);
 		return false;
 	});

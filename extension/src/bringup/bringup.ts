@@ -225,9 +225,16 @@ export function captureServiceFor(
 	return name ? serviceSlug(name) : undefined;
 }
 
-/** Pulls span component names out of a trace without parsing every line. */
-const COMPONENT_RE = /"component"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-
+/**
+ * Span component names from a trace — ENTER events only.
+ *
+ * The enter filter is the whole point. tracelens writes an `enter` AND a
+ * matching `exit` for every span, so scanning the file for `"component"` counted
+ * each one twice and the audit told the user a service had "served 4 requests"
+ * when it served 2. Parsed per line rather than regexed over the whole text
+ * precisely so `event` can be consulted; a bring-up capture is a few thousand
+ * lines and this runs once, so the cost is irrelevant next to being right.
+ */
 function traceComponents(traceFile: string): string[] {
 	let text: string;
 	try {
@@ -236,8 +243,19 @@ function traceComponents(traceFile: string): string[] {
 		return [];
 	}
 	const out: string[] = [];
-	for (const m of text.matchAll(COMPONENT_RE)) {
-		out.push(m[1]);
+	for (const line of text.split('\n')) {
+		const trimmed = line.trim();
+		if (!trimmed) {
+			continue;
+		}
+		try {
+			const ev = JSON.parse(trimmed) as { component?: unknown; event?: unknown };
+			if (ev.event === 'enter' && typeof ev.component === 'string') {
+				out.push(ev.component);
+			}
+		} catch {
+			// torn or partial line — a live capture is appended to while we read
+		}
 	}
 	return out;
 }
@@ -338,6 +356,14 @@ export function markUntracedBringup(
 	workspaceRoot: string,
 	service: string,
 	verdict: Extract<OwnCodeVerdict, { state: 'absent' }>,
+	/**
+	 * Set when the recorded command was just corrected. The record is still not
+	 * verified — this capture genuinely traced nothing — but "fix the flags" is
+	 * now stale advice contradicting a fix that already happened, and "set it up
+	 * again" would send the user back through the step that produced the bad
+	 * command in the first place. What is actually needed is another run.
+	 */
+	repairedPackage?: string,
 ): void {
 	const file = getStartCommandPath(workspaceRoot, service);
 	let parsed: Record<string, unknown>;
@@ -352,12 +378,17 @@ export function markUntracedBringup(
 	// "this is a library with nothing to start" heuristic, which would park the
 	// service as unstartable instead of queueing the repair.
 	parsed.failure_kind = 'untraced';
-	parsed.failure_symptom =
-		`The service started and served ${verdict.requests} request(s), but every span came from ` +
-		`somewhere other than its own package '${verdict.rootPackage}' — tracelens instrumented ` +
-		`the wrong code. Fix the '--target-package' flags in this file's start command so they ` +
-		`include '${verdict.rootPackage}'. Until they do, every endpoint reports 0% coverage and ` +
-		`no latency, with nothing raising an error to explain it.`;
+	parsed.failure_symptom = repairedPackage
+		? `The service started and served ${verdict.requests} request(s), but every span came from ` +
+			`somewhere other than its own package '${verdict.rootPackage}' — this capture was made ` +
+			`before the command was fixed. '--target-package ${repairedPackage}' has since been added ` +
+			`to this file, so nothing here needs editing: RUN the service again and the next capture ` +
+			`will carry its own code.`
+		: `The service started and served ${verdict.requests} request(s), but every span came from ` +
+			`somewhere other than its own package '${verdict.rootPackage}' — tracelens instrumented ` +
+			`the wrong code. Fix the '--target-package' flags in this file's start command so they ` +
+			`include '${verdict.rootPackage}'. Until they do, every endpoint reports 0% coverage and ` +
+			`no latency, with nothing raising an error to explain it.`;
 	try {
 		fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 	} catch {

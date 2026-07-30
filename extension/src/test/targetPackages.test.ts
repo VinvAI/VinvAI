@@ -406,6 +406,44 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 		assert.match(String(after.symptom), /'examples'/);
 	});
 
+	// The audit reported "served 4 request(s)" for 2 real requests: it scanned the
+	// file for `"component"` and tracelens writes an enter AND an exit for every
+	// span, so every root was counted twice. A number we put in front of the user
+	// has to be the number that happened.
+	test('a request is counted once, not once per span event', () => {
+		const root = repo();
+		const dir = path.join(root, '.vinv', 'captures', 'vinv-bringup', 'api');
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, 'trace.jsonl'),
+			[
+				// Two requests, each with its enter/exit pair and ASGI sub-spans.
+				{ component: 'POST /run-agent', event: 'enter' },
+				{ component: 'POST /run-agent http receive', event: 'enter' },
+				{ component: 'smolagents.agents.run', event: 'enter' },
+				{ component: 'smolagents.agents.run', event: 'exit' },
+				{ component: 'POST /run-agent http receive', event: 'exit' },
+				{ component: 'POST /run-agent', event: 'exit' },
+				{ component: 'POST /run-agent', event: 'enter' },
+				{ component: 'POST /run-agent', event: 'exit' },
+			]
+				.map((e) => JSON.stringify(e))
+				.join('\n') + '\n',
+			'utf8',
+		);
+		const rec = path.join(root, '.vinv', 'start_commands', 'api.json');
+		fs.mkdirSync(path.dirname(rec), { recursive: true });
+		fs.writeFileSync(rec, JSON.stringify({ verified: true, commands: [] }), 'utf8');
+
+		const verdict = auditOwnCodeTracing(root, service);
+		assert.strictEqual(verdict.state, 'absent');
+		assert.strictEqual(
+			verdict.state === 'absent' && verdict.requests,
+			2,
+			'two requests were served, not four span events',
+		);
+	});
+
 	test('a bring-up that DID trace its own code is left verified', () => {
 		const root = repo();
 		seed(root, ['POST /chat', 'examples.server.main.chat']);
