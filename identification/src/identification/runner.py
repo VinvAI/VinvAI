@@ -1954,6 +1954,47 @@ def _file_to_module(rel: str) -> str:
     return mod
 
 
+def _merge_stats(stats: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Sum per-component tallies into one, preserving the memory None/0 split."""
+    out: dict[str, Any] = {
+        "calls": 0,
+        "total_ms": 0.0,
+        "blocked_ms": 0.0,
+        "mem_delta_bytes": None,
+        "ok": 0,
+        "error": 0,
+        "errors": set(),
+    }
+    for st in stats:
+        for k in ("calls", "total_ms", "blocked_ms", "ok", "error"):
+            out[k] += st[k]
+        out["errors"] |= st["errors"]
+        if st["mem_delta_bytes"] is not None:
+            out["mem_delta_bytes"] = (out["mem_delta_bytes"] or 0) + st["mem_delta_bytes"]
+    return out
+
+
+def _runtime_facts(st: dict[str, Any]) -> dict[str, Any]:
+    """The runtime annotation carried by a node / runtime-only / middleware row.
+
+    ``blocked_ms`` is always present (a span that never waited genuinely blocked
+    for 0ms).  ``mem_delta_bytes`` is omitted entirely when nothing measured it,
+    because the ``standard`` capture preset leaves memory attribution off and a
+    literal 0 would read as "this function allocates nothing".
+    """
+    facts: dict[str, Any] = {
+        "calls": st["calls"],
+        "total_ms": round(st["total_ms"], 3),
+        "blocked_ms": round(st["blocked_ms"], 3),
+        "ok": st["ok"],
+        "error": st["error"],
+        "errors": sorted(st["errors"]),
+    }
+    if st["mem_delta_bytes"] is not None:
+        facts["mem_delta_bytes"] = st["mem_delta_bytes"]
+    return facts
+
+
 def _qual_matches(component: str, module: str, name: str) -> bool:
     """True if a trace ``component`` refers to symbol ``name`` defined in ``module``.
 
@@ -2016,6 +2057,41 @@ def _load_trace_events(path: Path) -> list[dict[str, Any]]:
             if isinstance(obj, dict):
                 events.append(obj)
     return events
+
+
+def _resolve_trace_files(root: Path, service: str | None, override: str | None) -> list[Path]:
+    """Every capture a REPO-WIDE question should read, newest first.
+
+    ``_resolve_trace_file`` answers "which single capture" — correct for
+    ``tracemap``, which overlays one endpoint of one service.  It is wrong for
+    ``tracesummary``, which ranks EVERY endpoint in the repo: picking the
+    freshest capture means only whichever service ran last can be seen as
+    exercised, and if that service's inbound spans match no consolidated
+    endpoint, the summary reports nothing exercised anywhere.  Downstream that
+    empties the insight manifest, which skips probes, which starves the whole
+    pipeline — with "no observed endpoints" as the only symptom.
+
+    An explicit ``override`` or ``service`` still narrows, because those are the
+    caller saying they mean one capture.
+    """
+    if override:
+        cand = Path(override).expanduser()
+        if cand.is_file():
+            return [cand]
+        raise FileNotFoundError(f"--trace {cand} does not exist")
+
+    caps = root / ".vinv" / "captures"
+    found = [p for p in caps.rglob("trace.jsonl") if p.is_file() and p.stat().st_size > 0] if caps.is_dir() else []
+    if service:
+        narrowed = [p for p in found if p.parent.name == service]
+        if narrowed:
+            found = narrowed
+    if not found:
+        raise FileNotFoundError(
+            f"No tracelens capture for {root} (no non-empty trace.jsonl under {caps}). "
+            "Run a service under tracing to capture a trace first, or pass --trace."
+        )
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def _resolve_trace_file(root: Path, service: str | None, override: str | None) -> Path:
@@ -2094,6 +2170,14 @@ def _reconstruct_forest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "depth": depth if isinstance(depth, int) else 0,
                     "children": [],
                     "duration_ms": 0.0,
+                    # Wall time is not the same question as "was it working".
+                    # ``blocked_ms`` is the part of the duration spent waiting on
+                    # I/O, and ``mem_delta_bytes`` the net allocation across the
+                    # call — both already on every exit span, both previously
+                    # dropped here, so a function that only waits looked
+                    # identical to one burning CPU.
+                    "blocked_ms": 0.0,
+                    "mem_delta_bytes": None,
                     "status": "ok",
                     "error_type": None,
                 }
@@ -2103,6 +2187,11 @@ def _reconstruct_forest(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if stack:
                 node = stack.pop()
                 node["duration_ms"] = float(ev.get("duration_ms") or 0.0)
+                node["blocked_ms"] = float(ev.get("blocked_ms") or 0.0)
+                # None (memory attribution off) must stay distinguishable from 0
+                # (measured, allocated nothing) all the way to the surface.
+                mem = ev.get("mem_delta_bytes")
+                node["mem_delta_bytes"] = None if mem is None else int(mem)
                 node["status"] = ev.get("status", "ok")
                 node["error_type"] = ev.get("error_type")
                 completed.setdefault(key, []).append(node)
@@ -2205,12 +2294,25 @@ def map_trace_to_tree(
         comp = n["component"]
         st = bucket.get(comp)
         if st is None:
-            st = {"calls": 0, "total_ms": 0.0, "ok": 0, "error": 0, "errors": set()}
+            st = {
+                "calls": 0,
+                "total_ms": 0.0,
+                "blocked_ms": 0.0,
+                # Stays None unless at least one span actually measured memory,
+                # so "attribution was off" never renders as "allocated nothing".
+                "mem_delta_bytes": None,
+                "ok": 0,
+                "error": 0,
+                "errors": set(),
+            }
             bucket[comp] = st
             if bucket is runtime:
                 runtime_by_func.setdefault(comp.rsplit(".", 1)[-1], []).append(comp)
         st["calls"] += 1
         st["total_ms"] += n["duration_ms"]
+        st["blocked_ms"] += n.get("blocked_ms") or 0.0
+        if n.get("mem_delta_bytes") is not None:
+            st["mem_delta_bytes"] = (st["mem_delta_bytes"] or 0) + n["mem_delta_bytes"]
         if n["status"] == "error":
             st["error"] += 1
             if n["error_type"]:
@@ -2260,37 +2362,17 @@ def map_trace_to_tree(
             if hit is not None:
                 matched_components.add(hit)
                 st = runtime[hit]
-                node["runtime"] = {
-                    "executed": True,
-                    "calls": st["calls"],
-                    "total_ms": round(st["total_ms"], 3),
-                    "ok": st["ok"],
-                    "error": st["error"],
-                    "errors": sorted(st["errors"]),
-                }
+                node["runtime"] = {"executed": True, **_runtime_facts(st)}
             elif node.get("node_type") == "class_definition" and (
                 methods := _class_methods_executed(mod, name, runtime.keys())
             ):
                 # Constructor/class node: no direct span exists, so credit it when
                 # any of its methods ran and aggregate their runtime facts.
-                calls = ok = error = 0
-                total_ms = 0.0
-                errs: set[str] = set()
                 for m in methods:
                     matched_components.add(m)
-                    ms = runtime[m]
-                    calls += ms["calls"]
-                    ok += ms["ok"]
-                    error += ms["error"]
-                    total_ms += ms["total_ms"]
-                    errs |= ms["errors"]
                 node["runtime"] = {
                     "executed": True,
-                    "calls": calls,
-                    "total_ms": round(total_ms, 3),
-                    "ok": ok,
-                    "error": error,
-                    "errors": sorted(errs),
+                    **_runtime_facts(_merge_stats(runtime[m] for m in methods)),
                     "via_methods": len(methods),
                 }
                 hit = methods[0]
@@ -2317,25 +2399,14 @@ def map_trace_to_tree(
 
     # Runtime calls under the handler that the static tree never predicted.
     runtime_only = [
-        {
-            "component": comp,
-            "calls": st["calls"],
-            "total_ms": round(st["total_ms"], 3),
-            "errors": sorted(st["errors"]),
-        }
+        {"component": comp, **_runtime_facts(st)}
         for comp, st in runtime.items()
         if comp not in matched_components
     ]
     runtime_only.sort(key=lambda d: (-d["total_ms"], d["component"]))
 
     middleware_entries = [
-        {
-            "component": comp,
-            "scope": "middleware",
-            "calls": st["calls"],
-            "total_ms": round(st["total_ms"], 3),
-            "errors": sorted(st["errors"]),
-        }
+        {"component": comp, "scope": "middleware", **_runtime_facts(st)}
         for comp, st in middleware.items()
     ]
     middleware_entries.sort(key=lambda d: (-d["total_ms"], d["component"]))
@@ -2564,9 +2635,15 @@ def summarize_traces(
     )
     apis = consolidated.get("apis", [])
 
-    trace_path = _resolve_trace_file(root, service, trace)
-    events = _load_trace_events(trace_path)
-    counts = _root_span_counts(events)
+    # EVERY capture, not just the freshest. A repo with four traced services has
+    # four captures, and reading one of them means three services' endpoints are
+    # reported as never exercised — see _resolve_trace_files.
+    trace_paths = _resolve_trace_files(root, service, trace)
+    counts: dict[tuple[str, str], int] = {}
+    for path in trace_paths:
+        for key, n in _root_span_counts(_load_trace_events(path)).items():
+            counts[key] = counts.get(key, 0) + n
+    trace_path = trace_paths[0]
 
     matched: set[tuple[str, str]] = set()
     rows: list[dict[str, Any]] = []
@@ -2602,7 +2679,10 @@ def summarize_traces(
         "status": "ok",
         "service": service,
         "code_root": str(root),
+        # `trace_file` stays the newest capture for back-compat; `trace_files` is
+        # the honest answer to "what was actually counted".
         "trace_file": str(trace_path),
+        "trace_files": [str(p) for p in trace_paths],
         "api_count": len(rows),
         "exercised_count": sum(1 for r in rows if r["trace_count"]),
         "trace_invocations_total": total_invocations,
@@ -2611,11 +2691,11 @@ def summarize_traces(
     }
 
     log.info(
-        "tracesummary_done apis=%d exercised=%d invocations=%d trace=%s",
+        "tracesummary_done apis=%d exercised=%d invocations=%d captures=%d",
         len(rows),
         result["exercised_count"],
         total_invocations,
-        trace_path,
+        len(trace_paths),
     )
 
     out_dir = root / ".vinv" / "identification"
