@@ -1496,6 +1496,83 @@ def _list_feedback_instruction(
     )
 
 
+# Server runners whose application lives in a positional `module:attr` spec, so
+# the `-m` target names the RUNNER and the real entrypoint is an argument to it.
+_APP_SPEC_RUNNERS = frozenset({"uvicorn", "gunicorn", "hypercorn", "daphne", "granian"})
+
+_TOKEN_RE = re.compile(r'"[^"]*"|\'[^\']*\'|\S+')
+
+
+def _module_from_script(token: str) -> str | None:
+    """The dotted module a ``.py`` path resolves to, or None for a bare script.
+
+    A script with no directory part runs as ``__main__`` and belongs to no
+    package, so there is nothing to name in ``--target-package``; reporting its
+    stem would produce a target matching no span.
+    """
+    norm = token.replace("\\", "/")
+    if not norm.endswith(".py"):
+        return None
+    parts = [p for p in norm[:-3].split("/") if p and p != "."]
+    if len(parts) < 2 or not all(p.isidentifier() for p in parts):
+        return None
+    return ".".join(parts)
+
+
+def _app_spec_module(rest: list[str]) -> str | None:
+    """First non-flag positional read as ``module:attr`` — uvicorn's app spec."""
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok.startswith("-"):
+            # Skip a flag's value too, unless it was written `--flag=value`.
+            if "=" not in tok and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+                i += 1
+            i += 1
+            continue
+        mod = tok.split(":")[0]
+        if all(p.isidentifier() for p in mod.split(".")) and mod:
+            return mod
+        return _module_from_script(tok)
+    return None
+
+
+def _entrypoint_root_package(command: str) -> str | None:
+    """Top-level import package the start command's entrypoint lives in, or None.
+
+    Mirrors ``entrypointModule``/``rootPackage`` in the extension
+    (``bringup/targetPackages.ts``) so both sides derive the SAME answer — the
+    engine must not need its caller to supply this.
+
+    None for anything ambiguous (a console script, a bare top-level file, a
+    ``flask run``): callers treat that as "no opinion" rather than guessing a
+    package, which would either mask a real mismatch or invent a false one.
+    """
+    tokens = [t.strip("\"'") for t in _TOKEN_RE.findall(command)]
+    for i, tok in enumerate(tokens):
+        if tok == "-m":
+            target = tokens[i + 1] if i + 1 < len(tokens) else None
+            if not target:
+                return None
+            if target in _APP_SPEC_RUNNERS:
+                mod = _app_spec_module(tokens[i + 2:])
+            elif all(p.isidentifier() for p in target.split(".")) and target:
+                mod = target
+            else:
+                return None
+            return mod.split(".")[0] if mod else None
+        base = tok.replace("\\", "/").split("/")[-1]
+        if base.endswith(".exe"):
+            base = base[:-4]
+        if base in _APP_SPEC_RUNNERS:
+            mod = _app_spec_module(tokens[i + 1:])
+            return mod.split(".")[0] if mod else None
+        if tok.endswith(".py"):
+            mod = _module_from_script(tok)
+            return mod.split(".")[0] if mod else None
+    return None
+
+
 def _default_modules(project_root: Path, service: str, modules: list[str] | None) -> list[str]:
     """Resolve the instrumentation modules for ``service`` when none were passed.
 
@@ -1512,19 +1589,38 @@ def _default_modules(project_root: Path, service: str, modules: list[str] | None
     only, which is exactly the "runtime view is empty" failure mode.
     """
     resolved = [m for m in (modules or []) if m]
-    if not resolved:
-        try:
-            for svc in _read_services(project_root):
-                if isinstance(svc, dict) and svc.get("name") == service:
+    entry_root: str | None = None
+    try:
+        for svc in _read_services(project_root):
+            if isinstance(svc, dict) and svc.get("name") == service:
+                if not resolved:
                     resolved = [
                         m for m in svc.get("modules", [])
                         if isinstance(m, str) and m.isidentifier()
                     ]
-                    break
-        except RuntimeError:
-            pass
+                command = svc.get("command")
+                if isinstance(command, str):
+                    entry_root = _entrypoint_root_package(command)
+                break
+    except RuntimeError:
+        pass
     if not resolved and service.isidentifier():
         resolved = [service]
+
+    # The package the service's ENTRYPOINT lives in, derived from its own recorded
+    # command. Stage 2a records `modules` from distribution discovery, which sees
+    # installed packages — so a service whose entrypoint sits outside one (an
+    # `examples/` tree, an `apps/` or `services/` directory) has that package in
+    # neither `modules` nor anything else the engine reads, and every command it
+    # renders traces the libraries while missing the handlers.
+    #
+    # Until now the ONLY thing supplying it was targetPackagesFor() on the
+    # extension side, which meant `bringup start` without an explicit --module —
+    # the CLI, a printed runbook piped into another agent — silently lost it. A
+    # value the engine can derive from a field it already reads should not depend
+    # on its caller remembering to pass it.
+    if entry_root and entry_root not in resolved:
+        resolved.append(entry_root)
 
     if not resolved:
         return []
