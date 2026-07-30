@@ -125,6 +125,8 @@ suite('findings: message routing', () => {
 			refresh: async () => void log.push('refresh'),
 			dispatchFix: async (sig) => void log.push(`fix:${sig}`),
 			walk: async () => void log.push('walk'),
+			openDeadSection: async (id) => void log.push(`dead:${id}`),
+			analyzeDeadCode: async () => void log.push('analyze'),
 		};
 		await handleFindingsMessage({ type: 'openSource', file: 'x.py', line: 3 }, a);
 		await handleFindingsMessage({ type: 'refresh' }, a);
@@ -135,7 +137,11 @@ suite('findings: message routing', () => {
 		// The walkthrough is reached FROM the report now — Journey has no entry
 		// point of its own outside the command palette, so this is the path.
 		await handleFindingsMessage({ type: 'walk' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123', 'walk']);
+		await handleFindingsMessage({ type: 'openDeadSection', sectionId: 'aa11bb22cc33' }, a);
+		// Same rule as dispatchFix: a section message with no id names no section.
+		await handleFindingsMessage({ type: 'openDeadSection' }, a);
+		await handleFindingsMessage({ type: 'analyzeDeadCode' }, a);
+		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123', 'walk', 'dead:aa11bb22cc33', 'analyze']);
 	});
 });
 

@@ -182,7 +182,23 @@ export function buildPrompt(questions: ChannelQuestion[]): string {
  * take down the run.
  */
 export function parseAnswers(stdout: string): Record<string, unknown> {
-	if (!stdout) {return {};}
+	return (parseEnvelope(stdout, 'answers') as Record<string, unknown>) ?? {};
+}
+
+/**
+ * The value of `key` out of the last balanced JSON object in a harness reply.
+ *
+ * Extracted from `parseAnswers` when the dead-code batcher needed the identical
+ * scan for a `{"verdicts": ...}` envelope. Two copies of a tolerant parser is how
+ * one of them quietly stops tolerating something the other handles — the same
+ * argument `describeLineage` makes for one formatter per fact.
+ *
+ * Returns undefined when nothing usable is present; never throws, because an
+ * unparseable reply must leave the caller's queue pending rather than take down
+ * the run.
+ */
+export function parseEnvelope(stdout: string, key: string): unknown {
+	if (!stdout) {return undefined;}
 	const candidates: string[] = [];
 	// Fenced blocks first — the common shape — then the raw text.
 	const fence = /```(?:json)?\s*([\s\S]*?)```/g;
@@ -208,11 +224,9 @@ export function parseAnswers(stdout: string): Record<string, unknown> {
 				depth--;
 				if (depth === 0) {
 					try {
-						const parsed = JSON.parse(text.slice(start, i + 1)) as {
-							answers?: Record<string, unknown>;
-						};
-						if (parsed && typeof parsed === 'object' && parsed.answers) {
-							return parsed.answers;
+						const parsed = JSON.parse(text.slice(start, i + 1)) as Record<string, unknown>;
+						if (parsed && typeof parsed === 'object' && parsed[key] !== undefined) {
+							return parsed[key];
 						}
 					} catch {
 						// Keep scanning: a later candidate may parse.
@@ -222,7 +236,7 @@ export function parseAnswers(stdout: string): Record<string, unknown> {
 			}
 		}
 	}
-	return {};
+	return undefined;
 }
 
 /** Write answers back into their channel files. Returns how many landed. */

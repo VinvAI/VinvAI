@@ -20,7 +20,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { evidenceFileForKind, isDispatchableKind } from '../harness/issueKinds';
+import { describeLineage } from '../harness/runtimeAnalysis';
 import { serviceForEndpointFile } from '../bringup/targetPackages';
+import { deadCodePath, type DeadCodeReport } from './deadCodeModel';
+import { analysisPath, type DeadCodeAnalysis } from '../harness/deadCodeAnalysis';
 
 /**
  * Resolves `METHOD /path` → owning service, for every endpoint the workspace
@@ -129,6 +132,48 @@ export interface FindingsIssue {
 	coveredFrames: string[];
 }
 
+/**
+ * One dead-code section as the Findings list needs it — identity, size, the
+ * reachability verdict, and the agent's one-liner if it has read the code.
+ *
+ * Deliberately NOT the whole section: the member symbols and their source belong
+ * to the section's own report tab, and carrying them here would make
+ * findings.json grow with the dead code of the repo rather than with its
+ * findings.
+ */
+export interface FindingsDeadSection {
+	id: string;
+	title: string;
+	files: string[];
+	layer: string;
+	reason: 'orphan' | 'reachable-untested';
+	lines: number;
+	symbols: number;
+	/** How many live symbols statically reference this section. */
+	liveCallers: number;
+	/** The agent's recommendation, or null when the section is unanalysed. */
+	action: string | null;
+	/** The agent's account of what the code does; empty when unanalysed. */
+	what: string;
+}
+
+export interface FindingsDeadCode {
+	/**
+	 * False when no capture has been joined onto the graph. Everything would read
+	 * as dead, so the list is empty and the panel says why — an untraced repo is
+	 * an absence of evidence, not a pile of findings.
+	 */
+	hasTrace: boolean;
+	/** Symbols a trace executed, of the symbols considered (tests/docs excluded). */
+	traced: number;
+	considered: number;
+	/** Sections that have an agent verdict, of those listed. */
+	analysed: number;
+	sections: FindingsDeadSection[];
+	/** The honest one-line rendering of the section selection's bounds. */
+	bound: string;
+}
+
 export interface Findings {
 	schemaVersion: 1;
 	root: string;
@@ -144,6 +189,8 @@ export interface Findings {
 		regressRealDiffs: number;
 		stateCreated: number;
 		stateCleaned: number;
+		/** Dead-code sections listed; 0 also when no trace exists to judge against. */
+		deadSections: number;
 	};
 	/**
 	 * The services bring-up verified, from .vinv/services.json.
@@ -163,6 +210,15 @@ export interface Findings {
 	 */
 	servicesWithFindings: string[];
 	issues: FindingsIssue[];
+	/**
+	 * Code no capture ever executed, grouped into sections.
+	 *
+	 * Assembled from `.vinv/reports/deadcode.json` like every other source here —
+	 * this model reads artifacts, it does not derive them. The Findings view
+	 * refreshes that artifact before assembling, so the panel is never stale; a
+	 * workspace that has never scanned simply has no dead-code section.
+	 */
+	deadCode: FindingsDeadCode;
 	episodes: FindingsEpisode[];
 	opportunities: Array<{
 		kind: string;
@@ -286,6 +342,55 @@ function toFindingsIssue(c: any, services: Map<string, string>): FindingsIssue {
 	};
 }
 
+/**
+ * The dead-code block, joined from the scan artifact and the agent's verdicts.
+ *
+ * Both files are optional and independent: a scan with no analysis lists sections
+ * with `action: null` (the panel offers the button), and an analysis whose
+ * sections no longer exist contributes nothing, because a verdict is only ever
+ * attached by section id — the id is derived from the member symbols, so code
+ * that changed gets a new id and cannot inherit a verdict written about the old
+ * version.
+ */
+function buildDeadCodeBlock(workspaceRoot: string): FindingsDeadCode {
+	const scan = readJson(deadCodePath(workspaceRoot)) as DeadCodeReport | null;
+	const analysis = readJson(analysisPath(workspaceRoot)) as DeadCodeAnalysis | null;
+	if (!scan || !scan.sections) {
+		return {
+			hasTrace: false,
+			traced: 0,
+			considered: 0,
+			analysed: 0,
+			sections: [],
+			bound: '0 dead-code section(s)',
+		};
+	}
+	const verdicts = analysis?.verdicts ?? {};
+	const sections: FindingsDeadSection[] = (scan.sections.items ?? []).map((s) => {
+		const v = verdicts[s.id];
+		return {
+			id: s.id,
+			title: s.title,
+			files: s.files,
+			layer: s.layer,
+			reason: s.reason,
+			lines: s.lines,
+			symbols: s.symbols?.items?.length ?? 0,
+			liveCallers: s.liveCallers.length,
+			action: v?.action ?? null,
+			what: v?.what ?? '',
+		};
+	});
+	return {
+		hasTrace: Boolean(scan.hasTrace),
+		traced: Number(scan.traced ?? 0),
+		considered: Number(scan.considered ?? 0),
+		analysed: sections.filter((s) => s.action).length,
+		sections,
+		bound: describeLineage(scan.sections.lineage ?? [], 'dead-code section'),
+	};
+}
+
 export function buildFindings(workspaceRoot: string): Findings {
 	const ex = path.join(workspaceRoot, '.vinv', 'exercise');
 	const scorecard = readJson(path.join(ex, 'scorecard.json')) ?? {};
@@ -358,6 +463,7 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const after = scorecard.coverage?.after_exercised ?? {};
 	const pollution = scorecard.state_pollution ?? {};
 	const accepted = episodes.filter((e) => e.action === 'accept').length;
+	const deadCode = buildDeadCodeBlock(workspaceRoot);
 
 	return {
 		schemaVersion: 1,
@@ -382,9 +488,11 @@ export function buildFindings(workspaceRoot: string): Findings {
 				(regress.latest?.perf ?? 0),
 			stateCreated: Number(pollution.created ?? 0),
 			stateCleaned: Number(pollution.cleaned ?? 0),
+			deadSections: deadCode.sections.length,
 		},
 		services,
 		issues,
+		deadCode,
 		servicesWithFindings: [
 			...new Set(issues.map((i) => i.service).filter((s): s is string => !!s)),
 		].sort(),

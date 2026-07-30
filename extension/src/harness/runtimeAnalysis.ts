@@ -203,7 +203,7 @@ export interface SelectionStats {
 	 * "192 dropped, 19,400ms combined" cannot be skimmed past the way a sentence
 	 * saying the same thing can. Absent when nothing was dropped.
 	 */
-	residual?: { count: number; magnitude: number; unit: 'ms' | 'bytes' };
+	residual?: { count: number; magnitude: number; unit: 'ms' | 'bytes' | 'lines' };
 }
 
 /**
@@ -289,7 +289,7 @@ export function selectionStage(
 		coverage_achieved: number;
 		stopped_by: SelectionStats['stopped_by'];
 		droppedMagnitude?: number;
-		unit?: 'ms' | 'bytes';
+		unit?: 'ms' | 'bytes' | 'lines';
 	},
 ): SelectionStats {
 	const dropped = Math.max(0, opts.total - opts.returned);
@@ -345,10 +345,16 @@ export function describeSelection(stats: SelectionStats, noun: string): string {
 	);
 }
 
-/** `14.6ms` / `2.1MB` — the residual magnitude in its own unit. */
-function magnitude(m: number, unit: 'ms' | 'bytes'): string {
+/** `14.6ms` / `2.1MB` / `340 lines` — the residual magnitude in its own unit. */
+function magnitude(m: number, unit: 'ms' | 'bytes' | 'lines'): string {
 	if (unit === 'ms') {
 		return `${m < 10 ? m.toFixed(1) : Math.round(m)}ms`;
+	}
+	// Dead code ranks by source volume, not time: "192 dropped, 4,100 lines
+	// combined" is the same checkable residual claim in the unit that selection
+	// actually ordered by.
+	if (unit === 'lines') {
+		return `${Math.round(m).toLocaleString('en-US')} lines`;
 	}
 	const mb = m / 1024 / 1024;
 	return mb >= 1 ? `${mb.toFixed(1)}MB` : `${Math.round(m / 1024)}KB`;

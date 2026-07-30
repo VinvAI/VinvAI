@@ -17,6 +17,7 @@ import { CallTreeEditorProvider } from './identification/callTreeView';
 import { GraphExplorerEditorProvider } from './views/graphExplorer';
 import { JourneyEditorProvider } from './views/journeyView';
 import { FindingsEditorProvider } from './views/findingsView';
+import { DeadSectionEditorProvider } from './views/deadCodeReportView';
 import { OptimizationReportEditorProvider } from './views/optimizationReportView';
 import { registerAutoTriggers } from './harness/autoTrigger';
 import { registerAutoPilotAutoStart } from './harness/autoPilot';
@@ -171,6 +172,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		GraphExplorerEditorProvider.register(context),
 		JourneyEditorProvider.register(context),
 		FindingsEditorProvider.register(context),
+		DeadSectionEditorProvider.register(context),
 		OptimizationReportEditorProvider.register(context),
 	);
 

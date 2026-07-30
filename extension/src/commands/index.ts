@@ -18,6 +18,7 @@ import { findTraceFiles } from '../graph/indexGraph';
 import { openCallTree } from '../identification/callTreeView';
 import { openJourney } from '../views/journeyView';
 import { openFindings } from '../views/findingsView';
+import { analyzeDeadCodeSections } from '../harness/deadCodeRunner';
 import type { CallSiteContext } from '../identification/callSiteContext';
 import { loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
@@ -263,6 +264,23 @@ export function registerCommands(
 			}
 			await openFindings(folder.uri.fsPath, arg?.service);
 		}),
+		// Ask the coding agent what the dead code does and what to do with it.
+		// `arg.sectionId` narrows to one section (the report tab's own button);
+		// without it every unanalysed section goes, batched.
+		vscode.commands.registerCommand(
+			'vinv-vs.analyzeDeadCode',
+			async (arg?: { sectionId?: string | null; all?: boolean }) => {
+				const folder = vscode.workspace.workspaceFolders?.[0];
+				if (!folder) {
+					void vscode.window.showErrorMessage('Open a workspace folder to analyse dead code.');
+					return;
+				}
+				await analyzeDeadCodeSections(folder.uri.fsPath, {
+					sectionId: arg?.sectionId ?? undefined,
+					reanalyseAll: arg?.all,
+				});
+			},
+		),
 		// The values the exerciser could not derive. This panel used to open only
 		// as a side effect of an exercise pass, so closing the tab — or getting a
 		// credential wrong — meant re-running the whole pipeline to be asked again.

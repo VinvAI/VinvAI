@@ -68,11 +68,6 @@ export function getGraphHtml(): string {
 		}
 		.mode-switch button + button { border-left: 1px solid var(--line-strong); }
 		.mode-switch button.active { background: var(--ink); color: var(--bg); }
-		/* Dead Code is a standing accent call-to-action, not one mode among many —
-		   it reads as red-on-white at a glance whether or not it is engaged. */
-		.v-btn.dead { background: var(--accent); border-color: var(--accent); color: #ffffff; }
-		.v-btn.dead:hover { background: var(--accent-hover); border-color: var(--accent-hover); color: #ffffff; }
-		.v-btn.dead.active { box-shadow: inset 0 0 0 2px var(--bg); }
 		main { flex: 1; display: flex; min-height: 0; }
 		#canvas-wrap { flex: 1; position: relative; min-width: 0; }
 		canvas { position: absolute; inset: 0; cursor: grab; }
@@ -159,7 +154,6 @@ export function getGraphHtml(): string {
 			<button id="m-diff" title="What changed this epoch (solid red ring) and everything downstream of it (dashed ring)">Diff Impact</button>
 			<button id="m-tour" title="Dependency-ordered walkthrough of the highest-ranked symbols">Tour</button>
 		</div>
-		<button class="v-btn dead" id="btn-dead" title="Show only the nodes with no trace mapped — suspected dead code. Updates live as new traces are captured.">Dead Code</button>
 		<button class="v-btn primary" id="btn-ask" title="Ask a question about the selected node (or the whole codebase)">Ask Vinv</button>
 		<button class="v-btn" id="btn-trajectory" title="Show episode history, goals, rewards, evidence, disputes, reverts, and learned policy changes">Trajectory</button>
 		<button class="v-btn" id="btn-theme" title="Cycle the graph theme: follow the editor, always light, or always dark">Theme: Auto</button>
@@ -221,7 +215,11 @@ export function getGraphHtml(): string {
 	const BIG_GRAPH_FILES = 120;
 
 	let snapshot = null;
-	let mode = 'explore';           // explore | runtime | diff | tour | dead
+	// Dead code used to be a fifth mode here. A canvas filter can say WHERE the
+	// untraced nodes are and nothing else — not what they do, not whether anything
+	// still points at them, not what to do about them — so it moved to Findings,
+	// where it is a list of sections each opening its own walkthrough report.
+	let mode = 'explore';           // explore | runtime | diff | tour
 	let expanded = new Set();       // files rendered at symbol level
 	let selected = null;            // display-node id
 	let neighborIds = new Set();    // direct neighbors of the selected node
@@ -354,9 +352,10 @@ export function getGraphHtml(): string {
 		// Every status line counts dnodes, and this is the ONE place dnodes
 		// changes — legend toggle, expand, collapse. Refreshing per call site
 		// missed all three: showing the hidden-by-default tests/docs layers
-		// grows the set from 336 to 577, so Dead Code kept reporting "332 of 336"
-		// while the truth on screen was "573 of 577", and expanding a file left
-		// the file-node count sitting over a canvas of symbol nodes.
+		// grows the set from 336 to 577, so a status line computed elsewhere kept
+		// reporting "332 of 336" while the truth on screen was "573 of 577", and
+		// expanding a file left the file-node count sitting over a canvas of
+		// symbol nodes.
 		setStatus(modeStatus());
 	}
 
@@ -768,17 +767,8 @@ export function getGraphHtml(): string {
 			const t = dnodes.filter((n) => impactedFiles.has(n.file));
 			if (t.length) { return t; }
 		}
-		if (mode === 'dead') {
-			const t = dnodes.filter(isDead);
-			if (t.length) { return t; }
-		}
 		return dnodes;
 	}
-
-	// Dead = no trace ever mapped to this node. Derived from n.rt every frame,
-	// so the set shrinks on its own as captures land and the host reposts a
-	// snapshot — nothing here caches a "dead list".
-	function isDead(n) { return !n.rt; }
 
 	// Focus one node: center it and zoom so its whole neighborhood is readable —
 	// scale derives from the neighborhood extent, clamped to a comfortable band
@@ -846,11 +836,6 @@ export function getGraphHtml(): string {
 	}
 
 	function nodeAlpha(n) {
-		// Dead-code mode is a hard filter, not a dim: traced nodes leave the
-		// canvas entirely (alpha 0 is skipped by draw and pick) so what remains
-		// IS the answer. Checked before selection so isolation can't leak a
-		// traced neighbor back in.
-		if (mode === 'dead' && !isDead(n)) { return 0; }
 		// Selection isolates: the node, its neighbors, everything else recedes.
 		if (selected) {
 			return (n.id === selected || neighborIds.has(n.id)) ? 1 : 0.07;
@@ -877,7 +862,6 @@ export function getGraphHtml(): string {
 			const a = dnodes[e.a], b = dnodes[e.b];
 			const touchesSelection = selected && (a.id === selected || b.id === selected);
 			if (selected && !touchesSelection) { continue; }
-			if (mode === 'dead' && (!isDead(a) || !isDead(b))) { continue; }
 			const [ax, ay] = worldToScreen(a.x, a.y);
 			const [bx, by] = worldToScreen(b.x, b.y);
 			ctx.strokeStyle = touchesSelection ? accent : line;
@@ -1392,14 +1376,6 @@ export function getGraphHtml(): string {
 			return traced + ' symbols traced · ' + flows + ' observed call edges (' +
 				discovered + ' runtime-only, dashed) — arrows show caller → callee';
 		}
-		if (mode === 'dead') {
-			const traced = Object.keys(snapshot.runtime).length;
-			if (!traced) {
-				return 'no trace yet — everything reads as dead; run a service (Services panel ▶) first';
-			}
-			const dead = dnodes.filter(isDead).length;
-			return dead + ' of ' + dnodes.length + ' nodes have no trace mapped — shrinks live as captures land';
-		}
 		if (mode === 'diff') {
 			if (snapshot.store_epoch <= 0) { return 'no epochs yet — reindex after a change'; }
 			return changedFiles.size
@@ -1414,7 +1390,6 @@ export function getGraphHtml(): string {
 		for (const id of ['explore', 'runtime', 'diff', 'tour']) {
 			document.getElementById('m-' + id).classList.toggle('active', id === m);
 		}
-		document.getElementById('btn-dead').classList.toggle('active', m === 'dead');
 		document.getElementById('tourbox').style.display = m === 'tour' ? 'block' : 'none';
 		// A mode switch is a change of QUESTION: drop the previous selection so
 		// stale isolation can't mask the overlay, then fly the camera to frame
@@ -1428,12 +1403,6 @@ export function getGraphHtml(): string {
 	['explore', 'runtime', 'diff', 'tour'].forEach((m) => {
 		document.getElementById('m-' + m).addEventListener('click', () => setMode(m));
 	});
-	// Toggle: a second click on Dead Code returns you to Explore rather than
-	// stranding you in a filtered canvas with no obvious way out.
-	document.getElementById('btn-dead').addEventListener('click', () => {
-		setMode(mode === 'dead' ? 'explore' : 'dead');
-	});
-
 	// ---- guided tour ----
 	function showTourStep() {
 		const tour = snapshot ? snapshot.tour : [];

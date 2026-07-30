@@ -16,6 +16,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO, VINV_FONT_SERIF } from './webviewTheme';
 import { buildFindings, writeFindingsSummary } from './findingsModel';
+import { buildDeadCode, writeDeadCodeReport } from './deadCodeModel';
+import { openDeadSection } from './deadCodeReportView';
 import { openJourney } from './journeyView';
 import { openPathInEditor } from '../support/openDocument';
 import { dispatchClusterFix } from '../harness/exerciseRunner';
@@ -23,11 +25,13 @@ import { dispatchClusterFix } from '../harness/exerciseRunner';
 export const FINDINGS_VIEW_TYPE = 'vinv.findings';
 
 export interface FindingsOutbound {
-	type: 'openSource' | 'refresh' | 'dispatchFix' | 'walk';
+	type: 'openSource' | 'refresh' | 'dispatchFix' | 'walk' | 'openDeadSection' | 'analyzeDeadCode';
 	file?: string;
 	line?: number;
 	/** Cluster fingerprint for 'dispatchFix'. */
 	signature?: string;
+	/** Dead-code section id for 'openDeadSection'. */
+	sectionId?: string;
 }
 
 export interface FindingsActions {
@@ -36,6 +40,10 @@ export interface FindingsActions {
 	dispatchFix: (signature: string) => Promise<void>;
 	/** Open the per-endpoint walkthrough (call tree, flamegraph, exact I/O). */
 	walk: () => Promise<void>;
+	/** Open one dead-code section's walkthrough report. */
+	openDeadSection: (sectionId: string) => Promise<void>;
+	/** Ask the harness about every unanalysed section, in batches. */
+	analyzeDeadCode: () => Promise<void>;
 }
 
 export async function handleFindingsMessage(
@@ -50,6 +58,10 @@ export async function handleFindingsMessage(
 		await actions.dispatchFix(msg.signature);
 	} else if (msg.type === 'walk') {
 		await actions.walk();
+	} else if (msg.type === 'openDeadSection' && msg.sectionId) {
+		await actions.openDeadSection(msg.sectionId);
+	} else if (msg.type === 'analyzeDeadCode') {
+		await actions.analyzeDeadCode();
 	}
 }
 
@@ -129,6 +141,15 @@ function wireFindings(
 
 	let disposed = false;
 	const push = async (): Promise<void> => {
+		// Re-derive the dead-code scan before assembling: buildFindings reads
+		// artifacts and never computes them, and this is the one artifact no engine
+		// pass writes — it falls out of the index store plus the trace join, both of
+		// which move under this panel while it is open.
+		try {
+			writeDeadCodeReport(workspaceRoot, buildDeadCode(workspaceRoot));
+		} catch {
+			// A failed scan costs the dead-code section, not the whole panel.
+		}
 		const findings = buildFindings(workspaceRoot);
 		if (disposed) {
 			return;
@@ -177,6 +198,22 @@ function wireFindings(
 		// is now reached FROM here rather than being a sibling tab with no entry
 		// point of its own.
 		walk: () => openJourney(workspaceRoot),
+		openDeadSection: async (sectionId) => {
+			const opened = await openDeadSection(workspaceRoot, sectionId);
+			if (!opened) {
+				void vscode.window.showWarningMessage(
+					'Vinv: that dead-code section is no longer in the index — the code it covered was ' +
+						'changed or removed. The list below is current.',
+				);
+				await push();
+			}
+		},
+		// Every unanalysed section in one go: the batcher decides how many prompts
+		// that is, which is the whole reason it exists.
+		analyzeDeadCode: async () => {
+			await vscode.commands.executeCommand('vinv-vs.analyzeDeadCode');
+			await push();
+		},
 	};
 
 	const sub = webview.onDidReceiveMessage((msg: FindingsOutbound | { type: 'webviewError' }) => {
@@ -294,6 +331,16 @@ function getHtml(): string {
 		button.act:disabled { cursor: default; background: var(--bg-2); color: var(--muted);
 			border-color: var(--line-strong); }
 		.files a { color: var(--muted-2); }
+		/* A dead-code row is a link to its own report, so the whole card reacts. */
+		.dead { border: 1px solid var(--line-strong); padding: 9px 12px; margin-bottom: 8px;
+			cursor: pointer; background: transparent; }
+		.dead:hover { border-color: var(--ink); background: var(--bg-2); }
+		.dead .label { font-weight: 600; overflow-wrap: anywhere; }
+		.dead .what { color: var(--muted); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
+		.dead .go { color: var(--muted-2); font-size: 9px; letter-spacing: 0.18em;
+			text-transform: uppercase; white-space: nowrap; }
+		.badge.orphan { color: var(--muted-2); }
+		.badge.wired { color: var(--accent-fg); }
 	</style>
 </head>
 <body>
@@ -321,6 +368,8 @@ function getHtml(): string {
 				tip: 'Functions the endpoints can reach that a captured request actually executed' },
 			{ k: 'Issues found', v: h.issuesFound, hot: h.issuesFound > 0,
 				tip: 'Distinct failures observed in live runs, grouped by root cause' },
+			{ k: 'Dead code sections', v: h.deadSections, hot: h.deadSections > 0,
+				tip: 'Connected islands of code that no captured run ever executed' },
 			{ k: 'Optimizations accepted', v: h.episodesAccepted + '<small>/' + (h.episodesAccepted + h.episodesReverted) + ' attempts</small>',
 				tip: 'Speedups that measured faster with behavior unchanged; the rest were rolled back' },
 			{ k: 'Regression checks', v: h.regressCases + '<small> · ' + h.regressRealDiffs + ' real changes</small>', hot: h.regressRealDiffs > 0,
@@ -470,6 +519,45 @@ function getHtml(): string {
 			html += '</div>';
 		}
 
+		// Dead code sits directly under the failures: both answer "what did Vinv
+		// find", and this one used to be a filter on the graph canvas where it could
+		// show you WHERE untraced code was and nothing else about it.
+		const d = f.deadCode || { hasTrace: false, sections: [], analysed: 0, traced: 0, considered: 0, bound: '' };
+		html += '<h2>Dead code (' + d.sections.length + ')</h2>';
+		if (!d.hasTrace) {
+			html += '<div class="empty">Nothing has been traced yet, so every symbol would read as dead. ' +
+				'Run a service (Services panel ▶) and exercise it — this list is derived from what the captures did NOT reach.</div>';
+		} else if (d.sections.length === 0) {
+			html += '<div class="empty">Every symbol the captures could reach was executed — no dead sections. ' +
+				'(' + d.traced + ' of ' + d.considered + ' symbols traced; tests and docs are not counted.)</div>';
+		} else {
+			html += '<div class="walk-cta">' +
+				esc(d.bound) + ' · ' + d.analysed + ' analysed · ' +
+				d.traced + '/' + d.considered + ' symbols traced. ' +
+				(d.analysed < d.sections.length
+					? '<button id="analyze-dead" type="button" title="Hand every unanalysed section to your coding harness — batched into a few runs, not one per section — and ask what it does and how to integrate or re-imagine it">Ask the agent about the rest</button>'
+					: '<button id="analyze-dead" type="button" title="Ask again — useful after the code or the traces changed">Re-analyse all</button>') +
+				'</div>';
+			for (const s of d.sections) {
+				const wired = s.reason === 'reachable-untested';
+				html += '<div class="dead" data-section="' + esc(s.id) + '" title="Open the walkthrough for this section">' +
+					'<div class="head">' +
+					'<span class="badge ' + (wired ? 'wired' : 'orphan') + '" title="' +
+					(wired
+						? 'Code that DID run statically references this section — it is wired up, the path was just never taken'
+						: 'Nothing in the indexed graph references this section at all') + '">' +
+					(wired ? 'reached, never run' : 'no references') + '</span>' +
+					'<span class="label">' + esc(s.title) + '</span>' +
+					'<span class="badge" title="Source lines across every symbol in this section">' + s.lines + ' lines</span>' +
+					(s.action
+						? '<span class="badge" title="What the agent recommends after reading the code">' + esc(s.action) + '</span>'
+						: '<span class="badge env" title="No agent has read this section yet">not analysed</span>') +
+					'<span class="grow"></span><span class="go">open report →</span></div>' +
+					(s.what ? '<div class="what">' + esc(s.what) + '</div>' : '') +
+					'</div>';
+			}
+		}
+
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';
 		if (f.episodes.length === 0) {
 			html += '<div class="empty">No optimization episodes recorded yet. An episode is appended to .vinv/exercise/optimize.jsonl each time a verified optimization runs to a verdict — dispatched from the Optimize panel or report, or by the exerciser — and lands here with each attempt&#39;s paired-bootstrap CI, behavior-suite result, and whether the change was kept or reverted.</div>';
@@ -581,6 +669,16 @@ function getHtml(): string {
 		// Wired after the mount because the section is rebuilt on every push.
 		const walk = document.getElementById('walk');
 		if (walk) { walk.addEventListener('click', () => vscode.postMessage({ type: 'walk' })); }
+		const analyzeDead = document.getElementById('analyze-dead');
+		if (analyzeDead) {
+			analyzeDead.addEventListener('click', () => {
+				// The batches take minutes; a live button would queue a second fan-out
+				// over the same sections.
+				analyzeDead.disabled = true;
+				analyzeDead.textContent = 'Asking the agent…';
+				vscode.postMessage({ type: 'analyzeDeadCode' });
+			});
+		}
 	}
 
 	// One delegated listener: the content is re-rendered wholesale on every push,
@@ -599,6 +697,11 @@ function getHtml(): string {
 		if (open) {
 			e.preventDefault();
 			vscode.postMessage({ type: 'openSource', file: open.getAttribute('data-open') });
+			return;
+		}
+		const section = e.target.closest('[data-section]');
+		if (section) {
+			vscode.postMessage({ type: 'openDeadSection', sectionId: section.getAttribute('data-section') });
 		}
 	});
 

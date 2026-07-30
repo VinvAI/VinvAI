@@ -151,6 +151,16 @@
 				"priority": "default"
 			},
 			{
+				"viewType": "vinv.deadCodeSection",
+				"displayName": "Vinv Dead Code Section",
+				"selector": [
+					{
+						"filenamePattern": "**/.vinv/reports/deadcode-[0-9a-f]*.json"
+					}
+				],
+				"priority": "default"
+			},
+			{
 				"viewType": "vinv.optimizationReport",
 				"displayName": "Vinv Optimize",
 				"selector": [
@@ -264,6 +274,11 @@
 				"title": "Open Findings (what Vinv found and fixed)",
 				"category": "Vinv",
 				"icon": "$(checklist)"
+			},
+			{
+				"command": "vinv-vs.analyzeDeadCode",
+				"title": "Analyze Dead Code (ask the agent what it does)",
+				"category": "Vinv"
 			},
 			{
 				"command": "vinv-vs.refreshSessions",
