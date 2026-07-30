@@ -163,14 +163,12 @@ export async function computeNextStep(
 			command: 'vinv-vs.autoPilot',
 		};
 	}
-	if (!enginesReady(context)) {
-		return {
-			label: 'Install Vinv engines',
-			detail:
-				'One click clones the open-source engines to ~/.vinv/engines and runs uv sync — tracing, indexing and analysis all come from them.',
-			command: 'vinv-vs.installEngines',
-		};
-	}
+	// No "install the engines" rung: the pin check owns that. On activation
+	// maybeUpdateEngines (engines/update.ts) already offers the clone + uv sync
+	// + cargo build when the engines are absent, and it does so knowing the REF
+	// the build needs — which this rung never did, so a user who followed it
+	// could still land on the wrong commit. Two prompts for one action, one of
+	// them less correct, is worse than one.
 	if (!isProjectIndexed(workspaceRoot)) {
 		return {
 			label: 'Discover this project',
