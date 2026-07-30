@@ -39,6 +39,7 @@ import type {
 	MemoryLeakSuspect,
 	SymbolSessionTiming,
 	TraceSpan,
+	SelectionStats,
 } from './runtimeAnalysis';
 import { removeExpiredOptimizationEvidence } from './optimizationEvidence';
 
@@ -624,7 +625,9 @@ function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
  * head of predicted recoverable time — relative to THIS trace — so the rule is
  * scale-free (a 5ms service and a 5s batch job get the same treatment).
  */
-export function computeOptimizationCandidates(inputs: ComputeInputs): OptimizationCandidate[] {
+export function computeOptimizationCandidates(
+	inputs: ComputeInputs,
+): { items: OptimizationCandidate[]; stats: SelectionStats } {
 	const { nodes, edges, timings, cacheByRow } = inputs;
 	const coverage = inputs.coverage ?? 0.9;
 	const cap = inputs.cap ?? 12;
@@ -916,7 +919,13 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 	);
 	const total = raw.reduce((s, c) => s + effective(c), 0);
 	if (total <= 0) {
-		return memory;
+		// No latency signal at all. The memory dimension may still have found
+		// candidates, but no LATENCY bound was applied, so the stats say so
+		// rather than implying a selection happened.
+		return {
+			items: memory,
+			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+		};
 	}
 	// End-to-end Amdahl ceiling per candidate (see the field doc): share of the
 	// trace's total predicted time, discounted by the waste prior. The
@@ -929,8 +938,14 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 	raw.sort((a, b) => effective(b) - effective(a));
 	const out: OptimizationCandidate[] = [];
 	let covered = 0;
+	let stoppedBy: SelectionStats['stopped_by'] = 'exhausted';
 	for (const c of raw) {
-		if (out.length >= cap || covered / total >= coverage) {
+		if (out.length >= cap) {
+			stoppedBy = 'cap';
+			break;
+		}
+		if (covered / total >= coverage) {
+			stoppedBy = 'coverage';
 			break;
 		}
 		covered += effective(c);
@@ -939,7 +954,23 @@ export function computeOptimizationCandidates(inputs: ComputeInputs): Optimizati
 	// Memory candidates (computed above, ranked in bytes) are appended after the
 	// ms Pareto — they never entered the clamp/calibration/Amdahl loops, which
 	// are all time concepts.
-	return [...out, ...memory];
+	//
+	// `stats` therefore describes the LATENCY selection only, and deliberately so:
+	// the memory dimension is ranked in BYTES against its own bound, and folding
+	// two incommensurable selections into one coverage number would produce a
+	// figure that is not true of either. `items.length` can exceed `stats.returned`
+	// by the memory tail; a renderer that needs a single count should use
+	// items.length and reserve describeSelection() for the latency claim.
+	return {
+		items: [...out, ...memory],
+		stats: {
+			returned: out.length,
+			total: raw.length,
+			dropped: raw.length - out.length,
+			coverage_achieved: covered / total,
+			stopped_by: stoppedBy,
+		},
+	};
 }
 
 // ---- outcome calibration artifact (read side) -------------------------------

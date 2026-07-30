@@ -24,6 +24,7 @@ import {
 	type PackBudgets,
 } from '../harness/contextPack';
 import {
+	EPISODE_FEATURES,
 	appendEpisodeEvent,
 	armLevels,
 	effectiveEpsilon,
@@ -462,24 +463,29 @@ suite('Context Pack Composer', () => {
 });
 
 suite('Episode telemetry (bandit over pack composition)', () => {
-	test('the factored arm grid is a stable 2^3 factorial with invertible indexing', () => {
+	test('the factored arm grid is a stable 2^n factorial with invertible indexing', () => {
 		const previous = process.env.VINV_EPISODE_ARM_LEVELS;
 		try {
 			delete process.env.VINV_EPISODE_ARM_LEVELS;
 			const arms = episodeArmSet();
-			assert.strictEqual(arms.length, 8, 'full factorial over three binary features');
+			assert.strictEqual(
+				arms.length,
+				1 << EPISODE_FEATURES.length,
+				'full factorial over the binary features',
+			);
 			// Every coalition is an arm and the index round-trips.
-			for (let i = 0; i < 8; i++) {
+			for (let i = 0; i < 1 << EPISODE_FEATURES.length; i++) {
 				assert.strictEqual(levelsToIndex(armLevels(i)), i);
 			}
 			// Env override with valid levels reshapes the grid.
 			process.env.VINV_EPISODE_ARM_LEVELS = JSON.stringify({
 				slice_depth: [0, 3],
 				include_runtime: [false, true],
-				snippet_chars: [500, 4000],
 			});
-			assert.strictEqual(episodeArmSet()[7].slice_depth, 3);
-			assert.strictEqual(episodeArmSet()[7].snippet_chars, 4000);
+			// Arm 3 is the richest of the FOUR arms (depth level 1 | runtime level 1).
+			// It was arm 7 when snippet_chars was a third feature; see EPISODE_FEATURES.
+			assert.strictEqual(episodeArmSet()[3].slice_depth, 3);
+			assert.strictEqual(episodeArmSet()[3].include_runtime, true);
 			// Garbage env keeps the policy grid — exploration never stops.
 			process.env.VINV_EPISODE_ARM_LEVELS = 'garbage';
 			assert.deepStrictEqual(episodeArmSet(), arms);
@@ -493,10 +499,10 @@ suite('Episode telemetry (bandit over pack composition)', () => {
 	});
 
 	test('Thompson selection concentrates on the best arm and logs a valid propensity', () => {
-		// A confident posterior: arm 5 verifies ~90%, all others ~10%.
+		// A confident posterior: arm 3 verifies ~90%, all others ~10%.
 		const arms = episodeArmSet(POLICY_PRIORS);
 		const posteriors = arms.map((_, a) =>
-			a === 5 ? { alpha: 90, beta: 10 } : { alpha: 10, beta: 90 },
+			a === 3 ? { alpha: 90, beta: 10 } : { alpha: 10, beta: 90 },
 		);
 		const policy: EpisodePolicy = {
 			...POLICY_PRIORS,
@@ -515,7 +521,7 @@ suite('Episode telemetry (bandit over pack composition)', () => {
 		const N = 400;
 		for (let i = 0; i < N; i++) {
 			const d = selectEpisodeArm(policy, rng);
-			if (d.armIndex === 5) {
+			if (d.armIndex === 3) {
 				bestHits += 1;
 			}
 			// Every logged propensity is a valid probability with the floor mass.
@@ -534,7 +540,12 @@ suite('Episode telemetry (bandit over pack composition)', () => {
 		for (let i = 0; i < 200; i++) {
 			seen.add(selectEpisodeArm(POLICY_PRIORS, rng).armIndex);
 		}
-		assert.ok(seen.size >= 5, `cold TS explores many arms (saw ${seen.size})`);
+		// All but at most one arm of the grid — 'broadly', scaled to the grid rather
+		// than hardcoded, so it survives a feature entering or leaving.
+		assert.ok(
+			seen.size >= (1 << EPISODE_FEATURES.length) - 1,
+			`cold TS explores many arms (saw ${seen.size})`,
+		);
 	});
 
 	test('exploration decays with ledger evidence but never below the floor', () => {
@@ -598,7 +609,8 @@ suite('Episode telemetry (bandit over pack composition)', () => {
 		const home = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-converge-'));
 		try {
 			process.env.VINV_HOME = home;
-			const BEST = 5;
+			// Any arm of the 4-arm grid; 2 exercises a non-zero index.
+			const BEST = 2;
 			const pBest = 0.8;
 			const pOther = 0.2;
 			let s = 20260717 >>> 0;
@@ -753,12 +765,12 @@ suite('Episode policy updater (credit attribution + promotion)', () => {
 		const levels = POLICY_PRIORS.arm_levels;
 		// A legacy arm whose values sit on the current grid maps to its coalition.
 		assert.strictEqual(
-			armIndexForValues({ slice_depth: 2, include_runtime: true, snippet_chars: 800 }, levels),
+			armIndexForValues({ slice_depth: 2, include_runtime: true }, levels),
 			3,
 		);
 		// Values off the grid are unmappable — excluded, never misattributed.
 		assert.strictEqual(
-			armIndexForValues({ slice_depth: 7, include_runtime: true, snippet_chars: 800 }, levels),
+			armIndexForValues({ slice_depth: 7, include_runtime: true }, levels),
 			null,
 		);
 	});
@@ -778,7 +790,11 @@ suite('Episode policy updater (credit attribution + promotion)', () => {
 		assert.ok(shrunk1 < 1 && shrunk1 > globalMean - 1e-12);
 		// The LCB is below the mean, tightens with n, and is -inf with no data.
 		assert.ok(bernsteinLcb(stats[0], 0.1) < stats[0].mean);
-		assert.strictEqual(bernsteinLcb(stats[7], 0.1), Number.NEGATIVE_INFINITY);
+		// Last arm of the grid — unobserved, so its LCB is -inf.
+		assert.strictEqual(
+			bernsteinLcb(stats[(1 << EPISODE_FEATURES.length) - 1], 0.1),
+			Number.NEGATIVE_INFINITY,
+		);
 		const many = perArmStats(
 			episodesFor([{ arm: 0, rewards: new Array<number>(200).fill(1) }]),
 			8,
@@ -788,18 +804,18 @@ suite('Episode policy updater (credit attribution + promotion)', () => {
 
 	test('Shapley attribution over the factorial grid is exact and efficient', () => {
 		// Construct an additive value function: v = 0.5·runtime + 0.2·depth.
-		// Shapley must recover the coefficients exactly, and snippet gets 0.
-		const values = new Array<number>(8).fill(0).map((_, i) => {
+		// Shapley must recover both coefficients exactly over the 4-arm grid.
+		const values = new Array<number>(1 << EPISODE_FEATURES.length).fill(0).map((_, i) => {
 			const levels = armLevels(i);
 			return 0.2 * levels.slice_depth + 0.5 * levels.include_runtime;
 		});
 		const phi = shapleyAttribution(values);
 		assert.ok(Math.abs(phi.slice_depth - 0.2) < 1e-12);
 		assert.ok(Math.abs(phi.include_runtime - 0.5) < 1e-12);
-		assert.ok(Math.abs(phi.snippet_chars - 0) < 1e-12);
-		// Efficiency: contributions sum to v(all) - v(none).
-		const sum = phi.slice_depth + phi.include_runtime + phi.snippet_chars;
-		assert.ok(Math.abs(sum - (values[7] - values[0])) < 1e-12);
+		// Efficiency: contributions sum to v(all) - v(none). v(all) is the
+		// all-levels-high arm, index (1 << features) - 1 = 3.
+		const sum = phi.slice_depth + phi.include_runtime;
+		assert.ok(Math.abs(sum - (values[(1 << EPISODE_FEATURES.length) - 1] - values[0])) < 1e-12);
 	});
 
 	test('TS posteriors move the greedy arm toward the higher verified-fix rate', () => {
@@ -835,12 +851,15 @@ suite('Episode policy updater (credit attribution + promotion)', () => {
 		// here, and so did 1, which is exactly the defect it closes.)
 		const withNonObjective: CompletedEpisode[] = [
 			...episodesFor([{ arm: 2, rewards: [1, 1, 1, 1, 1] }]),
-			{ armIndex: 5, propensity: 0.5, reward: -1, attempts: 1, verified: false, objective: false },
-			{ armIndex: 5, propensity: 0.5, reward: 1, attempts: 1, verified: true, objective: false },
+			// Arm 1, deliberately NOT arm 2: the assertion below proves a non-objective
+			// episode leaves its arm untouched, which only means something if that arm
+			// carries no objective evidence.
+			{ armIndex: 1, propensity: 0.5, reward: -1, attempts: 1, verified: false, objective: false },
+			{ armIndex: 1, propensity: 0.5, reward: 1, attempts: 1, verified: true, objective: false },
 		];
 		const pol = computeUpdatedPolicy(current, withNonObjective);
-		assert.strictEqual(pol.arm_posteriors![5].alpha, 1, 'non-objective episode ignored (alpha stays prior)');
-		assert.strictEqual(pol.arm_posteriors![5].beta, 1, 'non-objective episode ignored (beta stays prior)');
+		assert.strictEqual(pol.arm_posteriors![1].alpha, 1, 'non-objective episode ignored (alpha stays prior)');
+		assert.strictEqual(pol.arm_posteriors![1].beta, 1, 'non-objective episode ignored (beta stays prior)');
 		assert.strictEqual(pol.preferred_arm, 2, 'only objective arm 2 learned');
 		// Attempt budget: 90th percentile of attempts-to-success plus one
 		// attempt of optimism margin (without it the budget ratchets down and
@@ -1672,7 +1691,7 @@ suite('Hotspot selection (Pareto head of traced time)', () => {
 			2: { executed: true, calls: 50, total_ms: 90, errors: 0, error_types: [], failures: [], current_errors: 0, latest_epoch: null },
 			3: { executed: true, calls: 1, total_ms: 10, errors: 0, error_types: [], failures: [], current_errors: 0, latest_epoch: null },
 		};
-		const hot = selectHotspots(nodes, overlay, 0.8, 8);
+		const hot = selectHotspots(nodes, overlay, 0.8, 8).items;
 		// 700ms alone is 70% (< 80% coverage) so the head is {0, 1}; row 2 would
 		// push coverage past the target and is excluded.
 		assert.deepStrictEqual(hot.map((h) => h.row), [0, 1]);
@@ -1683,16 +1702,16 @@ suite('Hotspot selection (Pareto head of traced time)', () => {
 		const scaled: Record<number, RuntimeOverlay> = Object.fromEntries(
 			Object.entries(overlay).map(([r, rt]) => [r, { ...rt, total_ms: rt.total_ms / 1000 }]),
 		);
-		assert.deepStrictEqual(selectHotspots(nodes, scaled, 0.8, 8).map((h) => h.row), [0, 1]);
+		assert.deepStrictEqual(selectHotspots(nodes, scaled, 0.8, 8).items.map((h) => h.row), [0, 1]);
 	});
 
 	test('empty or zero-time traces select nothing; cap bounds the list', () => {
 		const nodes = [0, 1, 2].map((r) => makeNode(r));
-		assert.deepStrictEqual(selectHotspots(nodes, {}, 0.8, 8), []);
+		assert.deepStrictEqual(selectHotspots(nodes, {}, 0.8, 8).items, []);
 		const flat: Record<number, RuntimeOverlay> = Object.fromEntries(
 			[0, 1, 2].map((r) => [r, { executed: true, calls: 1, total_ms: 100, errors: 0, error_types: [], failures: [], current_errors: 0, latest_epoch: null }]),
 		);
-		assert.strictEqual(selectHotspots(nodes, flat, 1, 2).length, 2);
+		assert.strictEqual(selectHotspots(nodes, flat, 1, 2).items.length, 2);
 	});
 
 	test('error clusters carry seed rows and a content signature that dedupes exactly', () => {
@@ -2038,7 +2057,7 @@ suite('Runtime analyses (memory trends + cache candidates)', () => {
 				enter('src.mod2.fn2', 'c2'), exit('src.mod2.fn2', { duration_ms: 30 }),
 			], Math.floor(Date.now() / 1000));
 			const nodes = [makeNode(0), makeNode(1), makeNode(2)];
-			const candidates = collectCacheCandidates(ws, nodes);
+			const candidates = collectCacheCandidates(ws, nodes).items;
 			assert.strictEqual(candidates.length, 1, 'only the pure duplicate qualifies');
 			assert.strictEqual(candidates[0].row, 0);
 			assert.strictEqual(candidates[0].calls, 4);
@@ -2438,7 +2457,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 				...call('src.mod0.fn0', 'collapsed', 'r2'),
 				...call('src.mod0.fn0', 'collapsed', 'r3'),
 			], Math.floor(Date.now() / 1000));
-			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]).items, []);
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
@@ -2451,7 +2470,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
 				enter('src.mod0.fn0', 'aaaa'), exit('src.mod0.fn0', { duration_ms: 100 }),
 			], Math.floor(Date.now() / 1000));
-			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]).items, []);
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
@@ -2471,7 +2490,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 			// Newest session: the symbol costs only 50ms now — you cannot reclaim
 			// 300ms from a symbol that currently spends 50ms.
 			writeTrace(ws, 's1', [...call('src.mod0.fn0', 'aaaa', 'r0', 50)], t);
-			const out = collectCacheCandidates(ws, [makeNode(0)]);
+			const out = collectCacheCandidates(ws, [makeNode(0)]).items;
 			assert.strictEqual(out.length, 1);
 			assert.ok(out[0].reclaimable_ms <= 50, `capped at newest session (got ${out[0].reclaimable_ms})`);
 		} finally {
@@ -2515,7 +2534,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 
 			// Both entry points are duplicated (identical args across two runs) and
 			// would otherwise be the two biggest cache candidates by time.
-			const rows = collectCacheCandidates(ws, nodes).map((c) => c.row);
+			const rows = collectCacheCandidates(ws, nodes).items.map((c) => c.row);
 			assert.ok(!rows.includes(0), 'the process root must not be offered for memoization');
 			assert.ok(!rows.includes(1), 'the pass-through must not be offered for memoization');
 			assert.deepStrictEqual(rows, [2], 'only genuine nested work stays eligible');
@@ -2562,11 +2581,16 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 
 			// And it stays dispatchable: identical args and result across both
 			// requests, so it is exactly the memoization candidate.
+			const cache = collectCacheCandidates(ws, nodes);
 			assert.deepStrictEqual(
-				collectCacheCandidates(ws, nodes).map((c) => c.row),
+				cache.items.map((c) => c.row),
 				[2],
 				'the hot function must remain an optimization candidate',
 			);
+			// Nothing was withheld, so the bound must say so rather than leaving
+			// "1 candidate" ambiguous between "all of them" and "the first of many".
+			assert.strictEqual(cache.stats.stopped_by, 'exhausted');
+			assert.strictEqual(cache.stats.dropped, 0);
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
@@ -2584,7 +2608,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 				lines.push(exit('src.mod0.fn0', { duration_ms: 100, result_hash: 'noneh', result_schema: 'NoneType' }));
 			}
 			writeTrace(ws, 's0', lines, Math.floor(Date.now() / 1000));
-			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]), []);
+			assert.deepStrictEqual(collectCacheCandidates(ws, [makeNode(0)]).items, []);
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
@@ -2610,7 +2634,7 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 			assert.ok(reasons.get(1)?.includes('security-sensitive'), 'importing a guarded module inherits the guard');
 			assert.strictEqual(reasons.get(2), undefined, 'a clean file is not guarded');
 
-			const out = collectCacheCandidates(ws, nodes);
+			const out = collectCacheCandidates(ws, nodes).items;
 			assert.deepStrictEqual(out.map((c) => c.row), [2], 'only the clean symbol is offered as cacheable');
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
@@ -2670,7 +2694,7 @@ suite('Seam fixes (validation round)', () => {
 			writeTrace(ws, 's1', [mk(90)].flat(), t);
 			const nodes = [makeNode(0)];
 			const timings = collectSymbolTimings(ws, nodes);
-			const list = computeOptimizationCandidates({ nodes, edges: [], timings, cacheByRow: new Map() });
+			const list = computeOptimizationCandidates({ nodes, edges: [], timings, cacheByRow: new Map() }).items;
 			for (const c of list) {
 				assert.ok(
 					c.predicted_ms <= c.total_ms + 1e-9,

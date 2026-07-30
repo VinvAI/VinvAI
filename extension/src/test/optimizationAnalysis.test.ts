@@ -96,7 +96,7 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 			edges: EDGES,
 			timings: baseTimings(),
 			cacheByRow: cacheFor(),
-		});
+		}).items;
 	}
 
 	test('a lifetime frame is excluded from EVERY waste kind, not just cache', () => {
@@ -113,7 +113,7 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 			timings: baseTimings(),
 			cacheByRow: cacheFor(),
 			lifetimeRows: new Set([1]),
-		});
+		}).items;
 		assert.ok(
 			!gated.some((c) => c.row === 1),
 			'a lifetime frame must not surface under any waste kind',
@@ -243,7 +243,7 @@ suite('optimizationAnalysis: Amdahl ceiling', () => {
 			edges: [],
 			timings,
 			cacheByRow: new Map([[1, cache]]),
-		});
+		}).items;
 		// share = 1, waste_prior = 0.5 → ceiling = 1/(1 − 0.5) = 2×.
 		assert.ok(Math.abs(c.amdahl_ceiling! - 2) < 1e-9);
 	});
@@ -254,7 +254,7 @@ suite('optimizationAnalysis: Amdahl ceiling', () => {
 			edges: EDGES,
 			timings: baseTimings(),
 			cacheByRow: cacheFor(),
-		});
+		}).items;
 		assert.ok(list.length >= 2);
 		const total = list.reduce((s, c) => s + c.predicted_ms_effective!, 0);
 		for (const c of list) {
@@ -279,7 +279,7 @@ suite('optimizationAnalysis: calibration deflation at ranking time', () => {
 			timings: baseTimings(),
 			cacheByRow: cacheFor(),
 			coverage: 1,
-		});
+		}).items;
 		assert.strictEqual(plain[0].row, 1);
 		assert.strictEqual(plain[0].predicted_ms_effective, plain[0].predicted_ms, 'no calibration → effective = raw');
 		// History says cache predictions land at 10% of the claim → the fan-out
@@ -291,7 +291,7 @@ suite('optimizationAnalysis: calibration deflation at ranking time', () => {
 			cacheByRow: cacheFor(),
 			coverage: 1,
 			calibration: { cache: 0.1 },
-		});
+		}).items;
 		assert.strictEqual(calibrated[0].row, 2, 'the deflated cache claim no longer outranks the fan-out');
 		const cache = calibrated.find((c) => c.row === 1)!;
 		assert.strictEqual(Math.round(cache.predicted_ms), 150, 'raw survives for the proof loop');
@@ -414,7 +414,7 @@ suite('optimizationAnalysis: attempt-history store (doom-loop guard)', () => {
 			edges: EDGES,
 			timings: baseTimings(),
 			cacheByRow: cacheFor(),
-		});
+		}).items;
 		const keys = candidateAttemptKeys(list);
 		const cacheRow = list.find((c) => c.waste_kind === 'cache')!;
 		assert.ok(
@@ -557,7 +557,7 @@ suite('optimizationAnalysis: unexplained-wait detector', () => {
 			timings,
 			cacheByRow: new Map(),
 			spans,
-		});
+		}).items;
 	}
 
 	test('a call whose duration neither callees nor typical self-work explain is flagged', () => {
@@ -637,7 +637,7 @@ suite('optimizationAnalysis: gc-pressure detector', () => {
 			edges: [],
 			timings,
 			cacheByRow: new Map(),
-		});
+		}).items;
 	}
 
 	test('an outlier GC total flags the top allocator, bounded by its GC share', () => {

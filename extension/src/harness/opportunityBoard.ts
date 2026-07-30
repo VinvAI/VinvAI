@@ -60,6 +60,7 @@ import {
 	loadOptimizationCalibration,
 	type OptimizationCandidate,
 } from './optimizationAnalysis';
+import type { SelectionStats } from './runtimeAnalysis';
 
 /**
  * The complete lifecycle:
@@ -750,6 +751,23 @@ export function reconcileOpportunityBoard(
  * (optimizationSource.ts assembles the same inputs for the panel; that class
  * is vscode-bound, so the vscode-free surfaces share this assembly instead.)
  */
+/**
+ * Bound report from the most recent `rankedOpportunityCandidates` call.
+ *
+ * A sidecar is normally the wrong shape (it goes stale the moment anything
+ * else calls the ranker) and I rejected one for the selectors themselves. It is
+ * acceptable HERE and only here because `rankedOpportunityCandidates` already
+ * returns a plain array by contract to several callers, and widening that
+ * signature would churn the board's whole surface for a value only the
+ * rendering path wants. Read it immediately after the call or not at all.
+ */
+let lastRankedSelection: SelectionStats | null = null;
+
+/** The bound that ended the last ranking, or null if it has not run. */
+export function lastRankedSelectionStats(): SelectionStats | null {
+	return lastRankedSelection;
+}
+
 export function rankedOpportunityCandidates(workspaceRoot: string): OptimizationCandidate[] {
 	if (!hasIndexStore(workspaceRoot)) {
 		// loadNodes degrades to [] on a missing store, which would masquerade as
@@ -761,12 +779,12 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 	const nodes: GraphNode[] = loadNodes(storeDir);
 	const edges = loadEdges(storeDir, nodes.length);
 	const timings = collectSymbolTimings(workspaceRoot, nodes);
-	const cacheByRow = new Map(collectCacheCandidates(workspaceRoot, nodes).map((c) => [c.row, c]));
+	const cacheByRow = new Map(collectCacheCandidates(workspaceRoot, nodes).items.map((c) => [c.row, c]));
 	const spans = collectRequestSpans(workspaceRoot, nodes);
 	// Same ranking-time calibration deflation as the panel path — the board and
 	// the panel must never rank the same evidence differently.
 	const calibration = loadOptimizationCalibration(workspaceRoot);
-	return computeOptimizationCandidates({
+	const { items, stats } = computeOptimizationCandidates({
 		nodes,
 		edges,
 		timings,
@@ -782,6 +800,13 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 		// the analyzer's default to stay in sync.
 		cap: OPPORTUNITY_ANALYZER_CAP,
 	});
+	// The bound is recorded, not discarded. A board that posts N opportunities
+	// and cannot say whether N was everything is the truncation-reads-as-
+	// completeness shape; `stats` is what lets a surface state it. Latency
+	// selection only — see computeOptimizationCandidates for why memory is
+	// not folded in.
+	lastRankedSelection = stats;
+	return items;
 }
 
 /** Board input for one ranked candidate. */

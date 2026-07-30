@@ -75,7 +75,7 @@ suite('optimization memory dimension (disk pipeline)', () => {
 			timings: collectSymbolTimings(root, nodes),
 			cacheByRow: new Map(),
 			memoryLeaks: collectMemoryTrends(root, nodes),
-		});
+		}).items;
 		const big = list.find((c) => c.name === 'buildBig');
 		assert.ok(big, 'buildBig allocates heavily and should surface');
 		assert.strictEqual(big!.dimension, 'memory');

@@ -23,6 +23,7 @@ import {
 	toolWhyDidThisRun,
 } from '../runtime/analysis';
 import { discoverStores, describeProvenance } from '../graph/storeDiscovery';
+import { toolRelevantTo } from './relevanceTool';
 
 const PROTOCOL_VERSION = '2024-11-05';
 const launchRoot = process.argv[2] ?? process.cwd();
@@ -124,6 +125,39 @@ const TOOLS = [
 		inputSchema: { type: 'object', properties: symbolArg, required: ['symbol'] },
 	},
 	{
+		name: 'relevant_to',
+		description:
+			'Rank the codebase by graph relevance to one or more symbols you name — the ' +
+			'SAME typed-edge personalized-PageRank walk that composed your context pack, ' +
+			're-anchored on your choice. Use when you have found symbols that matter and ' +
+			'want what surrounds them, ranked: it answers "what else is relevant to THESE", ' +
+			'which semantic search (vinv_query) and plain traversal (blast_radius) cannot. ' +
+			'Returns walk mass per symbol so the ranking is auditable, and reports how many ' +
+			'symbols it reached versus returned.',
+		inputSchema: {
+			type: 'object',
+			properties: {
+				symbols: {
+					type: 'array',
+					items: { type: 'string' },
+					description:
+						'Anchor symbols — a bare name, a dotted qualname, or file:name to disambiguate.',
+				},
+				budget: {
+					type: 'number',
+					description: 'Max symbols to return (default 40, ceiling 200).',
+				},
+				max_hops: {
+					type: 'number',
+					description:
+						'Optional admission bound: only symbols within this many hops of an anchor ' +
+						'may enter. Ranking is by walk mass regardless. Omit for unbounded.',
+				},
+			},
+			required: ['symbols'],
+		},
+	},
+	{
 		name: 'blast_radius',
 		description:
 			'Transitive callers (upstream) and callees (downstream) of a symbol in the ' +
@@ -190,6 +224,18 @@ function dispatch(name: string, args: Record<string, unknown>): Record<string, u
 			);
 		case 'slice':
 			return withProvenance(toolSlice(root, symbol));
+		case 'relevant_to':
+			// Graph relevance, not trace evidence — so it reads the index snapshot
+			// rather than the capture corpus, and carries the same provenance line
+			// as every other tool so an agent can tell which store answered.
+			return withProvenance(
+				toolRelevantTo(
+					root,
+					Array.isArray(args.symbols) ? args.symbols.map((s) => String(s)) : [],
+					typeof args.budget === 'number' ? args.budget : undefined,
+					typeof args.max_hops === 'number' ? args.max_hops : undefined,
+				),
+			);
 		case 'blast_radius':
 			return withProvenance(
 				toolBlastRadius(

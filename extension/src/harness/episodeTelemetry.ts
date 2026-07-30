@@ -32,25 +32,42 @@ export interface EpisodeArm {
 	slice_depth: number;
 	/** Whether runtime evidence (trace facts) is included in the pack. */
 	include_runtime: boolean;
-	/** Per-symbol snippet budget in characters. */
-	snippet_chars: number;
 }
 
 /** The named composition features the factored arm grid ranges over. */
-export const EPISODE_FEATURES = ['slice_depth', 'include_runtime', 'snippet_chars'] as const;
+/**
+ * The features the bandit actually explores.
+ *
+ * `snippet_chars` WAS a third feature and was removed: on this path it is consumed
+ * in exactly one place — `contextPack` slicing `n.summary` — and summaries are far
+ * shorter than either level, so both returned the identical string. Measured on a
+ * 7577-symbol snapshot: longest summary 696 chars, median 76, p99 160, and ZERO
+ * symbols exceeded even the lean 800 level. Bit 2 was inert, arms 0-3 were
+ * byte-identical to arms 4-7, and Thompson sampling spent half its exploration
+ * distinguishing arms that could not differ — while the learner was already
+ * starved (1 objective outcome across 17 completed episodes).
+ *
+ * The bit was not merely wasted. `qna/answer.ts` decoded it for Ask Vinv's ANCHOR
+ * SOURCE budget, where the same numbers DO bite (indexed source: median 436, p95
+ * 3769, 30.3% of symbols over 800). So a value was learned in a domain where it
+ * provably could not affect the outcome, then applied to one where it could. That
+ * is not thin evidence; it is evidence with no causal path to the claim it was
+ * used to justify. Ask Vinv now carries its own explicit `qna_snippet_chars`.
+ *
+ * Dropping it halves the arm space to 4, doubling the per-arm sample rate.
+ */
+export const EPISODE_FEATURES = ['slice_depth', 'include_runtime'] as const;
 export type EpisodeFeature = (typeof EPISODE_FEATURES)[number];
 
 /** Two levels per feature: level 0 is the lean baseline, level 1 the rich one. */
 export interface ArmFeatureLevels {
 	slice_depth: [number, number];
 	include_runtime: [boolean, boolean];
-	snippet_chars: [number, number];
 }
 
 const DEFAULT_FEATURE_LEVELS: ArmFeatureLevels = {
 	slice_depth: [1, 2],
 	include_runtime: [false, true],
-	snippet_chars: [800, 1600],
 };
 
 function validFeatureLevels(raw: unknown): raw is ArmFeatureLevels {
@@ -60,17 +77,13 @@ function validFeatureLevels(raw: unknown): raw is ArmFeatureLevels {
 	const r = raw as Record<string, unknown>;
 	const depth = r.slice_depth;
 	const runtime = r.include_runtime;
-	const snippet = r.snippet_chars;
 	return (
 		Array.isArray(depth) &&
 		depth.length === 2 &&
 		depth.every((d) => Number.isInteger(d) && d >= 0 && d <= 4) &&
 		Array.isArray(runtime) &&
 		runtime.length === 2 &&
-		runtime.every((b) => typeof b === 'boolean') &&
-		Array.isArray(snippet) &&
-		snippet.length === 2 &&
-		snippet.every((s) => Number.isInteger(s) && s >= 100 && s <= 20_000)
+		runtime.every((b) => typeof b === 'boolean')
 	);
 }
 
@@ -81,11 +94,11 @@ function validFeatureLevels(raw: unknown): raw is ArmFeatureLevels {
  */
 export function armGrid(levels: ArmFeatureLevels): EpisodeArm[] {
 	const arms: EpisodeArm[] = [];
-	for (let i = 0; i < 8; i++) {
+	// 1 << EPISODE_FEATURES.length — 4 arms since snippet_chars was removed.
+	for (let i = 0; i < 1 << EPISODE_FEATURES.length; i++) {
 		arms.push({
 			slice_depth: levels.slice_depth[i & 1],
 			include_runtime: levels.include_runtime[(i >> 1) & 1],
-			snippet_chars: levels.snippet_chars[(i >> 2) & 1],
 		});
 	}
 	return arms;
@@ -96,13 +109,12 @@ export function armLevels(index: number): Record<EpisodeFeature, 0 | 1> {
 	return {
 		slice_depth: (index & 1) as 0 | 1,
 		include_runtime: ((index >> 1) & 1) as 0 | 1,
-		snippet_chars: ((index >> 2) & 1) as 0 | 1,
 	};
 }
 
 /** Arm index for a level assignment (inverse of armLevels). */
 export function levelsToIndex(levels: Record<EpisodeFeature, 0 | 1>): number {
-	return levels.slice_depth | (levels.include_runtime << 1) | (levels.snippet_chars << 2);
+	return levels.slice_depth | (levels.include_runtime << 1);
 }
 
 /**
@@ -131,7 +143,7 @@ export function episodeArmSet(policy?: EpisodePolicy): EpisodeArm[] {
  * `attribution` record what the current values were computed from.
  */
 export interface EpisodePolicy {
-	version: 2;
+	version: 3;
 	/** Exploration ceiling — effective epsilon decays below it with data. */
 	epsilon0: number;
 	/** Exploration floor — never stop exploring entirely. */
@@ -146,6 +158,33 @@ export interface EpisodePolicy {
 	attempt_budget_max: number;
 	/** Greedy arm = argmax posterior mean (reporting/back-compat; TS drives selection). */
 	preferred_arm: number;
+	/**
+	 * Ask Vinv's per-anchor SOURCE budget, in characters.
+	 *
+	 * Explicit rather than decoded from a bandit arm. It previously came from
+	 * `(preferred_arm >> 2) & 1`, i.e. a bit the bandit learned against context
+	 * PACKS — where it sliced summaries and could not bite — and Ask Vinv then
+	 * applied it to anchor SOURCE, where it does. See EPISODE_FEATURES.
+	 *
+	 * 4000 follows from what a prompt can hold, NOT from a percentile of one
+	 * repo. Anchors are bounded and few (explicit seeds plus extra anchor rows),
+	 * so the bound that transfers is capacity: ~8 anchors x 4000 = 32KB, which a
+	 * prompt absorbs, where p99 (11,920 here) x 8 = ~95KB does not. The measured
+	 * distribution corroborates the choice; it did not derive it. Do NOT 'update'
+	 * this from a fresh percentile — that would make it a property of whichever
+	 * repo was measured last.
+	 *
+	 * REQUIRED, not optional, and that is load-bearing. The consumer slices with
+	 * it: `text.slice(0, Math.ceil(qna_snippet_chars * k))`. If the field were
+	 * optional and ever absent, that arithmetic is NaN and `.slice(0, NaN)`
+	 * returns the EMPTY STRING — the model would receive an empty code fence
+	 * where the anchor's source belongs, with no error and nothing in the prompt
+	 * saying so. A silently empty anchor is worse than a truncated one, because
+	 * truncation now announces itself and this would not. Keep it required, and
+	 * keep `validPolicy` range-checking it so a malformed file resets to priors
+	 * rather than propagating a non-number.
+	 */
+	qna_snippet_chars: number;
 	/**
 	 * Per-arm Beta posteriors over the verified-fix probability, re-estimated
 	 * from the objective-outcome ledger each episode. Absent on a cold/legacy
@@ -303,14 +342,15 @@ export function walkParams(policy: EpisodePolicy): WalkParams {
  * episodes accrue — none is a frozen constant.
  */
 export const POLICY_PRIORS: EpisodePolicy = {
-	version: 2,
+	version: 3,
 	epsilon0: 0.25,
 	epsilon_min: 0.02,
 	epsilon_decay: 0.5,
 	attempt_budget: 3,
 	attempt_quantile: 0.9,
 	attempt_budget_max: 6,
-	preferred_arm: 3, // depth 2 + runtime evidence at the lean snippet budget
+	preferred_arm: 3, // depth 2 + runtime evidence (the richest of the 4 arms)
+	qna_snippet_chars: 4000,
 	ts_prior_alpha: 1, // uniform Beta(1,1) prior — no arm privileged before data
 	ts_prior_beta: 1,
 	arm_levels: DEFAULT_FEATURE_LEVELS,
@@ -335,7 +375,7 @@ function validPolicy(raw: Partial<EpisodePolicy>): raw is EpisodePolicy {
 	const intIn = (v: unknown, lo: number, hi: number): boolean =>
 		Number.isInteger(v) && (v as number) >= lo && (v as number) <= hi;
 	return (
-		raw.version === 2 &&
+		raw.version === 3 &&
 		numberIn(raw.epsilon0, 0, 0.5) &&
 		numberIn(raw.epsilon_min, 0, 0.5) &&
 		(raw.epsilon_min as number) <= (raw.epsilon0 as number) &&
@@ -344,7 +384,9 @@ function validPolicy(raw: Partial<EpisodePolicy>): raw is EpisodePolicy {
 		numberIn(raw.attempt_quantile, 0.5, 1) &&
 		intIn(raw.attempt_budget_max, 1, 10) &&
 		validFeatureLevels(raw.arm_levels) &&
-		intIn(raw.preferred_arm, 0, 7) &&
+		// 0..3: the arm space is 1 << EPISODE_FEATURES.length, now 4 not 8.
+		intIn(raw.preferred_arm, 0, (1 << EPISODE_FEATURES.length) - 1) &&
+		intIn(raw.qna_snippet_chars, 200, 40_000) &&
 		intIn(raw.slice_budget, 4, 200) &&
 		intIn(raw.seed_cap, 1, 50) &&
 		intIn(raw.failure_evidence_chars, 200, 50_000) &&
@@ -441,7 +483,40 @@ export function loadEpisodePolicy(): EpisodePolicy {
 		return { ...POLICY_PRIORS };
 	}
 	if (!validPolicy(raw)) {
-		appendEpisodeEvent({ type: 'policy_invalidated', ts: new Date().toISOString() });
+		// Say WHY, and say what was discarded. The ledger previously carried 38
+		// bare {type, ts} invalidations against 17 completed episodes — enough to
+		// make "was that one clean migration or something invalidating
+		// repeatedly?" unanswerable. A reset is a state change and must announce
+		// itself like any other.
+		// Read through `unknown`: `raw` is typed Partial<EpisodePolicy>, so TS narrows
+		// `version` to the CURRENT literal and would rule out the comparison below —
+		// but the whole point is that the FILE may hold an older number.
+		const rawVersion = (raw as { version?: unknown }).version;
+		const storedVersion = typeof rawVersion === 'number' ? rawVersion : null;
+		const discardedArms = Array.isArray(raw.arm_posteriors)
+			? raw.arm_posteriors.length
+			: 0;
+		// A KNOWN version step is a migration, not corruption. v2 -> v3 dropped
+		// `snippet_chars` from the arm grid (see EPISODE_FEATURES), which halves
+		// the arm space, so a v2 file's 8 posteriors cannot be reindexed onto 4
+		// arms — arm 4, the one v2 had promoted, ceases to exist. Discarding them
+		// is correct AND cheap here (the ledger holds one objective observation),
+		// but it must be a declared reset rather than a silent fallback.
+		const migration = storedVersion === POLICY_PRIORS.version - 1;
+		appendEpisodeEvent({
+			type: 'policy_invalidated',
+			ts: new Date().toISOString(),
+			from_version: storedVersion,
+			to_version: POLICY_PRIORS.version,
+			reason: migration
+				? 'grid change v2->v3: snippet_chars removed from the arm space (it was '
+					+ 'inert on the pack path), so arm indices are not comparable and the '
+					+ 'stored posteriors were discarded'
+				: 'stored policy failed validation and was replaced with priors',
+			declared_migration: migration,
+			discarded_arm_count: discardedArms,
+			arm_count: 1 << EPISODE_FEATURES.length,
+		});
 		return { ...POLICY_PRIORS };
 	}
 	return raw;
