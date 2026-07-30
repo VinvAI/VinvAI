@@ -55,6 +55,15 @@ export interface Findings {
 		stateCreated: number;
 		stateCleaned: number;
 	};
+	/**
+	 * The services bring-up verified, from .vinv/services.json.
+	 *
+	 * Carried here because this view is the one landing surface: services were
+	 * previously visible ONLY in the Journey tab, which had no entry point
+	 * outside the command palette, so "what did Vinv actually bring up" was
+	 * effectively unreachable.
+	 */
+	services: Array<{ name: string; kind: string; port: number | null; command: string }>;
 	issues: Array<{ kind: string; title: string; signature: string }>;
 	episodes: FindingsEpisode[];
 	opportunities: Array<{ kind: string; endpoint: string; detail: string; value: number }>;
@@ -130,6 +139,15 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const episodesRaw = readJsonl(path.join(ex, 'optimize.jsonl'));
 	const regressRaw = readJsonl(path.join(ex, 'regress.jsonl'));
 	const ledger = readJsonl(path.join(ex, 'state_ledger.jsonl'));
+	const servicesDoc = readJson(path.join(workspaceRoot, '.vinv', 'services.json')) ?? {};
+	const services = (Array.isArray(servicesDoc.services) ? servicesDoc.services : []).map(
+		(s: any) => ({
+			name: String(s.name ?? ''),
+			kind: String(s.kind ?? ''),
+			port: typeof s.port === 'number' ? s.port : null,
+			command: String(s.command ?? ''),
+		}),
+	);
 
 	const episodes: FindingsEpisode[] = episodesRaw.slice(-MAX_EPISODES).map((e: any) => ({
 		at: Number(e.at ?? 0),
@@ -202,6 +220,7 @@ export function buildFindings(workspaceRoot: string): Findings {
 			stateCreated: Number(pollution.created ?? 0),
 			stateCleaned: Number(pollution.cleaned ?? 0),
 		},
+		services,
 		issues: (issuesDoc.clusters ?? []).map((c: any) => ({
 			kind: String(c.kind ?? ''),
 			title: String(c.title ?? ''),

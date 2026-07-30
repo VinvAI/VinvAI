@@ -100,6 +100,14 @@ export interface FlowFacts {
 	};
 	/** The onboarding compass's answer (computed by nextStep.ts). */
 	nextStep?: { label: string; detail: string; command: string; args?: unknown[] };
+	/**
+	 * Values the exerciser gave up on and is asking a human for
+	 * (.vinv/exercise/config_requests.json). Non-zero means a run is blocked on
+	 * a person, so the rail has to say so — the panel that collects them opens
+	 * only as a side effect of an exercise pass, and a closed tab was previously
+	 * unrecoverable without re-running the whole pipeline.
+	 */
+	configRequests: number;
 }
 
 // ---- outputs ---------------------------------------------------------------
@@ -161,6 +169,15 @@ export interface FlowModel {
 	/** The single next human action; absent while Auto-Pilot drives. */
 	nextAction?: FlowNextAction;
 	autoPilot: { running: boolean; label: string };
+	/**
+	 * Everything that is not a pipeline stage, in one always-present footer.
+	 *
+	 * The rail is the only surface a user never has to go looking for, so it —
+	 * not a nav bar repeated inside every panel — is where the other destinations
+	 * live. Before this, Journey and the configuration panel had no entry point
+	 * at all outside the command palette.
+	 */
+	destinations: FlowLink[];
 }
 
 // ---- computation -----------------------------------------------------------
@@ -301,7 +318,10 @@ function servicesStage(f: FlowFacts): FlowStage {
 		summary = `${failed.length} service${failed.length === 1 ? '' : 's'} could not be set up`;
 	} else if (real.length > 0 && set.length === real.length) {
 		status = 'done';
-		summary = `All ${real.length} service${real.length === 1 ? '' : 's'} know how to start`;
+		summary =
+			real.length === 1
+				? 'This service knows how to start'
+				: `All ${real.length} services know how to start`;
 	} else if (real.length === 0) {
 		status = f.services.length > 0 ? 'done' : 'waiting';
 		summary =
@@ -504,7 +524,14 @@ function verifyStage(f: FlowFacts): FlowStage {
 	} else if (f.probes.length > 0) {
 		const passed = f.probes.filter((p) => p.passed).length;
 		status = passed === f.probes.length && f.issues.length === 0 ? 'done' : 'error';
+		// Probes and runtime issues are different evidence: every probe can pass
+		// while a traced run still threw. Reporting only the probe tally then put
+		// a red "needs attention" directly above "2/2 checks passing" and never
+		// named the reason, so the summary carries both.
 		summary = `${passed}/${f.probes.length} checks passing`;
+		if (passed === f.probes.length && f.issues.length > 0) {
+			summary += ` · ${f.issues.length} problem${f.issues.length === 1 ? '' : 's'} in live runs`;
+		}
 		for (const p of f.probes) {
 			links.push({
 				label: p.label,
@@ -530,6 +557,47 @@ function verifyStage(f: FlowFacts): FlowStage {
 		summary,
 		links: capLinks(links, 8),
 	};
+}
+
+/**
+ * The footer's destinations, in the order a person needs them: the thing
+ * blocking a run first, then read-what-happened, then explore, then ask.
+ */
+function destinationsFor(f: FlowFacts): FlowLink[] {
+	const links: FlowLink[] = [];
+	if (f.configRequests > 0) {
+		links.push({
+			label: `Vinv needs ${f.configRequests} value${f.configRequests === 1 ? '' : 's'}`,
+			detail: 'a run is blocked until these are filled in',
+			command: 'vinv-vs.openConfigRequests',
+			state: 'error',
+		});
+	}
+	links.push(
+		{
+			// One landing surface: services, issues, episodes, regression replay and
+			// the endpoint profile, with the per-endpoint walkthrough reached from
+			// inside it. Listing Journey as a sibling here asked the user to choose
+			// between two tabs whose names do not tell them apart.
+			label: 'Report',
+			detail: 'services, findings, evidence — and the walk through what ran',
+			command: 'vinv-vs.openFindings',
+			state: 'ok',
+		},
+		{
+			label: 'Code map',
+			detail: 'every function, and what never ran',
+			command: 'vinv-vs.openGraphExplorer',
+			state: 'ok',
+		},
+		{
+			label: 'Ask Vinv',
+			detail: 'a question answered from the traces',
+			command: 'vinv-vs.askVinv',
+			state: 'ok',
+		},
+	);
+	return links;
 }
 
 /** Computes the whole rail from observable facts. Pure. */
@@ -577,7 +645,7 @@ export function computeFlowModel(f: FlowFacts): FlowModel {
 		};
 	}
 
-	return { stages, issues, nextAction, autoPilot: f.autoPilot };
+	return { stages, issues, nextAction, autoPilot: f.autoPilot, destinations: destinationsFor(f) };
 }
 
 /**

@@ -22,6 +22,7 @@ function facts(overrides: Partial<FlowFacts> = {}): FlowFacts {
 		probes: [],
 		pendingEdges: 0,
 		autoPilot: { running: false, label: '' },
+		configRequests: 0,
 		...overrides,
 	};
 }

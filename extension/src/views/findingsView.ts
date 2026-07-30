@@ -16,12 +16,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
 import { buildFindings, writeFindingsSummary } from './findingsModel';
+import { openJourney } from './journeyView';
 import { openPathInEditor } from '../support/openDocument';
 
 export const FINDINGS_VIEW_TYPE = 'vinv.findings';
 
 export interface FindingsOutbound {
-	type: 'openSource' | 'refresh';
+	type: 'openSource' | 'refresh' | 'walk';
 	file?: string;
 	line?: number;
 }
@@ -29,6 +30,8 @@ export interface FindingsOutbound {
 export interface FindingsActions {
 	openSource: (file: string | undefined, line?: number) => Promise<void>;
 	refresh: () => Promise<void>;
+	/** Open the per-endpoint walkthrough (call tree, flamegraph, exact I/O). */
+	walk: () => Promise<void>;
 }
 
 export async function handleFindingsMessage(
@@ -39,6 +42,8 @@ export async function handleFindingsMessage(
 		await actions.openSource(msg.file, msg.line);
 	} else if (msg.type === 'refresh') {
 		await actions.refresh();
+	} else if (msg.type === 'walk') {
+		await actions.walk();
 	}
 }
 
@@ -116,6 +121,11 @@ function wireFindings(workspaceRoot: string, webview: vscode.Webview): vscode.Di
 			});
 		},
 		refresh: push,
+		// The deep walkthrough stays its own surface — a flamegraph and an
+		// input-authoring form do not belong inline in a scrolling report — but it
+		// is now reached FROM here rather than being a sibling tab with no entry
+		// point of its own.
+		walk: () => openJourney(workspaceRoot),
 	};
 
 	const sub = webview.onDidReceiveMessage((msg: FindingsOutbound | { type: 'webviewError' }) => {
@@ -171,7 +181,14 @@ function getHtml(): string {
 		td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
 		.badge { font-size: 9px; padding: 1px 6px; letter-spacing: 0.16em; text-transform: uppercase;
 			border: 1px solid currentColor; color: var(--muted-2); white-space: nowrap; }
-		.badge.accept { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+		.walk-cta { color: var(--muted); font-size: 11px; margin-bottom: 10px;
+			display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+		.walk-cta button { font-family: inherit; font-size: 9px; font-weight: 500;
+			letter-spacing: 0.18em; text-transform: uppercase; padding: 5px 12px;
+			cursor: pointer; border-radius: 0;
+			background: transparent; border: 1px solid var(--line-strong); color: var(--ink); }
+		.walk-cta button:hover { border-color: var(--ink); }
+		.badge.accept { background: var(--ok); border-color: var(--ok); color: #ffffff; }
 		.badge.revert { color: var(--accent-fg); }
 		.badge.env { color: var(--muted); }
 		.epi { border: 1px solid var(--line-strong); padding: 10px 12px; margin-bottom: 10px; }
@@ -181,7 +198,7 @@ function getHtml(): string {
 		.epi .files { color: var(--muted-2); font-size: 10.5px; margin-top: 4px; }
 		.att { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 		.att .ap { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
-		.att .suite { flex: none; font-size: 10px; }
+		.att .suite { flex: none; font-size: 10px; color: var(--ok-fg); }
 		.att .suite.fail { color: var(--accent-fg); }
 		.att .cin { flex: none; font-size: 10px; color: var(--muted); white-space: nowrap; }
 		/* CI bar: signed axis, zero tick in the middle-ish; interval drawn as a
@@ -190,7 +207,7 @@ function getHtml(): string {
 			background: var(--bg-2); border: 1px solid var(--line-strong); }
 		.ci .zero { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
 		.ci .band { position: absolute; top: 2px; bottom: 2px; }
-		.ci .band.good { background: var(--ink); }
+		.ci .band.good { background: var(--ok); }
 		.ci .band.bad { background: var(--accent); }
 		.ci .pt { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent-fg); }
 		.bar { position: relative; height: 8px; background: var(--bg-2);
@@ -264,6 +281,19 @@ function getHtml(): string {
 		tiles(f);
 		let html = '';
 
+		// Services lead, because "what did Vinv bring up" is the first question and
+		// the answer used to live only in the Journey tab, which had no entry point.
+		if (f.services && f.services.length) {
+			html += '<h2>Services</h2>';
+			html += '<table><tr><th>Service</th><th>Kind</th><th>Port</th><th>Starts with</th></tr>';
+			for (const s of f.services) {
+				html += '<tr><td>' + esc(s.name) + '</td><td>' + esc(s.kind) + '</td>' +
+					'<td>' + (s.port == null ? '—' : esc(String(s.port))) + '</td>' +
+					'<td><code>' + esc(s.command) + '</code></td></tr>';
+			}
+			html += '</table>';
+		}
+
 		html += '<h2>Issue clusters (' + f.issues.length + ')</h2>';
 		html += f.issues.length === 0 ? '<div class="empty">No failures found in anything that was exercised.</div>' : '';
 		for (const i of f.issues) {
@@ -334,6 +364,13 @@ function getHtml(): string {
 		}
 
 		html += '<h2>Latency profile per endpoint</h2>';
+		// A bare table header over zero rows reads as broken rather than empty, so
+		// the whole table is skipped and the section says why it is empty.
+		if (f.endpoints.length === 0) {
+			html += '<div class="empty">No endpoint has been exercised yet, so there is no latency to profile.</div>';
+		} else {
+		html += '<div class="walk-cta">Need the call tree, flamegraph and the exact inputs and outputs for one of these? ' +
+			'<button id="walk" type="button">Walk them one by one</button></div>';
 		const maxP95 = Math.max(1, ...f.endpoints.map((e) => e.p95Ms));
 		html += '<table><tr><th>Endpoint</th>' +
 			'<th title="Functions this endpoint can reach that a captured request actually executed (ran / reachable)">Coverage</th>' +
@@ -349,6 +386,7 @@ function getHtml(): string {
 				'<td>' + esc(Object.entries(e.statuses).map(([k, v]) => k + '×' + v).join(' ')) + '</td></tr>';
 		}
 		html += '</table>';
+		}
 
 		html += '<h2>Data the tests created (' + f.state.cleaned + '/' + f.state.created + ' cleaned up)</h2>';
 		if (f.state.rows.length === 0) {
@@ -372,6 +410,9 @@ function getHtml(): string {
 
 		html += '<div class="hint">Machine-readable copy of everything above: .vinv/reports/findings.json (this tab\\'s backing file).</div>';
 		document.getElementById('content').innerHTML = html;
+		// Wired after the mount because the section is rebuilt on every push.
+		const walk = document.getElementById('walk');
+		if (walk) { walk.addEventListener('click', () => vscode.postMessage({ type: 'walk' })); }
 	}
 
 	window.addEventListener('message', (event) => {

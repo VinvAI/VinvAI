@@ -5,6 +5,8 @@ import { openDebugPanel } from '../debug/debugPanel';
 import { SessionsProvider, type SessionTimeRange } from '../views/sessionsView';
 import { ServicesProvider } from '../views/servicesView';
 import { openConfigureForm } from '../config/configureProject';
+import { openConfigRequestPanel, writeAnswers } from '../views/configRequestPanel';
+import { runExercisePass } from '../harness/exerciseRunner';
 import { openTracelensTerminal, openIndexTerminal } from '../tracelens/tracelens';
 import { runDiscovery, stopDiscovery } from '../index/discovery';
 import { readServices, isServiceStarted, readStartCommands } from '../bringup/bringup';
@@ -229,6 +231,28 @@ export function registerCommands(
 				return;
 			}
 			await openFindings(folder.uri.fsPath);
+		}),
+		// The values the exerciser could not derive. This panel used to open only
+		// as a side effect of an exercise pass, so closing the tab — or getting a
+		// credential wrong — meant re-running the whole pipeline to be asked again.
+		vscode.commands.registerCommand('vinv-vs.openConfigRequests', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
+			if (!folder) {
+				void vscode.window.showErrorMessage('Open a workspace folder to configure it.');
+				return;
+			}
+			const root = folder.uri.fsPath;
+			const panel = openConfigRequestPanel(root, {
+				save: (answers) => writeAnswers(root, answers),
+				rerun: async () => void (await runExercisePass(context, root)),
+				showError: (message) => void vscode.window.showErrorMessage(message),
+				notify: (message) => void vscode.window.showInformationMessage(`Vinv: ${message}`),
+			});
+			if (!panel) {
+				void vscode.window.showInformationMessage(
+					'Vinv: nothing to configure — Vinv resolved this project on its own.',
+				);
+			}
 		}),
 		vscode.commands.registerCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
 		vscode.commands.registerCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),

@@ -118,14 +118,18 @@ suite('findings: assembly', () => {
 });
 
 suite('findings: message routing', () => {
-	test('openSource and refresh route through', async () => {
+	test('openSource, refresh and walk route through', async () => {
 		const log: string[] = [];
 		const a: FindingsActions = {
 			openSource: async (f, l) => void log.push(`open:${f}:${l}`),
 			refresh: async () => void log.push('refresh'),
+			walk: async () => void log.push('walk'),
 		};
 		await handleFindingsMessage({ type: 'openSource', file: 'x.py', line: 3 }, a);
 		await handleFindingsMessage({ type: 'refresh' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh']);
+		// The walkthrough is reached FROM the report now — Journey has no entry
+		// point of its own outside the command palette, so this is the path.
+		await handleFindingsMessage({ type: 'walk' }, a);
+		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'walk']);
 	});
 });

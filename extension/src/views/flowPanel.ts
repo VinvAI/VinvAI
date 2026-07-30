@@ -225,11 +225,13 @@ function getFlowHtml(cspSource: string): string {
 			border-radius: 50%; box-sizing: border-box;
 			border: 1.5px solid var(--muted-2); background: var(--bg);
 		}
-		.stage.done .dot { border-color: var(--ink); background: var(--ink); }
+		.stage.done .dot { border-color: var(--ok-fg); background: var(--ok-fg); }
 		.stage.error .dot { border-color: var(--accent-fg); background: var(--accent-fg); }
 		.stage.running .dot {
+			--dot-ring: var(--accent-ring);
+			--dot-ring-soft: var(--accent-ring-soft);
 			border-color: var(--accent-fg); background: var(--accent-fg);
-			box-shadow: 0 0 0 4px rgba(215, 25, 33, 0.18);
+			box-shadow: 0 0 0 4px var(--dot-ring);
 			animation: v-pulse 2.4s ease-in-out infinite;
 		}
 		.stage h2 {
@@ -243,7 +245,7 @@ function getFlowHtml(cspSource: string): string {
 			color: var(--muted-2);
 		}
 		.stage.error h2 .st, .stage.running h2 .st { color: var(--accent-fg); }
-		.stage.done h2 .st { color: var(--muted); }
+		.stage.done h2 .st { color: var(--ok-fg); }
 		.summary { color: var(--muted); margin: 3px 0 0; line-height: 1.5; }
 		.stage.error .summary { color: var(--accent-fg); }
 		.activity { color: var(--accent-fg); margin: 3px 0 0; line-height: 1.5; }
@@ -271,11 +273,13 @@ function getFlowHtml(cspSource: string): string {
 			flex: none; width: 6px; height: 6px; border-radius: 50%;
 			align-self: center; background: var(--muted-2);
 		}
-		.lnk.s-ok .b { background: var(--ink); }
+		.lnk.s-ok .b { background: var(--ok-fg); }
 		.lnk.s-error .b { background: var(--accent-fg); }
 		.lnk.s-running .b {
+			--dot-ring: var(--accent-ring);
+			--dot-ring-soft: var(--accent-ring-soft);
 			background: var(--accent-fg);
-			box-shadow: 0 0 0 3px rgba(215, 25, 33, 0.18);
+			box-shadow: 0 0 0 3px var(--dot-ring);
 			animation: v-pulse 2.4s ease-in-out infinite;
 		}
 		.lnk .lab { color: var(--ink); }
@@ -309,6 +313,13 @@ function getFlowHtml(cspSource: string): string {
 		.issue .ev:hover { border-color: var(--ink); }
 		.issue .sent { align-self: center; font-size: 11px; letter-spacing: 0.04em; color: var(--muted); border: 1px dashed var(--line-strong); padding: 3px 8px; }
 
+		/* ---- destinations footer ---- */
+		.dests { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+		.dests .k {
+			font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+			color: var(--muted-2); margin-bottom: 5px;
+		}
+
 		.empty { color: var(--muted); line-height: 1.6; padding: 4px 0; }
 		.brand {
 			display: flex; align-items: center; gap: 8px; margin: 0 0 12px;
@@ -331,6 +342,10 @@ function getFlowHtml(cspSource: string): string {
 	<div class="issues" id="issues">
 		<div class="hd" id="issues-hd">Problems found</div>
 		<div id="issues-list"></div>
+	</div>
+	<div class="dests" id="dests">
+		<div class="k">Open</div>
+		<div id="dests-list"></div>
 	</div>
 
 	<script nonce="${nonce}">
@@ -457,6 +472,12 @@ function getFlowHtml(cspSource: string): string {
 				item.appendChild(acts);
 				list.appendChild(item);
 			}
+
+			// Destinations. Reuses renderLink so a footer row behaves exactly like
+			// a stage row — same hover, same dot, same message back.
+			const dests = document.getElementById('dests-list');
+			dests.textContent = '';
+			for (const d of model.destinations || []) { dests.appendChild(renderLink(d)); }
 		}
 
 		document.getElementById('next-btn').addEventListener('click', () => {
