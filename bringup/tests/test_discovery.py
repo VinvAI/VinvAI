@@ -359,7 +359,17 @@ def test_default_modules_remaps_distribution_name_to_import_package(tmp_path: Pa
     assert _default_modules(tmp_path, "admin", None) == ["vinv_admin"]
 
 
-def test_default_modules_drops_unknown_names_when_discovery_exists(tmp_path: Path) -> None:
+def test_default_modules_passes_unknown_names_through(tmp_path: Path) -> None:
+    # Deliberately NOT dropped. A name that matches neither an import package nor
+    # a distribution is still a target tracelens itself accepts: it resolves a
+    # non-importable directory as a source root, and keeps an unresolvable name in
+    # case the target only becomes importable once the app mutates sys.path. This
+    # filter used to delete such names, which is how `examples/` — a PEP 420
+    # namespace dir holding the entrypoint — was stripped from every rendered
+    # command, producing bring-ups whose own handlers emitted no spans.
     _write(tmp_path / "svc" / "pyproject.toml", '[project]\nname = "svc"\n')
     _write(tmp_path / "svc" / "src" / "real_pkg" / "__init__.py")
-    assert _default_modules(tmp_path, "svc", ["no_such_pkg", "real_pkg"]) == ["real_pkg"]
+    assert _default_modules(tmp_path, "svc", ["no_such_pkg", "real_pkg"]) == [
+        "no_such_pkg",
+        "real_pkg",
+    ]

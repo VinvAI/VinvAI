@@ -96,9 +96,15 @@ never a guessed default — so the tree is buildable. For a Python service, addi
    the framework's best answer, not a ceiling. Check that the module your entrypoint
    lives in is covered: for `-m uvicorn pkg.sub.app:app` that is `pkg`, for
    `python dir/thing.py` it is `dir`. If it is not covered, **add a
-   `--target-package` for it** and note that you did — a directory without
-   `__init__.py` is a valid target (tracelens treats it as a source root). A service
-   that starts green while its own handlers emit no spans is a FAILED bring-up.
+   `--target-package` for it** — a directory without `__init__.py` is a valid target
+   (tracelens treats it as a source root). A service that starts green while its own
+   handlers emit no spans is a FAILED bring-up.
+
+   **If you add a target the flags above did not list, you MUST record which one in
+   the deliverable** (`added_target_packages`, see below). Without it the recorded
+   file is indistinguishable from one where the framework supplied every flag, so
+   nobody can tell whether the engine's target derivation works or an agent has been
+   quietly compensating for it.
 2. **Convert the launch command to Python-script form** so tracelens's `runpy` dispatch keeps the
    AST hook installed: replace `uvicorn ARGS` with `python -m uvicorn ARGS`, and drop `--reload`
    (reload forks workers and loses child-process spans).
@@ -180,6 +186,7 @@ tool:
 {{
   "service": "{service}",
   "verified": true,
+  "added_target_packages": [],
   "verification": {{
     "port": <port-or-null>,
     "listening": true,
@@ -259,6 +266,14 @@ assignments (`FOO=bar cmd …`) and `export FOO=bar; cmd …` prefixes ARE fine,
 `> log 2>&1 &` — that is fine for your run, but what you RECORD is the same command with those
 wrappers stripped. Only a dependency entry that is inherently detached (`docker compose up -d <db>`)
 may return immediately.
+
+**`added_target_packages` records the targets YOU added that the prompt did not list.** Leave it
+`[]` when you used the rendered flags unchanged; put the names you added when you followed the
+own-code check above (e.g. `["examples"]` for an entrypoint in a namespace directory). It is the
+only signal separating "the framework derived every target correctly" from "an agent compensated by
+hand" — the two produce identical commands. Adding a flag and leaving the list empty hides a gap in
+the engine's target derivation and makes the next person debug a bug that was already being worked
+around. Record what you added, not the full flag list.
 
 Rules for the deliverable:
 

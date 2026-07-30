@@ -250,11 +250,18 @@ shell first to confirm the flags available in the installed version. Then:
    are the framework's best answer, not a ceiling. Before you compose the command,
    check that the module your entrypoint lives in is actually covered: for
    `-m uvicorn pkg.sub.app:app` that is `pkg`, for `python dir/thing.py` it is `dir`.
-   If the listed targets do not cover it, **add a `--target-package` for it** and say
-   so in your notes — a directory without `__init__.py` is a valid target (tracelens
-   treats it as a source root and instruments the files under it). A service that
-   starts green while its own handlers emit no spans is a FAILED bring-up, not a
-   passing one, and it is the single most common way this step goes wrong.
+   If the listed targets do not cover it, **add a `--target-package` for it** — a
+   directory without `__init__.py` is a valid target (tracelens treats it as a
+   source root and instruments the files under it). A service that starts green
+   while its own handlers emit no spans is a FAILED bring-up, not a passing one,
+   and it is the single most common way this step goes wrong.
+
+   **If you add a target the flags above did not list, you MUST record which one
+   in the deliverable** (`added_target_packages`, see the deliverable section).
+   Without it the recorded file cannot be told apart from one where the framework
+   supplied every flag, so nobody can later tell whether the engine's target
+   derivation is working or an agent has been quietly compensating for it. Record
+   the names you added, not the full list.
 2. **Convert the launch command into a Python-script form** so tracelens's `runpy` dispatch
    keeps the AST hook installed:
    - **Replace `uvicorn ARGS`** with **`python -m uvicorn ARGS`**.
@@ -702,6 +709,7 @@ not placeholders:
 {{
   "service": "{service}",
   "verified": true,
+  "added_target_packages": [],
   "verification": {{
     "port": <port-or-null>,
     "listening": true,
@@ -759,6 +767,17 @@ port and got a response, it is a **port** probe, whatever it is called.
 
 Omitting `probe` keeps the legacy inference (port recorded → port probe, else
 process semantics) — but for any non-HTTP service, record it explicitly.
+
+**`added_target_packages` records the targets YOU added that the prompt did not
+list.** Leave it `[]` when you used the rendered flags unchanged; put the names
+you added when you followed the own-code check above (e.g.
+`["examples"]` for an entrypoint in a namespace directory). This is the ONLY
+signal that distinguishes "the framework derived every target correctly" from
+"an agent compensated by hand", and the two look identical in the recorded
+command. Getting it wrong in the quiet direction — adding a flag and leaving the
+list empty — hides a gap in the engine's target derivation and makes the next
+person debug a bug that was already being worked around. Record the names you
+added, not the full flag list.
 
 **REPLAY CONTRACT — the recorded `{service}` command must run the server in the
 FOREGROUND.** Every consumer of this file (the extension's Run button, restart
