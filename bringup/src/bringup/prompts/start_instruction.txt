@@ -448,12 +448,23 @@ shell first to confirm the flags available in the installed version. Then:
      `kill` only understands MSYS pids, so against a native Win32 pid it answers
      `kill: (<pid>) - No such process` and exits 1 **while the server is still
      serving on that port**. Never read that message as "already stopped". Use
-     `taskkill /F /T /PID <pid>` instead (single slashes in Git Bash — `//F` is
-     rejected), and target the **root `tracelens.exe`**: the tree is
-     `tracelens.exe → python.exe → python.exe` and killing an inner node leaves
-     the leaf still holding the port. `taskkill` without `/F` is refused by this
-     tree ("can only be terminated forcefully"), so `/F /T` is expected here, not
-     a last resort.
+     taskkill on **the PID the probe just gave you** — no tree-walking needed:
+     ```bash
+     taskkill //F //T //PID <pid>     # from Git Bash (your vinv_verify session)
+     taskkill /F /T /PID <pid>        # from PowerShell or cmd
+     ```
+     **The doubled slashes are required in Git Bash and are not a typo.** MSYS
+     rewrites a lone `/F` argument into the path `F:/` before taskkill sees it,
+     so the single-slash form fails with
+     `ERROR: Invalid argument/option - 'F:/'` and leaves the port held — a
+     confusing failure on a step whose text promises success. `//F` reaches
+     taskkill intact. Single slashes are correct ONLY from PowerShell/cmd.
+
+     `/T` takes the children with it, and the `tracelens.exe → python.exe →
+     python.exe` parents above the listener exit on their own once it dies, so
+     killing the listening PID reaps the whole tree. Plain `taskkill` without
+     `/F` is refused here ("can only be terminated forcefully"), so `//F //T` is
+     the expected form, not a last resort.
 
    **Confirm the port is actually free before you finish** — re-run the probe
    above and require it to return nothing. A bring-up that "succeeded" but left

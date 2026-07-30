@@ -155,10 +155,14 @@ never a guessed default — so the tree is buildable. For a Python service, addi
      `<output>.summary.json` on the way out.
    - **Windows:** `kill -TERM` **does not work and lies about it** — MSYS `kill` knows only MSYS
      pids, so against a native pid it answers `No such process` and exits 1 **while the server is
-     still serving**. Never read that as "already stopped". Use `taskkill /F /T /PID <pid>` (single
-     slashes in Git Bash — `//F` is rejected) against the **root `tracelens.exe`**: the tree is
-     `tracelens.exe → python.exe → python.exe`, and killing an inner node leaves the leaf holding
-     the port. Plain `taskkill` without `/F` is refused by this tree, so `/F /T` is expected here.
+     still serving**. Never read that as "already stopped". Use taskkill on **the PID the probe just
+     gave you**: `taskkill //F //T //PID <pid>` from Git Bash, or `taskkill /F /T /PID <pid>` from
+     PowerShell/cmd. **The doubled slashes are required in Git Bash and are not a typo** — MSYS
+     rewrites a lone `/F` into the path `F:/` before taskkill sees it, so the single-slash form dies
+     with `ERROR: Invalid argument/option - 'F:/'` and leaves the port held. No tree-walking is
+     needed: `/T` takes the children, and the `tracelens.exe → python.exe → python.exe` parents
+     above the listener exit on their own once it dies. Plain `taskkill` without `/F` is refused
+     here, so `//F //T` is the expected form.
 
    **Confirm the port is actually free before finishing** — re-run the probe and require it to
    return nothing. A bring-up that leaves the port held makes the NEXT launch die with "address
