@@ -173,6 +173,12 @@ export function collectRuntimeErrorClusters(
  * coverage target, the report says `'cap'` and the evidence arrives on its own.
  */
 export interface SelectionStats {
+	/**
+	 * Which selector applied this bound. Named because a chain is only readable
+	 * if its stages are: "24 -> 4 -> 11 -> 6" says nothing without knowing that
+	 * the first narrowing was the cache Pareto and the second the waste ranking.
+	 */
+	stage: string;
 	/** Items handed back. */
 	returned: number;
 	/** Items the analysis found before any bound was applied. */
@@ -187,6 +193,122 @@ export interface SelectionStats {
 	 * honestly rather than leaving "4" ambiguous.
 	 */
 	stopped_by: 'coverage' | 'cap' | 'exhausted';
+	/**
+	 * The aggregate of what this stage dropped, in the unit it ranked by.
+	 *
+	 * Present so `sum(shown) + residual = total` holds. A count alone lets a
+	 * reader believe a bound was harmless; a magnitude lets them CHECK it — the
+	 * difference between "20 dropped" and "20 dropped, 14.6ms combined against
+	 * 32,668ms kept". It is also what makes a cap stop unmissable, since
+	 * "192 dropped, 19,400ms combined" cannot be skimmed past the way a sentence
+	 * saying the same thing can. Absent when nothing was dropped.
+	 */
+	residual?: { count: number; magnitude: number; unit: 'ms' | 'bytes' };
+}
+
+/**
+ * A ranked result together with EVERY bound that shaped it, source-first.
+ *
+ * Truncation here is pipeline state, not a property of one call. The cache
+ * selector narrows 24 candidates to 4, those 4 feed the waste ranking, and the
+ * ranking narrows again — so a single `stats` attached to the last stage cannot
+ * express what a reader needs, and the board reported "6 of 11" while a bound
+ * nobody mentioned had already removed 20. Returning the chain is what makes
+ * that unrepresentable rather than merely fixed.
+ *
+ * The model is EXPLAIN ANALYZE's per-node "Rows Removed by Filter" and OTel's
+ * per-span `dropped_*_count`: each stage records what it dropped, and the whole
+ * chain travels with the data. The failure mode it avoids is Prometheus
+ * `topk()`, which drops silently and leaves the aggregate unrecoverable
+ * downstream.
+ */
+export interface Bounded<T> {
+	items: T[];
+	/** Every bound applied, oldest first. Never empty. */
+	lineage: SelectionStats[];
+}
+
+/**
+ * A `Bounded` that dropped nothing — for a caller supplying a set it knows is
+ * complete.
+ *
+ * Exists so "I have everything" is STATED rather than represented by an absent
+ * lineage. An empty `lineage[]` would be indistinguishable from a producer that
+ * forgot to record one, and `chainStatus` would call both 'exhausted'; this
+ * makes the claim explicit and attributable to a named stage.
+ */
+export function unbounded<T>(items: T[], stage = 'given'): Bounded<T> {
+	return {
+		items,
+		lineage: [
+			selectionStage(stage, {
+				returned: items.length,
+				total: items.length,
+				coverage_achieved: items.length > 0 ? 1 : 0,
+				stopped_by: 'exhausted',
+			}),
+		],
+	};
+}
+
+/**
+ * The epistemic status of a whole chain — ABSORBING toward the least certain.
+ *
+ * A cap stop anywhere poisons everything after it. "Not known to be immaterial"
+ * is not a property a later coverage stop can repair: once a stage ran out of
+ * slots, no downstream measurement can speak for what it never saw. So a chain
+ * reads `'cap'` if any stage capped, `'coverage'` if any measured a bound, and
+ * `'exhausted'` only when nothing anywhere was dropped.
+ *
+ * The same monoid this codebase already uses twice, deliberately: `mergeExitOutcome`
+ * (conflicting evidence is absorbing) and `mergeContainment` (one escape makes the
+ * identity a defect). Selection is the third instance and must not invent a
+ * different rule — the pessimistic value wins, because the cost of overstating
+ * certainty is always higher than the cost of understating it.
+ */
+export function chainStatus(lineage: readonly SelectionStats[]): SelectionStats['stopped_by'] {
+	if (lineage.some((s) => s.stopped_by === 'cap')) {
+		return 'cap';
+	}
+	if (lineage.some((s) => s.stopped_by === 'coverage')) {
+		return 'coverage';
+	}
+	return 'exhausted';
+}
+
+/**
+ * Builds one stage record, computing `dropped` and the residual from the ranked
+ * quantity so no call site has to derive either. `magnitude` is the summed
+ * ranking quantity of everything dropped.
+ */
+export function selectionStage(
+	stage: string,
+	opts: {
+		returned: number;
+		total: number;
+		coverage_achieved: number;
+		stopped_by: SelectionStats['stopped_by'];
+		droppedMagnitude?: number;
+		unit?: 'ms' | 'bytes';
+	},
+): SelectionStats {
+	const dropped = Math.max(0, opts.total - opts.returned);
+	return {
+		stage,
+		returned: opts.returned,
+		total: opts.total,
+		dropped,
+		coverage_achieved: opts.coverage_achieved,
+		stopped_by: opts.stopped_by,
+		residual:
+			dropped > 0
+				? {
+						count: dropped,
+						magnitude: opts.droppedMagnitude ?? 0,
+						unit: opts.unit ?? 'ms',
+					}
+				: undefined,
+	};
 }
 
 /**
@@ -223,6 +345,63 @@ export function describeSelection(stats: SelectionStats, noun: string): string {
 	);
 }
 
+/** `14.6ms` / `2.1MB` — the residual magnitude in its own unit. */
+function magnitude(m: number, unit: 'ms' | 'bytes'): string {
+	if (unit === 'ms') {
+		return `${m < 10 ? m.toFixed(1) : Math.round(m)}ms`;
+	}
+	const mb = m / 1024 / 1024;
+	return mb >= 1 ? `${mb.toFixed(1)}MB` : `${Math.round(m / 1024)}KB`;
+}
+
+/**
+ * The honest rendering of a WHOLE chain — the only formatter any surface should
+ * call.
+ *
+ * One formatter for one fact, for the same reason `containmentVerdict` is shared
+ * between its two producers: a formatter per surface is how two renderings of
+ * one fact drift apart, and here the drift already happened — agents got the
+ * bound through the MCP tools while the Optimize panel printed a bare count.
+ *
+ * Every stage that dropped anything is named with its residual, so the sentence
+ * is checkable rather than asserted:
+ *
+ *   exhausted -> "4 candidate(s)"
+ *   one bound -> "4 of 24 candidate(s) — cache-pareto dropped 20 (14.6ms combined,
+ *                 99.96% coverage retained)"
+ *   capped    -> "6 of 11 candidate(s) — NOT KNOWN TO BE COMPLETE: cache-pareto
+ *                 STOPPED AT ITS ITEM CAP, dropping 192 (19400ms combined, only
+ *                 40.2% coverage); optimization-rank dropped 5 (…)"
+ *
+ * The cap wording is louder on purpose and, because `chainStatus` is absorbing,
+ * it fires for a chain whose LAST stage stopped on coverage but whose first hit
+ * a cap. That is the case the flat struct could not express at all.
+ */
+export function describeLineage(lineage: readonly SelectionStats[], noun: string): string {
+	const dropping = lineage.filter((s) => s.dropped > 0);
+	const returned = lineage.length ? lineage[lineage.length - 1].returned : 0;
+	// Population at the SOURCE, not at the last stage: the whole point is that the
+	// last stage's `total` is already a survivor count.
+	const population = lineage.length ? lineage[0].total : 0;
+	if (dropping.length === 0) {
+		return `${returned} ${noun}(s)`;
+	}
+	const parts = dropping.map((s) => {
+		const pct = (s.coverage_achieved * 100).toFixed(1);
+		const res = s.residual
+			? `${s.residual.count} (${magnitude(s.residual.magnitude, s.residual.unit)} combined`
+			: `${s.dropped} (`;
+		return s.stopped_by === 'cap'
+			? `${s.stage} STOPPED AT ITS ITEM CAP, dropping ${res}, only ${pct}% coverage)`
+			: `${s.stage} dropped ${res}, ${pct}% coverage retained)`;
+	});
+	const head =
+		chainStatus(lineage) === 'cap'
+			? `${returned} of ${population} ${noun}(s) — NOT KNOWN TO BE COMPLETE: `
+			: `${returned} of ${population} ${noun}(s) — `;
+	return head + parts.join('; ');
+}
+
 /** One latency hotspot from the captured trace, with its share of total time. */
 export interface Hotspot {
 	row: number;
@@ -247,7 +426,7 @@ export function selectHotspots(
 	overlay: Record<number, RuntimeOverlay>,
 	coverage = 0.8,
 	cap = 8,
-): { items: Hotspot[]; stats: SelectionStats } {
+): Bounded<Hotspot> {
 	const entries = Object.entries(overlay)
 		.map(([row, rt]) => ({ row: Number(row), rt }))
 		.filter(({ rt }) => rt.total_ms > 0);
@@ -255,7 +434,14 @@ export function selectHotspots(
 	if (totalMs <= 0) {
 		return {
 			items: [],
-			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+			lineage: [
+				selectionStage('hotspot-pareto', {
+					returned: 0,
+					total: 0,
+					coverage_achieved: 0,
+					stopped_by: 'exhausted',
+				}),
+			],
 		};
 	}
 	entries.sort((a, b) => b.rt.total_ms - a.rt.total_ms);
@@ -291,13 +477,18 @@ export function selectHotspots(
 	}
 	return {
 		items: out,
-		stats: {
-			returned: out.length,
-			total: entries.length,
-			dropped: entries.length - out.length,
-			coverage_achieved: covered / totalMs,
-			stopped_by: stoppedBy,
-		},
+		lineage: [
+			selectionStage('hotspot-pareto', {
+				returned: out.length,
+				total: entries.length,
+				coverage_achieved: covered / totalMs,
+				stopped_by: stoppedBy,
+				// The ranked quantity of everything dropped, so shown + residual
+				// reconstructs the population rather than merely counting it.
+				droppedMagnitude: totalMs - covered,
+				unit: 'ms',
+			}),
+		],
 	};
 }
 
@@ -761,7 +952,7 @@ export function collectCacheCandidates(
 	nodes: GraphNode[],
 	coverage = 0.8,
 	cap = 8,
-): { items: CacheCandidate[]; stats: SelectionStats } {
+): Bounded<CacheCandidate> {
 	const rowsFor = buildComponentMatcher(nodes);
 	const guarded = securityGuardReasons(workspaceRoot, nodes);
 	interface ArgGroup {
@@ -901,7 +1092,14 @@ export function collectCacheCandidates(
 	if (total <= 0) {
 		return {
 			items: [],
-			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+			lineage: [
+				selectionStage('cache-pareto', {
+					returned: 0,
+					total: 0,
+					coverage_achieved: 0,
+					stopped_by: 'exhausted',
+				}),
+			],
 		};
 	}
 	raw.sort((a, b) => b.reclaimable_ms - a.reclaimable_ms);
@@ -922,13 +1120,16 @@ export function collectCacheCandidates(
 	}
 	return {
 		items: out,
-		stats: {
-			returned: out.length,
-			total: raw.length,
-			dropped: raw.length - out.length,
-			coverage_achieved: covered / total,
-			stopped_by: stoppedBy,
-		},
+		lineage: [
+			selectionStage('cache-pareto', {
+				returned: out.length,
+				total: raw.length,
+				coverage_achieved: covered / total,
+				stopped_by: stoppedBy,
+				droppedMagnitude: total - covered,
+				unit: 'ms',
+			}),
+		],
 	};
 }
 

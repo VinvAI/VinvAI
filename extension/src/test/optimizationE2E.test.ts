@@ -27,6 +27,7 @@ import {
 	collectCacheCandidates,
 	collectRequestSpans,
 	collectSymbolTimings,
+	unbounded,
 } from '../harness/runtimeAnalysis';
 import {
 	computeOptimizationCandidates,
@@ -156,8 +157,8 @@ suite('optimization end-to-end (disk pipeline)', () => {
 		const nodes = loadNodes(store);
 		const edges = loadEdges(store, nodes.length);
 		const timings = collectSymbolTimings(root, nodes);
-		const cacheByRow = new Map(collectCacheCandidates(root, nodes).items.map((c) => [c.row, c]));
-		return { nodes, timings, list: computeOptimizationCandidates({ nodes, edges, timings, cacheByRow }).items };
+		const cache = collectCacheCandidates(root, nodes);
+		return { nodes, timings, list: computeOptimizationCandidates({ nodes, edges, timings, cache }).items };
 	}
 
 	test('a symbol whose only call RAISED is never a hotspot (the smolagents defect)', () => {
@@ -283,7 +284,7 @@ suite('optimization end-to-end (request-structure detectors)', () => {
 			nodes,
 			edges: loadEdges(dir, nodes.length),
 			timings: collectSymbolTimings(root, nodes),
-			cacheByRow: new Map(),
+			cache: unbounded([], 'cache-pareto'),
 			spans: collectRequestSpans(root, nodes),
 		}).items;
 	}
@@ -446,7 +447,7 @@ suite('optimization end-to-end (end-ordered exporter traces)', () => {
 			nodes,
 			edges: loadEdges(dir, nodes.length),
 			timings: collectSymbolTimings(root, nodes),
-			cacheByRow: new Map(),
+			cache: unbounded([], 'cache-pareto'),
 			spans: forest(),
 		}).items;
 		assert.ok(

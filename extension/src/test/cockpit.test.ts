@@ -93,8 +93,10 @@ import {
 	collectMemoryTrends,
 	collectRequestSpans,
 	collectSymbolTimings,
+	chainStatus,
 	securityGuardReasons,
 	theilSenSlope,
+	unbounded,
 } from '../harness/runtimeAnalysis';
 import { computeOptimizationCandidates } from '../harness/optimizationAnalysis';
 import {
@@ -2589,8 +2591,9 @@ suite('Cache soundness gates (functional dependence + ceiling cap + security gua
 			);
 			// Nothing was withheld, so the bound must say so rather than leaving
 			// "1 candidate" ambiguous between "all of them" and "the first of many".
-			assert.strictEqual(cache.stats.stopped_by, 'exhausted');
-			assert.strictEqual(cache.stats.dropped, 0);
+			assert.strictEqual(chainStatus(cache.lineage), 'exhausted');
+			assert.strictEqual(cache.lineage.at(-1)!.dropped, 0);
+			assert.strictEqual(cache.lineage.at(-1)!.residual, undefined);
 		} finally {
 			fs.rmSync(ws, { recursive: true, force: true });
 		}
@@ -2694,7 +2697,7 @@ suite('Seam fixes (validation round)', () => {
 			writeTrace(ws, 's1', [mk(90)].flat(), t);
 			const nodes = [makeNode(0)];
 			const timings = collectSymbolTimings(ws, nodes);
-			const list = computeOptimizationCandidates({ nodes, edges: [], timings, cacheByRow: new Map() }).items;
+			const list = computeOptimizationCandidates({ nodes, edges: [], timings, cache: unbounded([], 'cache-pareto') }).items;
 			for (const c of list) {
 				assert.ok(
 					c.predicted_ms <= c.total_ms + 1e-9,

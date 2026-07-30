@@ -9,8 +9,13 @@ import * as os from 'os';
 import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import {
+	chainStatus,
 	collectGcPressure,
 	collectSymbolTimings,
+	describeLineage,
+	selectionStage,
+	unbounded,
+	type Bounded,
 	type CacheCandidate,
 	type SymbolSessionTiming,
 	type TraceSpan,
@@ -75,7 +80,7 @@ function baseTimings(): Map<number, SymbolSessionTiming[]> {
 	]);
 }
 
-function cacheFor(): Map<number, CacheCandidate> {
+function cacheFor(): Bounded<CacheCandidate> {
 	const c: CacheCandidate = {
 		row: 1,
 		name: 'get_docs',
@@ -86,7 +91,10 @@ function cacheFor(): Map<number, CacheCandidate> {
 		reclaimable_ms: 150,
 		share: 1,
 	};
-	return new Map([[1, c]]);
+	// `unbounded`, not a bare list: these fixtures ARE the complete candidate
+	// set, and the analyzer now inherits whatever bound produced its input, so a
+	// test must say which it is rather than leave it to be assumed.
+	return unbounded([c], 'cache-pareto');
 }
 
 suite('optimizationAnalysis: recoverable-time ranking', () => {
@@ -95,7 +103,7 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 		}).items;
 	}
 
@@ -111,7 +119,7 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 			lifetimeRows: new Set([1]),
 		}).items;
 		assert.ok(
@@ -159,6 +167,95 @@ suite('optimizationAnalysis: recoverable-time ranking', () => {
 			);
 		}
 		assert.strictEqual(list[0].row, 1, 'the 150ms cache win outranks the others');
+	});
+});
+
+suite('selection lineage: bounds compose and the least certain wins', () => {
+	const stage = (
+		name: string,
+		stopped_by: 'coverage' | 'cap' | 'exhausted',
+		returned: number,
+		total: number,
+	) =>
+		selectionStage(name, {
+			returned,
+			total,
+			coverage_achieved: total > 0 ? returned / total : 0,
+			stopped_by,
+			droppedMagnitude: (total - returned) * 10,
+			unit: 'ms' as const,
+		});
+
+	test('a cap ANYWHERE poisons the chain, even behind a later coverage stop', () => {
+		// The case a flat per-call stat could not express at all. The cache Pareto
+		// runs out of slots, then the waste ranking stops on measured coverage —
+		// and a reader shown only the last stage would be told the result is
+		// bounded by something that measured what it dropped. It is not: nothing
+		// measured the 192 the first stage never looked past.
+		assert.strictEqual(
+			chainStatus([stage('cache-pareto', 'cap', 8, 200), stage('optimization-rank', 'coverage', 6, 11)]),
+			'cap',
+		);
+		// Order does not matter — absorbing, not last-wins.
+		assert.strictEqual(
+			chainStatus([stage('cache-pareto', 'coverage', 4, 24), stage('optimization-rank', 'cap', 6, 11)]),
+			'cap',
+		);
+		assert.strictEqual(
+			chainStatus([stage('cache-pareto', 'coverage', 4, 24), stage('optimization-rank', 'exhausted', 4, 4)]),
+			'coverage',
+		);
+		// Only when nothing anywhere dropped is the whole chain complete.
+		assert.strictEqual(
+			chainStatus([stage('a', 'exhausted', 4, 4), stage('b', 'exhausted', 4, 4)]),
+			'exhausted',
+		);
+		// Same monoid as mergeExitOutcome/mergeContainment: the pessimistic value
+		// wins, because overstating certainty costs more than understating it.
+	});
+
+	test('the rendering names the SOURCE population, not the last survivor count', () => {
+		const line = describeLineage(
+			[stage('cache-pareto', 'cap', 8, 200), stage('optimization-rank', 'coverage', 6, 11)],
+			'candidate',
+		);
+		// "6 of 200", never "6 of 11" — 11 is already a survivor count, and
+		// printing it as the population is precisely the defect.
+		assert.ok(line.startsWith('6 of 200 candidate(s)'), line);
+		assert.match(line, /NOT KNOWN TO BE COMPLETE/);
+		assert.match(line, /cache-pareto STOPPED AT ITS ITEM CAP, dropping 192/);
+		// Both stages are named, so the reader can see WHERE it narrowed.
+		assert.match(line, /optimization-rank dropped 5/);
+		// The residual magnitude makes the claim checkable rather than asserted.
+		assert.match(line, /1920ms combined/);
+	});
+
+	test('a complete chain says so plainly, with no bound language', () => {
+		const line = describeLineage([stage('cache-pareto', 'exhausted', 4, 4)], 'candidate');
+		assert.strictEqual(line, '4 candidate(s)');
+	});
+
+	test('the analyzer INHERITS its input bound instead of replacing it', () => {
+		// The stacked-truncation defect, as a test. The cache stage dropped 20 of
+		// 24 before the analyzer saw anything; a board reporting only the ranking
+		// stage would state 4 as the population.
+		const capped: Bounded<CacheCandidate> = {
+			items: cacheFor().items,
+			lineage: [stage('cache-pareto', 'cap', 4, 24)],
+		};
+		const out = computeOptimizationCandidates({
+			nodes: NODES,
+			edges: EDGES,
+			timings: baseTimings(),
+			cache: capped,
+		});
+		assert.strictEqual(out.lineage.length, 2, 'both stages must survive');
+		assert.strictEqual(out.lineage[0].stage, 'cache-pareto');
+		assert.strictEqual(out.lineage[1].stage, 'optimization-rank');
+		// And the upstream cap governs the whole chain even though this ranking
+		// exhausted its own input.
+		assert.strictEqual(chainStatus(out.lineage), 'cap');
+		assert.ok(describeLineage(out.lineage, 'candidate').includes('of 24'));
 	});
 });
 
@@ -242,7 +339,7 @@ suite('optimizationAnalysis: Amdahl ceiling', () => {
 			nodes,
 			edges: [],
 			timings,
-			cacheByRow: new Map([[1, cache]]),
+			cache: unbounded([cache], 'cache-pareto'),
 		}).items;
 		// share = 1, waste_prior = 0.5 → ceiling = 1/(1 − 0.5) = 2×.
 		assert.ok(Math.abs(c.amdahl_ceiling! - 2) < 1e-9);
@@ -253,7 +350,7 @@ suite('optimizationAnalysis: Amdahl ceiling', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 		}).items;
 		assert.ok(list.length >= 2);
 		const total = list.reduce((s, c) => s + c.predicted_ms_effective!, 0);
@@ -277,7 +374,7 @@ suite('optimizationAnalysis: calibration deflation at ranking time', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 			coverage: 1,
 		}).items;
 		assert.strictEqual(plain[0].row, 1);
@@ -288,7 +385,7 @@ suite('optimizationAnalysis: calibration deflation at ranking time', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 			coverage: 1,
 			calibration: { cache: 0.1 },
 		}).items;
@@ -413,7 +510,7 @@ suite('optimizationAnalysis: attempt-history store (doom-loop guard)', () => {
 			nodes: NODES,
 			edges: EDGES,
 			timings: baseTimings(),
-			cacheByRow: cacheFor(),
+			cache: cacheFor(),
 		}).items;
 		const keys = candidateAttemptKeys(list);
 		const cacheRow = list.find((c) => c.waste_kind === 'cache')!;
@@ -555,7 +652,7 @@ suite('optimizationAnalysis: unexplained-wait detector', () => {
 			nodes,
 			edges: [],
 			timings,
-			cacheByRow: new Map(),
+			cache: unbounded([], 'cache-pareto'),
 			spans,
 		}).items;
 	}
@@ -636,7 +733,7 @@ suite('optimizationAnalysis: gc-pressure detector', () => {
 			nodes: gcNodes,
 			edges: [],
 			timings,
-			cacheByRow: new Map(),
+			cache: unbounded([], 'cache-pareto'),
 		}).items;
 	}
 

@@ -35,12 +35,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { GraphEdge, GraphNode } from '../graph/indexGraph';
 import type {
+	Bounded,
 	CacheCandidate,
 	MemoryLeakSuspect,
 	SymbolSessionTiming,
 	TraceSpan,
 	SelectionStats,
 } from './runtimeAnalysis';
+import { selectionStage } from './runtimeAnalysis';
 import { removeExpiredOptimizationEvidence } from './optimizationEvidence';
 
 /** Which evidence signal drove a candidate's predicted recoverable amount. */
@@ -292,8 +294,20 @@ interface ComputeInputs {
 	edges: GraphEdge[];
 	/** row → per-session timings, oldest→newest (collectSymbolTimings). */
 	timings: Map<number, SymbolSessionTiming[]>;
-	/** cache opportunities keyed by row (collectCacheCandidates). */
-	cacheByRow: Map<number, CacheCandidate>;
+	/**
+	 * Cache opportunities as `collectCacheCandidates` returned them — the WHOLE
+	 * Bounded value, not a pre-built row map.
+	 *
+	 * Taking the bounded value rather than `Map<number, CacheCandidate>` is what
+	 * makes the stacked-truncation defect unrepresentable. When this field was a
+	 * map, both call sites wrote `collectCacheCandidates(...).items` and the
+	 * upstream bound died at the join: the cache Pareto had already dropped 20 of
+	 * 24 candidates, and the board then reported only its OWN bound as "6 of 11",
+	 * a number that reads as the population and is actually a survivor count.
+	 * Now the lineage arrives with the data and there is no shape a caller can
+	 * pass that omits it.
+	 */
+	cache: Bounded<CacheCandidate>;
 	/** per-request call forest (collectRequestSpans) — enables the structural
 	 * signals: N+1, staircase, and self-time. Optional; without it the analyzer
 	 * falls back to the aggregate signals only. */
@@ -627,8 +641,12 @@ function computeSpanSignals(roots: TraceSpan[]): Map<number, SpanSignal> {
  */
 export function computeOptimizationCandidates(
 	inputs: ComputeInputs,
-): { items: OptimizationCandidate[]; stats: SelectionStats } {
-	const { nodes, edges, timings, cacheByRow } = inputs;
+): Bounded<OptimizationCandidate> {
+	const { nodes, edges, timings } = inputs;
+	// Built here rather than taken pre-built: the join needs a row lookup, but
+	// the CALLER must not be the one to discard everything else (see
+	// ComputeInputs.cache).
+	const cacheByRow = new Map(inputs.cache.items.map((c) => [c.row, c]));
 	const coverage = inputs.coverage ?? 0.9;
 	const cap = inputs.cap ?? 12;
 	const spanSig = inputs.spans ? computeSpanSignals(inputs.spans) : new Map<number, SpanSignal>();
@@ -920,11 +938,21 @@ export function computeOptimizationCandidates(
 	const total = raw.reduce((s, c) => s + effective(c), 0);
 	if (total <= 0) {
 		// No latency signal at all. The memory dimension may still have found
-		// candidates, but no LATENCY bound was applied, so the stats say so
-		// rather than implying a selection happened.
+		// candidates, but no LATENCY bound was applied here, so this stage says
+		// so rather than implying a selection happened. The upstream cache chain
+		// still travels: it narrowed before this point whether or not this stage
+		// had anything left to rank.
 		return {
 			items: memory,
-			stats: { returned: 0, total: 0, dropped: 0, coverage_achieved: 0, stopped_by: 'exhausted' },
+			lineage: [
+				...inputs.cache.lineage,
+				selectionStage('optimization-rank', {
+					returned: 0,
+					total: 0,
+					coverage_achieved: 0,
+					stopped_by: 'exhausted',
+				}),
+			],
 		};
 	}
 	// End-to-end Amdahl ceiling per candidate (see the field doc): share of the
@@ -955,21 +983,31 @@ export function computeOptimizationCandidates(
 	// ms Pareto — they never entered the clamp/calibration/Amdahl loops, which
 	// are all time concepts.
 	//
-	// `stats` therefore describes the LATENCY selection only, and deliberately so:
+	// The lineage therefore describes the LATENCY chain only, and deliberately so:
 	// the memory dimension is ranked in BYTES against its own bound, and folding
 	// two incommensurable selections into one coverage number would produce a
-	// figure that is not true of either. `items.length` can exceed `stats.returned`
-	// by the memory tail; a renderer that needs a single count should use
-	// items.length and reserve describeSelection() for the latency claim.
+	// figure that is not true of either. `items.length` can exceed the last
+	// stage's `returned` by the memory tail; a renderer that needs a single count
+	// should use items.length and reserve describeLineage() for the latency claim.
+	//
+	// The cache chain is PREPENDED, not replaced. Its Pareto ran before this one
+	// and its drops never reached `raw`, so reporting only this stage would state
+	// a survivor count as the population — "6 of 11" when the cache stage had
+	// already taken 24 down to 4. chainStatus() then makes an upstream cap
+	// poison the whole chain, which a single stage could not express.
 	return {
 		items: [...out, ...memory],
-		stats: {
-			returned: out.length,
-			total: raw.length,
-			dropped: raw.length - out.length,
-			coverage_achieved: covered / total,
-			stopped_by: stoppedBy,
-		},
+		lineage: [
+			...inputs.cache.lineage,
+			selectionStage('optimization-rank', {
+				returned: out.length,
+				total: raw.length,
+				coverage_achieved: covered / total,
+				stopped_by: stoppedBy,
+				droppedMagnitude: total - covered,
+				unit: 'ms',
+			}),
+		],
 	};
 }
 

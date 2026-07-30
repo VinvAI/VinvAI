@@ -761,10 +761,10 @@ export function reconcileOpportunityBoard(
  * signature would churn the board's whole surface for a value only the
  * rendering path wants. Read it immediately after the call or not at all.
  */
-let lastRankedSelection: SelectionStats | null = null;
+let lastRankedSelection: SelectionStats[] | null = null;
 
-/** The bound that ended the last ranking, or null if it has not run. */
-export function lastRankedSelectionStats(): SelectionStats | null {
+/** Every bound that shaped the last ranking, or null if it has not run. */
+export function lastRankedSelectionStats(): SelectionStats[] | null {
 	return lastRankedSelection;
 }
 
@@ -779,16 +779,18 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 	const nodes: GraphNode[] = loadNodes(storeDir);
 	const edges = loadEdges(storeDir, nodes.length);
 	const timings = collectSymbolTimings(workspaceRoot, nodes);
-	const cacheByRow = new Map(collectCacheCandidates(workspaceRoot, nodes).items.map((c) => [c.row, c]));
+	// Passed whole: the cache Pareto's own bound has to reach the board, or the
+	// board's count is a survivor count presented as a population.
+	const cache = collectCacheCandidates(workspaceRoot, nodes);
 	const spans = collectRequestSpans(workspaceRoot, nodes);
 	// Same ranking-time calibration deflation as the panel path — the board and
 	// the panel must never rank the same evidence differently.
 	const calibration = loadOptimizationCalibration(workspaceRoot);
-	const { items, stats } = computeOptimizationCandidates({
+	const { items, lineage } = computeOptimizationCandidates({
 		nodes,
 		edges,
 		timings,
-		cacheByRow,
+		cache,
 		spans,
 		calibration,
 		// collectCacheCandidates already drops these, but the per-call, fanout and
@@ -802,10 +804,12 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 	});
 	// The bound is recorded, not discarded. A board that posts N opportunities
 	// and cannot say whether N was everything is the truncation-reads-as-
-	// completeness shape; `stats` is what lets a surface state it. Latency
-	// selection only — see computeOptimizationCandidates for why memory is
-	// not folded in.
-	lastRankedSelection = stats;
+	// completeness shape; the lineage is what lets a surface state it. The WHOLE
+	// chain, not just this analyzer's stage: the cache Pareto ran first and its
+	// drops never reached the ranking, so keeping only the last stage would
+	// report a survivor count as the population. Latency chain only — see
+	// computeOptimizationCandidates for why memory is not folded in.
+	lastRankedSelection = lineage;
 	return items;
 }
 

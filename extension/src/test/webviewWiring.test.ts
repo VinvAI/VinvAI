@@ -35,10 +35,25 @@ function makeWorkspace(): { root: string; existing: string; cleanup: () => void 
 	fs.writeFileSync(existing, '# pack\n', 'utf8');
 	// force+retries: on Windows a file just opened in the editor stays locked
 	// briefly, so a bare rmSync throws ENOTEMPTY; retry until the handle drops.
+	//
+	// And if it never drops, teardown must not fail a passing test. These tests
+	// open a real file in a real editor, and VS Code holds that handle for as
+	// long as it likes — under full-suite load the retries expire and rmSync
+	// throws EPERM from inside the `finally`, turning a green assertion into a
+	// red one that names the wrong thing entirely ("opens a real file and
+	// reports success" failing on a directory delete). The subject here is
+	// resolveOpenTarget, not filesystem teardown; a leaked temp directory is
+	// harmless and the OS reclaims it.
 	return {
 		root,
 		existing,
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
+		cleanup: () => {
+			try {
+				fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+			} catch {
+				// Still locked by the editor. Leave it to the OS.
+			}
+		},
 	};
 }
 

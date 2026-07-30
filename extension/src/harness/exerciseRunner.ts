@@ -204,13 +204,18 @@ export function issueEpisodesFromClusters(
 
 /** The service to exercise: prefer a live session with a known port. */
 function pickTarget(workspaceRoot: string): { service: string; port: number } | null {
-	const candidates = runningServiceNames().length
-		? runningServiceNames()
-		: readServices(workspaceRoot)
+	// Read the inventory ONCE. This used to re-read and re-parse services.json on
+	// every iteration of the loop below, so a workspace with N services cost N+1
+	// reads of the same file to answer one question.
+	const services = readServices(workspaceRoot);
+	const running = runningServiceNames();
+	const candidates = running.length
+		? running
+		: services
 				.map((s) => s.name)
 				.filter((name) => readStartCommands(workspaceRoot, name).length > 0);
 	for (const service of candidates) {
-		const entry = readServices(workspaceRoot).find((s) => s.name === service);
+		const entry = services.find((s) => s.name === service);
 		if (typeof entry?.port === 'number' && entry.port > 0) {
 			return { service, port: entry.port };
 		}
@@ -248,10 +253,21 @@ function campaignBudget(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : 12;
 }
 
-/** Per-engine-step timeout (VINV_EXERCISE_TIMEOUT_S, default 180s). */
+/**
+ * Per-engine-step timeout (VINV_EXERCISE_TIMEOUT_S, default 10 hours).
+ *
+ * Was 180s, which killed real passes rather than hung ones. The exerciser
+ * drives every discovered endpoint, learns invariants, and runs the function /
+ * differential / fault / concurrency oracles — on a repo with a few dozen
+ * endpoints and a model in the loop that is minutes of legitimate work per
+ * step, and the pass died mid-flight with "exerciser timed out after 180s"
+ * and no partial results. A timeout is a deadlock backstop here, not a budget:
+ * it exists so a wedged child cannot hold the pipeline forever, and the honest
+ * value for that is hours, not minutes.
+ */
 function stepTimeoutMs(): number {
 	const raw = Number.parseFloat(process.env.VINV_EXERCISE_TIMEOUT_S ?? '');
-	return (Number.isFinite(raw) && raw > 0 ? raw : 180) * 1000;
+	return (Number.isFinite(raw) && raw > 0 ? raw : 36_000) * 1000;
 }
 
 /**

@@ -8,7 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { indexStoreDir, loadEdges, loadNodes } from '../graph/indexGraph';
-import { collectMemoryTrends, collectSymbolTimings } from '../harness/runtimeAnalysis';
+import { collectMemoryTrends, collectSymbolTimings, unbounded } from '../harness/runtimeAnalysis';
 import { computeOptimizationCandidates, dimensionOf, unitOf } from '../harness/optimizationAnalysis';
 
 function writeStore(root: string, names: string[]): void {
@@ -73,7 +73,7 @@ suite('optimization memory dimension (disk pipeline)', () => {
 			nodes,
 			edges: loadEdges(store, nodes.length),
 			timings: collectSymbolTimings(root, nodes),
-			cacheByRow: new Map(),
+			cache: unbounded([], 'cache-pareto'),
 			memoryLeaks: collectMemoryTrends(root, nodes),
 		}).items;
 		const big = list.find((c) => c.name === 'buildBig');

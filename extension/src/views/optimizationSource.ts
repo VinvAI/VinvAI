@@ -37,6 +37,7 @@ import {
 	collectRequestSpans,
 	collectSymbolTimings,
 	lifetimeFrames,
+	type Bounded,
 	type SelectionStats,
 	type SymbolSessionTiming,
 } from '../harness/runtimeAnalysis';
@@ -66,7 +67,7 @@ export interface OptimizationModel {
 	 * rather than "5" — a count printed bare reads as "and that is all of
 	 * them", which a Pareto head has usually not earned.
 	 */
-	selection?: SelectionStats;
+	selection?: SelectionStats[];
 }
 
 /** Where the agent-legible mirror lives (a sibling of graph.json/findings.json). */
@@ -159,7 +160,7 @@ export class OptimizationSource implements vscode.Disposable {
 	private memoSig = '\u0000none';
 	private memoCandidates: OptimizationCandidate[] = [];
 	/** The bound that produced `memoCandidates`, memoized with them. */
-	private memoSelection: SelectionStats | undefined;
+	private memoSelection: SelectionStats[] | undefined;
 	/** Dispatched + resolved candidates, by row — survive recompute & restart. */
 	private tracked = new Map<number, OptimizationCandidate>();
 
@@ -437,7 +438,7 @@ export class OptimizationSource implements vscode.Disposable {
 			if (sig !== this.memoSig) {
 				const computed = this.computeCandidates(root);
 				this.memoCandidates = computed.items;
-				this.memoSelection = computed.stats;
+				this.memoSelection = computed.lineage;
 				this.memoSig = sig;
 				// Fresh evidence: record which persisted attempt keys are still
 				// alive in this capture session (the doom-loop store's expiry clock).
@@ -456,12 +457,15 @@ export class OptimizationSource implements vscode.Disposable {
 	}
 
 	/** The expensive pass: load evidence and rank candidates. */
-	private computeCandidates(root: string): { items: OptimizationCandidate[]; stats: SelectionStats } {
+	private computeCandidates(root: string): Bounded<OptimizationCandidate> {
 		const storeDir = indexStoreDir(root);
 		const nodes: GraphNode[] = loadNodes(storeDir);
 		const edges = loadEdges(storeDir, nodes.length);
 		const timings = collectSymbolTimings(root, nodes);
-		const cacheByRow = new Map(collectCacheCandidates(root, nodes).items.map((c) => [c.row, c]));
+		// Passed whole, same as the board: the panel and the board must not only
+		// rank identically but ACCOUNT identically, and the cache Pareto's drops
+		// are part of that accounting.
+		const cache = collectCacheCandidates(root, nodes);
 		const spans = collectRequestSpans(root, nodes);
 		// Ranking-time calibration: predicted_ms deflated by the learned
 		// per-waste-kind outcome ratio when the artifact exists (default 1).
@@ -473,7 +477,7 @@ export class OptimizationSource implements vscode.Disposable {
 			nodes,
 			edges,
 			timings,
-			cacheByRow,
+			cache,
 			spans,
 			calibration,
 			memoryLeaks,

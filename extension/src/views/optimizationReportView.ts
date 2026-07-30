@@ -23,6 +23,7 @@ import {
 	type OptimizationModel,
 } from './optimizationSource';
 import type { OptimizationCandidate } from '../harness/optimizationAnalysis';
+import { describeLineage, type SelectionStats } from '../harness/runtimeAnalysis';
 
 export const OPTIMIZATION_REPORT_VIEW_TYPE = 'vinv.optimizationReport';
 
@@ -119,9 +120,20 @@ function readModelFromDisk(backingPath: string): OptimizationModel {
 		const parsed = JSON.parse(fs.readFileSync(backingPath, 'utf8')) as {
 			updated_at?: string;
 			candidates?: OptimizationCandidate[];
+			selection?: SelectionStats[];
 		};
 		const candidates = parsed.candidates ?? [];
-		return { updatedAt: parsed.updated_at ?? '', hasTrace: candidates.length > 0, candidates };
+		return {
+			updatedAt: parsed.updated_at ?? '',
+			hasTrace: candidates.length > 0,
+			candidates,
+			// Read back off the mirror, not dropped. This view is the one a PERSON
+			// reads, and it was the only surface still printing a bare count while
+			// the MCP tools and Ask Vinv stated the bound — the asymmetry was
+			// backwards, since an agent can re-call a tool with a wider cap and
+			// someone looking at a panel cannot.
+			selection: parsed.selection,
+		};
 	} catch {
 		return { updatedAt: '', hasTrace: false, candidates: [] };
 	}
@@ -136,7 +148,19 @@ function wireReport(
 	webview.html = getReportHtml();
 
 	const post = (model: OptimizationModel): void => {
-		void webview.postMessage({ type: 'model', model });
+		// Formatted HERE, in TypeScript, not re-implemented in the webview script.
+		// A second formatter is exactly how two renderings of one fact drift, which
+		// is the defect this whole chain exists to remove — and how this panel came
+		// to print a bare count while the MCP tools stated the bound.
+		//
+		// One statement for the TIME-ranked selection, which spans the latency and
+		// parallelism sections both (they share the ms Pareto). Memory keeps its
+		// plain count: it is ranked in bytes against its own bound, and a coverage
+		// number folded across the two would be true of neither.
+		const selectionNote = model.selection?.some((s) => s.dropped > 0)
+			? describeLineage(model.selection, 'time-ranked candidate')
+			: '';
+		void webview.postMessage({ type: 'model', model, selectionNote });
 	};
 
 	// Prefer the live source (instant updates, no re-read); fall back to the
@@ -251,6 +275,10 @@ function getReportHtml(): string {
 		.working-note { align-self: center; color: var(--accent-fg); font-size: 11px; }
 		.empty { color: var(--muted); font-size: 12px; line-height: 1.6; padding: 8px 0; max-width: 60ch; }
 		.hint { color: var(--muted-2); font-size: 10.5px; margin-top: 20px; }
+		/* The selection bound. Muted but not a footnote — it qualifies every count
+		   above it, so it sits with them rather than below the fold. */
+		.bound { color: var(--muted); font-size: 10.5px; margin-top: 16px;
+			padding-left: 9px; border-left: 2px solid var(--line-strong); }
 	</style>
 </head>
 <body>
@@ -404,7 +432,7 @@ function getReportHtml(): string {
 			return h;
 		}
 
-		function render(model) {
+		function render(model, selectionNote) {
 			const cands = model.candidates || [];
 			tiles(cands);
 			const content = document.getElementById('content');
@@ -422,6 +450,11 @@ function getReportHtml(): string {
 				html += '<h2>' + DIM_LABEL[dim] + ' (' + group.length + ')</h2>';
 				for (const c of group) { html += card(c, scale); }
 			}
+			// The bound, stated where the counts are. Only rendered when something
+			// was actually dropped — a note on a complete list would be noise.
+			if (selectionNote) {
+				html += '<div class="bound">' + esc(selectionNote) + '</div>';
+			}
 			html += '<div class="hint">Machine-readable copy: .vinv/reports/optimization.json (this tab\\'s backing file).</div>';
 			content.innerHTML = html;
 			content.querySelectorAll('button[data-opt]').forEach((b) =>
@@ -431,7 +464,7 @@ function getReportHtml(): string {
 		}
 
 		window.addEventListener('message', (event) => {
-			if (event.data && event.data.type === 'model') { render(event.data.model); }
+			if (event.data && event.data.type === 'model') { render(event.data.model, event.data.selectionNote || ''); }
 		});
 	</script>
 </body>

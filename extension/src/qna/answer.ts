@@ -39,7 +39,8 @@ import { loadEpisodePolicy, walkParams, type WalkParams } from '../harness/episo
 import {
 	collectCacheCandidates,
 	collectMemoryTrends,
-	describeSelection,
+	describeLineage,
+	selectionStage,
 	selectHotspots,
 } from '../harness/runtimeAnalysis';
 import { indexStoreDir } from '../graph/indexGraph';
@@ -630,7 +631,7 @@ export function assembleEvidence(
 		if (hotspots.length > 0) {
 			lines.push('\n## Runtime cost analyses (measured across all captures)');
 			lines.push(
-				`Latency Pareto head (share of ALL traced time) — ${describeSelection(hot.stats, 'hotspot')}:`,
+				`Latency Pareto head (share of ALL traced time) — ${describeLineage(hot.lineage, 'hotspot')}:`,
 			);
 			for (const h of hotspots) {
 				lines.push(
@@ -664,17 +665,33 @@ export function assembleEvidence(
 		const cacheable = cache.items;
 		if (cacheable.length > 0) {
 			// TWO bounds stack here: the analysis Pareto head, and this display cap
-			// on top of it. Reporting only the first would be an honest-looking
-			// sentence standing in front of a second, hidden truncation — measured
-			// on this repo the chain is 24 found -> 4 ranked -> 3 shown, and the
-			// heading used to say none of it.
+			// on top of it. Measured on this repo the chain is 24 found -> 4 ranked
+			// -> 3 shown, and the heading used to say none of it.
+			//
+			// The display cap is APPENDED to the lineage rather than described in a
+			// trailing clause, because it is a bound like any other and belongs in
+			// the same accounting. It is a 'cap': slicing the top N measures
+			// nothing about what it removed, so chainStatus correctly refuses to
+			// call this chain complete.
 			const shownCache = cacheable.slice(0, walk.failure_exemplars);
+			const rankedMs = cacheable.reduce((s, c) => s + c.reclaimable_ms, 0);
+			const shownMs = shownCache.reduce((s, c) => s + c.reclaimable_ms, 0);
+			const cacheLineage =
+				shownCache.length < cacheable.length
+					? [
+							...cache.lineage,
+							selectionStage('display-cap', {
+								returned: shownCache.length,
+								total: cacheable.length,
+								coverage_achieved: rankedMs > 0 ? shownMs / rankedMs : 0,
+								stopped_by: 'cap',
+								droppedMagnitude: rankedMs - shownMs,
+								unit: 'ms',
+							}),
+						]
+					: cache.lineage;
 			lines.push(
-				`Duplicate-recomputation (memoization) candidates — ${describeSelection(cache.stats, 'candidate')}` +
-					(cacheable.length > shownCache.length
-						? `; showing the top ${shownCache.length} of those`
-						: '') +
-					':',
+				`Duplicate-recomputation (memoization) candidates — ${describeLineage(cacheLineage, 'candidate')}:`,
 			);
 			for (const c of shownCache) {
 				lines.push(
