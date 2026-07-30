@@ -300,7 +300,7 @@ function getHtml(): string {
 	// Shared between both card variants: the empirical counterpart to analysis —
 	// instead of asking what the code is, ask whether it can be made to RUN.
 	const TRY_RUN_BTN =
-		'<button class="act" id="tryrun" title="Have the coding harness write a driver that exercises this section, run it under vinv tracing, and report which symbols actually executed — a reached symbol leaves the dead list">Try run this path</button>';
+		'<button class="act" id="tryrun" title="Have the coding harness write a driver that exercises this section, run it under vinv tracing, and report which symbols actually executed — a reached symbol leaves the dead list">Run this Path</button>';
 
 	function verdictCard(v) {
 		if (!v) {

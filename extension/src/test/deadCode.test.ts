@@ -26,7 +26,7 @@ import {
 	buildBatchPrompt,
 	buildContextRetriever,
 	buildDriverPrompt,
-	parseDriver,
+	parseDriverReply,
 	parseVerdicts,
 	pooled,
 	readAnalysis,
@@ -470,18 +470,22 @@ suite('dead code: try-run driver', () => {
 		assert.ok(prompt.includes('{"driver": null}'), 'declining is an allowed reply');
 	});
 
-	test('parseDriver reads a fenced reply and rejects empty or declined ones', () => {
-		const good = parseDriver(
+	test('parseDriverReply keeps the driver, the decline and the unusable apart', () => {
+		const good = parseDriverReply(
 			'sure!\n```json\n' +
 				JSON.stringify({ driver: { code: 'import app\napp.helper_a()', notes: 'direct call' } }) +
 				'\n```',
 		);
-		assert.ok(good);
-		assert.ok(good.code.includes('helper_a'));
-		assert.strictEqual(good.notes, 'direct call');
-		assert.strictEqual(parseDriver(JSON.stringify({ driver: null })), null);
-		assert.strictEqual(parseDriver(JSON.stringify({ driver: { code: '   ' } })), null);
-		assert.strictEqual(parseDriver('no json at all'), null);
+		assert.strictEqual(good.kind, 'driver');
+		if (good.kind === 'driver') {
+			assert.ok(good.code.includes('helper_a'));
+			assert.strictEqual(good.notes, 'direct call');
+		}
+		// {"driver": null} is the documented decline — a verdict, not a transport
+		// failure, and the two must not collapse into one outcome.
+		assert.strictEqual(parseDriverReply(JSON.stringify({ driver: null })).kind, 'declined');
+		assert.strictEqual(parseDriverReply(JSON.stringify({ driver: { code: '   ' } })).kind, 'unusable');
+		assert.strictEqual(parseDriverReply('no json at all').kind, 'unusable');
 	});
 
 	test('revivedSymbols counts from the overlay, not from the run outcome', () => {

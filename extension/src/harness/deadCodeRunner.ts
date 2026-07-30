@@ -24,7 +24,7 @@ import {
 	batchSections,
 	buildContextRetriever,
 	buildDriverPrompt,
-	parseDriver,
+	parseDriverReply,
 	readAnalysis,
 	revivedSymbols,
 	writeAnalysis,
@@ -62,7 +62,9 @@ export interface TryRunOutcome {
 	outcome:
 		| 'revived' // the trace reached section symbols — they are no longer dead
 		| 'not-reached' // the driver ran and traced, but none of the section executed
-		| 'no-driver' // the agent declined or replied unusably
+		| 'no-reply' // the harness never answered (blocked, timed out, CLI missing)
+		| 'declined' // the agent judged the section not drivable from a script
+		| 'unusable-reply' // the harness answered, but no driver could be parsed
 		| 'run-failed' // the driver produced no trace at all
 		| 'unavailable'; // preconditions missing (section gone, no tracelens config…)
 	detail: string;
@@ -140,20 +142,40 @@ export async function tryRunDeadSection(
 				title: `Vinv: trying to run dead section ${section.title} under trace…`,
 			},
 			async (): Promise<TryRunOutcome> => {
+				const dispatchName = `deadcode-driver-${section.id}`;
 				const reply = await dispatchAgentPrompt(
 					getHarnessId() || harnessId,
 					workspaceRoot,
-					`deadcode-driver-${section.id}`,
+					dispatchName,
 					buildDriverPrompt(section, sources, env, context),
 				);
-				const driver = reply ? parseDriver(reply) : null;
-				if (!driver) {
+				// Three distinct failures, three distinct messages — "no driver" with
+				// no cause is a support question, not a report.
+				if (reply === null) {
 					const detail =
-						'the agent produced no driver for this section — it may not be drivable from a ' +
-						'script, or the harness reply was unusable.';
+						'the harness never replied — it is signed out, over quota, timed out ' +
+						`(VINV_AGENT_TIMEOUT_S, default 300s), or its CLI is missing. ` +
+						`See .vinv/logs/harness-agent-${dispatchName}.log for the transcript.`;
 					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
-					return { outcome: 'no-driver', detail, revived: [] };
+					return { outcome: 'no-reply', detail, revived: [] };
 				}
+				const parsed = parseDriverReply(reply);
+				if (parsed.kind === 'declined') {
+					const detail =
+						'the agent read this section and judged it not drivable from a script ' +
+						'(e.g. build-tool config or code needing infrastructure a driver cannot fake). ' +
+						'That is a verdict, not a failure — re-running will not change it.';
+					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
+					return { outcome: 'declined', detail, revived: [] };
+				}
+				if (parsed.kind === 'unusable') {
+					const detail =
+						'the harness replied but no driver could be parsed from its answer — worth one ' +
+						`retry. See .vinv/logs/harness-agent-${dispatchName}.log for what it said.`;
+					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+					return { outcome: 'unusable-reply', detail, revived: [] };
+				}
+				const driver = parsed;
 
 				// A real file, never inline: tracelens degrades AST coverage for
 				// `python -c` (see tracedRun's module doc).

@@ -475,17 +475,34 @@ export function buildDriverPrompt(
 	].join('\n');
 }
 
-/** The driver out of a reply; null when the agent declined or replied unusably. */
-export function parseDriver(stdout: string): { code: string; notes: string } | null {
+/**
+ * The three ways a driver reply can land, kept apart because they demand
+ * different responses from the user: a DECLINED section is settled (the agent
+ * judged it undrivable — asking again buys nothing), an UNUSABLE reply is a
+ * transport problem worth a retry, and only 'driver' carries work to run.
+ * Collapsing them into null produced exactly the support question it invites:
+ * "got no driver — why?", with no way to answer from the message.
+ */
+export type DriverReply =
+	| { kind: 'driver'; code: string; notes: string }
+	| { kind: 'declined' } // the agent replied {"driver": null} — not drivable
+	| { kind: 'unusable' }; // no parsable driver envelope in the reply
+
+export function parseDriverReply(stdout: string): DriverReply {
 	const raw = parseEnvelope(stdout, 'driver');
+	// parseEnvelope distinguishes "key absent" (undefined) from an explicit
+	// {"driver": null} — the latter is the documented decline, not a miss.
+	if (raw === null) {
+		return { kind: 'declined' };
+	}
 	if (!raw || typeof raw !== 'object') {
-		return null;
+		return { kind: 'unusable' };
 	}
 	const code = String((raw as Record<string, unknown>).code ?? '').trim();
 	if (!code) {
-		return null;
+		return { kind: 'unusable' };
 	}
-	return { code, notes: String((raw as Record<string, unknown>).notes ?? '').trim() };
+	return { kind: 'driver', code, notes: String((raw as Record<string, unknown>).notes ?? '').trim() };
 }
 
 /**
