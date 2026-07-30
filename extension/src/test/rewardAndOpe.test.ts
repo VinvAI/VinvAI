@@ -1155,7 +1155,7 @@ suite('Episode walk: reward → ledger → policy update → OPE gate', () => {
 
 		// n=1 is below min_promotion_n (5): the incumbent must hold.
 		assert.strictEqual(
-			computeUpdatedPolicy({ ...POLICY_PRIORS }, [ep(4, true)]).preferred_arm,
+			computeUpdatedPolicy({ ...POLICY_PRIORS }, [ep(2, true)]).preferred_arm,
 			incumbent,
 			'one objective success must not promote an arm',
 		);
@@ -1164,9 +1164,9 @@ suite('Episode walk: reward → ledger → policy update → OPE gate', () => {
 		assert.strictEqual(
 			computeUpdatedPolicy(
 				{ ...POLICY_PRIORS },
-				[ep(4, true), ep(4, true), ep(4, true), ep(4, true), ep(4, true)],
+				[ep(2, true), ep(2, true), ep(2, true), ep(2, true), ep(2, true)],
 			).preferred_arm,
-			4,
+			2,
 			'min_promotion_n met with margin must promote',
 		);
 
@@ -1175,7 +1175,7 @@ suite('Episode walk: reward → ledger → policy update → OPE gate', () => {
 		assert.strictEqual(
 			computeUpdatedPolicy(
 				{ ...POLICY_PRIORS },
-				[ep(5, true), ep(5, false), ep(5, true), ep(5, false), ep(5, true), ep(5, false)],
+				[ep(1, true), ep(1, false), ep(1, true), ep(1, false), ep(1, true), ep(1, false)],
 			).preferred_arm,
 			incumbent,
 			'a coin-flip arm must not displace the incumbent',

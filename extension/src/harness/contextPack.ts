@@ -32,6 +32,19 @@ import {
 	optimizeAttemptsPath,
 } from './optimizationAnalysis';
 
+/**
+ * Per-symbol summary budget in the pack.
+ *
+ * A FIXED constant, deliberately. This was a learnable bandit feature and the
+ * measurement showed why that was wrong: summaries here top out at 696 chars
+ * (median 76, p99 160), so neither of the old 800/1600 levels ever cut anything
+ * and the bit the bandit spent half its arm space exploring was inert. Making it
+ * learnable again would repeat that. 800 preserves today's behaviour exactly —
+ * it is above the observed maximum, so it truncates nothing — while leaving a
+ * bound in place for a summariser that later emits longer text.
+ */
+const PACK_SUMMARY_CHARS = 800;
+
 /** Composition budgets from the learned policy — nothing here is a constant. */
 export interface PackBudgets {
 	/** Graph-slice node budget. */
@@ -311,7 +324,7 @@ export function composePackContent(
 			entry += ` (walk mass ${mass.toExponential(2)})`;
 		}
 		if (n.summary) {
-			entry += `\n  ${n.summary.slice(0, arm.snippet_chars)}`;
+			entry += `\n  ${n.summary.slice(0, PACK_SUMMARY_CHARS)}`;
 		}
 		if (arm.include_runtime) {
 			const rt = snapshot.runtime[n.row];
