@@ -161,7 +161,10 @@ export type BringupOutcome =
 	/** The agent investigated and concluded there is nothing to run (a pure
 	 * library module) — recorded as verified:false with an empty command list. */
 	| { state: 'library'; symptom?: string }
-	| { state: 'failed'; symptom?: string };
+	/** `kind` carries the recorded failure_kind when one was written — callers
+	 * that offer remedies must branch on it: an 'untraced' failure means the
+	 * service STARTED AND SERVED, so "how do you start it?" is not a remedy. */
+	| { state: 'failed'; symptom?: string; kind?: string };
 
 /**
  * Classifies the recorded bring-up attempt. Distinguishes "never tried",
@@ -189,7 +192,7 @@ export function readBringupOutcome(workspaceRoot: string, service: string): Brin
 		// A recorded kind is a fact; the prose heuristic below is a guess. Where
 		// we wrote the record ourselves, don't re-derive it from the wording.
 		if (parsed.failure_kind === 'untraced') {
-			return { state: 'failed', symptom };
+			return { state: 'failed', symptom, kind: 'untraced' };
 		}
 		const noCommand = !Array.isArray(parsed.commands) || parsed.commands.length === 0;
 		const libraryClues = /library|no module named .*__main__|cannot be directly executed|no.*entrypoint/i;
@@ -357,13 +360,16 @@ export function markUntracedBringup(
 	service: string,
 	verdict: Extract<OwnCodeVerdict, { state: 'absent' }>,
 	/**
-	 * Set when the recorded command was just corrected. The record is still not
-	 * verified — this capture genuinely traced nothing — but "fix the flags" is
-	 * now stale advice contradicting a fix that already happened, and "set it up
-	 * again" would send the user back through the step that produced the bad
-	 * command in the first place. What is actually needed is another run.
+	 * Set when the recorded command was just corrected. `rerunTraced` says whether
+	 * the corrected command was then actually re-exercised (the post-repair replay
+	 * verified): the two cases need OPPOSITE advice. If the re-run happened and own
+	 * code is still absent, "run it again" is false hope — something deeper than
+	 * the flags is wrong. If the re-run did not happen, this capture predates the
+	 * fix and one more run is exactly what is needed. The old single-string
+	 * parameter collapsed both into "run again", which kept a user looping on a
+	 * message that was sometimes right and sometimes provably wrong.
 	 */
-	repairedPackage?: string,
+	repair?: { package: string; rerunTraced: boolean },
 ): void {
 	const file = getStartCommandPath(workspaceRoot, service);
 	let parsed: Record<string, unknown>;
@@ -378,17 +384,22 @@ export function markUntracedBringup(
 	// "this is a library with nothing to start" heuristic, which would park the
 	// service as unstartable instead of queueing the repair.
 	parsed.failure_kind = 'untraced';
-	parsed.failure_symptom = repairedPackage
-		? `The service started and served ${verdict.requests} request(s), but every span came from ` +
-			`somewhere other than its own package '${verdict.rootPackage}' — this capture was made ` +
-			`before the command was fixed. '--target-package ${repairedPackage}' has since been added ` +
-			`to this file, so nothing here needs editing: RUN the service again and the next capture ` +
-			`will carry its own code.`
-		: `The service started and served ${verdict.requests} request(s), but every span came from ` +
-			`somewhere other than its own package '${verdict.rootPackage}' — tracelens instrumented ` +
-			`the wrong code. Fix the '--target-package' flags in this file's start command so they ` +
-			`include '${verdict.rootPackage}'. Until they do, every endpoint reports 0% coverage and ` +
-			`no latency, with nothing raising an error to explain it.`;
+	const served =
+		`The service started and served ${verdict.requests} request(s), but every span came from ` +
+		`somewhere other than its own package '${verdict.rootPackage}'`;
+	parsed.failure_symptom = !repair
+		? `${served} — tracelens instrumented the wrong code. Fix the '--target-package' flags in ` +
+			`this file's start command so they include '${verdict.rootPackage}'. Until they do, every ` +
+			`endpoint reports 0% coverage and no latency, with nothing raising an error to explain it.`
+		: repair.rerunTraced
+			? `${served} — even AFTER the command was corrected to include '--target-package ` +
+				`${repair.package}' and re-run under the corrected form. The target flags are no longer ` +
+				`the cause; do not edit them again. Diagnose the tracelens launch itself: its stderr ` +
+				`(instrumentation warnings, import-hook failures) is where the reason will be.`
+			: `${served} — this capture was made before the command was fixed. '--target-package ` +
+				`${repair.package}' has since been added to this file and the automatic re-run did not ` +
+				`complete, so nothing here needs editing: RUN the service again and the next capture ` +
+				`will carry its own code.`;
 	try {
 		fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
 	} catch {

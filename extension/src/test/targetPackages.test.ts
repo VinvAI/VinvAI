@@ -444,6 +444,38 @@ suite('targetPackages: the audit downgrades an untraced bring-up', () => {
 		);
 	});
 
+	// The repaired-but-not-rerun and repaired-and-rerun cases need OPPOSITE
+	// advice: one more run fixes the first, and is false hope for the second.
+	// A single symptom string for both kept a user looping on "run it again"
+	// while the re-run had already happened and already failed.
+	test('the recorded symptom matches what actually happened', () => {
+		const root = repo();
+		seed(root, ['POST /chat', 'smolagents.agents.run']);
+		const verdict = auditOwnCodeTracing(root, service);
+		assert.strictEqual(verdict.state, 'absent');
+		const v = verdict as Extract<typeof verdict, { state: 'absent' }>;
+
+		// Repaired, but the corrected command was never re-exercised: this capture
+		// predates the fix, so one more run is exactly the remedy.
+		markUntracedBringup(root, 'api', v, { package: 'examples', rerunTraced: false });
+		let out = readBringupOutcome(root, 'api');
+		assert.strictEqual(out.state, 'failed');
+		assert.strictEqual(out.state === 'failed' && out.kind, 'untraced', 'the kind must surface');
+		assert.match(String(out.state === 'failed' && out.symptom), /RUN the service again/);
+
+		// Repaired AND re-run, own code still absent: the flags are exonerated and
+		// "run again" must not be the advice.
+		seed(root, ['POST /chat', 'smolagents.agents.run']);
+		markUntracedBringup(root, 'api', v, { package: 'examples', rerunTraced: true });
+		out = readBringupOutcome(root, 'api');
+		const symptom = String(out.state === 'failed' && out.symptom);
+		assert.match(symptom, /no longer the cause/);
+		assert.ok(
+			!symptom.includes('RUN the service again'),
+			'a re-run that already failed must not be re-prescribed',
+		);
+	});
+
 	test('a bring-up that DID trace its own code is left verified', () => {
 		const root = repo();
 		seed(root, ['POST /chat', 'examples.server.main.chat']);

@@ -49,6 +49,18 @@ export async function offerHintedRetry(
 	if (outcome.state !== 'failed') {
 		return false;
 	}
+	// An 'untraced' failure is NOT a start failure: the service started and
+	// served — what failed is that tracelens instrumented the wrong code. Asking
+	// the operator how they start it cannot fix that, and in practice produced
+	// the worst loop this flow can make: the user was asked for a command the
+	// inventory already recorded, typed it back verbatim, the retry failed the
+	// same way, and the follow-up toast blamed "your command". The recorded
+	// symptom already names the actual remedy (re-run, or diagnose tracelens),
+	// so fall through to normal failure handling instead of interrogating the
+	// one person who cannot help.
+	if (outcome.kind === 'untraced') {
+		return false;
+	}
 
 	// Prefill with the best guess we have, in order of authority: what the
 	// operator told us last time, then the inventory's command. The agent's own

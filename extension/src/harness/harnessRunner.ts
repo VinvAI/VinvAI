@@ -1745,6 +1745,14 @@ export function runBringupStartViaHarness(
 		// ourselves so the capture describes what is now recorded, then judge THAT.
 		// Costly (a real service boot) but only on the path where we changed the
 		// command out from under the evidence.
+		// Whether the corrected command actually got re-exercised. verifyServiceReplay
+		// reports failure as a RETURN VALUE, not an exception — awaiting it inside a
+		// bare try/catch discarded the verdict, so a replay that never booted (port
+		// still held by the agent's not-quite-dead server, a Windows kill quirk this
+		// repo has hit before) read as success and the audit judged the agent's
+		// PRE-fix capture. Which can only ever say "own code not traced" — proven by
+		// running the corrected command directly, which does produce own-code spans.
+		let rerunTraced = false;
 		if (repaired) {
 			try {
 				// Imported lazily on purpose: episodeLoop imports THIS module, so a
@@ -1752,11 +1760,19 @@ export function runBringupStartViaHarness(
 				// partially initialised at load time. The call is already lazy, so
 				// deferring the resolve costs nothing.
 				const { verifyServiceReplay } = await import('./episodeLoop.js');
-				await verifyServiceReplay(workspaceRoot, service.name, extToken);
-			} catch {
-				// A failed replay is not fatal here — the audit below still reports
-				// what the capture shows, and a broken command is bring-up's own
-				// verdict to record, not this repair's.
+				const replay = await verifyServiceReplay(workspaceRoot, service.name, extToken);
+				rerunTraced = replay.verdict === 'pass';
+				if (!rerunTraced) {
+					console.warn(
+						`Vinv: post-repair replay of ${service.name} did not verify ` +
+							`(${replay.verdict}): ${replay.reason}`,
+					);
+				}
+			} catch (e) {
+				console.warn(
+					`Vinv: post-repair replay of ${service.name} threw: ` +
+						(e instanceof Error ? e.message : String(e)),
+				);
 			}
 		}
 		const verdict = auditOwnCodeTracing(workspaceRoot, service);
@@ -1769,20 +1785,27 @@ export function runBringupStartViaHarness(
 			}
 			return ok;
 		}
-		markUntracedBringup(workspaceRoot, service.name, verdict, repaired ?? undefined);
-		// ONE message, and it must not contradict the repair. Two notifications —
-		// "the command has been corrected" followed by "set it up again" — told the
-		// user to redo the very step that had just been fixed for them.
+		markUntracedBringup(
+			workspaceRoot,
+			service.name,
+			verdict,
+			repaired ? { package: repaired, rerunTraced } : undefined,
+		);
+		// ONE message, matching what actually happened. The repaired-but-not-rerun
+		// and repaired-and-rerun cases need OPPOSITE advice — "run it again" is the
+		// fix for the first and false hope for the second.
 		void vscode.window.showWarningMessage(
-			repaired
-				? `Vinv: ${service.name}'s recorded command left out its own package '${repaired}'. ` +
-						'That has been corrected and the service re-run, but its handlers still ' +
-						`produced no spans across ${verdict.requests} request(s) — so the target package ` +
-						'is not the only thing wrong here. Check the "Vinv" output channel for what ' +
-						'tracelens reported.'
-				: `Vinv: ${service.name} served ${verdict.requests} request(s) but nothing from ` +
-						`'${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
-						'so coverage and latency would read zero. Recorded as not verified.',
+			repaired && rerunTraced
+				? `Vinv: ${service.name}'s command was corrected (added '${repaired}') and re-run, ` +
+						'but its handlers still produced no spans — the target package is not the ' +
+						'cause. Check the "Vinv" output channel for what tracelens reported.'
+				: repaired
+					? `Vinv: ${service.name}'s recorded command left out its own package ` +
+							`'${repaired}'. That is now fixed, but the automatic re-run could not ` +
+							'complete — RUN the service once and the next capture will carry its own code.'
+					: `Vinv: ${service.name} served ${verdict.requests} request(s) but nothing from ` +
+							`'${verdict.rootPackage}' was traced — tracelens instrumented the wrong package, ` +
+							'so coverage and latency would read zero. Recorded as not verified.',
 		);
 		return false;
 	});
