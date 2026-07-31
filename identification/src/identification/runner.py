@@ -2360,6 +2360,57 @@ def _is_code_component(component: str) -> bool:
     return bool(component) and "." in component and not any(c.isspace() for c in component)
 
 
+def _percentile(values: list[float], p: int) -> float:
+    """Nearest-rank percentile, rounded to 0.1ms. 0.0 for an empty sample.
+
+    Nearest-rank (rather than interpolation) because every other percentile in
+    this product is computed that way — the exerciser's scorecard and the
+    extension's views included — and a p95 that disagrees with itself depending
+    on which surface printed it is worse than either method.
+    """
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    at = min(len(ordered) - 1, int(len(ordered) * p / 100))
+    return round(ordered[at], 1)
+
+
+def _unit_latency(handler_nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """How the unit's OWN invocations went: duration distribution and outcome.
+
+    The per-symbol facts elsewhere in the overlay are sums — ``calls`` and
+    ``total_ms`` — which give a mean and nothing else. A mean hides exactly the
+    thing anyone reading a latency column is looking for, so the distribution is
+    summarised here, once, at the only level where "one invocation of this unit"
+    is well defined: the handler's own spans.
+
+    This is what makes a latency number available for EVERY kind of unit. It is
+    the handler entering and leaving, so a CLI run, a worker task, a scheduled
+    job and a driven function are all measured the same way an HTTP request is
+    — no HTTP oracle, no exerciser, no scorecard required.
+    """
+    durations = [float(n.get("duration_ms") or 0.0) for n in handler_nodes]
+    blocked = [float(n.get("blocked_ms") or 0.0) for n in handler_nodes]
+    ok = sum(1 for n in handler_nodes if n.get("status") != "error")
+    errors: dict[str, int] = {}
+    for n in handler_nodes:
+        if n.get("status") == "error" and n.get("error_type"):
+            errors[n["error_type"]] = errors.get(n["error_type"], 0) + 1
+    return {
+        "calls": len(handler_nodes),
+        "ok": ok,
+        "error": len(handler_nodes) - ok,
+        # Sorted by frequency so the caller can name the dominant failure first.
+        "error_types": [t for t, _ in sorted(errors.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "p50_ms": _percentile(durations, 50),
+        "p95_ms": _percentile(durations, 95),
+        "max_ms": round(max(durations), 1) if durations else 0.0,
+        "total_ms": round(sum(durations), 1),
+        # Of that wall time, the part spent waiting rather than computing.
+        "blocked_ms": round(sum(blocked), 1),
+    }
+
+
 def map_trace_to_tree(
     project_root: Path,
     *,
@@ -2425,6 +2476,7 @@ def map_trace_to_tree(
             if _qual_matches(n["component"], handler_module, handler):
                 handler_nodes.append(n)
     matched_requests = sorted({n["request_id"] for n in handler_nodes})
+    latency = _unit_latency(handler_nodes)
 
     # Aggregate the runtime facts of every component under the handler subtree(s).
     runtime: dict[str, dict[str, Any]] = {}
@@ -2573,6 +2625,7 @@ def map_trace_to_tree(
         "max_depth": max_depth,
         "requests_matched": matched_requests,
         "handler_observed": bool(handler_nodes),
+        "latency": latency,
         "coverage": coverage,
         "runtime_only": runtime_only,
         "middleware": middleware_entries,
@@ -2634,6 +2687,16 @@ def render_trace_map_text(result: dict[str, Any]) -> str:
             "method — neither confirmed nor denied]"
         )
     lines.append(coverage_line)
+    lat = result.get("latency") or {}
+    if lat.get("calls"):
+        outcome = f"{lat.get('ok', 0)} ok"
+        if lat.get("error"):
+            types = ", ".join(lat.get("error_types") or [])
+            outcome += f", {lat['error']} raised" + (f" ({types})" if types else "")
+        lines.append(
+            f"latency: p50 {lat.get('p50_ms', 0)}ms · p95 {lat.get('p95_ms', 0)}ms · "
+            f"max {lat.get('max_ms', 0)}ms over {lat['calls']} invocation(s) — {outcome}"
+        )
     lines.append("")
 
     def _runtime_tag(node: dict[str, Any]) -> str:

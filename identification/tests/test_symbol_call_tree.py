@@ -159,6 +159,49 @@ def test_a_symbol_unit_gets_a_runtime_overlay_too(tmp_path: Path) -> None:
     assert result["coverage"]["executed"] == 2
 
 
+def test_the_overlay_reports_the_units_own_latency_distribution(tmp_path: Path) -> None:
+    # The per-symbol facts are sums (calls + total_ms), which give a mean and
+    # hide the tail. Percentiles are computed once, here, at the only level
+    # where "one invocation of this unit" is defined — and they exist for a
+    # driven function exactly as they do for a route.
+    root = _library_repo(tmp_path)
+    trace = root / ".vinv" / "captures" / "vinv-exerciser" / "repo" / "functions"
+    trace.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for i, ms in enumerate([5.0, 10.0, 100.0]):
+        rid = f"r{i}"
+        lines.append(json.dumps({
+            "event": "enter", "component": "acme.mod.summarize", "depth": 0,
+            "request_id": rid, "thread_id": 1,
+        }))
+        lines.append(json.dumps({
+            "event": "exit", "component": "acme.mod.summarize", "depth": 0,
+            "duration_ms": ms, "status": "error" if ms == 100.0 else "ok",
+            "error_type": "ValueError" if ms == 100.0 else None,
+            "request_id": rid, "thread_id": 1,
+        }))
+    (trace / "trace.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    lat = map_trace_to_tree(root, symbol="acme.mod:summarize")["latency"]
+
+    assert lat["calls"] == 3
+    assert lat["p50_ms"] == 10.0
+    assert lat["p95_ms"] == 100.0, "the tail is the number a latency column is read for"
+    assert lat["max_ms"] == 100.0
+    assert (lat["ok"], lat["error"]) == (2, 1)
+    assert lat["error_types"] == ["ValueError"]
+
+
+def test_a_unit_that_never_ran_reports_no_latency_rather_than_zeros(tmp_path: Path) -> None:
+    root = _library_repo(tmp_path)
+    _write_trace(root, [("acme.other.thing", 0)])
+
+    result = map_trace_to_tree(root, symbol="acme.mod:summarize")
+
+    assert result["handler_observed"] is False
+    assert result["latency"]["calls"] == 0
+
+
 def test_the_symbol_overlay_artifact_survives_a_colon_in_the_id(tmp_path: Path) -> None:
     # `module:qualname` is not a legal filename on Windows: unsanitized, the
     # write raised and the artifact the caller was promised never appeared.
