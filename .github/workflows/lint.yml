@@ -15,6 +15,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  readme-parity:
+    name: extension README matches root README
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Open VSX README is synced from root (pills excepted)
+        run: python3 scripts/sync-extension-readme.py --check
+
   changed:
     name: lint changed files (ruff + eslint)
     runs-on: ubuntu-latest
