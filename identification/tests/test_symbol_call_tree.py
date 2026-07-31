@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from identification.runner import build_api_call_tree
+from identification.runner import build_api_call_tree, map_trace_to_tree
 
 
 def _chunk(
@@ -120,3 +120,51 @@ def test_neither_identifier_is_a_usage_error(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         build_api_call_tree(root)
+
+
+def _write_trace(root: Path, spans: list[tuple[str, int]]) -> Path:
+    """A capture where each ``(component, depth)`` ran once, outermost first."""
+    trace = root / ".vinv" / "captures" / "vinv-exerciser" / "repo" / "functions"
+    trace.mkdir(parents=True, exist_ok=True)
+    path = trace / "trace.jsonl"
+    enters = [
+        json.dumps({"event": "enter", "component": c, "depth": d,
+                    "request_id": "r1", "thread_id": 1})
+        for c, d in spans
+    ]
+    # tracelens writes exits in completion order — innermost first.
+    exits = [
+        json.dumps({"event": "exit", "component": c, "depth": d, "duration_ms": 1.0,
+                    "status": "ok", "request_id": "r1", "thread_id": 1})
+        for c, d in reversed(spans)
+    ]
+    path.write_text("\n".join(enters + exits) + "\n", encoding="utf-8")
+    return path
+
+
+def test_a_symbol_unit_gets_a_runtime_overlay_too(tmp_path: Path) -> None:
+    # The gap this closes: a function unit could get a static tree (`--symbol`)
+    # but not an overlay — tracemap took only `--api-id`, so every function and
+    # CLI unit rendered as "nothing ran" however much of it had.
+    root = _library_repo(tmp_path)
+    _write_trace(root, [("acme.mod.summarize", 0), ("acme.mod.helper", 1)])
+
+    result = map_trace_to_tree(root, symbol="acme.mod:summarize", max_depth=5)
+
+    assert result["status"] == "ok"
+    assert result["handler_observed"] is True
+    assert result["tree"]["runtime"]["executed"] is True
+    helper = next(c for c in result["tree"]["children"] if c.get("name") == "helper")
+    assert helper["runtime"]["executed"] is True
+    assert result["coverage"]["executed"] == 2
+
+
+def test_the_symbol_overlay_artifact_survives_a_colon_in_the_id(tmp_path: Path) -> None:
+    # `module:qualname` is not a legal filename on Windows: unsanitized, the
+    # write raised and the artifact the caller was promised never appeared.
+    root = _library_repo(tmp_path)
+    _write_trace(root, [("acme.mod.summarize", 0)])
+
+    result = map_trace_to_tree(root, symbol="acme.mod:summarize")
+
+    assert Path(result["output_file"]).is_file()

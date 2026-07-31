@@ -1650,6 +1650,18 @@ def _symbol_entrypoint(
         store.close()
 
 
+def _artifact_stem(entry_id: str | None) -> str:
+    """Filename-safe stem for an entry point's ``.calltree``/``.tracemap`` artifact.
+
+    Declared ids are already filename-safe, but a symbol-rooted unit is spelled
+    ``module:qualname`` — and a colon is not a legal filename character on
+    Windows, so writing the artifact raised ``OSError`` and the (caught) warning
+    was the only trace of it: the JSON the caller was told about simply never
+    appeared.  Mirrors the extension's own ``safeId``.
+    """
+    return re.sub(r"[^A-Za-z0-9._-]", "_", entry_id or "entrypoint")
+
+
 def build_api_call_tree(
     project_root: Path,
     *,
@@ -1955,7 +1967,7 @@ def build_api_call_tree(
     out_dir = root / ".vinv" / "identification"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"{target.get('id')}.calltree.json"
+        out_file = out_dir / f"{_artifact_stem(target.get('id'))}.calltree.json"
         out_file.write_text(json.dumps(result, indent=2), encoding="utf-8")
         result["output_file"] = str(out_file)
     except OSError as exc:
@@ -2154,6 +2166,31 @@ def _load_trace_events(path: Path) -> list[dict[str, Any]]:
     return events
 
 
+def _capture_matches_service(path: Path, caps: Path, service: str) -> bool:
+    """Whether a capture under ``caps`` belongs to ``service``.
+
+    Captures are keyed by the service slug one level under the session dir —
+    ``.vinv/captures/<session>/<slug>/trace.jsonl`` — so matching the capture's
+    IMMEDIATE parent was right for everything bring-up writes.  The exerciser
+    nests a per-oracle directory under that slug (``<slug>/functions/``,
+    ``<slug>/invocations/``), which is where every CLI and function unit's
+    capture lands; against those the parent is the ORACLE name, no candidate
+    ever matched, and the narrowing silently fell through to "the freshest
+    capture anywhere" — the exact mis-attribution ``--service`` exists to
+    prevent, now aimed at the non-HTTP units instead.
+
+    So the slug is matched against any directory between the session and the
+    file.  The session segment itself is excluded so a session and a service
+    that happen to share a name cannot cross-match.
+    """
+    try:
+        parts = path.relative_to(caps).parts
+    except ValueError:
+        return False
+    # parts = (<session>, <slug>, [<oracle>, ...], "trace.jsonl")
+    return service in parts[1:-1]
+
+
 def _resolve_trace_files(root: Path, service: str | None, override: str | None) -> list[Path]:
     """Every capture a REPO-WIDE question should read, newest first.
 
@@ -2178,7 +2215,7 @@ def _resolve_trace_files(root: Path, service: str | None, override: str | None) 
     caps = root / ".vinv" / "captures"
     found = [p for p in caps.rglob("trace.jsonl") if p.is_file() and p.stat().st_size > 0] if caps.is_dir() else []
     if service:
-        narrowed = [p for p in found if p.parent.name == service]
+        narrowed = [p for p in found if _capture_matches_service(p, caps, service)]
         if narrowed:
             found = narrowed
     if not found:
@@ -2193,8 +2230,8 @@ def _resolve_trace_file(root: Path, service: str | None, override: str | None) -
     """Locate the tracelens capture for ``root``, raising if none exists.
 
     Probe order: explicit ``override`` → the freshest ``trace.jsonl`` anywhere
-    under ``<repo>/.vinv/captures/`` whose parent directory matches ``service``
-    → the freshest capture overall.
+    under ``<repo>/.vinv/captures/`` that belongs to ``service`` (see
+    :func:`_capture_matches_service`) → the freshest capture overall.
 
     Captures land under ``.vinv/captures/<session>/<service>/trace.jsonl``
     where ``<session>`` is whatever launched the run (``vinv-bringup``, the
@@ -2218,7 +2255,7 @@ def _resolve_trace_file(root: Path, service: str | None, override: str | None) -
         return max(live)[1] if live else None
 
     if service:
-        matching = [p for p in found if p.parent.name == service]
+        matching = [p for p in found if _capture_matches_service(p, caps, service)]
         best = _newest(matching)
         if best is not None:
             return best
@@ -2347,6 +2384,12 @@ def map_trace_to_tree(
     never executed, runtime calls under the handler the static tree missed, and
     (tagged ``middleware``) everything the request ran outside the handler's
     subtree, which a handler-rooted walk structurally cannot see.
+
+    The entry point is named by ``api_id`` or — for a function no declaration
+    names, the shape the exerciser drives directly — by ``symbol``, exactly as
+    :func:`build_api_call_tree` takes them.  Anything that can have a static
+    tree can have a runtime one; restricting this to declared ids left every
+    function unit with a tree and no overlay, reported as if nothing had run.
 
     ``trace`` overrides the capture location; otherwise ``<repo>/.vinv/captures/
     vinv-bringup/<service>/trace.jsonl`` (and any sibling) is probed.
@@ -2549,7 +2592,7 @@ def map_trace_to_tree(
     out_dir = root / ".vinv" / "identification"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"{ep.get('id')}.tracemap.json"
+        out_file = out_dir / f"{_artifact_stem(ep.get('id'))}.tracemap.json"
         out_file.write_text(json.dumps(result, indent=2), encoding="utf-8")
         result["output_file"] = str(out_file)
     except OSError as exc:

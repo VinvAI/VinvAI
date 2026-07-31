@@ -11,8 +11,8 @@ from `<repo>/.vinv/index` and, where a trace exists, a recorded run.
 | Command | Purpose |
 | --- | --- |
 | `identification consolidate <repo>` | List every entry point the code defines — HTTP routes, CLI commands, background and scheduled tasks — with its handler. |
-| `identification calltree <repo> --api-id ID` | Build the call tree behind one entry point. |
-| `identification tracemap <repo> --api-id ID` | Overlay a recorded run on that tree: what executed, how often, how long — and what never ran. |
+| `identification calltree <repo> --api-id ID` | Build the call tree behind one entry point (or `--symbol module:qualname` for an undeclared function). |
+| `identification tracemap <repo> --api-id ID` | Overlay a recorded run on that tree: what executed, how often, how long — and what never ran. Takes `--symbol` too. |
 | `identification tracesummary <repo>` | Rank every endpoint by how hard the recorded run exercised it. |
 
 ## `// 01 · install`

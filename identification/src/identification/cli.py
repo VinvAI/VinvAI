@@ -59,10 +59,10 @@ Build the repo's Rust index first, then:
   1. identification consolidate <repo>
        List the service's entry points. Writes
        <repo>/.vinv/identification/apis.json.
-  2. identification calltree <repo> --api-id ID
+  2. identification calltree <repo> --api-id ID | --symbol module:qualname
        Build the call tree for one entry point. Writes
        <repo>/.vinv/identification/<id>.calltree.json.
-  3. identification tracemap <repo> --api-id ID
+  3. identification tracemap <repo> --api-id ID | --symbol module:qualname
        Overlay a captured trace onto that call tree. Writes
        <repo>/.vinv/identification/<id>.tracemap.json.
   4. identification tracesummary <repo>
@@ -98,11 +98,14 @@ exerciser drives directly. Writes
 _TRACEMAP_HELP = """\
 Overlay a captured trace onto ONE entry point's call tree.
 
-Identify the entry point by --api-id. Annotates each node with whether it ran
-(call count, duration, errors) and reports the static/runtime gaps. The capture
-is probed under <repo>/.vinv/captures/ (override with --trace); --request-id
-scopes to a single request. Writes <repo>/.vinv/identification/<id>.tracemap.json.
-Requires an existing index and a captured trace.
+Identify the entry point by --api-id, or by --symbol (`module:qualname`) for a
+function no declaration names — the same pair `calltree` takes, so anything that
+has a static tree can also have a runtime one. Annotates each node with whether
+it ran (call count, duration, errors) and reports the static/runtime gaps. The
+capture is probed under <repo>/.vinv/captures/ (override with --trace);
+--request-id scopes to a single request. Writes
+<repo>/.vinv/identification/<id>.tracemap.json. Requires an existing index and a
+captured trace.
 """
 
 
@@ -216,8 +219,19 @@ def calltree_cmd(
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
 @click.option(
     "--api-id",
-    required=True,
+    default=None,
     help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).",
+)
+@click.option(
+    "--symbol",
+    default=None,
+    help=(
+        "Overlay the tree rooted at an indexed symbol instead — `module:qualname`, "
+        "`path/to/file.py:name` or a bare name. For a function the exerciser drove "
+        "directly, which no entry-point declaration names. One of --api-id / "
+        "--symbol is required; with both, the declared entry point wins and the "
+        "symbol is the fallback."
+    ),
 )
 @click.option(
     "--trace",
@@ -247,7 +261,8 @@ def calltree_cmd(
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def tracemap_cmd(
     repo_path: str,
-    api_id: str,
+    api_id: str | None,
+    symbol: str | None,
     trace: str | None,
     service: str | None,
     store_dir: str | None,
@@ -258,10 +273,14 @@ def tracemap_cmd(
 ) -> None:
     _configure_logging(verbose)
     log = logging.getLogger("identification.tracemap")
+    if not api_id and not symbol:
+        _emit({"status": "error", "error": "one of --api-id / --symbol is required"})
+        return
     try:
         result = map_trace_to_tree(
             Path(repo_path),
             api_id=api_id,
+            symbol=symbol,
             trace=trace,
             service=service,
             store_dir=store_dir,

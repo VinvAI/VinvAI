@@ -76,6 +76,39 @@ def test_aggregating_sees_endpoints_the_freshest_capture_alone_misses(repo: Path
     assert ("GET", "/") in agg
 
 
+def write_nested_capture(root: Path, service: str, oracle: str, mtime: float) -> Path:
+    """An exerciser capture: `<session>/<slug>/<oracle>/trace.jsonl`, one level deeper."""
+    d = root / ".vinv" / "captures" / "vinv-exerciser" / service / oracle
+    d.mkdir(parents=True, exist_ok=True)
+    trace = d / "trace.jsonl"
+    trace.write_text('{"component": "acme.cli.main", "event": "enter", "depth": 0}\n', encoding="utf-8")
+    import os
+
+    os.utime(trace, (mtime, mtime))
+    return trace
+
+
+def test_a_service_narrows_onto_its_exerciser_capture_too(repo: Path) -> None:
+    # CLI and function units trace into `<slug>/<oracle>/`, so matching only the
+    # capture's immediate parent found nothing and fell back to "freshest
+    # anywhere" — the CLI unit's overlay was read off whichever service traced
+    # last (here `ui`, the newest), and every node came back "not run".
+    write_nested_capture(repo, "cli-tool", "invocations", mtime=500)
+
+    chosen = _resolve_trace_file(repo, "cli-tool", None)
+
+    assert chosen.parent.name == "invocations"
+    assert chosen.parent.parent.name == "cli-tool"
+
+
+def test_the_session_directory_is_not_mistaken_for_a_service(repo: Path) -> None:
+    # Without excluding the session segment, `--service vinv-bringup` would
+    # "match" every capture in the repo and narrow to nothing.
+    found = _resolve_trace_files(repo, "vinv-bringup", None)
+
+    assert [p.parent.name for p in found] == ["ui", "worker", "api"]
+
+
 def test_an_empty_capture_tree_still_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         _resolve_trace_files(tmp_path, None, None)
