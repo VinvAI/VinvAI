@@ -226,43 +226,9 @@ Vinv ties **every runtime trace to the exact code segment that produced it** and
 - **Silent-wrong-value findings dispatch with value-shaped criteria** — for `differential-mismatch`, `fault-divergence`, `concurrency-divergence`, `invariant-violation` and `baseline-degraded`, "these calls no longer raise" would be vacuous, because the target never raised. The criterion is the *value*.
 - **When two attempts stop making progress, a Nash-bargaining stall judge decides** — continue only if both an explorer stance *and* an auditor stance strictly prefer it to asking you. Otherwise you get a judgment panel, not a token bonfire.
 
-## The same run, in detail
+## Exerciser on the FastAPI template
 
-Everything above came from one all-local pass on that template, on an M-series MacBook:
-
-- **Indexed 855 symbols across 151 files with 516 call edges in 27.6s** — cold, from clone.
-- **Semantic search: 5/6 natural questions hit the right symbol in the top 5, p50 64ms:**
-
-| You ask | Vinv answers |
-|---|---|
-| "where are JWT access tokens created" | `create_access_token` |
-| "password hashing" | `verify_password` |
-| "database session dependency" | `get_db` |
-
-- The backend then ran under Vinv's **zero-edit tracer** inside Cursor desktop, extension live — no code changes to the template.
-
-<div align="center">
-<img src="https://images.vinv.ai/demo-fastapi-run-light.gif" alt="Vinv running end to end on the FastAPI full-stack template: install, code graph of 855 symbols, semantic code search hits, runtime trace hotspots, rank_suspects naming the failing frame, and verified probes" width="720">
-</div>
-
-*The actual run, captured frame by frame: install → 855-symbol graph → search hits → trace hotspots → the failing frame named → verified.*
-
-**Then we ran its backend under Vinv's zero-edit tracer** (inside Cursor desktop, DB deliberately down) and hit it with real traffic. From one run, Vinv produced:
-
-| What Vinv saw | Result |
-|---|---|
-| Hotspots (per-symbol, from live spans) | `login_access_token` 12× · 8.1ms avg → `authenticate` → `get_user_by_email` 22× |
-| Failing frame, named exactly | `crud.get_user_by_email` — 22× `sqlalchemy.exc.OperationalError` |
-| Caller chain for every failure | `login_access_token → authenticate → get_user_by_email` |
-| Trace | 274 events, 0 unparseable, finalized on SIGTERM |
-
-Your agent sees "500". **Vinv hands it the exact failing function, the error type, and the chain that led there** — before it opens a single file.
-
-*Bonus: this very demo caught a real Vinv bug (Python 3.14 broke OTel's contrib loader; the error was being swallowed). We fixed it the same day — [that's the loop working on ourselves.](#proven-on-itself)*
-
-### Then we let the exerciser loose on the same template
-
-Traffic only shows you the code paths users happen to hit. The behavior exerciser drives the rest — same repo, same laptop, one run:
+Traffic only shows you the code paths users happen to hit. The behavior exerciser drives the rest — same [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template), one run:
 
 | Metric | Traffic only | Exercised |
 |---|---|---|
