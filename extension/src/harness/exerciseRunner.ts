@@ -750,8 +750,18 @@ async function runServiceFreePass(
 	ports: ExercisePassPorts,
 ): Promise<ExercisePassResult> {
 	publishExerciseState(
-		exerciseStateFromArtifacts(null, null, 'running', `${why} — exercising functions and contracts…`),
+		exerciseStateFromArtifacts(
+			null, null, 'running', `${why} — running CLIs, functions and contracts…`,
+		),
 	);
+	// The CLI oracle runs FIRST, and unconditionally: a repo with no served port
+	// often has console scripts, and those are the only units it has. Their argv
+	// is declared in .vinv/services.json rather than generated, so this is the
+	// cheapest and most faithful evidence available here — running it after the
+	// campaign would spend the budget before touching the repo's real surface.
+	// A repo with no python_cli / python_library entry exits immediately with
+	// status 'environment', so this costs nothing where it does not apply.
+	await ports.runEngine(bin, ['invocations', workspaceRoot], workspaceRoot, env);
 	const campaign = await ports.runEngine(
 		bin,
 		['campaign', workspaceRoot, '--budget', String(campaignBudget())],
