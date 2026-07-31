@@ -294,19 +294,58 @@ export interface CallTreeResult extends IdentificationResult {
  * resolved call graph rooted at that entry point's handler. Deterministic: walks
  * the code index's precomputed call graph — no traces, no running server, no LLM.
  * Requires the installed engine.
+ *
+ * Pass `symbol` instead for a unit no declaration names — a function the
+ * exerciser drove directly, whose id is a `module:qualname` the consolidated
+ * inventory has never heard of. See `unitRoot`.
  */
 export function getCallTree(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	apiId: string,
+	symbol?: string,
 ): Promise<CallTreeResult> {
 	return runIdentification<CallTreeResult>(context, workspaceRoot, [
 		'calltree',
 		workspaceRoot,
-		'--api-id',
-		apiId,
+		...unitArgs(apiId, symbol),
 		'--json',
 	]);
+}
+
+/**
+ * How one unit is named to the engine: `--api-id` for a declared entry point,
+ * `--symbol` for one the exerciser drove directly.
+ *
+ * Passing only the id for an undeclared unit is not a degraded answer but an
+ * error — the engine finds no entry point `acme.mod:summarize` and raises, which
+ * the call-tree view renders as a permanently unavailable overlay. BOTH are sent
+ * when a symbol is known, which is the engine's documented precedence: a
+ * declared entry point wins and the symbol is the fallback, so a caller that
+ * guessed "undeclared" about an id the inventory does know still gets the
+ * declaration's tree rather than a name-matched approximation of it.
+ */
+function unitArgs(apiId: string, symbol?: string): string[] {
+	return symbol ? ['--api-id', apiId, '--symbol', symbol] : ['--api-id', apiId];
+}
+
+/**
+ * The `symbol` to root a unit at, or undefined when a declared entry point owns
+ * the id.
+ *
+ * Two signals, because neither alone is sound. A `module:qualname` spelling is
+ * what the exerciser records for a function target and no consolidated id ever
+ * looks like that, so it decides on its own — including before apis.json exists.
+ * Otherwise the inventory decides, but only when it HAS one: an empty (not yet
+ * written) apis.json must not make every endpoint look undeclared, since
+ * `calltree --api-id` re-consolidates from the index and works without the file.
+ */
+export function symbolRootFor(workspaceRoot: string, apiId: string): string | undefined {
+	if (apiId.includes(':')) {
+		return apiId;
+	}
+	const entries = readEntryPoints(workspaceRoot);
+	return entries.length > 0 && !entries.some((e) => e.id === apiId) ? apiId : undefined;
 }
 
 /** One endpoint's runtime hit count from `tracesummary`. */
@@ -401,12 +440,13 @@ export function getTraceMap(
 	 * service ran last and usually not this one.
 	 */
 	service?: string,
+	/** Root the overlay at this symbol instead of a declared id — see getCallTree. */
+	symbol?: string,
 ): Promise<TraceMapResult> {
 	return runIdentification<TraceMapResult>(context, workspaceRoot, [
 		'tracemap',
 		workspaceRoot,
-		'--api-id',
-		apiId,
+		...unitArgs(apiId, symbol),
 		...(service ? ['--service', service] : []),
 		'--json',
 	]);

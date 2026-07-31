@@ -6,7 +6,8 @@
  * the Sessions view polls), a debounced pass runs the identification engine
  * end-to-end with ZERO clicks:
  *
- *   consolidate (via tracesummary) → per observed endpoint: tracemap (static
+ *   consolidate (via tracesummary + the captures' own handler spans) → per
+ *   observed entry point, of any kind: tracemap (static
  *   call tree + runtime overlay) written to .vinv/reports/calltree-<id>.json,
  *   and the smoke/flamegraph HTML report built headlessly into
  *   .vinv/reports/smoke-<id>.html — nothing is opened, everything is on disk
@@ -35,12 +36,18 @@ import {
 import { isBinAvailable } from '../tracelens/bin';
 import { generateSmokeReport } from '../tracelens/report';
 import {
+	entryPointLabel,
 	getTraceMap,
 	getTraceSummary,
 	hasCaptures,
+	readEntryPoints,
+	symbolRootFor,
 	type CallNode,
+	type EntryPoint,
+	type TraceCount,
 	type TraceMapResult,
 } from '../identification/identification';
+import { entryPointHits } from '../identification/entryPointHits';
 import {
 	indexStoreDir,
 	loadNodes,
@@ -132,6 +139,69 @@ export async function buildCallTreeReport(
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, `${JSON.stringify(map, null, '\t')}\n`, 'utf8');
 	return file;
+}
+
+/** One unit the capture proves ran, whatever kind of starting point it is. */
+export interface ObservedUnit {
+	id: string;
+	/** Human-facing label: "GET /health", a command name, `python path/to/f.py`. */
+	trigger: string;
+	handler: string | null;
+	file: string;
+	traceCount: number;
+}
+
+/**
+ * Every unit a capture actually exercised — HTTP endpoints AND the rest.
+ *
+ * The pass used to be `tracesummary.endpoints` and nothing else, and
+ * `tracesummary` answers only for HTTP: it counts requests whose root span is
+ * `"<METHOD> <path>"` against the consolidated `apis` view. CLI commands,
+ * workers, scheduled jobs, stdio servers and `__main__` scripts have no root
+ * span of that shape, so no matter how often they ran they were never built a
+ * call tree, never given a smoke report, and never appeared in the manifest the
+ * Flow rail and Findings read — the runtime overlay existed for one fifth of
+ * the inventory.
+ *
+ * The join for those is `entryPointHits`, which counts an entry point's own
+ * handler spans directly out of the captures — the same numbers the Traces
+ * panel already shows in its Hits column, so the two surfaces cannot disagree.
+ * The engine's own counts WIN wherever both have an answer: for a route,
+ * distinct requests is the better unit and every other HTTP surface quotes it.
+ */
+export function observedUnits(
+	endpoints: TraceCount[],
+	entries: EntryPoint[],
+	hits: Map<string, number>,
+): ObservedUnit[] {
+	const units: ObservedUnit[] = [];
+	const seen = new Set<string>();
+	for (const e of endpoints) {
+		if (e.trace_count > 0) {
+			units.push({
+				id: e.id,
+				trigger: `${e.method} ${e.path}`,
+				handler: e.handler,
+				file: e.file,
+				traceCount: e.trace_count,
+			});
+			seen.add(e.id);
+		}
+	}
+	for (const entry of entries) {
+		const n = hits.get(entry.id) ?? 0;
+		if (n > 0 && !seen.has(entry.id)) {
+			units.push({
+				id: entry.id,
+				trigger: entryPointLabel(entry),
+				handler: entry.handler,
+				file: entry.file,
+				traceCount: n,
+			});
+			seen.add(entry.id);
+		}
+	}
+	return units;
 }
 
 /** Content signature for issue dedup — same family as failureSignature. */
@@ -325,12 +395,17 @@ async function insightPassOnce(
 		}
 		publishInsightState({
 			phase: 'running',
-			label: 'summarizing traced endpoints…',
+			label: 'summarizing traced entry points…',
 			manifest: readInsightManifest(workspaceRoot),
 		});
 
 		const summary = await getTraceSummary(context, workspaceRoot);
-		const observed = (summary.endpoints ?? []).filter((e) => e.trace_count > 0);
+		const entries = readEntryPoints(workspaceRoot);
+		const observed = observedUnits(
+			summary.endpoints ?? [],
+			entries,
+			entryPointHits(workspaceRoot, entries),
+		);
 		const reportsDir = path.join(workspaceRoot, '.vinv', 'reports');
 		fs.mkdirSync(reportsDir, { recursive: true });
 
@@ -339,7 +414,7 @@ async function insightPassOnce(
 		let built = 0;
 		for (const ep of observed) {
 			built += 1;
-			const trigger = `${ep.method} ${ep.path}`;
+			const trigger = ep.trigger;
 			publishInsightState({
 				phase: 'running',
 				label: `building call tree + report for ${trigger} (${built}/${observed.length})…`,
@@ -350,7 +425,13 @@ async function insightPassOnce(
 			let map: TraceMapResult | null = null;
 			let calltreePath: string | null = null;
 			try {
-				map = await getTraceMap(context, workspaceRoot, ep.id, captureServiceFor(workspaceRoot, ep.file));
+				map = await getTraceMap(
+					context,
+					workspaceRoot,
+					ep.id,
+					captureServiceFor(workspaceRoot, ep.file),
+					symbolRootFor(workspaceRoot, ep.id),
+				);
 				calltreePath = callTreeReportPath(workspaceRoot, ep.id);
 				fs.mkdirSync(path.dirname(calltreePath), { recursive: true });
 				fs.writeFileSync(calltreePath, `${JSON.stringify(map, null, '\t')}\n`, 'utf8');
@@ -385,7 +466,7 @@ async function insightPassOnce(
 				handler: ep.handler,
 				calltreePath,
 				reportPath,
-				traceCount: ep.trace_count,
+				traceCount: ep.traceCount,
 				errorCount: tree.errorCount,
 				symbols: tree.symbols,
 				lastBuilt: new Date().toISOString(),

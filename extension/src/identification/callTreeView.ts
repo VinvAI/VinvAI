@@ -5,6 +5,7 @@ import {
 	getCallTree,
 	getTraceMap,
 	readEntryPoints,
+	symbolRootFor,
 	type CallNode,
 	type TraceMapResult,
 } from './identification';
@@ -221,10 +222,34 @@ function wireCallTree(
 		return handleCallTreeMessage(msg, actions);
 	});
 
+	// The unit's root: a declared entry point is named by its id, a function the
+	// exerciser drove directly by its symbol. Resolved once — apis.json does not
+	// change while a tab is open, and both the static tree and every overlay poll
+	// must agree about what they are rooted at.
+	const symbol = symbolRootFor(workspaceRoot, apiId);
+
+	// The capture is chosen by the service that DEFINES this unit. Omitting it
+	// made the engine fall back to "the freshest trace.jsonl anywhere", and since
+	// the poll below rewrites .vinv/reports/calltree-<id>.json — the same snapshot
+	// the insight pass writes — merely opening the tab replaced a correct overlay
+	// with one read off whichever service happened to trace last. On a repo with
+	// four traced services that showed every node "not run" at 0% coverage, with
+	// `status: ok` and nothing naming the mismatch. Resolved once: services.json
+	// does not change while a tab is open.
+	let captureService = captureServiceFor(
+		workspaceRoot,
+		readEntryPoints(workspaceRoot).find((e) => e.id === apiId)?.file,
+	);
+
 	// 1) Static call tree first — fast, no trace needed.
 	void (async () => {
 		try {
-			const tree = await getCallTree(context, workspaceRoot, apiId);
+			const tree = await getCallTree(context, workspaceRoot, apiId, symbol);
+			// An undeclared unit has no inventory row to join on, so its owning
+			// service can only be learned from the tree the engine just resolved.
+			if (!captureService) {
+				captureService = captureServiceFor(workspaceRoot, tree.entrypoint?.file);
+			}
 			if (!disposed) {
 				void webview.postMessage({ type: 'tree', result: tree });
 				writeSnapshot(tree);
@@ -240,26 +265,13 @@ function wireCallTree(
 	})();
 
 	// 2) Runtime overlay — poll tracemap every second while the tab is open.
-	//
-	// The capture is chosen by the service that DEFINES this endpoint. Omitting it
-	// made the engine fall back to "the freshest trace.jsonl anywhere", and since
-	// this poll rewrites .vinv/reports/calltree-<id>.json — the same snapshot the
-	// insight pass writes — merely opening the tab replaced a correct overlay with
-	// one read off whichever service happened to trace last. On a repo with four
-	// traced services that showed every node "not run" at 0% coverage, with
-	// `status: ok` and nothing naming the mismatch. Resolved once: services.json
-	// does not change while a tab is open.
-	const captureService = captureServiceFor(
-		workspaceRoot,
-		readEntryPoints(workspaceRoot).find((e) => e.id === apiId)?.file,
-	);
 	const tick = async (): Promise<void> => {
 		if (polling || disposed) {
 			return;
 		}
 		polling = true;
 		try {
-			const map = await getTraceMap(context, workspaceRoot, apiId, captureService);
+			const map = await getTraceMap(context, workspaceRoot, apiId, captureService, symbol);
 			// The binary's overlay has latency but not memory; attribute memory
 			// from the raw trace and merge it onto each executed node.
 			enrichWithMemory(map, getTraceMemory(workspaceRoot));

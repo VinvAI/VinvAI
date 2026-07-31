@@ -21,6 +21,12 @@ import {
 	moduleCandidates,
 	resetHitCache,
 } from '../identification/entryPointHits';
+import { observedUnits } from '../harness/insightRunner';
+import {
+	symbolRootFor,
+	type EntryPoint,
+	type TraceCount,
+} from '../identification/identification';
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-hits-'));
@@ -152,5 +158,110 @@ suite('entry-point hits: counting from the captures', () => {
 			entryPointHits(tmpDir(), [{ id: 'CLI_main', handler: 'main', file: 'a/cli.py' }]).size,
 			0,
 		);
+	});
+});
+
+suite('insight pass: which units get a call tree built', () => {
+	const entry = (over: Partial<EntryPoint> = {}): EntryPoint => ({
+		kind: 'cli_command',
+		id: 'CLI_generate',
+		trigger: 'generate',
+		handler: 'generate_cmd',
+		file: 'handbook/src/handbook/cli.py',
+		line: 10,
+		framework: 'click',
+		...over,
+	});
+	const route = (over: Partial<TraceCount> = {}): TraceCount => ({
+		id: 'GET_health',
+		method: 'GET',
+		path: '/health',
+		handler: 'health',
+		file: 'app/api.py',
+		line: 3,
+		trace_count: 4,
+		...over,
+	});
+
+	test('a traced CLI command is built, not only the HTTP endpoints', () => {
+		const units = observedUnits(
+			[route()],
+			[entry(), entry({ id: 'CLI_never', trigger: 'never' })],
+			new Map([['CLI_generate', 3]]),
+		);
+
+		assert.deepStrictEqual(
+			units.map((u) => [u.id, u.trigger, u.traceCount]),
+			[
+				['GET_health', 'GET /health', 4],
+				['CLI_generate', 'generate', 3],
+			],
+		);
+	});
+
+	test('an endpoint is listed once, on the engine’s own count', () => {
+		// entryPointHits counts handler spans and tracesummary counts requests;
+		// for a route the latter is the number every other HTTP surface quotes.
+		const units = observedUnits(
+			[route()],
+			[entry({ id: 'GET_health', kind: 'http_api', trigger: 'GET /health', handler: 'health', file: 'app/api.py' })],
+			new Map([['GET_health', 11]]),
+		);
+
+		assert.strictEqual(units.length, 1);
+		assert.strictEqual(units[0].traceCount, 4);
+	});
+
+	test('a never-exercised entry point is not built', () => {
+		assert.deepStrictEqual(observedUnits([route({ trace_count: 0 })], [entry()], new Map()), []);
+	});
+
+	test('a bare __main__ script is labelled by the file that runs', () => {
+		const units = observedUnits(
+			[],
+			[entry({ id: 'MAIN_tool', kind: 'script_main', trigger: '__main__', file: 'tools/report.py' })],
+			new Map([['MAIN_tool', 1]]),
+		);
+
+		assert.strictEqual(units[0].trigger, 'python tools/report.py');
+	});
+});
+
+suite('rooting a unit: declared id vs symbol', () => {
+	function workspace(entries: object[] | null): string {
+		const root = tmpDir();
+		if (entries) {
+			const dir = path.join(root, '.vinv', 'identification');
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(
+				path.join(dir, 'apis.json'),
+				JSON.stringify({ status: 'ok', entrypoints: entries }),
+				'utf8',
+			);
+		}
+		return root;
+	}
+
+	test('a module:qualname target is a symbol even before apis.json exists', () => {
+		// The exerciser's function targets are spelled this way and no
+		// consolidated id ever is — `--api-id acme.mod:summarize` finds no entry
+		// point and raises, which the call-tree view showed as "no overlay".
+		assert.strictEqual(symbolRootFor(workspace(null), 'acme.mod:summarize'), 'acme.mod:summarize');
+	});
+
+	test('a declared entry point is left to its id', () => {
+		const root = workspace([{ kind: 'cli_command', id: 'CLI_generate', trigger: 'generate', handler: 'generate_cmd', file: 'h/cli.py', line: 1, framework: 'click' }]);
+		assert.strictEqual(symbolRootFor(root, 'CLI_generate'), undefined);
+	});
+
+	test('an id the inventory has never heard of falls back to the symbol', () => {
+		const root = workspace([{ kind: 'http_api', id: 'GET_health', trigger: 'GET /health', handler: 'health', file: 'app/api.py', line: 1, framework: 'fastapi' }]);
+		assert.strictEqual(symbolRootFor(root, 'summarize'), 'summarize');
+	});
+
+	test('a missing inventory does not make every endpoint look undeclared', () => {
+		// `calltree --api-id` re-consolidates from the index and works without
+		// apis.json, so an absent file must not divert a real id to a symbol.
+		assert.strictEqual(symbolRootFor(workspace(null), 'GET_health'), undefined);
 	});
 });
