@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "An autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL. Nine oracles hunt a real run, your own coding agent does the edit, and nothing lands unless it passes acceptance tests the agent never sees. Local, no API keys.",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
