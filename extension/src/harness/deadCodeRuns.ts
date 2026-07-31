@@ -38,12 +38,42 @@ export type DeadCodeRunOutcome =
 	| 'run-failed' // the driver produced no trace at all
 	| 'unavailable'; // preconditions missing (section gone, no tracelens config…)
 
+/** A rendered argument or return value, exactly as the trace summarized it. */
+export interface ObservedValue {
+	/** Parameter name, or 'return'. */
+	name: string;
+	render: string;
+}
+
+/** One observed call: what went in, what came back out. */
+export interface ObservedCall {
+	args: ObservedValue[];
+	/** Rendered return value; empty when the call raised instead of returning. */
+	result: string;
+	/** Exception type when the call raised, else null. */
+	error: string | null;
+	ms: number;
+}
+
 /** One function as the fresh trace saw it. */
 export interface TracedFunction {
 	component: string;
 	calls: number;
 	ms: number;
 	errors: number;
+	/** The caller observed inside this run, when the trace showed one. */
+	parent?: string | null;
+	/** Depth of the shallowest observed call — the walkthrough's ordering. */
+	depth?: number;
+	/**
+	 * Distinct input→output observations, most informative first.
+	 *
+	 * This is the point of the whole surface: "helper_a ran" is a fact about the
+	 * tracer, "helper_a([]) → 0" is a fact about the code. Bounded because a
+	 * probe case that loops a thousand times has a thousand near-identical calls
+	 * and the first few already say what it does.
+	 */
+	samples?: ObservedCall[];
 }
 
 /** The shape of what a driver's capture recorded. */
@@ -57,6 +87,28 @@ export interface DeadCodeTraceSummary {
 	top: TracedFunction[];
 	/** Distinct error types raised during the run, if any. */
 	errorTypes: string[];
+}
+
+/**
+ * One probe case of one try-run: its own process, its own capture.
+ *
+ * Cases are captured separately rather than marked inside one trace because the
+ * driver runs as `__main__` and is not an instrumented target package — its own
+ * frames never reach the trace, so there is nothing in a merged capture to
+ * attribute a call to the case that made it. One process per case makes the
+ * attribution structural instead of inferred.
+ */
+export interface DeadCodeCaseRun {
+	/** The argv value that selected it; empty when the script ran with no argv. */
+	name: string;
+	/** What the agent said this case shows. */
+	why: string;
+	traceFile: string;
+	exitCode: number | null;
+	timedOut: boolean;
+	/** Tail of this case's own output — the evidence when it produced nothing. */
+	outputTail: string;
+	trace: DeadCodeTraceSummary | null;
 }
 
 /** One try-run of one dead-code section, as it happened. */
@@ -81,10 +133,18 @@ export interface DeadCodeRunRecord {
 	traceFile: string | null;
 	exitCode: number | null;
 	timedOut: boolean;
-	/** The agent's own note about what the driver drives and what it fakes. */
+	/**
+	 * The agent's own note about what the driver drives and what it fakes — and,
+	 * on a `declined` run, its stated reason for refusing. A decline is the only
+	 * outcome with no driver and no trace, so without this the row holds nothing
+	 * a reader could check.
+	 */
 	notes: string;
 	/** Tail of the driver's combined output — the evidence when it failed. */
 	outputTail: string;
+	/** Every case of this run, in declared order. Empty on runs that never got that far. */
+	cases?: DeadCodeCaseRun[];
+	/** The whole run merged — what executed across all cases. */
 	trace: DeadCodeTraceSummary | null;
 }
 

@@ -580,7 +580,8 @@
 		}
 	},
 	"scripts": {
-		"vscode:prepublish": "npm run sync-readme && npm run stamp && npm run check && npm run bundle",
+		"vscode:prepublish": "npm run sync-readme && npm run stamp && npm run check && npm run clean-out && npm run bundle",
+		"clean-out": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
 		"sync-readme": "node ./scripts/sync-readme.mjs --check",
 		"stamp": "node ./scripts/stamp-engine-pin.mjs",
 		"package": "vsce package --no-rewrite-relative-links",

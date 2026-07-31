@@ -423,18 +423,32 @@ export interface DriverEnvironment {
 	cwd: string;
 }
 
+/** Cases run per try-run. Enough to show a behaviour, few enough to read. */
+export const MAX_PROBE_CASES = 8;
+
 /**
- * The prompt that asks the harness to WRITE a driver for one dead section —
- * the "try run this path" half of the surface, where analysis asks what the
- * code is and this asks whether it can be made to execute at all.
+ * The prompt that asks the harness to write a PROBE SUITE for one dead section
+ * — the "try run this path" half of the surface, where analysis asks what the
+ * code is and this shows what it does.
  *
- * The driver runs under tracelens with the workspace's own recorded
- * configuration, so the deliverable is deliberately narrow: one standalone
- * Python script that imports the real modules and drives the section's
- * symbols. A driver that RAISES is still useful — tracelens records every
- * function that ran before the raise — so the prompt says so; an agent that
- * believes only a green run counts will fabricate scaffolding to swallow
- * errors, which hides exactly the evidence the trace exists to capture.
+ * The deliverable is a set of cases rather than a single driver, because one
+ * call answers the wrong question. "It executed" is a fact about the tracer;
+ * "given an empty list it returns 0, given a negative amount it raises
+ * ValueError" is a fact about the code, and it takes several deliberately
+ * different inputs to establish. Every case runs as its own traced process, so
+ * its call tree and its values are attributable to it and to nothing else.
+ *
+ * A case that RAISES is a result, not a failure — tracelens records every
+ * function that ran before the raise, and the exception is part of the
+ * behaviour being documented. The prompt says so, because an agent that
+ * believes only a green run counts will wrap everything in try/except and hide
+ * exactly the evidence the trace exists to capture.
+ *
+ * The "find an existing caller" instruction is attached ONLY to
+ * reachable-untested sections. For an orphan there is by construction no
+ * caller to find, and telling an agent to look for one invites it to conclude
+ * the section is undrivable when the absence of callers is the premise of the
+ * task.
  */
 export function buildDriverPrompt(
 	section: DeadSection,
@@ -442,27 +456,52 @@ export function buildDriverPrompt(
 	env: DriverEnvironment,
 	context?: LiveContextSymbol[],
 ): string {
+	const existingWayIn =
+		section.reason === 'reachable-untested'
+			? [
+					'- LOOK FOR AN EXISTING WAY IN FIRST. Live code references this section,',
+					'  so a test, script, CLI entry point or fixture that already constructs',
+					'  these arguments may exist — search for it and drive through what you',
+					'  find. Something that already builds the inputs is both less work and',
+					'  better evidence than scaffolding invented from scratch.',
+				]
+			: [
+					'- NOTHING calls this code today — that is the premise of the task, not a',
+					'  reason to decline. There is no existing caller to copy, so read the',
+					'  code and construct the arguments yourself.',
+				];
 	return [
 		'Vinv traced this repository at runtime and the section below never',
-		'executed. Write a DRIVER that tries to run it, so a fresh trace can',
-		'prove whether this code is executable at all.',
+		'executed, so nobody can say what it DOES. Write a PROBE SUITE: a set of',
+		'cases that call it with real inputs and run under tracelens, so the',
+		'input→output behaviour of every symbol involved is recorded and can be',
+		'shown to a developer.',
 		'',
 		renderSection(section, sources, context),
 		'',
-		'The driver will be executed as:',
-		`  ${env.python} <driver.py>     (under tracelens, cwd: ${env.cwd})`,
+		'Each case is executed on its own as:',
+		`  ${env.python} <driver.py> <case-name>     (under tracelens, cwd: ${env.cwd})`,
 		`Instrumented packages: ${env.targetPackages.join(', ') || '(none recorded)'}`,
 		'',
 		'Rules:',
-		'- ONE standalone Python script. Import the real modules from this',
-		'  repository and call the section’s symbols (or the live callers that',
-		'  lead into them) with plausible arguments. Read the code first to build',
+		'- ONE standalone Python script holding EVERY case. It reads the case name',
+		'  from sys.argv[1] and runs exactly that case; with no argument it runs',
+		'  them all in order.',
+		`- Between 3 and ${MAX_PROBE_CASES} cases, chosen to SHOW THE BEHAVIOUR rather than to`,
+		'  pass: the ordinary input, the boundary (empty, zero, missing, maximum),',
+		'  and the input that makes it fail. VARY the inputs — several copies of',
+		'  the same call teach nothing.',
+		...existingWayIn,
+		'- Import the real modules from this repository and call the section’s',
+		'  symbols directly with concrete arguments. Read the code first to build',
 		'  the minimum real scaffolding — objects, fixtures, temp files.',
 		'- Prefer driving the code IN-PROCESS over the network: import the handler',
 		'  and call it, rather than starting a server.',
-		'- A driver that raises is still a useful driver — every function that ran',
-		'  before the raise is traced. Do NOT wrap everything in try/except to make',
-		'  the run look green; let real failures propagate.',
+		'- A case that raises is a RESULT, not a failure: the exception is part of',
+		'  what this code does, and everything that ran before it is traced. Do NOT',
+		'  wrap cases in try/except to make the run look green.',
+		'- Print nothing for the record — the trace IS the record. Arguments and',
+		'  return values are captured automatically at every instrumented call.',
 		'- No destructive operations: nothing that deletes, migrates, or mutates',
 		'  state outside temp directories.',
 		'- Do NOT bind a fixed port. The service this repo runs may already be up on',
@@ -470,14 +509,24 @@ export function buildDriverPrompt(
 		'  use" — which says nothing about whether the section can execute. If the',
 		'  code under test genuinely needs a listening socket, bind port 0 and read',
 		'  back the port the OS assigned.',
-		'- It must finish within 60 seconds.',
+		'- Each case must finish within 60 seconds.',
 		'',
 		'Reply with ONE json object and nothing else:',
 		'{"driver": {"code": "<the complete python script>",',
-		'  "notes": "what it drives and any setup it fakes"}}',
-		'If this section genuinely cannot be driven from a script (e.g. it is',
-		'dead build-tool config), reply {"driver": null} and nothing else.',
+		'  "notes": "what it drives and any setup it fakes",',
+		'  "cases": [{"name": "<the argv value>", "why": "what this case shows"}]}}',
+		'If this section genuinely cannot be driven from a script (e.g. it is dead',
+		'build-tool config, or it needs infrastructure that cannot be faked), reply',
+		'{"driver": null, "reason": "<what specifically cannot be constructed>"}.',
+		'A decline carrying no reason is treated as no answer at all, not as a',
+		'verdict — so if you decline, say what stopped you.',
 	].join('\n');
+}
+
+/** One probe case: the argv value that selects it, and what it is meant to show. */
+export interface DriverCase {
+	name: string;
+	why: string;
 }
 
 /**
@@ -487,18 +536,54 @@ export function buildDriverPrompt(
  * transport problem worth a retry, and only 'driver' carries work to run.
  * Collapsing them into null produced exactly the support question it invites:
  * "got no driver — why?", with no way to answer from the message.
+ *
+ * A decline carries its REASON for the same argument one step further. Without
+ * it the record holds no driver, no trace and no explanation — the only outcome
+ * in the log that cannot be checked — so a bare `{"driver": null}` is a miss,
+ * not a verdict, and the caller says so rather than settling the section.
  */
 export type DriverReply =
-	| { kind: 'driver'; code: string; notes: string }
-	| { kind: 'declined' } // the agent replied {"driver": null} — not drivable
+	| { kind: 'driver'; code: string; notes: string; cases: DriverCase[] }
+	| { kind: 'declined'; reason: string } // {"driver": null} — not drivable
 	| { kind: 'unusable' }; // no parsable driver envelope in the reply
+
+/**
+ * The declared cases, trimmed to what the runner will actually execute.
+ *
+ * Names become argv values, so blanks and duplicates are dropped rather than
+ * run: two cases sharing a name produce two captures that cannot be told apart,
+ * which is the one thing the per-case split exists to prevent.
+ */
+function parseCases(raw: unknown): DriverCase[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const out: DriverCase[] = [];
+	const seen = new Set<string>();
+	for (const item of raw) {
+		if (!item || typeof item !== 'object') {
+			continue;
+		}
+		const rec = item as Record<string, unknown>;
+		const name = String(rec.name ?? '').trim();
+		if (!name || seen.has(name)) {
+			continue;
+		}
+		seen.add(name);
+		out.push({ name, why: String(rec.why ?? '').trim() });
+		if (out.length >= MAX_PROBE_CASES) {
+			break;
+		}
+	}
+	return out;
+}
 
 export function parseDriverReply(stdout: string): DriverReply {
 	const raw = parseEnvelope(stdout, 'driver');
 	// parseEnvelope distinguishes "key absent" (undefined) from an explicit
 	// {"driver": null} — the latter is the documented decline, not a miss.
 	if (raw === null) {
-		return { kind: 'declined' };
+		return { kind: 'declined', reason: String(parseEnvelope(stdout, 'reason') ?? '').trim() };
 	}
 	if (!raw || typeof raw !== 'object') {
 		return { kind: 'unusable' };
@@ -507,7 +592,14 @@ export function parseDriverReply(stdout: string): DriverReply {
 	if (!code) {
 		return { kind: 'unusable' };
 	}
-	return { kind: 'driver', code, notes: String((raw as Record<string, unknown>).notes ?? '').trim() };
+	return {
+		kind: 'driver',
+		code,
+		notes: String((raw as Record<string, unknown>).notes ?? '').trim(),
+		// No declared cases is not an error: the script still runs once, with no
+		// argv, which is exactly the single-driver behaviour this replaced.
+		cases: parseCases((raw as Record<string, unknown>).cases),
+	};
 }
 
 /**
