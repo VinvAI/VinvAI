@@ -3,16 +3,16 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — an autonomous swarm that finds bugs, dead code and performance issues in your services and APIs — and fixes them with closed-loop RL." width="880">
 </picture>
 
 <br><br>
 
-**An autonomous swarm that finds bugs, dead code and performance issues in your codebase — and fixes them with closed-loop RL.**
+**An autonomous swarm that finds bugs, dead code and performance issues in your services and APIs — and fixes them with closed-loop RL.**
 
-Nine oracles hunt a real run of your code in parallel. Findings go to the coding agent you already pay for. Nothing lands unless it survives acceptance tests written *before* the fix that the agent never sees — and every outcome trains what the swarm hunts next, locally.
+Oracles hunt a real run of your services and APIs in parallel. Findings go to the coding agent you already pay for. Nothing lands unless it survives acceptance tests written *before* the fix that the agent never sees — and every outcome trains what the swarm hunts next, locally.
 
-<sub>Python first — services **and** plain libraries. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine.</sub>
+<sub>Python first — services and APIs. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine.</sub>
 
 <br><br>
 
@@ -98,13 +98,12 @@ The industry automated *writing* and left *proving* entirely manual. Vinv automa
 
 ## The swarm, named
 
-A "swarm" with no structure is a slogan. Here is the actual roster: **nine oracles**, each with a distinct way of breaking your code, each writing findings into the same `issues.json` and the same fix-dispatch path.
+A "swarm" with no structure is a slogan. Here is the actual roster — oracles that break **services and APIs**, each writing findings into the same `issues.json` and the same fix-dispatch path.
 
 | Oracle | What it finds | Finding kinds |
 |---|---|---|
 | **HTTP exerciser** | Drives every discovered endpoint itself — schema-valid, boundary, negative, values mined from real traces, multi-step auth scenarios | `server-error` · `crash` · `invariant-violation` |
-| **Function harness** | Calls your functions **in process** — no routes, no server. This is what makes a plain **library** exercisable | `function-crash` · `import-error` |
-| **Differential oracle** | Compares a function against a reference implementation. For an evaluator or parser, the reference is CPython itself — disagreement *is* the bug report | `differential-mismatch` |
+| **Differential oracle** | Compares a service handler or evaluator against a reference implementation. For an evaluator or parser, the reference is CPython itself — disagreement *is* the bug report | `differential-mismatch` |
 | **Fault injection** | Adversarial-but-**legal** shapes at a dependency boundary (`None`, `""`, lone surrogate, reordered list), plus a sweep of every chunk-split point on a stream | `fault-crash` · `fault-divergence` |
 | **Concurrency oracle** | Deterministic interleavings and timeout injection — shared state that corrupts under parallel calls, and lock orderings that deadlock | `concurrency-divergence` · `concurrency-hang` |
 | **Environment oracle** | A dependency-resolution matrix, and upstream symbols whose signature moved under you | `signature-drift` *(reported, never dispatched — no edit here fixes it)* |
@@ -142,10 +141,10 @@ And the second-order reason to care: **dead code makes your coding agent worse.*
 Static scanners guess. Vinv records a real run and ranks what failed, what never executed, and what was slow. No "possible issue" — every finding names a symbol, a line, and the trace behind it.
 
 ```bash
-# from the repo, no service needed — the service-free oracles do the work
-exerciser campaign <repo> --budget 20
-# with a service up, the HTTP oracle arms too
+# with a service up — Auto-Pilot's path: plan every endpoint, then drive them
 exerciser plan <repo> --base-url http://127.0.0.1:PORT && exerciser run <repo> --base-url http://127.0.0.1:PORT
+# allocate budget across armed oracles (HTTP + the rest that apply to that run)
+exerciser campaign <repo> --budget 20
 ```
 
 ### 02 FIX — through the agent you already pay for
@@ -188,7 +187,6 @@ Measured on this repo's own ledger (800 logged decisions, 770 joined, 12 index e
 | *"cursor agent stuck in a loop"* | doom-loop guard — token-set self-similarity catches a repeating agent and forces a different approach |
 | *"how to find dead code in python from real usage"* | dead-code sections: never executed in any capture, with live callers and an agent verdict |
 | *"how to test fastapi endpoints automatically"* | the HTTP exerciser — schema/boundary/negative/auth inputs, every response banked as a regression case |
-| *"how to test a python library without writing tests"* | the function harness — drives exported functions in process, no service required |
 | *"python deadlock only under load"* | the concurrency oracle — deterministic schedules and timeout injection |
 | *"my parser accepts input CPython rejects"* | the differential oracle — disagreement with the reference *is* the bug report |
 | *"AI broke code that was working"* | byte-identical behavior replay gates every change; one-click revert of everything an episode touched |
@@ -208,13 +206,13 @@ Give your coding agent runtime context — one loop, these capabilities:
 - **Dead code sections** — *"Analyze Dead Code"* explains every untraced island; *"Try Run Dead Code"* asks your agent for a driver and re-traces to see what came alive. Sections split into **no references** and **reached from live code but never taken**, each with the callers that still point at it and a keep-or-cut verdict with its reasoning.<br><img src="https://images.vinv.ai/dead-code.gif" alt="a dead-code section report: reachable but untested, the live code that references it, and the keep-or-cut verdict with reasoning" width="640">
 - **Recoverable time** — latency hotspots ranked by the milliseconds you would actually get back, each dispatched as a predicted-then-proven optimization instead of a guess about what is slow.<br><img src="https://images.vinv.ai/optimize.gif" alt="the Optimize panel: open opportunities, recoverable milliseconds, and per-call latency against the whole-flow ceiling" width="640">
 - **Ask Vinv** — ask anything about your running system in plain English; every answer cites the exact trace spans and source lines it came from, and a **deterministic critic** blocks any claim the evidence can't back — grounded Q&A, not confident guessing.
-- **Behavior exerciser** — Vinv doesn't wait for traffic: it drives **every endpoint and every exported function itself**, picks strategies with a Thompson-sampling bandit rewarded by oracle violations first and new coverage only as a bonus, and turns every response into a permanent regression case.
+- **Behavior exerciser** — Vinv doesn't wait for traffic: it drives **every discovered service endpoint itself**, picks strategies with a Thompson-sampling bandit rewarded by oracle violations first and new coverage only as a bonus, and turns every response into a permanent regression case.
 - **Journey** — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and the exact inputs → outputs exercised — with a form to add your own test inputs that the engine replays forever after.<br><img src="https://images.vinv.ai/journey-walkthrough.gif" alt="Vinv Journey walkthrough: overview, then every endpoint's call tree, latency flamegraph, and exercised inputs and outputs, stepped with Next" width="640">
 - **Auto-Pilot & the red ring** — one click drives discover → set up → trace → exercise → fix → verify until green or budget; when new trace errors land, the fix episode is *already dispatched* by the time you see the red ring in the graph. The budget is yours: set attempts per service in **Configure**, and when a run exhausts them Vinv asks whether to grant more instead of quietly giving up.
 - **Agent babysitting** — a doom-loop guard (token-set self-similarity) catches a repeating agent, an adaptive silence watchdog catches a hung one, and **"Dispute a Verified Fix"** keeps even the verifier accountable.
 - **Findings** — what Vinv found and what it fixed, with the statistical evidence: issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diff kinds, and a machine-readable `findings.json` your agent can consume directly.<br><img src="https://images.vinv.ai/findings-tour.gif" alt="Vinv Findings tour: issue clusters, optimization episodes with 95% confidence intervals, regression replay kinds, latency profile per endpoint, and the state ledger" width="640">
 
-> **Honest scope:** Python first, for both services **and** plain libraries — a repo with nothing serving still gets the five service-free oracles. Other languages get the index, graph and grounded QnA, but no runtime evidence yet. TypeScript and Go next.
+> **Honest scope:** Python first — **services and APIs**. Auto-Pilot discovers runnable services, brings them up under tracelens, and exercises their HTTP (and related) entrypoints. Other languages get the index, graph and grounded QnA, but no runtime evidence yet. TypeScript and Go next.
 
 ## Why agents don't reward-hack under Vinv
 
@@ -289,8 +287,7 @@ Registration is idempotent and never commits secrets. The servers (`vinv-index`,
 | Debugging | reads source, speculates | fault-ranked suspects with real error messages |
 | Dead code | can't tell used from unused | never-executed islands with live callers and a try-run driver |
 | Bad fix | you diff and pray | one-click revert of everything the episode touched |
-| API testing | writes tests it then grades itself | exercises every endpoint, banks each response as an unseen regression case |
-| Library testing | writes unit tests from the signature | drives real functions in a sandbox, diffs against a reference implementation |
+| API testing | writes tests it then grades itself | exercises every service endpoint, banks each response as an unseen regression case |
 | Perf claims | "should be faster now" | paired-bootstrap 95% CI must exclude zero, behavior byte-identical, or auto-revert |
 | Test data | pollutes your dev DB and forgets | state ledger: created resources tracked, torn down via your own API, drift labeled |
 | Cost | burns tokens re-exploring | evidence pack composed once, locally; the bandit learns which pack composition pays |
@@ -387,7 +384,7 @@ Requires `identification consolidate` first for `apis.json`, and — for real co
 
 <details><summary><b>Few tool names on purpose — agents pick better from short menus; the session tool multiplexes</b></summary>
 
-**`vinv-index`** — the codebase and the session:
+**`vinv-index`** — your services' code and the session:
 
 | Tool | Returns |
 |---|---|
@@ -418,12 +415,12 @@ No. Vinv runs everything locally. The semantic index and code embedder run on yo
 No telemetry, no analytics, no usage pings, no crash reports. Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>, and sensitive data in traces is redacted and never sent anywhere. The extension makes exactly <b>one</b> outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a release that leaves your install broken can tell you. No query string, no identifiers, no version, nothing uploaded — all filtering happens on your machine, at most once every 12 hours. Turn it off with <code>vinv.notices.enabled</code>.
 </details>
 
-<details><summary><b>Does it work on a library, or only on a web service?</b></summary>
-Both. A repo with nothing serving still gets the five service-free oracles — the function harness, the differential oracle, fault injection, the concurrency prober and the environment matrix — driven by <code>exerciser campaign</code> with no <code>--base-url</code>. The HTTP oracle simply stays unarmed. Findings land in the same <code>issues.json</code> and go to the same fix-dispatch path.
+<details><summary><b>What does Auto-Pilot exercise today?</b></summary>
+<strong>Services and APIs.</strong> Auto-Pilot discovers runnable Python services, brings them up under tracelens, and drives their HTTP (and related) entrypoints. Plain library / in-process function driving is not the Auto-Pilot surface right now — the product path is services you can start and call.
 </details>
 
-<details><summary><b>Is it safe to let it call my functions?</b></summary>
-Targets the purity guard can't verify are routed through a containment ladder: a kernel-enforced OS sandbox (<code>sandbox-exec</code>, <code>bwrap</code>, <code>unshare</code>) where the host offers one, otherwise the Python process shim — always with a disposable copy of the repo, redirected <code>HOME</code>/<code>TMPDIR</code>/<code>XDG_*</code>, blocked network and subprocess spawning, and POSIX rlimits. Which tier you got is decided by a probe that checks a write outside the root really failed, and it's reported honestly. <code>--no-sandbox</code> leaves that set refused and undriven; it never runs them loose. <code>exerciser containment</code> tells you what your host can provide.
+<details><summary><b>Is untrusted exercise code sandboxed?</b></summary>
+Yes. Targets the purity guard can't verify are routed through a containment ladder: a kernel-enforced OS sandbox (<code>sandbox-exec</code>, <code>bwrap</code>, <code>unshare</code>) where the host offers one, otherwise the Python process shim — always with a disposable copy of the repo, redirected <code>HOME</code>/<code>TMPDIR</code>/<code>XDG_*</code>, blocked network and subprocess spawning, and POSIX rlimits. Which tier you got is decided by a probe that checks a write outside the root really failed, and it's reported honestly. <code>--no-sandbox</code> leaves that set refused and undriven; it never runs them loose. <code>exerciser containment</code> tells you what your host can provide.
 </details>
 
 <details><summary><b>Why is the first run slow? (Build time)</b></summary>
@@ -435,7 +432,7 @@ No. Vinv uses a zero-edit tracer. It instruments your Python backend at runtime 
 </details>
 
 <details><summary><b>Which languages are supported?</b></summary>
-Runtime evidence — tracing, the oracle swarm, verified fixes — is Python today, for services and libraries alike. Other stacks still get the semantic index, code graph, and grounded QnA. TypeScript and Go are next.
+Runtime evidence — tracing, the oracle swarm, verified fixes — is Python today, for <strong>services and APIs</strong>. Other stacks still get the semantic index, code graph, and grounded QnA. TypeScript and Go are next.
 </details>
 
 <details><summary><b>How does it know if a fix worked?</b></summary>
