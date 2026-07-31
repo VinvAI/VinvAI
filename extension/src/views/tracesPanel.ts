@@ -9,6 +9,7 @@ import {
 import { buildFilteredTrace } from '../identification/traceFilter';
 import { entryPointHits } from '../identification/entryPointHits';
 import type { SessionTimeRange } from './sessionsView';
+import { readUnitStats, type UnitStats } from './unitStats';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
 /**
@@ -43,6 +44,21 @@ interface TraceRow {
 	line: number;
 	kind: string;
 	count: number;
+	/** Percentage of the unit's call tree that ran, and which pass measured it. */
+	coveragePct?: number;
+	coverageText?: string;
+	coverageSource?: string;
+	/** Latency over the checks an exerciser ran against this unit. */
+	p50?: number;
+	p95?: number;
+	/** Status code → count. `none` means the request never completed. */
+	statuses?: Record<string, number>;
+	checks?: number;
+	failed?: number;
+	/** Runtime errors under this unit's call tree. */
+	errors?: number;
+	/** Whether a call-tree snapshot has already been built for this unit. */
+	built?: boolean;
 }
 
 let panel: vscode.WebviewPanel | undefined;
@@ -67,22 +83,38 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 
 	let entries: EntryPoint[] = [];
 	let counts = new Map<string, number>();
+	let stats = new Map<string, UnitStats>();
 	let range: SessionTimeRange | undefined;
 	let polling = false;
 	let disposed = false;
 
 	const rows = (): TraceRow[] =>
 		entries
-			.map((e) => ({
-				id: e.id,
-				trigger: entryPointLabel(e),
-				handler: e.handler ?? '',
-				file: e.file,
-				line: e.line,
-				kind: e.kind,
-				count: counts.get(e.id) ?? 0,
-			}))
-			// Busiest first, then alphabetical — the same order the tree used, so
+			.map((e) => {
+				const s = stats.get(e.id);
+				return {
+					id: e.id,
+					trigger: entryPointLabel(e),
+					handler: e.handler ?? '',
+					file: e.file,
+					line: e.line,
+					kind: e.kind,
+					count: counts.get(e.id) ?? 0,
+					coveragePct: s?.coverage?.pct,
+					coverageText: s?.coverage ? `${s.coverage.executed}/${s.coverage.total}` : undefined,
+					coverageSource: s?.coverage?.source,
+					p50: s?.p50Ms,
+					p95: s?.p95Ms,
+					statuses: s?.statuses,
+					checks: s?.checks,
+					failed: s?.failed,
+					errors: s?.errorCount,
+					built: s?.hasCallTree,
+				};
+			})
+			// What ran comes first — a panel whose first screen is a wall of
+			// never-exercised rows buries the run the user just made. Busiest
+			// first, then alphabetical, which is the order the tree used, so
 			// muscle memory carries over.
 			.sort((a, b) => b.count - a.count || a.trigger.localeCompare(b.trigger));
 
@@ -153,6 +185,10 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 				next.set(e.id, e.trace_count);
 			}
 			counts = next;
+			// Coverage, latency and status codes come from artifacts other passes
+			// write, not from this poll — re-read each tick so a run that finishes
+			// while the panel is open fills its columns in without a reopen.
+			stats = readUnitStats(root, entries);
 			post();
 		} catch {
 			// No trace yet, or an older binary without tracesummary — keep the last
@@ -210,18 +246,46 @@ input, select { background: var(--bg-2); color: var(--ink); border: 1px solid va
   border-radius: 0; padding: 6px 9px; font-family: ${VINV_FONT_MONO}; font-size: 12px; }
 input { flex: 1; min-width: 180px; }
 input:focus, select:focus { border-color: var(--accent-fg); outline: none; }
+body { --warn: #b45309; }
+body.vscode-dark, body.vscode-high-contrast:not(.vscode-high-contrast-light) { --warn: #d29922; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }
 th { text-align: left; font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
-     color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line-strong); padding: 7px 8px; }
-td { border-bottom: 1px solid var(--line); padding: 7px 8px; vertical-align: top; }
+     color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line-strong); padding: 7px 8px;
+     white-space: nowrap; }
+th.num { text-align: right; }
+td { border-bottom: 1px solid var(--line); padding: 7px 8px; vertical-align: middle; }
 tr.row { cursor: pointer; }
 tr.row:hover td { background: var(--bg-2); }
+tr.cold td { color: var(--muted); }
 .trigger { color: var(--ink); }
+.file { color: var(--muted); font-size: 10px; }
 .handler { color: var(--muted); }
-.count { text-align: right; font-variant-numeric: tabular-nums; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .count.hit { color: var(--accent-fg); }
 .kind { font-size: 9px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
-        border: 1px solid currentColor; padding: 1px 6px; }
+        border: 1px solid currentColor; padding: 1px 6px; white-space: nowrap; }
+.dash { color: var(--muted); }
+/* Coverage reads as a bar first and a number second — the shape of "most of
+   this never ran" is the point, and 12/40 does not carry it at a glance. */
+.cov { display: flex; align-items: center; gap: 7px; justify-content: flex-end; }
+.bar-t { width: 46px; height: 4px; background: var(--line); position: relative; flex: none; }
+.bar-t i { position: absolute; inset: 0 auto 0 0; background: var(--ok-fg); }
+.bar-t.low i { background: var(--accent-fg); }
+.bar-t.mid i { background: var(--warn); }
+.bar-t.traced i { opacity: .55; }
+.chip { font-variant-numeric: tabular-nums; padding: 1px 5px; border: 1px solid currentColor;
+        margin-right: 4px; font-size: 10px; white-space: nowrap; }
+.chip.ok { color: var(--ok-fg); }
+.chip.warn { color: var(--warn); }
+.chip.bad { color: var(--accent-fg); }
+.slow { color: var(--warn); }
+.err { color: var(--accent-fg); }
+.act { text-align: right; white-space: nowrap; }
+button.tree { background: transparent; color: var(--ink); border: 1px solid var(--line-strong);
+  border-radius: 0; padding: 3px 9px; font-family: ${VINV_FONT_MONO}; font-size: 10px;
+  letter-spacing: .1em; text-transform: uppercase; cursor: pointer; }
+button.tree:hover { border-color: var(--accent-fg); color: var(--accent-fg); }
+.legend { color: var(--muted); font-size: 10px; margin: 10px 0 0; line-height: 1.7; }
 .empty { color: var(--muted); padding: 24px 0; }
 </style></head>
 <body><div class="wrap">
@@ -231,6 +295,7 @@ tr.row:hover td { background: var(--bg-2); }
   <select id="range"><option value="">All time</option></select>
 </div>
 <div id="out"><div class="empty">Loading…</div></div>
+<p class="legend">Coverage is how much of the unit's call tree ran — solid when an exerciser drove it, faded when it is what the captures happened to catch. Latency and status codes come from the checks an exerciser ran, so a unit only traffic reached shows hits and coverage but no percentiles.</p>
 </div>
 <script>
 const vscode = acquireVsCodeApi();
@@ -250,17 +315,76 @@ function render(){
   const unit = (r) => r.kind === 'http_api'
     ? 'Distinct traced requests that reached this endpoint'
     : 'Times this entry point ran in the captures (its handler entered ' + r.count + '×)';
-  out.innerHTML = '<table><thead><tr><th>Entry point</th><th>Handler</th><th>Kind</th>' +
-    '<th style="text-align:right" title="How often this ran: requests for HTTP routes, invocations for everything else">Hits</th></tr></thead><tbody>' +
-    rows.map(r => '<tr class="row" data-id="' + esc(r.id) + '" data-label="' + esc(r.trigger) + '">' +
-      '<td class="trigger">' + esc(r.trigger) + '</td>' +
-      '<td class="handler">' + esc(r.handler || '—') + '</td>' +
+  const dash = '<span class="dash">—</span>';
+  const ms = (v) => v === undefined || v === null ? dash
+    : (v >= 1000 ? (Math.round(v / 100) / 10) + 's' : Math.round(v) + 'ms');
+  function cov(r) {
+    if (r.coveragePct === undefined || r.coveragePct === null) return dash;
+    const pct = Math.max(0, Math.min(100, r.coveragePct));
+    const band = pct >= 70 ? '' : (pct >= 35 ? ' mid' : ' low');
+    const faded = r.coverageSource === 'traced' ? ' traced' : '';
+    const how = r.coverageSource === 'traced'
+      ? 'What the captures happened to run through this unit'
+      : 'What the exerciser\\'s inputs reached when it drove this unit';
+    return '<span class="cov" title="' + esc(r.coverageText + ' symbols · ' + how) + '">' +
+      '<span class="bar-t' + band + faded + '"><i style="width:' + pct + '%"></i></span>' +
+      pct + '%</span>';
+  }
+  // Status codes are the run's own verdict — 2xx, 4xx and 5xx must not read the
+  // same, and a "none" (the request never completed) must not read as success.
+  function statuses(r) {
+    const s = r.statuses;
+    if (!s) return dash;
+    const keys = Object.keys(s).sort();
+    if (!keys.length) return dash;
+    return keys.map(k => {
+      const cls = k === 'none' ? 'bad' : (k[0] === '2' ? 'ok' : (k[0] === '5' ? 'bad' : 'warn'));
+      const label = k === 'none' ? 'ERR' : k;
+      const title = k === 'none' ? 'Requests that never completed' : 'HTTP ' + k;
+      return '<span class="chip ' + cls + '" title="' + esc(title) + '">' + esc(label) + ' ×' + s[k] + '</span>';
+    }).join('');
+  }
+  function checks(r) {
+    if (r.checks === undefined || r.checks === null) return dash;
+    const failed = r.failed || 0;
+    return failed > 0
+      ? '<span class="err" title="' + failed + ' of ' + r.checks + ' checks failed">' + (r.checks - failed) + '/' + r.checks + '</span>'
+      : '<span title="all checks passed">' + r.checks + '/' + r.checks + '</span>';
+  }
+  out.innerHTML = '<table><thead><tr>' +
+    '<th>Entry point</th><th>Kind</th><th>Handler</th>' +
+    '<th class="num" title="How often this ran: requests for HTTP routes, invocations for everything else">Hits</th>' +
+    '<th class="num" title="Symbols of this unit\\'s call tree that executed">Coverage</th>' +
+    '<th class="num" title="Median latency over the checks run against this unit">P50</th>' +
+    '<th class="num" title="95th-percentile latency — the slow tail users actually feel">P95</th>' +
+    '<th title="Status codes returned across those checks">Responses</th>' +
+    '<th class="num" title="Checks that passed, of those run">Checks</th>' +
+    '<th class="num" title="Runtime errors raised anywhere under this unit\\'s call tree">Errors</th>' +
+    '<th></th></tr></thead><tbody>' +
+    rows.map(r => '<tr class="row' + (r.count > 0 ? '' : ' cold') + '" data-id="' + esc(r.id) + '" data-label="' + esc(r.trigger) + '">' +
+      '<td class="trigger">' + esc(r.trigger) + '<div class="file">' + esc(r.file) + '</div></td>' +
       '<td><span class="kind">' + esc(r.kind.replace(/_/g, ' ')) + '</span></td>' +
-      '<td class="count' + (r.count > 0 ? ' hit' : '') + '" title="' + esc(unit(r)) + '">' +
-      r.count + '</td></tr>').join('') +
+      '<td class="handler">' + esc(r.handler || '—') + '</td>' +
+      '<td class="num count' + (r.count > 0 ? ' hit' : '') + '" title="' + esc(unit(r)) + '">' + r.count + '</td>' +
+      '<td class="num">' + cov(r) + '</td>' +
+      '<td class="num">' + ms(r.p50) + '</td>' +
+      '<td class="num' + (r.p95 >= 1000 ? ' slow' : '') + '">' + ms(r.p95) + '</td>' +
+      '<td>' + statuses(r) + '</td>' +
+      '<td class="num">' + checks(r) + '</td>' +
+      '<td class="num' + (r.errors > 0 ? ' err' : '') + '">' + (r.errors === undefined ? dash : r.errors) + '</td>' +
+      '<td class="act"><button class="tree" title="' +
+        esc(r.built ? 'Open the call tree with its runtime overlay' : 'Build and open the call tree for this unit') +
+        '">Call tree</button></td>' +
+      '</tr>').join('') +
     '</tbody></table>';
-  out.querySelectorAll('tr.row').forEach(tr => tr.addEventListener('click', () =>
-    vscode.postMessage({ type: 'open', id: tr.dataset.id, label: tr.dataset.label })));
+  const open = (tr) => vscode.postMessage({ type: 'open', id: tr.dataset.id, label: tr.dataset.label });
+  out.querySelectorAll('tr.row').forEach(tr => {
+    tr.addEventListener('click', () => open(tr));
+    // The button is the discoverable affordance; the row stays clickable so the
+    // habit from the old list still works. stopPropagation keeps one click from
+    // firing both.
+    tr.querySelector('button.tree').addEventListener('click', (ev) => { ev.stopPropagation(); open(tr); });
+  });
 }
 q.addEventListener('input', render);
 range.addEventListener('change', () => vscode.postMessage({ type: 'range', range: range.value }));

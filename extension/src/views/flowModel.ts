@@ -142,6 +142,11 @@ export interface FlowLink {
 	 * than displacing that.
 	 */
 	action?: { icon: 'play' | 'stop'; title: string; command: string; args?: unknown[] };
+	/**
+	 * This row is past the stage's visible cap: the panel keeps it collapsed
+	 * behind the "…and N more" toggle rather than showing it inline.
+	 */
+	overflow?: boolean;
 }
 
 export interface FlowStage {
@@ -249,14 +254,18 @@ export function autoPilotStage(label: string): FlowStageId | undefined {
 	return undefined;
 }
 
-/** Cap a link list, folding the tail into a "…and N more" muted row. */
+/**
+ * Cap what a stage shows at rest by marking the tail `overflow` — the panel
+ * folds those rows behind an expandable "…and N more" toggle. The tail is
+ * carried, not dropped: a workspace with nine services used to have one it
+ * could not reach from the rail at all, because the row that stood in for it
+ * was inert text.
+ */
 function capLinks(links: FlowLink[], max: number): FlowLink[] {
 	if (links.length <= max) {
 		return links;
 	}
-	const shown = links.slice(0, max - 1);
-	shown.push({ label: `…and ${links.length - (max - 1)} more`, state: 'muted' });
-	return shown;
+	return links.map((l, i) => (i < max - 1 ? l : { ...l, overflow: true }));
 }
 
 function discoverStage(f: FlowFacts): FlowStage {

@@ -678,6 +678,8 @@ export async function generateAcceptanceTests(
 	symbolContext: string,
 	episodeId: string,
 	token?: vscode.CancellationToken,
+	/** Live thinking feed — generation is a full agent run, not a quick call. */
+	onUpdate?: (line: string) => void,
 ): Promise<AcceptanceState> {
 	const harness = getHarness(harnessId);
 	if (harness.kind !== 'cli') {
@@ -689,6 +691,7 @@ export async function generateAcceptanceTests(
 	const prompt = buildTestGenPrompt(title, issue, goal, symbolContext);
 	const run = await runHarnessPrompt(harnessId, workspaceRoot, 'acceptance-tests', prompt, {
 		token,
+		onUpdate,
 	});
 	if (!run.ok) {
 		return { status: 'unavailable', detail: `test generation run failed: ${run.detail ?? 'unknown'}` };

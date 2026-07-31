@@ -272,6 +272,60 @@ suite('findings: service attribution', () => {
 		assert.deepStrictEqual(f.servicesWithFindings, ['api', 'worker']);
 	});
 
+	/**
+	 * A CLI invocation's id is minted by the exerciser as `<service>#<index>`
+	 * and appears in no apis.json, so the file-ownership join can never resolve
+	 * it. Before the prefix was read, every CLI row and CLI issue counted as
+	 * unattributed and vanished the moment a service chip was clicked.
+	 */
+	test('a CLI invocation attributes to the service its unit id names', () => {
+		const root = tmpRepo();
+		write(root, '.vinv/services.json', {
+			services: [{ name: 'acme-tool', kind: 'python_cli', command: 'acme-tool' }],
+		});
+		write(root, '.vinv/exercise/profile.json', {
+			endpoints: [
+				{ api_id: 'acme-tool#0', method: 'RUN', path: 'acme-tool --check', unit_kind: 'cli_invocation' },
+				{ api_id: 'acme.mod:summarize', method: 'CALL', path: 'acme.mod:summarize', unit_kind: 'function_call' },
+			],
+		});
+		write(root, '.vinv/exercise/scorecard.json', {
+			coverage: { after_exercised: { units_by_kind: { cli_invocation: 1, function_call: 1 } } },
+			endpoints: [
+				{ endpoint: 'RUN acme-tool --check', unit_kind: 'cli_invocation', coverage: '3/6' },
+				{ endpoint: 'CALL acme.mod:summarize', unit_kind: 'function_call', coverage: '1/2' },
+			],
+		});
+		write(root, '.vinv/exercise/issues.json', {
+			clusters: [{ kind: 'crash', title: 'exited 2', signature: 'z', endpoint_id: 'acme-tool#0' }],
+		});
+		const f = buildFindings(root);
+
+		assert.strictEqual(f.endpoints[0].service, 'acme-tool');
+		assert.strictEqual(f.endpoints[0].unitKind, 'cli_invocation');
+		assert.strictEqual(f.issues[0].service, 'acme-tool');
+		assert.deepStrictEqual(f.servicesWithFindings, ['acme-tool']);
+		// A driven call's target is a module path, which names a file rather than
+		// a service — unattributed on purpose, not by omission.
+		assert.strictEqual(f.endpoints[1].service, undefined);
+		assert.strictEqual(f.endpoints[1].unitKind, 'function_call');
+		assert.deepStrictEqual(f.headline.unitsByKind, { cli_invocation: 1, function_call: 1 });
+	});
+
+	test('a scorecard with no units_by_kind is counted from its own rows', () => {
+		const root = tmpRepo();
+		write(root, '.vinv/exercise/scorecard.json', {
+			endpoints: [
+				{ endpoint: 'GET /a' },
+				{ endpoint: 'RUN acme-tool', unit_kind: 'cli_invocation' },
+			],
+		});
+		const f = buildFindings(root);
+		// A row written before `unit_kind` existed is HTTP by construction.
+		assert.deepStrictEqual(f.headline.unitsByKind, { http_endpoint: 1, cli_invocation: 1 });
+		assert.strictEqual(f.endpoints[0].unitKind, 'http_endpoint');
+	});
+
 	test('no identification or services artifact leaves everything unattributed', () => {
 		const root = tmpRepo();
 		write(root, '.vinv/exercise/issues.json', {

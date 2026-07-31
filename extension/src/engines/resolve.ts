@@ -109,6 +109,37 @@ export function enginesSynced(enginesRoot: string): boolean {
 	return fs.existsSync(pythonEnginePath(enginesRoot, 'tracelens'));
 }
 
+/**
+ * Marker every successful sync/build terminal touches as its LAST step, so its
+ * mtime is "the moment the engines were last materialised for the commit on
+ * disk". Untracked, so `git checkout --force` leaves it alone.
+ *
+ * It exists because the venv could not answer that question. `uv sync` only
+ * rewrites a console script when the package's entry points actually change, so
+ * a sync that legitimately had nothing to do left tracelens older than the
+ * `.git/HEAD` every checkout rewrites — an "environment built for a different
+ * commit" verdict that no amount of re-syncing could clear, on engines that were
+ * in fact correct. A stamp the terminal writes on success says what happened
+ * rather than inferring it from a file uv had no reason to touch.
+ */
+export function engineSyncStampPath(enginesRoot: string): string {
+	return path.join(enginesRoot, '.vinv-engines-synced');
+}
+
+/**
+ * Marker an engines terminal writes when it has FINISHED — whether the sync and
+ * build succeeded, failed, or were interrupted. Distinct from the sync stamp
+ * above, which only lands on success: this one answers "is a build still running
+ * in that terminal?", which is what anything waiting on the engines needs, and
+ * an answer of "it finished badly" is still an answer.
+ *
+ * Deleted immediately before each run, so a previous run's marker can never be
+ * mistaken for this one's.
+ */
+export function engineRunDonePath(enginesRoot: string): string {
+	return path.join(enginesRoot, '.vinv-engines-run-done');
+}
+
 /** Scans PATH (plus uv's default install dirs) for an executable. */
 function findOnPath(name: string, extraDirs: string[] = []): string | null {
 	const exe = executableFileName(name);

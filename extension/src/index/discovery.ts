@@ -26,7 +26,7 @@ import {
 	runBringupStartViaHarness,
 } from '../harness/harnessRunner';
 import { ensureHarnessChosen } from '../harness/harnessPicker';
-import { enginesMatchPin } from '../engines/update';
+import { awaitEnginesTerminal } from '../engines/install';
 
 /** Combined outcome of a Discover Project run. */
 export interface DiscoveryResult {
@@ -287,46 +287,74 @@ let autoDiscovering = false;
  */
 const DISCOVERED_VERSION_KEY = 'vinv.autoDiscover.versionByWorkspace';
 
-function discoveredVersions(context: vscode.ExtensionContext): Record<string, string> {
+/**
+ * Raise this to force ONE automatic re-discovery pass on every workspace, on the
+ * next activation, without the package version having to move.
+ *
+ * The marker is keyed by version, on the assumption that a build worth
+ * re-discovering for arrives with a new version number. That assumption does not
+ * hold while iterating: a vsix rebuilt under the same version ships different
+ * engines (the pin moves several times inside one version), so its artifacts are
+ * stale in exactly the way this exists to catch, and every install of it read as
+ * already-current and did nothing. Bumping this invalidates every marker written
+ * by an earlier build of the same version, which is what makes "installing this
+ * version re-discovers, with no user action" true.
+ *
+ * Cost of a bump: one re-index + handbook + bring-up pass per workspace. Do it
+ * when the build changes what those artifacts contain, not on every rebuild.
+ */
+const REDISCOVER_REV = 1;
+
+/** Identity a discovery marker is valid for: the version AND the forced revision. */
+export function discoveryStamp(version: string): string {
+	return version ? `${version}#${REDISCOVER_REV}` : '';
+}
+
+function discoveredStamps(context: vscode.ExtensionContext): Record<string, string> {
 	return context.globalState.get<Record<string, string>>(DISCOVERED_VERSION_KEY) ?? {};
 }
 
-async function rememberDiscoveredVersion(
+async function rememberDiscoveredStamp(
 	context: vscode.ExtensionContext,
 	root: string,
-	version: string,
+	stamp: string,
 ): Promise<void> {
 	await context.globalState.update(DISCOVERED_VERSION_KEY, {
-		...discoveredVersions(context),
-		[root]: version,
+		...discoveredStamps(context),
+		[root]: stamp,
 	});
 }
 
 /**
  * Whether an already-discovered workspace should be discovered AGAIN because the
- * extension has been updated since its last pass. Pure — the caller supplies the
- * facts — so the "does this re-index on every window reload" question has an
- * answer that can be tested rather than argued about.
+ * build it last ran under is not this one. Pure — the caller supplies the facts —
+ * so the "does this re-index on every window reload" question has an answer that
+ * can be tested rather than argued about.
  *
- * `seen === undefined` deliberately does NOT count as an update. It is the state
- * of every workspace discovered before this marker existed, and of one whose
- * globalState was cleared; treating "I have no record" as "you just updated"
- * would force a full re-index on workspaces that are perfectly current. The cost
- * is that the first update after this ships is not detected for those
- * workspaces — recording the version and going quiet is the safe direction.
+ * `stamp` is discoveryStamp(version), not the bare version, so a forced revision
+ * bump reaches installs whose version number did not move.
+ *
+ * `seen === undefined` DOES count: a workspace with no record was discovered by
+ * a build that predates the marker, so its artifacts are the oldest ones here,
+ * and "I have no record of this workspace" is the one state where staying quiet
+ * guarantees the install changes nothing. This reverses the earlier rule, which
+ * skipped it to avoid re-indexing a workspace that might be current — the wrong
+ * direction to err in once installing a build is supposed to bring the workspace
+ * onto it with no user action. It costs one pass, and only ever one: the marker
+ * is written as soon as it completes.
  */
 export function shouldRediscoverForUpdate(input: {
 	discovered: boolean;
 	seen: string | undefined;
-	version: string;
+	stamp: string;
 }): boolean {
 	if (!input.discovered) {
 		return false; // not discovered at all — the normal first-run path handles it
 	}
-	if (!input.version || !input.seen) {
-		return false;
+	if (!input.stamp) {
+		return false; // unknown build (no packageJSON version) — never force work
 	}
-	return input.seen !== input.version;
+	return input.seen !== input.stamp;
 }
 
 /**
@@ -336,7 +364,7 @@ export function shouldRediscoverForUpdate(input: {
  *   • the auto-discover toggle is on (Settings tab / vinv.autoDiscover.enabled),
  *   • a folder is open, and
  *   • the project isn't already fully discovered (index + handbook + services),
- *     OR the extension has been updated since this workspace's last pass.
+ *     OR this build is not the one this workspace last ran a pass under.
  *
  * The already-discovered guard keeps reopening a workspace cheap: re-indexing and
  * the expensive handbook/bring-up agents do not run on every reload. The update
@@ -348,12 +376,15 @@ export function shouldRediscoverForUpdate(input: {
  * auto-start hangs off discovery COMPLETING (see harness/autoPilot), so a
  * workspace that never re-discovers never gets the pipeline either.
  *
- * The engines must already be on this build's pin before any of that: the pin
- * update is fire-and-forget in a terminal (git checkout + uv sync + cargo build,
- * minutes on a cold build), and discovering against half-rebuilt engines would
- * produce exactly the version skew the pin exists to prevent. When they are not
- * ready the marker is deliberately NOT written, so the next window retries —
- * which is also the first moment the engines are usable.
+ * It waits for a running engines terminal, and then runs WHATEVER that terminal
+ * did. Those are two separate things and both are deliberate. Waiting matters
+ * because a clone or a `git checkout` mid-flight is a moving target to index.
+ * Running regardless matters because the alternative — proceeding only once the
+ * engines look correct — is what made this unreachable in 0.2.1: the readiness
+ * check reported a false "environment is stale" that no sync could clear, so
+ * re-discovery waited for a condition that could never arrive and never ran at
+ * all. A pass that fails leaves the marker unwritten and is retried on the next
+ * activation; a pass that never fires is invisible.
  */
 export async function maybeAutoDiscover(context: vscode.ExtensionContext): Promise<void> {
 	if (autoDiscovering) {
@@ -368,29 +399,47 @@ export async function maybeAutoDiscover(context: vscode.ExtensionContext): Promi
 	}
 	const root = folder.uri.fsPath;
 	const version = String(context.extension.packageJSON.version ?? '');
+	const stamp = discoveryStamp(version);
 	const discovered = isProjectDiscovered(root);
 
+	// A rebuild from scratch, not a resume: this is "Re-discover Project (Force
+	// Rebuild)" fired by the install itself, minus that command's confirmation.
+	// Reusing the artifacts is the thing being fixed — they were produced by
+	// engines this build no longer ships — so gap-filling would keep exactly what
+	// is stale. Only ever set on the re-discovery path; a first run has nothing
+	// to delete.
+	let force = false;
+
 	if (discovered) {
-		if (!shouldRediscoverForUpdate({ discovered, seen: discoveredVersions(context)[root], version })) {
-			// Current (or first sighting): record what this workspace is on so the
-			// NEXT update is detectable, and leave the artifacts alone.
-			await rememberDiscoveredVersion(context, root, version);
+		const seen = discoveredStamps(context)[root];
+		if (!shouldRediscoverForUpdate({ discovered, seen, stamp })) {
+			// Current: record what this workspace is on so the NEXT build is
+			// detectable, and leave the artifacts alone.
+			await rememberDiscoveredStamp(context, root, stamp);
 			return;
 		}
-		if (!(await enginesMatchPin(context))) {
-			return; // engines still moving to the pin — retry on the next window
-		}
 		console.log(
-			`Vinv: extension updated to ${version} since this workspace's last pass — re-discovering`,
+			`Vinv: this workspace last discovered under ${seen ?? 'an unrecorded build'}, this build is ${stamp} — force re-discovering`,
 		);
+		force = true;
 	}
 
 	autoDiscovering = true;
 	try {
-		await runDiscovery(context, root);
-		// Only a completed pass counts. A failed or cancelled run must be
-		// retried by the next activation, not marked as done for this version.
-		await rememberDiscoveredVersion(context, root, version);
+		// Let the engines terminal finish first — pass or fail. Resolves at once
+		// when nothing is running, which is the usual case.
+		await awaitEnginesTerminal();
+		await runDiscovery(context, root, {}, { force });
+		// Only a pass that actually produced the artifacts counts. The marker used
+		// to be written whatever came back, which quietly cancelled the retry the
+		// comment promised: a run that failed — engines still building, indexing
+		// died, the user cancelled — recorded this build as done and nothing
+		// re-ran until the next one. Asking the artifacts, rather than the run's
+		// own result, is also what keeps this from looping: a workspace that ends
+		// up discovered is always marked, so it is never re-discovered twice.
+		if (isProjectDiscovered(root)) {
+			await rememberDiscoveredStamp(context, root, stamp);
+		}
 	} finally {
 		autoDiscovering = false;
 	}

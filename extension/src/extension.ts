@@ -104,7 +104,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// onto the engines ref this build was cut against — installing it first when
 	// the machine has none. Fire-and-forget: it is a couple of git reads, and the
 	// clone/build itself runs in a terminal, so activation never blocks.
-	void maybeUpdateEngines(context);
+	//
+	// Held, not discarded: auto-discovery below waits on this before it waits on
+	// the terminal it may launch. Without the handle it would ask "is an engines
+	// run in flight?" while this pass was still deciding, get "no", and index a
+	// checkout that was about to be moved underneath it.
+	const enginePass = maybeUpdateEngines(context);
 
 	// The one channel that reaches an install that is already broken: a static
 	// notices file, polled at most twice a day, filtered here, at most one toast.
@@ -212,9 +217,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Discover the workspace automatically on startup and whenever a folder is
 	// added, so the user doesn't have to click Discover Project manually. It is a
-	// no-op unless the engines are installed, the toggle is on, and the project
-	// isn't already discovered — see maybeAutoDiscover.
-	void maybeAutoDiscover(context);
+	// no-op unless the toggle is on and the project is either undiscovered or last
+	// discovered under a different build — see maybeAutoDiscover, which also waits
+	// out any engines terminal the pass above starts.
+	void enginePass.then(() => maybeAutoDiscover(context));
 
 	// Keep the index following the code: debounced incremental `index update`
 	// on save, and epoch tags on new capture sessions so runtime facts can be

@@ -7,8 +7,14 @@
  * Sections: headline tiles → issue clusters → optimization episodes (each
  * attempt drawn with its paired-bootstrap 95% CI on a signed axis; accepted
  * episodes show the exact evidence that cleared the bar) → regression replay
- * (kinds breakdown + history) → per-endpoint latency profile (p50/p95 bars)
+ * (kinds breakdown + history) → per-unit latency profile (p50/p95 bars)
  * → state-pollution ledger → detected opportunities awaiting episodes.
+ *
+ * "Unit", not "endpoint": the exerciser drives HTTP routes, CLI invocations
+ * and functions called directly, all three land in the scorecard, and the
+ * Traces panel has always listed all three. This panel used to call every one
+ * of them an endpoint, so a toolchain repo with no routes at all still read as
+ * "N endpoints covered". The nouns now follow the rows (see UNIT_NOUNS).
  */
 
 import * as vscode from 'vscode';
@@ -40,7 +46,7 @@ export interface FindingsActions {
 	openSource: (file: string | undefined, line?: number) => Promise<void>;
 	refresh: () => Promise<void>;
 	dispatchFix: (signature: string) => Promise<void>;
-	/** Open the per-endpoint walkthrough (call tree, flamegraph, exact I/O). */
+	/** Open the per-unit walkthrough (call tree, flamegraph, exact I/O). */
 	walk: () => Promise<void>;
 	/** Open one dead-code section's walkthrough report. */
 	openDeadSection: (sectionId: string) => Promise<void>;
@@ -376,6 +382,45 @@ function getHtml(): string {
 	const pct = (x) => (x >= 0 ? '+' : '') + (100 * x).toFixed(1) + '%';
 
 	/**
+	 * What the exerciser drove, named honestly.
+	 *
+	 * The exerciser has three oracles — HTTP routes, CLI invocations, driven
+	 * function calls — and the Traces panel has always listed all three. This
+	 * panel called every one of them an "endpoint", so a repo whose units are a
+	 * CLI and two functions read as "3 endpoints" and its latency table headed a
+	 * column "Endpoint" over a row saying RUN acme-tool. The nouns below are the
+	 * scorecard's own (exerciser/scorecard.py _UNIT_NOUNS), so the panel and the
+	 * markdown report say the same words.
+	 */
+	const UNIT_NOUNS = {
+		http_endpoint: ['endpoint', 'endpoints'],
+		cli_invocation: ['CLI invocation', 'CLI invocations'],
+		function_call: ['driven call', 'driven calls'],
+	};
+	const kindNoun = (kind, plural) => (UNIT_NOUNS[kind] || ['unit', 'units'])[plural ? 1 : 0];
+	// A single-kind set gets its own noun; a mixed one gets "units", which is
+	// what the word was always standing in for.
+	function unitNoun(byKind, plural) {
+		const kinds = Object.keys(byKind || {}).filter((k) => (byKind[k] || 0) > 0);
+		return kinds.length === 1 ? kindNoun(kinds[0], plural) : (plural ? 'units' : 'unit');
+	}
+	const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+	/** "12 endpoints · 3 CLI invocations" — only worth saying when mixed. */
+	function kindBreakdown(byKind) {
+		const kinds = Object.keys(byKind || {}).filter((k) => (byKind[k] || 0) > 0).sort();
+		if (kinds.length < 2) return '';
+		return kinds.map((k) => byKind[k] + ' ' + kindNoun(k, byKind[k] !== 1)).join(' · ');
+	}
+	function countByKind(rows) {
+		const counts = {};
+		for (const r of rows || []) {
+			const k = r.unitKind || 'http_endpoint';
+			counts[k] = (counts[k] || 0) + 1;
+		}
+		return counts;
+	}
+
+	/**
 	 * Has anything been exercised at all?
 	 *
 	 * A wall of zeros cannot say WHICH zero it is, and the two meanings are
@@ -386,6 +431,14 @@ function getHtml(): string {
 	 */
 	function nothingExercised(f) {
 		const h = f.headline;
+		// A cluster is a failure OBSERVED in a live run, so one existing is proof
+		// that something ran — the reverse of reading zero clusters as "clean",
+		// which is the inference this function exists to refuse. Without this a
+		// pass whose coverage assembly did not write a scorecard hid the findings
+		// it had just made behind "nothing has been exercised".
+		if (h.issuesFound > 0 || (f.deadCode && f.deadCode.hasTrace)) {
+			return false;
+		}
 		return h.endpointsTotal === 0
 			&& h.symbolsTotal === 0
 			&& h.regressCases === 0
@@ -428,11 +481,14 @@ function getHtml(): string {
 			if (ex) { ex.addEventListener('click', () => vscode.postMessage({ type: 'runExercise' })); }
 			return;
 		}
+		const byKind = h.unitsByKind || {};
+		const breakdown = kindBreakdown(byKind);
 		const t = [
-			{ k: 'Endpoints covered', v: h.endpointsCovered + '<small>/' + h.endpointsTotal + '</small>',
-				tip: 'Endpoints where at least one test request actually ran code' },
+			{ k: cap(unitNoun(byKind, true)) + ' covered', v: h.endpointsCovered + '<small>/' + h.endpointsTotal + '</small>',
+				tip: 'HTTP endpoints, CLI invocations and driven function calls where at least one exercised run actually got into your code' +
+					(breakdown ? ' — ' + breakdown : '') },
 			{ k: 'Functions covered', v: h.symbolsCovered + '<small>/' + h.symbolsTotal + '</small>',
-				tip: 'Functions the endpoints can reach that a captured request actually executed' },
+				tip: 'Functions those ' + unitNoun(byKind, true) + ' can reach that a captured run actually executed' },
 			{ k: 'Issues found', v: h.issuesFound, hot: h.issuesFound > 0,
 				tip: 'Distinct failures observed in live runs, grouped by root cause' },
 			{ k: 'Dead code sections', v: h.deadSections, hot: h.deadSections > 0,
@@ -477,7 +533,7 @@ function getHtml(): string {
 	/**
 	 * Narrows a findings document to one service.
 	 *
-	 * Every per-endpoint collection is filtered, not just the issue list, so the
+	 * Every per-unit collection is filtered, not just the issue list, so the
 	 * headline tiles, the latency table and the opportunity list all describe the
 	 * same subset the issues do. Collections with no service attribution
 	 * (episodes, regress history, the state ledger) are left whole rather than
@@ -495,6 +551,10 @@ function getHtml(): string {
 			headline: Object.assign({}, f.headline, {
 				issuesFound: issues.length,
 				endpointsTotal: endpoints.length || f.headline.endpointsTotal,
+				// Recounted from the narrowed rows, so the tile's noun describes the
+				// subset on screen: a service whose only units are CLI invocations
+				// should not inherit "endpoints" from the whole-workspace mix.
+				unitsByKind: endpoints.length ? countByKind(endpoints) : f.headline.unitsByKind,
 			}),
 		});
 	}
@@ -519,7 +579,7 @@ function getHtml(): string {
 			html += chip(s, s, f.issues.filter(i => i.service === s).length);
 		}
 		if (unattributed) {
-			html += '<span class="svcnote" title="These findings could not be traced to a single service — their endpoint maps to none, or to more than one">' +
+			html += '<span class="svcnote" title="These findings could not be traced to a single service — the unit maps to none, or to more than one. Driven function calls land here by design: their target is a module path, which names a file rather than a service">' +
 				f.issues.filter(i => !i.service).length + ' unattributed</span>';
 		}
 		bar.innerHTML = html;
@@ -551,6 +611,10 @@ function getHtml(): string {
 			html += '</table>';
 		}
 
+		// What ran and how it went, before what went wrong: a run that mostly
+		// worked should read as a run that mostly worked.
+		html += latencySection(f);
+
 		html += '<h2>Issue clusters (' + f.issues.length + ')</h2>';
 		html += f.issues.length === 0 ? '<div class="empty">No failures found in anything that was exercised.</div>' : '';
 		for (const i of f.issues) {
@@ -568,16 +632,20 @@ function getHtml(): string {
 				const row = (k, v, tip) => v
 					? '<tr><th' + (tip ? ' title="' + esc(tip) + '"' : '') + '>' + esc(k) + '</th><td>' + esc(v) + '</td></tr>'
 					: '';
-				html += row('Where', i.endpoint, 'The endpoint or oracle target that was driven');
-				html += row('Sent', ex.input, 'The exact request that reproduced this failure');
+				// A number is an HTTP status and says so; a word ('ok', 'error',
+				// 'timeout') is how a CLI invocation or a driven call ended, and
+				// labelling that "HTTP error" would invent a protocol it never spoke.
+				const got = typeof ex.status === 'number' ? 'HTTP ' + ex.status : (ex.status || '');
+				html += row('Where', i.endpoint, 'The endpoint, CLI invocation or function call that was driven');
+				html += row('Sent', ex.input, 'The exact input that reproduced this failure — the request for a route, the command line for a CLI invocation, the arguments for a driven call');
 				html += row('Strategy', ex.strategy, 'How the exerciser generated that input');
-				html += row('Got', (ex.status != null ? 'HTTP ' + ex.status : '') + (ex.detail && ex.detail !== 'HTTP ' + ex.status ? (ex.status != null ? ' — ' : '') + ex.detail : ''), 'What the service actually answered');
-				html += row('Expected', ex.expected, 'What a correct service would have answered');
+				html += row('Got', got + (ex.detail && ex.detail !== got ? (got ? ' — ' : '') + ex.detail : ''), 'What actually came back');
+				html += row('Expected', ex.expected, 'What a correct answer would have been');
 				html += row('Error', ex.error, 'The exception the call raised, when it raised one');
 				html += '</table>';
 			}
 			if (i.coveredFrames.length) {
-				html += '<div class="files" title="Functions the failing request actually reached — start reading here">reached ' +
+				html += '<div class="files" title="Functions the failing run actually reached — start reading here">reached ' +
 					i.coveredFrames.slice(0, 6).map(esc).join(' · ') +
 					(i.coveredFrames.length > 6 ? ' +' + (i.coveredFrames.length - 6) + ' more' : '') + '</div>';
 			}
@@ -586,9 +654,12 @@ function getHtml(): string {
 			html += '</div>';
 		}
 
-		// Dead code sits directly under the failures: both answer "what did Vinv
-		// find", and this one used to be a filter on the graph canvas where it could
-		// show you WHERE untraced code was and nothing else about it.
+	// Dead code is built here and appended LAST. It used to lead the page (just
+	// under the failures), which meant the first thing anyone saw after a run was
+	// a wall of code that had NOT executed — the least urgent thing Vinv knows,
+	// pushing what actually ran, how fast, and whether it worked below the fold.
+	function deadSection(f) {
+		let html = '';
 		const d = f.deadCode || { hasTrace: false, sections: [], analysed: 0, traced: 0, considered: 0, bound: '' };
 		html += '<h2>Dead code (' + d.sections.length + ')</h2>';
 		if (!d.hasTrace) {
@@ -630,6 +701,8 @@ function getHtml(): string {
 					'</div>';
 			}
 		}
+		return html;
+	}
 
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';
 		if (f.episodes.length === 0) {
@@ -692,30 +765,54 @@ function getHtml(): string {
 			html += '<div class="hint">environment = drift the engine attributed to its own planted state, not a code regression</div></div>';
 		}
 
-		html += '<h2>Latency profile per endpoint</h2>';
+	// What ran, and how it went. This is the answer to the first question anyone
+	// has after a run — which units were exercised, how much of each one
+	// executed, how fast, and what came back — so it is built here and rendered
+	// at the TOP. It used to sit six sections down, below dead code and the
+	// regression replay, where the successful half of a run was effectively
+	// invisible.
+	function latencySection(f) {
+		let html = '';
+		// The unit noun for THIS table's rows, not the headline's: a service filter
+		// can narrow a mixed workspace down to one kind.
+		const rowKinds = countByKind(f.endpoints);
+		const mixed = Object.keys(rowKinds).length > 1;
+		html += '<h2>Latency profile per ' + unitNoun(rowKinds, false) + '</h2>';
 		// A bare table header over zero rows reads as broken rather than empty, so
 		// the whole table is skipped and the section says why it is empty.
 		if (f.endpoints.length === 0) {
-			html += '<div class="empty">No endpoint has been exercised yet, so there is no latency to profile.</div>';
+			html += '<div class="empty">Nothing has been exercised yet — no endpoint, CLI invocation or driven call — so there is no latency to profile.</div>';
 		} else {
 		html += '<div class="walk-cta">Need the call tree, flamegraph and the exact inputs and outputs for one of these? ' +
 			'<button id="walk" type="button">Walk them one by one</button></div>';
 		const maxP95 = Math.max(1, ...f.endpoints.map((e) => e.p95Ms));
-		html += '<table><tr><th>Endpoint</th>' +
-			'<th title="Functions this endpoint can reach that a captured request actually executed (ran / reachable)">Coverage</th>' +
-			'<th title="Typical response time — half of the checked requests were faster than this">p50</th>' +
-			'<th title="The slow tail — 19 of 20 requests were faster than this">p95</th>' +
-			'<th style="width:30%" title="The slow tail, drawn relative to the slowest endpoint">p95 bar</th>' +
-			'<th title="How many requests got each HTTP status">Statuses</th></tr>';
+		html += '<table><tr><th>' + cap(unitNoun(rowKinds, false)) + '</th>' +
+			// Only when the rows disagree: a Kind column over a single-kind table
+			// repeats what the header already said.
+			(mixed ? '<th title="Which oracle drove this: an HTTP route, a CLI invocation recorded in .vinv/services.json, or a function called directly with generated arguments">Kind</th>' : '') +
+			'<th title="Functions this unit can reach that a captured run actually executed (ran / reachable)">Coverage</th>' +
+			'<th title="Typical time — half of the checked runs were faster than this">p50</th>' +
+			'<th title="The slow tail — 19 of 20 runs were faster than this">p95</th>' +
+			'<th style="width:30%" title="The slow tail, drawn relative to the slowest unit">p95 bar</th>' +
+			'<th title="How each run ended: HTTP status for a route, ok/error/timeout for a CLI invocation or driven call">Statuses</th></tr>';
 		for (const e of f.endpoints) {
 			const hot = e.p95Ms >= 200;
-			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge" title="No request has reached the function that serves this endpoint yet — usually it needs a login or a valid multi-step setup first">not reached</span>') + '</td>' +
+			const http = (e.unitKind || 'http_endpoint') === 'http_endpoint';
+			// "not reached" means something different per kind, and the HTTP wording
+			// (turned away by a login) is nonsense for a CLI run.
+			const notReached = http
+				? 'No request has reached the function that serves this endpoint yet — usually it needs a login or a valid multi-step setup first'
+				: 'The captures never show this unit\\'s own code running — the run may have failed before entering it, or tracing did not cover its package';
+			html += '<tr><td>' + esc(e.endpoint) + (e.handlerObserved ? '' : ' <span class="badge" title="' + notReached + '">not reached</span>') + '</td>' +
+				(mixed ? '<td>' + esc(kindNoun(e.unitKind || 'http_endpoint', false)) + '</td>' : '') +
 				'<td>' + esc(e.coverage) + '</td><td>' + e.p50Ms + 'ms</td><td' + (hot ? ' class="badge revert"' : '') + '>' + e.p95Ms + 'ms</td>' +
 				'<td><span class="bar' + (hot ? ' hot' : '') + '"><span style="width:' + Math.max(1, (e.p95Ms / maxP95) * 100) + '%"></span></span></td>' +
 				'<td>' + esc(Object.entries(e.statuses).map(([k, v]) => k + '×' + v).join(' ')) + '</td></tr>';
 		}
 		html += '</table>';
 		}
+		return html;
+	}
 
 		html += '<h2>Data the tests created (' + f.state.cleaned + '/' + f.state.created + ' cleaned up)</h2>';
 		if (f.state.rows.length === 0) {
@@ -736,6 +833,8 @@ function getHtml(): string {
 					'<span class="label">' + esc(s.name) + '</span></div><div class="why">' + esc(s.reason) + '</div></div>';
 			}
 		}
+
+		html += deadSection(f);
 
 		html += '<div class="hint">Machine-readable copy of everything above: .vinv/reports/findings.json (this tab\\'s backing file).</div>';
 		document.getElementById('content').innerHTML = html;

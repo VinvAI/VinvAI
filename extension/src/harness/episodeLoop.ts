@@ -1244,6 +1244,28 @@ export async function runEpisode(
 				// harness runs, replay verification, escalations — is unchanged.
 				notifToken.onCancellationRequested(() => cts.cancel());
 				const token = cts.token;
+				// The live thinking feed for the episode's SIDE agents (acceptance
+				// authors, stall judge, verification judge). They are dispatched the
+				// same way the fix is and run just as long, but used to report
+				// nothing at all — the episode sat on "generating acceptance
+				// tests…" for minutes with no sign of what the agent was doing.
+				// Same rule as the fix feed: the chat transcript is the surface, the
+				// notification only mirrors when the panel is closed. Tagged with
+				// the agent's name because these interleave with the fix's own lines.
+				// Test authors fan out N at once under ONE subcommand name, so the
+				// tag carries a sequence number — otherwise three authors' lines
+				// interleave under an identical label and read as one confused agent.
+				let sideAgentSeq = 0;
+				const sideAgentFeed = (agentName: string) => (line: string) => {
+					if (!isAskVinvOpen()) {
+						progress.report({ message: `${agentName}: ${line.slice(0, 80)}` });
+					}
+					postEpisodeUpdate({
+						kind: 'thinking',
+						text: `[${agentName}] ${line}`,
+						sessionId: owningSessionId,
+					});
+				};
 				let priorFailure: string | undefined = task.priorFailureSeed;
 				// Acceptance/regression oracle: generated ONCE, before any fix is
 				// dispatched, from the pre-fix code — so acceptance tests provably
@@ -1277,6 +1299,7 @@ export async function runEpisode(
 									name,
 									prompt,
 									triggerRun.tree,
+									sideAgentFeed(`${name} #${++sideAgentSeq}`),
 								),
 						}
 					: null;
@@ -1456,6 +1479,7 @@ export async function runEpisode(
 								symbolContext || '(no symbols grounded from the issue — inspect the repository)',
 								acceptanceToken,
 								token,
+								sideAgentFeed('acceptance-tests'),
 							);
 						}
 					} catch (e) {
@@ -2582,13 +2606,31 @@ export async function disputeVerifiedEpisode(
 		sessionId: undefined,
 	});
 	const goalBin = getBinPath(context, 'goal');
+	// The dispute already opened an episode block in the transcript above, so the
+	// authoring agent's thinking streams into it exactly like a fix episode's —
+	// this run takes minutes and used to show one static "building a
+	// counterexample…" line for all of them.
+	let disputeProgress: vscode.Progress<{ message?: string }> | undefined;
+	const disputeFeed = (agentName: string) => (line: string) => {
+		if (!isAskVinvOpen()) {
+			disputeProgress?.report({ message: `${agentName}: ${line.slice(0, 80)}` });
+		}
+		postEpisodeUpdate({ kind: 'thinking', text: `[${agentName}] ${line}`, sessionId: undefined });
+	};
 	const agentSpawn: AgentSpawn | null = fs.existsSync(goalBin)
 		? {
 				binPath: goalBin,
 				env: getHandbookEnv(path.dirname(goalBin), workspaceRoot),
 				cwd: workspaceRoot,
 				dispatch: (name, prompt) =>
-					dispatchAgentPrompt(getHarnessId(), workspaceRoot, name, prompt),
+					dispatchAgentPrompt(
+						getHarnessId(),
+						workspaceRoot,
+						name,
+						prompt,
+						undefined,
+						disputeFeed(name),
+					),
 			}
 		: null;
 	// Locate this issue's test set at the current epoch (may be absent — the
@@ -2611,8 +2653,9 @@ export async function disputeVerifiedEpisode(
 		// so as a toast it was minutes of corner real estate the user could not
 		// dismiss. Every outcome below ends in its own message or opened file.
 		{ location: vscode.ProgressLocation.Window, title: 'Vinv: building a counterexample test from your report…' },
-		() =>
-			strengthenAcceptanceFromNote(
+		(progress) => {
+			disputeProgress = progress;
+			return strengthenAcceptanceFromNote(
 				agentSpawn,
 				workspaceRoot,
 				disputable.issue as string,
@@ -2624,7 +2667,8 @@ export async function disputeVerifiedEpisode(
 				// their report (merging first would pollute the oracle with a test
 				// the human never endorsed).
 				{ deferMerge: true },
-			),
+			);
+		},
 	);
 	// Crash-class reproduction cannot retract: the test failed before ever
 	// checking the reported case (a hallucinated API, a fixture error). Both

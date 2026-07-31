@@ -122,11 +122,18 @@ export interface FindingsIssue {
 	/** The representative failure: what was sent, what came back, what was expected. */
 	exemplar: {
 		strategy: string;
-		status: number | null;
+		/**
+		 * An HTTP status for a route; the word a non-HTTP oracle recorded
+		 * (`ok` | `error` | `timeout`) for a CLI invocation or a driven call.
+		 * Non-numeric outcomes used to be coerced to null, which silently emptied
+		 * the "Got" row for every CLI failure — the reader could see that
+		 * something failed but not how it ended.
+		 */
+		status: number | string | null;
 		detail: string;
 		expected: string;
 		error: string;
-		/** The request that triggered it, JSON-rendered for display. */
+		/** The input that triggered it (request body, argv, or call arguments). */
 		input: string;
 	} | null;
 	/** Functions the failing case reached — where to start reading. */
@@ -188,8 +195,18 @@ export interface Findings {
 	schemaVersion: 1;
 	root: string;
 	headline: {
+		/**
+		 * Exercised UNITS, not just HTTP routes: the exerciser drives CLI
+		 * invocations and functions too, and both land in `endpoints` below
+		 * spelled `METHOD path` like everything else. The field keeps its name
+		 * because every reader joins on it (same call the scorecard makes), but
+		 * the count is over all kinds — the same population the Traces panel
+		 * lists — and `unitsByKind` is what lets the view name it honestly.
+		 */
 		endpointsCovered: number;
 		endpointsTotal: number;
+		/** `{ http_endpoint: 12, cli_invocation: 3 }` — how the total breaks down. */
+		unitsByKind: Record<string, number>;
 		symbolsCovered: number;
 		symbolsTotal: number;
 		issuesFound: number;
@@ -252,6 +269,13 @@ export interface Findings {
 	};
 	endpoints: Array<{
 		endpoint: string;
+		/**
+		 * Which oracle drove this unit: `http_endpoint` | `cli_invocation` |
+		 * `function_call`. Carried so the latency table can say what a row IS —
+		 * "RUN acme-tool" under a column headed "Endpoint" reads as a mislabelled
+		 * route rather than the CLI run it is.
+		 */
+		unitKind: string;
 		service?: string;
 		p50Ms: number;
 		p95Ms: number;
@@ -325,7 +349,71 @@ function renderInput(input: any): string {
 	return JSON.stringify(input);
 }
 
-function toFindingsIssue(c: any, services: Map<string, string>): FindingsIssue {
+/**
+ * How the exercised total breaks down by oracle.
+ *
+ * Prefers the scorecard's own `units_by_kind`, and falls back to counting the
+ * rows — a scorecard written before that field existed still has `unit_kind`
+ * per row, and one written before EITHER is all-HTTP by construction, which is
+ * exactly what the `http_endpoint` default yields.
+ */
+function unitsByKind(declared: any, rows: any): Record<string, number> {
+	if (declared && typeof declared === 'object' && Object.keys(declared).length > 0) {
+		return Object.fromEntries(
+			Object.entries(declared as Record<string, unknown>).map(([k, v]) => [k, Number(v ?? 0)]),
+		);
+	}
+	const counts: Record<string, number> = {};
+	for (const r of Array.isArray(rows) ? rows : []) {
+		const kind = String(r?.unit_kind ?? 'http_endpoint');
+		counts[kind] = (counts[kind] ?? 0) + 1;
+	}
+	return counts;
+}
+
+/**
+ * The service that owns a unit, from whichever ids it is known by.
+ *
+ * HTTP endpoints resolve through the apis.json → services.json join that
+ * buildServiceIndex performs. A CLI invocation never can: the exerciser mints
+ * its id as `<service>#<index>` (invocations.py) and that id appears in no
+ * apis.json, so every CLI row and every CLI issue counted as "unattributed"
+ * and vanished the moment a service chip was clicked. The prefix IS the
+ * service name — read, not guessed, and accepted only when it names a service
+ * the workspace actually inventoried.
+ *
+ * Driven function calls stay unattributed on purpose: their id is a module
+ * path (`pkg.mod:fn`), which maps to a file rather than to a service, and
+ * picking an owner off a package-name resemblance is exactly the guess this
+ * join refuses to make.
+ */
+function serviceForUnit(
+	index: Map<string, string>,
+	serviceNames: ReadonlySet<string>,
+	keys: Array<string | undefined>,
+): string | undefined {
+	for (const key of keys) {
+		if (key) {
+			const known = index.get(key);
+			if (known) {
+				return known;
+			}
+		}
+	}
+	for (const key of keys) {
+		const m = /^(.+)#\d+$/.exec(key ?? '');
+		if (m && serviceNames.has(m[1])) {
+			return m[1];
+		}
+	}
+	return undefined;
+}
+
+function toFindingsIssue(
+	c: any,
+	services: Map<string, string>,
+	serviceNames: ReadonlySet<string>,
+): FindingsIssue {
 	const ex = c.exemplar ?? null;
 	const where = `${c.method ?? ''} ${c.path ?? ''}`.trim();
 	const endpoint = where || String(c.endpoint_id ?? '');
@@ -334,14 +422,19 @@ function toFindingsIssue(c: any, services: Map<string, string>): FindingsIssue {
 		title: String(c.title ?? ''),
 		signature: String(c.signature ?? ''),
 		endpoint,
-		service: services.get(endpoint) ?? services.get(String(c.endpoint_id ?? '')),
+		service: serviceForUnit(services, serviceNames, [endpoint, String(c.endpoint_id ?? '')]),
 		count: Number(c.count ?? 1),
 		dispatchable: isDispatchableKind(String(c.kind ?? '')),
 		evidenceFile: evidenceFileForKind(String(c.kind ?? '')),
 		exemplar: ex
 			? {
 					strategy: String(ex.strategy ?? ''),
-					status: typeof ex.status === 'number' ? ex.status : null,
+					status:
+						typeof ex.status === 'number'
+							? ex.status
+							: typeof ex.status === 'string' && ex.status
+								? ex.status
+								: null,
 					detail: String(ex.detail ?? ''),
 					expected: String(ex.expected ?? ''),
 					error: String(ex.error ?? ''),
@@ -418,9 +511,17 @@ export function buildFindings(workspaceRoot: string): Findings {
 	const regressRaw = readJsonl(path.join(ex, 'regress.jsonl'));
 	const ledger = readJsonl(path.join(ex, 'state_ledger.jsonl'));
 	const clusters: any[] = Array.isArray(issuesDoc.clusters) ? issuesDoc.clusters : [];
-	const issues = clusters.map((c) => toFindingsIssue(c, serviceIndex));
 	const servicesDoc = readJson(path.join(workspaceRoot, '.vinv', 'services.json')) ?? {};
-	const services = (Array.isArray(servicesDoc.services) ? servicesDoc.services : []).map(
+	// Both spellings, exactly as buildServiceIndex reads them: current engines
+	// write `{services: [...]}`, older ones wrote a bare array, and accepting
+	// only the first here left array-form workspaces with an empty Services
+	// section while their endpoints still attributed fine.
+	const serviceList: any[] = Array.isArray(servicesDoc)
+		? servicesDoc
+		: Array.isArray(servicesDoc.services)
+			? servicesDoc.services
+			: [];
+	const services = serviceList.map(
 		(s: any) => ({
 			name: String(s.name ?? ''),
 			kind: String(s.kind ?? ''),
@@ -428,6 +529,18 @@ export function buildFindings(workspaceRoot: string): Findings {
 			command: String(s.command ?? ''),
 		}),
 	);
+	const serviceNames = new Set<string>(services.map((s: { name: string }) => s.name).filter(Boolean));
+	const issues = clusters.map((c) => toFindingsIssue(c, serviceIndex, serviceNames));
+	// The scorecard row is label-only (`RUN some-command`); the unit id that
+	// carries the owning service lives in the profile it was assembled from, so
+	// the two are joined on the label they both spell the same way.
+	const unitIdForLabel = new Map<string, string>();
+	for (const p of Array.isArray(profile.endpoints) ? profile.endpoints : []) {
+		const label = `${p?.method ?? ''} ${p?.path ?? ''}`.trim();
+		if (label && p?.api_id) {
+			unitIdForLabel.set(label, String(p.api_id));
+		}
+	}
 
 	const episodes: FindingsEpisode[] = episodesRaw.slice(-MAX_EPISODES).map((e: any) => ({
 		at: Number(e.at ?? 0),
@@ -488,6 +601,7 @@ export function buildFindings(workspaceRoot: string): Findings {
 		headline: {
 			endpointsCovered: Number(after.endpoints_with_coverage ?? 0),
 			endpointsTotal: Number(after.endpoints_total ?? 0),
+			unitsByKind: unitsByKind(after.units_by_kind, scorecard.endpoints),
 			symbolsCovered: Number(after.symbols_covered ?? 0),
 			symbolsTotal: Number(after.symbols_total ?? 0),
 			// issues.json is authoritative — it is the list rendered below, and the
@@ -517,14 +631,21 @@ export function buildFindings(workspaceRoot: string): Findings {
 		opportunities: (profile.opportunities ?? []).map((o: any) => ({
 			kind: String(o.kind ?? ''),
 			endpoint: String(o.endpoint ?? ''),
-			service: serviceIndex.get(String(o.endpoint ?? '')),
+			service: serviceForUnit(serviceIndex, serviceNames, [
+				String(o.endpoint ?? ''),
+				unitIdForLabel.get(String(o.endpoint ?? '')),
+			]),
 			detail: String(o.detail ?? ''),
 			value: Number(o.value ?? 0),
 		})),
 		regress,
 		endpoints: (scorecard.endpoints ?? []).map((e: any) => ({
 			endpoint: String(e.endpoint ?? ''),
-			service: serviceIndex.get(String(e.endpoint ?? '')),
+			unitKind: String(e.unit_kind ?? 'http_endpoint'),
+			service: serviceForUnit(serviceIndex, serviceNames, [
+				String(e.endpoint ?? ''),
+				unitIdForLabel.get(String(e.endpoint ?? '')),
+			]),
 			p50Ms: Number(e.p50_ms ?? 0),
 			p95Ms: Number(e.p95_ms ?? 0),
 			coverage: String(e.coverage ?? ''),

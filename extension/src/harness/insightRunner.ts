@@ -148,6 +148,8 @@ export interface ObservedUnit {
 	trigger: string;
 	handler: string | null;
 	file: string;
+	/** `http_api`, `cli_command`, `script_main`, … — carried into the manifest. */
+	kind: string;
 	traceCount: number;
 }
 
@@ -183,6 +185,7 @@ export function observedUnits(
 				trigger: `${e.method} ${e.path}`,
 				handler: e.handler,
 				file: e.file,
+				kind: 'http_api',
 				traceCount: e.trace_count,
 			});
 			seen.add(e.id);
@@ -196,6 +199,7 @@ export function observedUnits(
 				trigger: entryPointLabel(entry),
 				handler: entry.handler,
 				file: entry.file,
+				kind: entry.kind,
 				traceCount: n,
 			});
 			seen.add(entry.id);
@@ -463,6 +467,14 @@ async function insightPassOnce(
 			endpoints.push({
 				id: ep.id,
 				trigger,
+				kind: ep.kind,
+				coverage: map?.coverage
+					? {
+							total: map.coverage.static_functions,
+							executed: map.coverage.executed,
+							pct: map.coverage.pct,
+						}
+					: undefined,
 				handler: ep.handler,
 				calltreePath,
 				reportPath,

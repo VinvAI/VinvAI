@@ -914,6 +914,116 @@ export function oneShotFlags(harness: HarnessDef, workspaceRoot: string): string
 	return ` ${harness.oneShotArgs.split(EMPTY_MCP_TOKEN).join(file)}`;
 }
 
+/** One content block of a `claude-stream-json` assistant envelope. */
+interface StreamBlock {
+	type?: string;
+	text?: unknown;
+	thinking?: unknown;
+	name?: unknown;
+	input?: unknown;
+}
+
+/**
+ * Turns a harness's raw stdout into the live thinking feed. See
+ * createHarnessStreamDecoder.
+ */
+export interface HarnessStreamDecoder {
+	/** Feeds one raw chunk; returns the human lines it COMPLETED (never partial). */
+	push(chunk: string): string[];
+	/** Completes a trailing partial line — output that never ended in a newline. */
+	flush(): string[];
+	/** The run's answer text: the decoded `result`, else assistant text, else raw. */
+	answer(raw: string): string;
+}
+
+/**
+ * The single decoder for agent output, shared by all three dispatch channels
+ * (runHarnessPrompt, runHarnessTask, dispatchAgentPrompt) so the thinking feed
+ * reads the same wherever the work was dispatched from — an episode fix, a
+ * bring-up, a listing, a verification agent.
+ *
+ * For `claude-stream-json` harnesses: assistant text and thinking blocks become
+ * lines, a tool call becomes `→ <tool> <args>`, and the final `result` envelope
+ * becomes the answer. Anything that is not a JSON event (CLI warnings, stderr)
+ * stays visible verbatim. A non-streaming harness passes straight through.
+ *
+ * Line-buffered on purpose: a chunk boundary is not a line boundary, so partial
+ * lines are held until the next chunk (or flush) completes them. Taking only a
+ * chunk's tail — what the task path used to do — silently dropped whole lines
+ * whenever the agent wrote a burst.
+ */
+export function createHarnessStreamDecoder(harness: HarnessDef): HarnessStreamDecoder {
+	const streamed = harness.stream === 'claude-stream-json';
+	let resultText: string | null = null;
+	let assistantText = '';
+	let pending = '';
+
+	const decodeLine = (raw: string): string[] => {
+		const line = raw.trim();
+		if (!line) {
+			return [];
+		}
+		if (!streamed) {
+			return [line];
+		}
+		let ev: { type?: string; message?: { content?: StreamBlock[] }; result?: unknown };
+		try {
+			ev = JSON.parse(line);
+		} catch {
+			// Not an event — CLI warnings and stderr errors stay visible.
+			return [line];
+		}
+		if (ev.type === 'assistant') {
+			const human: string[] = [];
+			for (const block of ev.message?.content ?? []) {
+				if (block.type === 'text' && typeof block.text === 'string') {
+					assistantText += block.text + '\n';
+					human.push(...block.text.split('\n'));
+				} else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+					human.push(...block.thinking.split('\n'));
+				} else if (block.type === 'tool_use') {
+					const args = JSON.stringify(block.input ?? {}).replace(/\s+/g, ' ');
+					human.push(`→ ${String(block.name ?? 'tool')} ${args.slice(0, 120)}`);
+				}
+			}
+			return human;
+		}
+		if (ev.type === 'result' && typeof ev.result === 'string') {
+			resultText = ev.result;
+		}
+		// result / system-init / user (tool-result) envelopes: not feed material.
+		return [];
+	};
+	const clean = (lines: string[]): string[] =>
+		lines.map((l) => l.trim()).filter((l) => l.length > 0);
+
+	return {
+		push(chunk: string): string[] {
+			pending += chunk;
+			const lines = pending.split('\n');
+			// The tail is whatever follows the last newline — an incomplete line
+			// that the next chunk continues (or flush() completes).
+			pending = lines.pop() ?? '';
+			const out: string[] = [];
+			for (const line of lines) {
+				out.push(...decodeLine(line));
+			}
+			return clean(out);
+		},
+		flush(): string[] {
+			const tail = pending;
+			pending = '';
+			return clean(decodeLine(tail));
+		},
+		answer(raw: string): string {
+			if (!streamed) {
+				return raw;
+			}
+			return resultText ?? (assistantText.trim() || raw);
+		},
+	};
+}
+
 /**
  * Lock-free, headless dispatch for the VERIFICATION agents (audit judge, test
  * authors, stall judge, goal suggestion): the goal engine renders a prompt
@@ -922,9 +1032,14 @@ export function oneShotFlags(harness: HarnessDef, workspaceRoot: string): string
  *
  * Deliberately NOT runHarnessPrompt: it takes no part in the single-flight
  * lock (test authors fan out N in parallel, and the audit judge runs while an
- * episode owns the lock), it never shows UI, and every failure — ide-chat
- * harness (no headless channel), missing CLI, timeout, empty reply — resolves
- * null so callers degrade to their "agent unavailable" safe paths.
+ * episode owns the lock), it shows no UI of its own, and every failure —
+ * ide-chat harness (no headless channel), missing CLI, timeout, empty reply —
+ * resolves null so callers degrade to their "agent unavailable" safe paths.
+ *
+ * `onUpdate` is the live thinking feed: these agents run for minutes, and a
+ * caller that owns a progress surface (an episode's notification and chat, the
+ * dead-code progress row) can now show what the agent is doing instead of an
+ * unexplained pause. Callers with no surface simply omit it.
  */
 export function dispatchAgentPrompt(
 	harnessId: string,
@@ -936,6 +1051,7 @@ export function dispatchAgentPrompt(
 	// trajectories and learning records stay in one place per workspace while
 	// the edits land in one tree per trigger.
 	cwd?: string,
+	onUpdate?: (line: string) => void,
 ): Promise<string | null> {
 	const harness = getHarness(harnessId);
 	if (harness.kind !== 'cli' || !harness.bin) {
@@ -993,45 +1109,28 @@ export function dispatchAgentPrompt(
 		child.stdin?.end();
 
 		let out = '';
-		let resultText: string | null = null;
-		let assistantText = '';
-		let pending = '';
-		const decode = (line: string): void => {
-			if (harness.stream !== 'claude-stream-json') {
-				return;
-			}
-			try {
-				const ev = JSON.parse(line) as {
-					type?: string;
-					message?: { content?: Array<{ type?: string; text?: unknown }> };
-					result?: unknown;
-				};
-				if (ev.type === 'assistant') {
-					for (const block of ev.message?.content ?? []) {
-						if (block.type === 'text' && typeof block.text === 'string') {
-							assistantText += block.text + '\n';
-						}
-					}
-				} else if (ev.type === 'result' && typeof ev.result === 'string') {
-					resultText = ev.result;
-				}
-			} catch {
-				// Not an event line — ignore for decoding (kept in `out`).
+		const decoder = createHarnessStreamDecoder(harness);
+		// stderr gets its own line buffer: it feeds the thinking feed (a CLI
+		// warning is exactly what the operator needs to see) but must stay out of
+		// `out`, which is both the failure classifier's input and — for a
+		// non-streaming harness — the reply itself.
+		const errDecoder = createHarnessStreamDecoder(harness);
+		const feed = (lines: string[]) => {
+			for (const line of lines) {
+				onUpdate?.(line);
 			}
 		};
 		child.stdout?.setEncoding('utf8');
 		child.stdout?.on('data', (chunk: string) => {
 			log?.write(chunk);
 			out = (out + chunk).slice(-400_000);
-			pending += chunk;
-			const lines = pending.split('\n');
-			pending = lines.pop() ?? '';
-			for (const line of lines) {
-				decode(line);
-			}
+			feed(decoder.push(chunk));
 		});
 		child.stderr?.setEncoding('utf8');
-		child.stderr?.on('data', (chunk: string) => log?.write(chunk));
+		child.stderr?.on('data', (chunk: string) => {
+			log?.write(chunk);
+			feed(errDecoder.push(chunk));
+		});
 
 		const timer = setTimeout(() => {
 			killProcessTree(child, 'SIGKILL');
@@ -1043,9 +1142,8 @@ export function dispatchAgentPrompt(
 		});
 		child.on('exit', (code) => {
 			clearTimeout(timer);
-			if (pending) {
-				decode(pending);
-			}
+			feed(decoder.flush());
+			feed(errDecoder.flush());
 			// One doomed spawn is enough: classify precondition failures here so
 			// the session block short-circuits every sibling agent immediately.
 			const infra = classifyHarnessFailure(out, code);
@@ -1054,10 +1152,11 @@ export function dispatchAgentPrompt(
 				settle(null);
 				return;
 			}
-			const answer =
-				harness.stream === 'claude-stream-json'
-					? (resultText ?? (assistantText.trim() || ''))
-					: out.trim();
+			// No raw fallback on the stream path (unlike runHarnessPrompt, which
+			// shows whatever it got): these replies are PARSED against a JSON
+			// schema, and handing the parser a wall of stream-json envelopes
+			// yields a bogus verdict where a clean null makes the caller degrade.
+			const answer = decoder.answer(harness.stream === 'claude-stream-json' ? '' : out.trim());
 			settle(answer ? answer : null);
 		});
 	});
@@ -1176,73 +1275,16 @@ export async function runHarnessPrompt(
 
 		let out = '';
 		let lastLine = '';
-		// claude-stream-json decode state: the final `result` envelope is the
-		// run's answer; accumulated assistant text is the fallback when the
-		// envelope never arrives (crash, cancellation).
-		let resultText: string | null = null;
-		let assistantText = '';
-		interface StreamBlock {
-			type?: string;
-			text?: unknown;
-			thinking?: unknown;
-			name?: unknown;
-			input?: unknown;
-		}
-		const decodeStreamJson = (line: string): string[] => {
-			let ev: { type?: string; message?: { content?: StreamBlock[] }; result?: unknown };
-			try {
-				ev = JSON.parse(line);
-			} catch {
-				// Not an event — CLI warnings and stderr errors stay visible.
-				return [line];
-			}
-			if (ev.type === 'assistant') {
-				const human: string[] = [];
-				for (const block of ev.message?.content ?? []) {
-					if (block.type === 'text' && typeof block.text === 'string') {
-						assistantText += block.text + '\n';
-						human.push(...block.text.split('\n'));
-					} else if (block.type === 'thinking' && typeof block.thinking === 'string') {
-						human.push(...block.thinking.split('\n'));
-					} else if (block.type === 'tool_use') {
-						const args = JSON.stringify(block.input ?? {}).replace(/\s+/g, ' ');
-						human.push(`→ ${String(block.name ?? 'tool')} ${args.slice(0, 120)}`);
-					}
-				}
-				return human;
-			}
-			if (ev.type === 'result' && typeof ev.result === 'string') {
-				resultText = ev.result;
-			}
-			// result / system-init / user (tool-result) envelopes: not feed material.
-			return [];
-		};
+		// The shared decoder owns the claude-stream-json state (the final `result`
+		// envelope is the run's answer; accumulated assistant text is the fallback
+		// when the envelope never arrives) and the line buffering.
+		const decoder = createHarnessStreamDecoder(harness);
 		// The text callers treat as the agent's final answer (directive parsing,
 		// dispute evidence, QnA rendering): for stream-json harnesses that is the
 		// decoded result, never the raw event JSON.
-		const answerText = () => {
-			if (harness.stream !== 'claude-stream-json') {
-				return out;
-			}
-			return resultText ?? (assistantText.trim() || out);
-		};
-		// Line-buffered: a chunk boundary is not a line boundary, so partial
-		// lines are held back and every COMPLETE line is emitted. Taking only
-		// the chunk's tail (the previous behaviour) silently dropped whole
-		// lines whenever the agent wrote a burst — fine for a one-line progress
-		// label, but it is also the live thinking feed the chat renders.
-		let pending = '';
-		const emit = (raw: string) => {
-			const line = raw.trim();
-			if (!line) {
-				return;
-			}
-			const human = harness.stream === 'claude-stream-json' ? decodeStreamJson(line) : [line];
-			for (const h of human) {
-				const t = h.trim();
-				if (!t) {
-					continue;
-				}
+		const answerText = () => decoder.answer(out);
+		const emit = (lines: string[]) => {
+			for (const t of lines) {
 				// Two consumers, two needs. `lastLine` is a ONE-LINE status label
 				// (progress toast, log tail) and must stay short. `onUpdate` is the
 				// live thinking feed the chat transcript renders, and must get the
@@ -1353,22 +1395,11 @@ export async function runHarnessPrompt(
 			// grows one unbounded V8 string until the extension host OOMs. The full
 			// transcript is already on disk in the trajectory log.
 			out = (out + chunk).slice(-400_000);
-			pending += chunk;
-			const lines = pending.split('\n');
-			// The tail is whatever follows the last newline — an incomplete line
-			// that the next chunk continues (or the flush below completes).
-			pending = lines.pop() ?? '';
-			for (const line of lines) {
-				emit(line);
-			}
+			emit(decoder.push(chunk));
 		};
 		// Output that never ends in a newline still has to reach `lastLine` —
 		// it is the failure detail reported on a non-zero exit.
-		const flush = () => {
-			const tail = pending;
-			pending = '';
-			emit(tail);
-		};
+		const flush = () => emit(decoder.flush());
 		child.stdout?.setEncoding('utf8');
 		child.stdout?.on('data', onData);
 		child.stderr?.setEncoding('utf8');
@@ -1576,21 +1607,30 @@ async function runHarnessTask(
 					const extCancelReg = extToken?.onCancellationRequested(cancel);
 					token.onCancellationRequested(cancel);
 
-					let chunks = 0;
 					let lastLine = '';
 					// Classification ring: the last 4000 chars of raw output, so a
 					// precondition refusal (auth/quota/network) is recognized on close.
 					let tailRing = '';
+					// Same live thinking feed the episode loop shows, on the tasks the
+					// operator actually waits on: generating the handbook, listing
+					// services, starting one. These run for minutes; the notification
+					// used to read "Claude Code working… (update 47)", which says the
+					// process is alive and nothing about whether it is doing the right
+					// thing — the raw chunk tail it kept was a stream-json envelope, so
+					// there was nothing human to show even had it wanted to.
+					const decoder = createHarnessStreamDecoder(harness);
+					const emit = (lines: string[]) => {
+						for (const t of lines) {
+							// One-line notification/status-bar label: clipped, and marked
+							// when clipped. The full text is in the trajectory log.
+							lastLine = t.length > 120 ? `${t.slice(0, 119)}…` : t;
+							report(lastLine);
+						}
+					};
 					const onData = (chunk: string) => {
 						log?.write(chunk);
-						chunks += 1;
 						tailRing = (tailRing + chunk).slice(-4000);
-						const line = chunk.trim().split('\n').pop() ?? '';
-						if (line) {
-							// Status label only — marked when clipped, never silently.
-							lastLine = line.length > 120 ? `${line.slice(0, 119)}…` : line;
-						}
-						report(`${harness.label} working… (update ${chunks})`);
+						emit(decoder.push(chunk));
 					};
 					child.stdout?.setEncoding('utf8');
 					child.stdout?.on('data', onData);
@@ -1618,6 +1658,9 @@ async function runHarnessTask(
 					report(`Sending instructions to ${harness.label}…`);
 					child.on('error', (err) => settle(false, err.message));
 					child.on('close', (code) => {
+						// Output that never ended in a newline still has to reach
+						// `lastLine` — it is the failure detail reported below.
+						emit(decoder.flush());
 						if (token.isCancellationRequested || extToken?.isCancellationRequested) {
 							settle(false);
 							return;

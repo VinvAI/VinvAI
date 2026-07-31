@@ -117,6 +117,35 @@ suite('flowModel: rail stages', () => {
 		assert.deepStrictEqual(f.links[0].args, ['api']);
 	});
 
+	test('a long service list keeps its tail, marked for the panel to collapse', () => {
+		const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+		const model = computeFlowModel(
+			facts({
+				discovered: true,
+				services: names.map((n) => ({
+					name: n,
+					state: 'ready' as const,
+					startCommandPath: `/w/.vinv/start_commands/${n}.json`,
+				})),
+			}),
+		);
+		const s = stage(model, 'services');
+		// Every service is still reachable — the overflow ones are carried with a
+		// flag, not replaced by an inert "…and N more" row that did nothing.
+		assert.deepStrictEqual(s.links.map((l) => l.label), names);
+		assert.strictEqual(s.links.filter((l) => !l.overflow).length, 7);
+		const hidden = s.links.filter((l) => l.overflow);
+		assert.deepStrictEqual(hidden.map((l) => l.label), ['h', 'i', 'j']);
+		// A collapsed row is a real link, so expanding it opens the same target.
+		assert.strictEqual(hidden[0].openPath, '/w/.vinv/start_commands/h.json');
+
+		// Under the cap, nothing is marked at all.
+		const few = computeFlowModel(
+			facts({ discovered: true, services: [{ name: 'api', state: 'ready' }] }),
+		);
+		assert.ok(stage(few, 'services').links.every((l) => !l.overflow));
+	});
+
 	test('test stage offers the trigger once a service can be driven', () => {
 		const idle = computeFlowModel(facts({ discovered: true }));
 		const t0 = stage(idle, 'test');

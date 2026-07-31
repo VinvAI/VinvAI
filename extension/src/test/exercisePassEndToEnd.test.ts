@@ -160,11 +160,15 @@ suite('the exercise pass: nothing serving', () => {
 		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
 
 		assert.strictEqual(result.outcome, 'done');
-		// The HTTP-shaped commands must NOT run: there is no service.
 		const commands = rec.calls.map((c) => c.args[0]);
-		assert.deepStrictEqual(commands, ['campaign']);
+		// `plan`/`run` are the HTTP-shaped commands and must NOT run: there is no
+		// service to plan against. `profile`/`scorecard` are not — they assemble
+		// whatever the service-free oracles drove, and without them the pass wrote
+		// issues.json alone, leaving every coverage counter at zero and the
+		// Findings panel reporting "nothing has been exercised" over real findings.
+		assert.deepStrictEqual(commands, ['invocations', 'campaign', 'profile', 'scorecard']);
 		assert.ok(
-			!rec.calls[0].args.includes('--base-url'),
+			rec.calls.every((c) => !c.args.includes('--base-url')),
 			'the HTTP oracle must stay unarmed with nothing serving',
 		);
 		// The regression this suite exists for: the pass returned before here.
@@ -232,6 +236,74 @@ suite('the exercise pass: nothing serving', () => {
 		assert.ok(
 			triggers.includes('invariant-violation'),
 			'a silent wrong value needs value-shaped criteria, not "no longer raises"',
+		);
+	});
+
+	// The pass used to return a hardcoded `endpointsCovered: 0, total: 0` here
+	// however much it had driven, because nothing on this path assembled a
+	// profile. Those zeros are what the Findings panel reads as "nothing has been
+	// exercised" — so a repo with a full set of captures, a driven CLI and three
+	// live findings rendered "No traces yet" and hid all three.
+	test('assembled coverage reaches the pass result rather than a hardcoded zero', async () => {
+		const root = workspace({ 'issues.json': { cluster_count: 0, clusters: [] } });
+		const rec = recorder();
+		const record = rec.ports.runEngine;
+		rec.ports.runEngine = async (bin, args, cwd, env) => {
+			// The engine writes profile.json; the fake must too, or the read-back is
+			// testing a fixture rather than the wiring that reads it.
+			if (args[0] === 'profile') {
+				fs.writeFileSync(
+					path.join(root, '.vinv', 'exercise', 'profile.json'),
+					JSON.stringify({
+						endpoint_count: 3,
+						endpoints_with_coverage: 2,
+						invariants_learned: 5,
+						endpoints: [],
+					}),
+					'utf8',
+				);
+			}
+			return record(bin, args, cwd, env);
+		};
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		assert.strictEqual(result.total, 3, 'the pass reported no units over an assembled profile');
+		assert.strictEqual(result.endpointsCovered, 2);
+		assert.strictEqual(result.invariants, 5);
+	});
+
+	test('a failed assembly costs counters, not the findings', async () => {
+		const root = workspace({
+			'issues.json': {
+				cluster_count: 1,
+				clusters: [
+					{
+						signature: 'sig-live',
+						kind: 'function-crash',
+						title: 'demo:fn — TypeError',
+						endpoint_id: 'demo:fn',
+						method: 'CALL',
+						path: 'demo:fn',
+					},
+				],
+			},
+		});
+		const rec = recorder();
+		const record = rec.ports.runEngine;
+		rec.ports.runEngine = async (bin, args, cwd, env) =>
+			args[0] === 'profile'
+				? { ok: false, error: 'profile exploded' }
+				: record(bin, args, cwd, env);
+
+		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
+
+		assert.strictEqual(result.outcome, 'done', 'a coverage step must not fail an earned pass');
+		assert.strictEqual(result.issues, 1);
+		assert.strictEqual(rec.dispatched.length, 1, 'the finding was still handed off');
+		assert.ok(
+			!rec.calls.some((c) => c.args[0] === 'scorecard'),
+			'the scorecard is pure assembly over the profile — there is nothing to assemble',
 		);
 	});
 
@@ -635,7 +707,13 @@ suite('the exercise pass: several services', () => {
 		const result = await exercisePassOnce(fakeContext(), root, rec.ports);
 
 		assert.strictEqual(result.outcome, 'done');
-		assert.deepStrictEqual(rec.calls.map((c) => c.args[0]), ['campaign']);
+		// The service-free sequence exactly: nothing HTTP-shaped, because no
+		// service came up, but still the coverage assembly that gives the panel
+		// something to count.
+		assert.deepStrictEqual(
+			rec.calls.map((c) => c.args[0]),
+			['invocations', 'campaign', 'profile', 'scorecard'],
+		);
 	});
 });
 

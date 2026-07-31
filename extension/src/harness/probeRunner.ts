@@ -726,7 +726,23 @@ async function authorMissingProbes(
 		binPath: goalBin,
 		env: getHandbookEnv(path.dirname(goalBin), workspaceRoot),
 		cwd: workspaceRoot,
-		dispatch: (name, prompt) => dispatchAgentPrompt(getHarnessId(), workspaceRoot, name, prompt),
+		dispatch: (name, prompt) =>
+			dispatchAgentPrompt(
+				getHarnessId(),
+				workspaceRoot,
+				name,
+				prompt,
+				undefined,
+				// The probe row is this run's only surface, and authoring is a real
+				// agent dispatch per endpoint — stream its thinking there instead of
+				// leaving the row frozen on the previous label for minutes.
+				(line) =>
+					publishProbeState({
+						phase: 'running',
+						label: `authoring probes — ${line.slice(0, 100)}`,
+						results: getProbeState().results,
+					}),
+			),
 	};
 	const merged = [...specs];
 	for (const spec of pending) {

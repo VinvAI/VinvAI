@@ -192,6 +192,11 @@ export async function tryRunDeadSection(
 					workspaceRoot,
 					dispatchName,
 					buildDriverPrompt(section, sources, env, context),
+					undefined,
+					// Live thinking in the progress row: writing a probe suite is a
+					// multi-minute agent run, and the row otherwise sat on its title
+					// with no way to tell work from a hang.
+					(line) => progress.report({ message: line.slice(0, 120) }),
 				);
 				// Three distinct failures, three distinct messages — "no driver" with
 				// no cause is a support question, not a report.
@@ -455,12 +460,23 @@ export async function analyzeDeadCodeSections(
 					`Vinv: reading ${targets.length} dead-code section(s) — ` +
 					`${planned.length} batch(es), ${Math.min(MAX_CONCURRENT_BATCHES, planned.length)} at a time…`,
 			},
-			() =>
+			(progress) =>
 				analyzeDeadSections(
 					workspaceRoot,
 					targets,
 					(name, prompt) =>
-						dispatchAgentPrompt(getHarnessId() || harnessId, workspaceRoot, name, prompt),
+						dispatchAgentPrompt(
+							getHarnessId() || harnessId,
+							workspaceRoot,
+							name,
+							prompt,
+							undefined,
+							// Batches run MAX_CONCURRENT_BATCHES at a time, so the row
+							// interleaves several agents — the batch tag says which one
+							// each line came from. Liveness, not a transcript; the full
+							// per-batch output is in .vinv/logs.
+							(line) => progress.report({ message: `${name}: ${line.slice(0, 100)}` }),
+						),
 					{
 						snapshot,
 						// Persist per batch, not once at the end: a crash after batch 3 of

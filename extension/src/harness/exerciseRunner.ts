@@ -735,11 +735,54 @@ export async function dispatchClusterFix(
 }
 
 /**
+ * Assembles what the service-free oracles drove into the artifacts every
+ * surface counts from: profile.json, then scorecard.json.
+ *
+ * `plan` and `run` really are HTTP-shaped and stay absent here. `profile` and
+ * `scorecard` are NOT: profile's `unit_executions` folds invocation_results and
+ * function_results in beside results.jsonl, and the scorecard is pure assembly
+ * over whatever the profile found. Skipping them left this path writing
+ * issues.json and nothing else — so `coverage.after_exercised` never existed,
+ * every unit and symbol counter read zero, and the Findings panel reads a zero
+ * total as "nothing has been exercised" and hid the very clusters this pass had
+ * just found. A toolchain repo therefore reported "No traces yet" on top of a
+ * full set of captures.
+ *
+ * Neither step can fail the pass: the findings are already earned and already
+ * published, and a missing scorecard costs counters, not evidence.
+ */
+async function assembleServiceFreeReport(
+	workspaceRoot: string,
+	bin: string,
+	env: NodeJS.ProcessEnv,
+	ports: ExercisePassPorts,
+): Promise<ExerciseProfile | null> {
+	// No `--service`: on this path there is no served target to attribute to, and
+	// the label would be a guess. Each non-HTTP unit carries its OWN trace_jsonl,
+	// so coverage joins per unit rather than through a service's capture dir.
+	const profiled = await ports.runEngine(bin, ['profile', workspaceRoot], workspaceRoot, env);
+	if (!profiled.ok) {
+		console.warn(
+			`Vinv: profile step failed on the service-free path (findings still published): ${profiled.error}`,
+		);
+		return null;
+	}
+	const scored = await ports.runEngine(bin, ['scorecard', workspaceRoot], workspaceRoot, env);
+	if (!scored.ok) {
+		console.warn(
+			`Vinv: scorecard step failed on the service-free path (findings still published): ${scored.error}`,
+		);
+	}
+	return readExerciseJson<ExerciseProfile>(workspaceRoot, 'profile.json');
+}
+
+/**
  * The exercise pass for a repo with nothing serving: `campaign` alone, without
  * `--base-url`, so the HTTP oracle stays unarmed and the four service-free
- * oracles do the work. `plan`/`run`/`profile`/`scorecard` are all HTTP-shaped
- * and are correctly absent here — findings land in issues.json exactly as they
- * do on the served path, and go to the SAME dispatch path from there.
+ * oracles do the work. `plan`/`run` are HTTP-shaped and are correctly absent
+ * here — findings land in issues.json exactly as they do on the served path,
+ * and go to the SAME dispatch path from there — while `profile`/`scorecard`
+ * close the pass either way (see assembleServiceFreeReport).
  */
 async function runServiceFreePass(
 	context: vscode.ExtensionContext,
@@ -800,11 +843,15 @@ async function runServiceFreePass(
 		);
 		if (second.ok) {
 			const reissued = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+			const profile = await assembleServiceFreeReport(workspaceRoot, bin, env, ports);
 			publishExerciseState(
-				exerciseStateFromArtifacts(null, reissued, 'done', `${why} — ${drained.detail}`),
+				exerciseStateFromArtifacts(profile, reissued, 'done', `${why} — ${drained.detail}`),
 			);
 			return {
-				outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0,
+				outcome: 'done',
+				endpointsCovered: profile?.endpoints_with_coverage ?? 0,
+				total: profile?.endpoint_count ?? 0,
+				invariants: profile?.invariants_learned ?? 0,
 				issues: reissued?.clusters?.length ?? 0,
 			};
 		}
@@ -820,11 +867,20 @@ async function runServiceFreePass(
 	askUserForRemainingConfig(workspaceRoot, bin, env, ports);
 
 	const found = issues?.clusters?.length ?? 0;
+	const profile = await assembleServiceFreeReport(workspaceRoot, bin, env, ports);
 	publishExerciseState(
-		exerciseStateFromArtifacts(null, issues, 'done', `${why} — ${engineVerdict(workspaceRoot, found)}`),
+		exerciseStateFromArtifacts(
+			profile, issues, 'done', `${why} — ${engineVerdict(workspaceRoot, found)}`,
+		),
 	);
 	await dispatchFreshClusters(context, workspaceRoot, issues, ports);
-	return { outcome: 'done', endpointsCovered: 0, total: 0, invariants: 0, issues: found };
+	return {
+		outcome: 'done',
+		endpointsCovered: profile?.endpoints_with_coverage ?? 0,
+		total: profile?.endpoint_count ?? 0,
+		invariants: profile?.invariants_learned ?? 0,
+		issues: found,
+	};
 }
 
 /**
@@ -856,9 +912,13 @@ function askUserForRemainingConfig(
 					env,
 				);
 				const issues = readExerciseJson<ExerciseIssuesDoc>(workspaceRoot, 'issues.json');
+				// Re-assembled like the pass proper: this re-run produces the same
+				// evidence, and publishing it without a fresh profile/scorecard would
+				// roll the counters back to zero the moment a user answered a question.
+				const profile = await assembleServiceFreeReport(workspaceRoot, bin, env, ports);
 				publishExerciseState(
 					exerciseStateFromArtifacts(
-						null, issues, 'done', engineVerdict(workspaceRoot, issues?.clusters?.length ?? 0),
+						profile, issues, 'done', engineVerdict(workspaceRoot, issues?.clusters?.length ?? 0),
 					),
 				);
 			},

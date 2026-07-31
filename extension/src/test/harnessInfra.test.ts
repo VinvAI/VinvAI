@@ -24,6 +24,7 @@ import * as path from 'path';
 import {
 	classifyHarnessFailure,
 	clearHarnessBlock,
+	createHarnessStreamDecoder,
 	dispatchAgentPrompt,
 	getHarness,
 	getHarnessBlock,
@@ -268,6 +269,67 @@ suite('gateAttemptRun: the episode terminal seam', () => {
 	test('missing detail falls back to the catalog remediation', () => {
 		const stop = gateAttemptRun({ ok: false, infra: 'auth' }, cursor);
 		assert.ok(stop?.remediation.includes('cursor-agent login'));
+	});
+});
+
+suite('createHarnessStreamDecoder: the shared live thinking feed', () => {
+	const assistant = (blocks: unknown[]): string =>
+		JSON.stringify({ type: 'assistant', message: { content: blocks } });
+
+	test('surfaces thinking, text and tool calls as human lines', () => {
+		const d = createHarnessStreamDecoder(getHarness('claude-code'));
+		const lines = d.push(
+			assistant([
+				{ type: 'thinking', thinking: 'the port is already held' },
+				{ type: 'text', text: 'Starting the API service' },
+				{ type: 'tool_use', name: 'Bash', input: { command: 'uvicorn app:api' } },
+			]) + '\n',
+		);
+		assert.deepStrictEqual(lines, [
+			'the port is already held',
+			'Starting the API service',
+			'→ Bash {"command":"uvicorn app:api"}',
+		]);
+	});
+
+	test('a chunk boundary mid-line loses nothing', () => {
+		const d = createHarnessStreamDecoder(getHarness('claude-code'));
+		const event = assistant([{ type: 'text', text: 'listing services' }]) + '\n';
+		const cut = Math.floor(event.length / 2);
+		// The half-line is held, not emitted as garbage…
+		assert.deepStrictEqual(d.push(event.slice(0, cut)), []);
+		// …and completes when the rest arrives.
+		assert.deepStrictEqual(d.push(event.slice(cut)), ['listing services']);
+	});
+
+	test('flush completes output that never ended in a newline', () => {
+		const d = createHarnessStreamDecoder(getHarness('claude-code'));
+		assert.deepStrictEqual(d.push(assistant([{ type: 'text', text: 'done' }])), []);
+		assert.deepStrictEqual(d.flush(), ['done']);
+	});
+
+	test('non-event output (CLI warnings, stderr) stays visible verbatim', () => {
+		const d = createHarnessStreamDecoder(getHarness('claude-code'));
+		assert.deepStrictEqual(d.push('warning: config not found\n'), ['warning: config not found']);
+	});
+
+	test('the answer is the result envelope, falling back to assistant text', () => {
+		const withResult = createHarnessStreamDecoder(getHarness('claude-code'));
+		withResult.push(assistant([{ type: 'text', text: 'chatter' }]) + '\n');
+		withResult.push(JSON.stringify({ type: 'result', result: 'the final answer' }) + '\n');
+		assert.strictEqual(withResult.answer('raw'), 'the final answer');
+		// Crash/cancellation: no result envelope ever arrives.
+		const noResult = createHarnessStreamDecoder(getHarness('claude-code'));
+		noResult.push(assistant([{ type: 'text', text: 'partial work' }]) + '\n');
+		assert.strictEqual(noResult.answer('raw'), 'partial work');
+		// Nothing decodable at all: the caller's raw fallback.
+		assert.strictEqual(createHarnessStreamDecoder(getHarness('claude-code')).answer('raw'), 'raw');
+	});
+
+	test('a non-streaming harness passes its output through line by line', () => {
+		const d = createHarnessStreamDecoder(getHarness('cursor'));
+		assert.deepStrictEqual(d.push('first\nsecond\n'), ['first', 'second']);
+		assert.strictEqual(d.answer('raw stdout'), 'raw stdout');
 	});
 });
 

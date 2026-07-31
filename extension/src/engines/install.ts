@@ -9,6 +9,7 @@
  * their machine.
  */
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import * as path from 'path';
 import {
 	REPO_URL,
@@ -16,6 +17,8 @@ import {
 	cargoPath,
 	defaultEnginesCloneDir,
 	engineCommand,
+	engineRunDonePath,
+	engineSyncStampPath,
 	enginesRootDir,
 	enginesSynced,
 	resolveIndexBinary,
@@ -113,6 +116,69 @@ export function cargoBuildCommand(root: string): string {
 }
 
 /**
+ * Records that the engines were materialised for the commit now on disk — the
+ * last step of every terminal that syncs or builds them, so it runs only if all
+ * the steps before it succeeded (see chainSteps).
+ *
+ * The mtime is the signal (see engineSyncStampPath); the sha is written so the
+ * file explains itself to anyone who finds it. `>` redirects a native command's
+ * stdout in PowerShell and POSIX shells alike, so one spelling covers both.
+ */
+export function syncStampCommand(root: string): string {
+	return `git -C "${root}" rev-parse HEAD > "${engineSyncStampPath(root)}"`;
+}
+
+/**
+ * Announces that the terminal is done, whatever happened in it. Sent as its own
+ * line rather than chained onto the steps, so the shell runs it after the chain
+ * regardless of how the chain ended — including a chain the user interrupted.
+ */
+function runDoneCommand(root: string): string {
+	return `echo vinv-engines-run-finished > "${engineRunDonePath(root)}"`;
+}
+
+/** How long to wait on a running engines terminal, and how often to look. */
+const RUN_WAIT_MS = 45 * 60_000;
+const RUN_POLL_MS = 5_000;
+
+/**
+ * Resolves when the engines terminal launched most recently has finished. Always
+ * Promise.resolve() when none was launched, so callers can await it
+ * unconditionally.
+ */
+let terminalRun: Promise<void> = Promise.resolve();
+
+/**
+ * Awaits the engines terminal, if one is running.
+ *
+ * "Finished" means the shell got to the end of the command line — a failed sync,
+ * a failed build and a successful one all resolve this, and so does the ceiling
+ * below. It deliberately reports nothing about the outcome: callers wait so they
+ * are not racing a checkout mid-flight, and a build that failed is a state they
+ * still have to cope with. Whether the engines came out usable is a question for
+ * the filesystem (enginesMatchPin), not for this.
+ */
+export function awaitEnginesTerminal(): Promise<void> {
+	return terminalRun;
+}
+
+/** Polls for the done marker, giving up — and resolving anyway — at the ceiling. */
+function watchForRunDone(root: string): Promise<void> {
+	return new Promise<void>((resolve) => {
+		const done = engineRunDonePath(root);
+		const deadline = Date.now() + RUN_WAIT_MS;
+		const tick = (): void => {
+			if (fs.existsSync(done) || Date.now() >= deadline) {
+				resolve();
+				return;
+			}
+			setTimeout(tick, RUN_POLL_MS);
+		};
+		setTimeout(tick, RUN_POLL_MS);
+	});
+}
+
+/**
  * Joins shell steps so each runs only if the previous one succeeded, in the
  * syntax of `shell`.
  *
@@ -163,8 +229,16 @@ function withPathPrefix(dirs: string[], command: string, shell: 'powershell' | '
  *
  * Shared by the install and the pinned-ref update ([./update]) so both surface
  * the same way — visible, in the user's own shell, nothing hidden.
+ *
+ * `stampRoot` makes the run observable, and every caller whose steps materialise
+ * the engines (sync, build, or both) should pass it. Two markers come out of it:
+ * the sync stamp, chained so it lands only on success, and the done marker, sent
+ * as a separate line so it lands however the run ended. Doing both here rather
+ * than at each call site is what keeps a new caller from silently leaving the
+ * engines looking permanently stale, or leaving a waiter hanging on a run it
+ * cannot see the end of.
  */
-export function runInEnginesTerminal(name: string, steps: string[]): void {
+export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: string): void {
 	const isWin = process.platform === 'win32';
 	const terminal = vscode.window.createTerminal(
 		isWin ? { name, shellPath: 'powershell.exe' } : { name },
@@ -174,7 +248,24 @@ export function runInEnginesTerminal(name: string, steps: string[]): void {
 	const toolDirs = [uvPath(), cargoPath()]
 		.filter((p): p is string => p !== null)
 		.map((p) => path.dirname(p));
-	terminal.sendText(withPathPrefix(toolDirs, chainSteps(steps, shell), shell));
+	const all = stampRoot ? [...steps, syncStampCommand(stampRoot)] : steps;
+	if (stampRoot) {
+		// Clear the previous run's marker BEFORE the shell can write this one's,
+		// or a waiter would read "finished" off a run that ended hours ago.
+		try {
+			fs.rmSync(engineRunDonePath(stampRoot), { force: true });
+		} catch {
+			// Unwritable engines root: the wait falls back to its ceiling.
+		}
+	}
+	terminal.sendText(withPathPrefix(toolDirs, chainSteps(all, shell), shell));
+	if (stampRoot) {
+		// A second line, not a chained step: the shell reads it only once the
+		// command above returns, so it runs whether that command succeeded, failed,
+		// or was interrupted — which is exactly what "the terminal is done" means.
+		terminal.sendText(runDoneCommand(stampRoot));
+		terminalRun = watchForRunDone(stampRoot);
+	}
 }
 
 /**
@@ -204,7 +295,7 @@ export async function installEngines(context: vscode.ExtensionContext): Promise<
 				'uv sync',
 				cargoBuildCommand(root),
 			];
-	runInEnginesTerminal('Vinv Engines Install', steps);
+	runInEnginesTerminal('Vinv Engines Install', steps, root);
 	void vscode.window.showInformationMessage(
 		'Vinv: Installing engines in the terminal. When it finishes, discovery and tracing are ready to run.',
 	);

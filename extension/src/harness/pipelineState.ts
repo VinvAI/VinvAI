@@ -19,6 +19,16 @@ import * as vscode from 'vscode';
 /** Where the insight stage currently sits. */
 export type InsightPhase = 'idle' | 'running' | 'done' | 'failed' | 'skipped';
 
+/** How much of a unit's static call tree the capture actually executed. */
+export interface InsightCoverage {
+	/** Resolved symbols in the static tree (the denominator). */
+	total: number;
+	/** How many of them the trace observed running. */
+	executed: number;
+	/** executed/total as a percentage, as the engine rounded it. */
+	pct: number;
+}
+
 /** One endpoint's built insight artifacts, as recorded in the manifest. */
 export interface EndpointInsight {
 	/** Entry-point id (identification's api id). */
@@ -26,6 +36,21 @@ export interface EndpointInsight {
 	/** Human trigger, e.g. "GET /health". */
 	trigger: string;
 	handler: string | null;
+	/**
+	 * Kind of starting point — `http_api`, `cli_command`, `script_main`, … Absent
+	 * on manifests written before non-HTTP units were built at all.
+	 */
+	kind?: string;
+	/**
+	 * Coverage from the runtime overlay, for every traced unit.
+	 *
+	 * The engine computes this on every tracemap and it was thrown away here, so
+	 * the only way to show "how much of this ran" was to re-read and re-walk each
+	 * calltree-<id>.json — which is why no surface showed it. The exerciser's
+	 * scorecard has a coverage number too, but only for units IT drove; this one
+	 * exists for anything the captures saw.
+	 */
+	coverage?: InsightCoverage;
 	/** Absolute path of the call-tree JSON artifact, or null when it failed. */
 	calltreePath: string | null;
 	/** Absolute path of the smoke/flamegraph HTML report, or null when it failed. */

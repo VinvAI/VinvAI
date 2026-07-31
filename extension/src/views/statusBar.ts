@@ -34,6 +34,8 @@ import {
 import { collectRuntimeErrorClusters } from '../harness/runtimeAnalysis';
 import { runningServiceNames, onServiceExit } from '../bringup/serviceRunner';
 import { isEpisodeRunning } from '../harness/episodeLoop';
+import { getExerciseState, onExerciseStateChange } from '../harness/pipelineState';
+import { isDiscovering } from '../index/discovery';
 import { actionableOpportunityCount, timeSaverLine } from './optimizationPanel';
 import { optimizeReportOpenedThisSession } from './optimizationReportView';
 
@@ -132,7 +134,13 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 		const failing = currentFailingCount(root);
 		// The spinner is the part that catches the eye from across the screen —
 		// motion reads before colour does, and it costs no width.
-		const spinning = running.length > 0 || isEpisodeRunning();
+		// Every kind of live work, not just a running SERVICE. An exercise pass
+		// and a discovery run are the two the tray spends most of its time
+		// showing, and leaving them out was why the bar stayed still through
+		// exactly the wait this indicator exists for.
+		const exercising = getExerciseState().phase === 'running';
+		const spinning =
+			running.length > 0 || isEpisodeRunning() || exercising || isDiscovering();
 		let text = `$(${spinning ? 'sync~spin' : 'circuit-board'}) Vinv e${epoch}`;
 		tooltip.appendMarkdown(
 			`**Vinv** — code map version ${epoch} (updates every time the code is re-indexed)\n\n`,
@@ -200,6 +208,9 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 		// keep spinning for up to fifteen seconds, which is precisely the kind
 		// of stale "still working" signal that teaches people to ignore it.
 		onServiceExit(() => update()),
+		// Same reason: the 15s poll is far too slow to track a pass that starts
+		// and finishes between ticks.
+		onExerciseStateChange(() => update()),
 		// Refresh promptly when the window regains focus (an agent or terminal
 		// may have reindexed while the user was away).
 		vscode.window.onDidChangeWindowState((s) => {

@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as path from 'path';
+import { awaitEnginesTerminal } from '../engines/install';
+import { engineRunDonePath, engineSyncStampPath } from '../engines/resolve';
 import {
 	decideInstallAction,
 	decidePinAction,
@@ -7,7 +10,7 @@ import {
 	shouldRunPinCheck,
 	type EngineUpdateMode,
 } from '../engines/update';
-import { shouldRediscoverForUpdate } from '../index/discovery';
+import { discoveryStamp, shouldRediscoverForUpdate } from '../index/discovery';
 
 /** Baseline: a stamped build whose managed clone sits on the wrong commit. */
 function pin(
@@ -168,39 +171,64 @@ suite('engines pin decision', () => {
 suite('engines environment freshness', () => {
 	test('never built is always stale', () => {
 		assert.strictEqual(
-			environmentNeedsSync({ synced: false, venvMtimeMs: 9, headMtimeMs: 1 }),
+			environmentNeedsSync({ synced: false, stampMtimeMs: 9, headMtimeMs: 1 }),
 			true,
 			'a checkout with no venv needs a sync no matter what the mtimes say',
 		);
 	});
 
-	test('a venv older than the checkout was built for a different commit', () => {
-		// The observed case: the checkout was moved to the pin by hand at 05:14
-		// while the venv dated from 02:58, so HEAD matched, the pin check reported
-		// up-to-date, and the engines ran v0.1.2 code against a v0.1.1 environment
-		// — 878 lines of uv.lock and two pyprojects apart.
+	test('a stamp older than the checkout was written before it moved', () => {
+		// The case this exists for: the checkout was moved to the pin by hand at
+		// 05:14 while the environment dated from 02:58, so HEAD matched, the pin
+		// check reported up-to-date, and the engines ran v0.1.2 code against a
+		// v0.1.1 environment — 878 lines of uv.lock and two pyprojects apart.
 		assert.strictEqual(
-			environmentNeedsSync({ synced: true, venvMtimeMs: 2_58, headMtimeMs: 5_14 }),
+			environmentNeedsSync({ synced: true, stampMtimeMs: 2_58, headMtimeMs: 5_14 }),
 			true,
 		);
 	});
 
-	test('a venv newer than the checkout is current', () => {
+	test('a stamp newer than the checkout is current', () => {
 		assert.strictEqual(
-			environmentNeedsSync({ synced: true, venvMtimeMs: 5_15, headMtimeMs: 5_14 }),
+			environmentNeedsSync({ synced: true, stampMtimeMs: 5_15, headMtimeMs: 5_14 }),
+			false,
+		);
+	});
+
+	test('a synced checkout with no stamp is NOT stale', () => {
+		// The deadlock this replaces, and the one an already-installed checkout
+		// lands in: reading the venv's own mtime, a `uv sync` that legitimately had
+		// nothing to rewrite left tracelens older than the .git/HEAD every checkout
+		// touches, so correct engines reported stale on every activation and no
+		// sync could ever clear it. An absent stamp means "synced by a build that
+		// did not stamp", which is unknown — and unknown never churns a terminal.
+		assert.strictEqual(
+			environmentNeedsSync({ synced: true, stampMtimeMs: null, headMtimeMs: 5_14 }),
 			false,
 		);
 	});
 
 	test('unreadable mtimes never churn a terminal on a guess', () => {
 		assert.strictEqual(
-			environmentNeedsSync({ synced: true, venvMtimeMs: null, headMtimeMs: 5_14 }),
+			environmentNeedsSync({ synced: true, stampMtimeMs: 5_14, headMtimeMs: null }),
 			false,
 		);
-		assert.strictEqual(
-			environmentNeedsSync({ synced: true, venvMtimeMs: 5_14, headMtimeMs: null }),
-			false,
-		);
+	});
+
+	test('the success stamp and the finished marker are different files', () => {
+		// They answer different questions — "built for this commit" vs "the
+		// terminal is no longer running" — and collapsing them would make a failed
+		// build look like a successful sync.
+		const root = path.join('C:', 'engines');
+		assert.notStrictEqual(engineSyncStampPath(root), engineRunDonePath(root));
+		for (const p of [engineSyncStampPath(root), engineRunDonePath(root)]) {
+			assert.strictEqual(path.dirname(p), root, 'markers live in the engines root');
+		}
+	});
+
+	test('waiting on the engines terminal is a no-op when none is running', async () => {
+		// Callers await it unconditionally, so idle must not cost them anything.
+		await awaitEnginesTerminal();
 	});
 });
 
@@ -251,8 +279,8 @@ suite('engines install decision (no checkout on the machine)', () => {
 suite('shouldRediscoverForUpdate', () => {
 	const at = (overrides: Partial<Parameters<typeof shouldRediscoverForUpdate>[0]> = {}) => ({
 		discovered: true,
-		seen: '0.2.0',
-		version: '0.2.1',
+		seen: discoveryStamp('0.2.0'),
+		stamp: discoveryStamp('0.2.1'),
 		...overrides,
 	});
 
@@ -260,8 +288,8 @@ suite('shouldRediscoverForUpdate', () => {
 		assert.strictEqual(shouldRediscoverForUpdate(at()), true);
 	});
 
-	test('the same version does not re-discover on every window reload', () => {
-		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1' })), false);
+	test('the same build does not re-discover on every window reload', () => {
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: discoveryStamp('0.2.1') })), false);
 	});
 
 	test('an undiscovered workspace is left to the normal first-run path', () => {
@@ -274,22 +302,40 @@ suite('shouldRediscoverForUpdate', () => {
 		);
 	});
 
-	test('no recorded version is NOT treated as an update', () => {
-		// Every workspace discovered before the marker existed looks like this. A
-		// full re-index (plus the handbook and bring-up agents) on workspaces that
-		// are perfectly current is the wrong direction to err in.
-		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: undefined })), false);
+	test('no recorded build IS treated as an update', () => {
+		// Every workspace discovered before the marker existed looks like this, and
+		// its artifacts are the oldest on the machine. Staying quiet here is the one
+		// case where installing a build provably changes nothing, so it re-discovers
+		// — once, since the marker is written as soon as the pass completes.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: undefined })), true);
+	});
+
+	test('a marker left by the version-only logic is stale', () => {
+		// The state on every install carrying a bare '0.2.1' from an earlier build
+		// of this same version: it must run the pass, not read as already-current.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1' })), true);
+	});
+
+	test('a forced revision re-discovers a version that did not move', () => {
+		// The whole point of REDISCOVER_REV: same version number, new build, and
+		// every install of it re-discovers with no user action.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1#0' })), true);
+		assert.notStrictEqual(discoveryStamp('0.2.1'), '0.2.1');
 	});
 
 	test('an unknown current version never forces work', () => {
-		// packageJSON.version missing — comparing against '' would make every
+		// packageJSON.version missing — an empty stamp must not make every
 		// activation look like a change.
-		assert.strictEqual(shouldRediscoverForUpdate(at({ version: '' })), false);
+		assert.strictEqual(discoveryStamp(''), '');
+		assert.strictEqual(shouldRediscoverForUpdate(at({ stamp: '' })), false);
 	});
 
 	test('a downgrade counts too', () => {
 		// Rolling back also changes which engines the extension is cut against, so
 		// the artifacts are equally stale. This is a change test, not an ordering one.
-		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1', version: '0.2.0' })), true);
+		assert.strictEqual(
+			shouldRediscoverForUpdate(at({ seen: discoveryStamp('0.2.1'), stamp: discoveryStamp('0.2.0') })),
+			true,
+		);
 	});
 });

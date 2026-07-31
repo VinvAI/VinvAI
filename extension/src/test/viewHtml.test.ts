@@ -334,6 +334,13 @@ suite('findings view: episode attempts render legibly', () => {
 		return els.content.innerHTML;
 	}
 
+	/** The headline tiles, which live outside #content. */
+	function renderedTiles(f: unknown): string {
+		const { api, els } = evalWebviewScript(getFindingsHtml(), ['render']);
+		api.render(f);
+		return els.tiles.innerHTML;
+	}
+
 	test('each attempt shows kept/reverted, the numeric CI, and its order', () => {
 		const html = rendered(findings);
 		assert.ok(html.includes('>kept</span>'), 'accepted attempt labeled kept');
@@ -345,6 +352,27 @@ suite('findings view: episode attempts render legibly', () => {
 		assert.ok(!html.includes('1. add index'), 'single-attempt episodes not numbered');
 		assert.ok(html.includes('no measurement'), 'unmeasured attempt stays honest');
 		assert.ok(html.includes('suite ✗'), 'behavior-suite failure visible');
+	});
+
+	test('what ran leads the page and dead code closes it', () => {
+		// The page used to open on dead code — a list of what did NOT run — with
+		// the latency profile six sections below it. After a run, the successful
+		// half was the part you had to scroll for.
+		const html = rendered({
+			...mixedUnits,
+			deadCode: { hasTrace: true, sections: [], analysed: 0, traced: 3, considered: 9, bound: 'src/' },
+		});
+		const latency = html.indexOf('Latency profile');
+		const issues = html.indexOf('Issue clusters');
+		const dead = html.indexOf('Dead code');
+		assert.ok(latency > -1 && issues > -1 && dead > -1, 'all three sections render');
+		assert.ok(latency < issues, 'what ran comes before what went wrong');
+		assert.ok(dead > issues, 'dead code no longer sits under the failures');
+		assert.strictEqual(
+			dead,
+			Math.max(latency, issues, dead),
+			'dead code is the last section on the page',
+		);
 	});
 
 	test('empty state names the real trigger: optimize.jsonl episodes from panel or exerciser', () => {
@@ -372,11 +400,94 @@ suite('findings view: episode attempts render legibly', () => {
 		});
 		assert.ok(html.includes('>not reached</span>'), 'unreached endpoint labeled in plain words');
 		assert.ok(!html.includes('handler unseen'), 'the jargon badge is gone');
-		assert.ok(html.includes('title="Typical response time'), 'p50 column tooltip');
+		assert.ok(html.includes('title="Typical time'), 'p50 column tooltip');
 		assert.ok(html.includes('title="The slow tail'), 'p95 column tooltip');
+		assert.ok(html.includes('<th>Endpoint</th>'), 'an all-HTTP table still says endpoint');
+		assert.ok(!html.includes('>Kind</th>'), 'and does not repeat the kind on every row');
 		assert.ok(html.includes('Data the tests created'), 'ledger section title is plain');
 		assert.ok(html.includes('>still there</span>'), 'uncleaned row is a sentence a non-expert reads');
 		assert.ok(html.includes('fingerprint') || findings.issues.length === 0, 'issue id labeled fingerprint');
+	});
+
+	/**
+	 * The exerciser drives CLIs and functions as well as routes, and the Traces
+	 * panel lists all three. This panel called every one of them an "endpoint",
+	 * so a toolchain repo with no routes at all read as "3 endpoints covered"
+	 * over a table headed "Endpoint" with a row saying RUN acme-tool.
+	 */
+	const mixedUnits = {
+		...findings,
+		headline: { ...findings.headline, unitsByKind: { cli_invocation: 1, http_endpoint: 1 } },
+		endpoints: [
+			{ endpoint: 'GET /health', unitKind: 'http_endpoint', p50Ms: 2, p95Ms: 4, coverage: '1/1', handlerObserved: true, statuses: { '200': 3 } },
+			{ endpoint: 'RUN acme-tool --check', unitKind: 'cli_invocation', p50Ms: 900, p95Ms: 1200, coverage: '0/6', handlerObserved: false, statuses: { error: 1 } },
+		],
+	};
+
+	test('a mixed run names its units and says which kind each row is', () => {
+		const html = rendered(mixedUnits);
+		assert.ok(html.includes('Latency profile per unit'), 'a mixed set is not "per endpoint"');
+		assert.ok(html.includes('<th>Unit</th>'), 'the first column is not headed Endpoint');
+		assert.ok(html.includes('>Kind</th>'), 'a mixed table states the kind per row');
+		assert.ok(html.includes('>CLI invocation</td>'), 'the CLI row says what it is');
+		assert.ok(html.includes('>endpoint</td>'), 'and the HTTP row does too');
+		assert.ok(html.includes('RUN acme-tool --check'), 'the CLI unit is listed at all');
+		// "needs a login first" is HTTP advice; a CLI run was never turned away.
+		assert.ok(!/title="No request has reached[^"]*"[^>]*>not reached/.test(html)
+			|| html.includes('tracing did not cover its package'),
+			'the not-reached tooltip is written for the kind of unit it sits on');
+	});
+
+	/**
+	 * The empty state reads coverage totals, and those come from a scorecard the
+	 * service-free pass never used to write. A toolchain repo therefore hit every
+	 * zero at once and was told "nothing has been exercised" — while the issue
+	 * list under it held three failures observed in live runs. A cluster only
+	 * exists because something ran, so it settles the question the totals could
+	 * not, and the panel must never claim otherwise.
+	 */
+	test('findings on the page outrank a missing scorecard', () => {
+		const noScorecard = {
+			...findings,
+			headline: {
+				...findings.headline,
+				episodesAccepted: 0,
+				episodesReverted: 0,
+				issuesFound: 3,
+			},
+			episodes: [],
+		};
+		const tiles = renderedTiles(noScorecard);
+		assert.ok(!tiles.includes('No traces yet'), 'real findings were hidden behind the empty state');
+		assert.ok(tiles.includes('Issues found'), 'the issue tile is rendered instead');
+	});
+
+	test('a genuinely untouched workspace still says so', () => {
+		const tiles = renderedTiles({
+			...findings,
+			headline: { ...findings.headline, episodesAccepted: 0, episodesReverted: 0 },
+			episodes: [],
+		});
+		assert.ok(tiles.includes('No traces yet'), 'zero everything is not a clean bill of health');
+	});
+
+	test('the coverage tile is named after the units that were actually driven', () => {
+		assert.ok(renderedTiles(mixedUnits).includes('Units covered'), 'mixed run says units');
+		assert.ok(
+			renderedTiles({
+				...mixedUnits,
+				headline: { ...findings.headline, unitsByKind: { cli_invocation: 3 } },
+				endpoints: [mixedUnits.endpoints[1]],
+			}).includes('CLI invocations covered'),
+			'a CLI-only run says so rather than inventing endpoints',
+		);
+		assert.ok(
+			renderedTiles({
+				...findings,
+				headline: { ...findings.headline, unitsByKind: { http_endpoint: 4 } },
+			}).includes('Endpoints covered'),
+			'an all-HTTP run keeps the word it always used',
+		);
 	});
 });
 
@@ -566,7 +677,7 @@ suite('traces panel: non-HTTP entry points are first-class rows', () => {
 		const html = rendered([cliRow]);
 		assert.ok(html.includes('generate'), 'the command is listed');
 		assert.ok(html.includes('>2</td>'), 'the run count is rendered, not a permanent zero');
-		assert.ok(html.includes('class="count hit"'), 'a run entry point reads as exercised');
+		assert.ok(html.includes('count hit'), 'a run entry point reads as exercised');
 		assert.ok(
 			html.includes('Times this entry point ran in the captures'),
 			'the non-HTTP unit is invocations, and the cell says so',
@@ -585,6 +696,46 @@ suite('traces panel: non-HTTP entry points are first-class rows', () => {
 	test('an entry point nothing has run still lists, at zero', () => {
 		const html = rendered([{ ...cliRow, count: 0 }]);
 		assert.ok(html.includes('>0</td>'));
-		assert.ok(!html.includes('class="count hit"'), 'zero is not styled as a hit');
+		assert.ok(!html.includes('count hit'), 'zero is not styled as a hit');
+	});
+
+	test('a run reports how it went, not just that it happened', () => {
+		const html = rendered([
+			{
+				...cliRow,
+				id: 'GET_health',
+				trigger: 'GET /health',
+				kind: 'http_api',
+				count: 12,
+				coveragePct: 30,
+				coverageText: '12/40',
+				coverageSource: 'exercised',
+				p50: 8,
+				p95: 1400,
+				statuses: { '200': 11, '500': 1 },
+				checks: 12,
+				failed: 1,
+				errors: 2,
+				built: true,
+			},
+		]);
+		assert.ok(html.includes('30%') && html.includes('12/40 symbols'), 'coverage is shown with its denominator');
+		assert.ok(html.includes('8ms'), 'p50 is rendered');
+		assert.ok(html.includes('1.4s'), 'a slow p95 is rendered in seconds, not four digits of ms');
+		assert.ok(html.includes('class="num slow"'), 'and reads as slow');
+		assert.ok(html.includes('200 ×11') && html.includes('500 ×1'), 'every status code is on the row');
+		assert.ok(html.includes('chip bad'), 'a 5xx does not read the same as a 2xx');
+		assert.ok(html.includes('11/12'), 'checks show what passed of what ran');
+		assert.ok(html.includes('Call tree'), 'every row can open its call tree');
+	});
+
+	test('a unit with no exerciser run shows dashes, never invented zeros', () => {
+		// Traffic-only units have coverage and hits but no percentiles: 0ms and
+		// "0 checks passed" would both be lies about work nobody did.
+		const html = rendered([{ ...cliRow, coveragePct: 40, coverageText: '2/5', coverageSource: 'traced' }]);
+		assert.ok(html.includes('bar-t mid traced'), 'an overlay-measured bar is marked as such');
+		assert.ok(html.includes('What the captures happened to run'), 'and says which pass measured it');
+		assert.ok(!html.includes('0ms'), 'no latency is not zero latency');
+		assert.ok(html.includes('dash'), 'the empty cells are dashes');
 	});
 });

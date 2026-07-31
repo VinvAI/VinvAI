@@ -338,6 +338,9 @@ function getFlowHtml(cspSource: string): string {
 		.lnk .lab { color: var(--ink); }
 		.lnk.s-muted .lab { color: var(--muted); }
 		.lnk .det { color: var(--muted-2); font-size: 10px; min-width: 0; }
+		/* the "…and N more" / "Show less" toggle at the foot of a capped stage */
+		.lnk.more .lab { color: var(--muted); letter-spacing: 0.04em; }
+		.lnk.more .b { background: transparent; border: 1px solid var(--muted-2); box-shadow: none; }
 
 		/* ---- issues ---- */
 		.issues { display: none; margin-top: 6px; border: 1px solid var(--accent-fg); }
@@ -405,6 +408,10 @@ function getFlowHtml(cspSource: string): string {
 		const vscode = acquireVsCodeApi();
 		let model = null;
 		let nextAction = null;
+		// Stage ids whose overflow rows are showing. Lives outside render() so a
+		// model post (they arrive on every pipeline tick) does not re-collapse a
+		// list the user just opened.
+		const expanded = new Set();
 
 		function el(tag, cls, text) {
 			const e = document.createElement(tag);
@@ -444,6 +451,20 @@ function getFlowHtml(cspSource: string): string {
 			});
 			row.appendChild(act);
 			return row;
+		}
+
+		/** The row that opens or closes a stage's overflow rows. */
+		function renderMore(stageId, hidden, open) {
+			const b = el('button', 'lnk s-muted more');
+			b.type = 'button';
+			b.appendChild(el('span', 'b'));
+			b.appendChild(el('span', 'lab', open ? 'Show less' : '…and ' + hidden + ' more'));
+			b.title = open ? 'Collapse this list' : 'Show the remaining ' + hidden;
+			b.addEventListener('click', () => {
+				if (open) { expanded.delete(stageId); } else { expanded.add(stageId); }
+				render();
+			});
+			return b;
 		}
 
 		const STATUS_WORD = { done: 'done', running: 'running', waiting: 'waiting', error: 'needs attention' };
@@ -486,7 +507,14 @@ function getFlowHtml(cspSource: string): string {
 				}
 				if (s.links.length) {
 					const box = el('div', 'links');
-					for (const l of s.links) { box.appendChild(renderLink(l)); }
+					const shown = s.links.filter((l) => !l.overflow);
+					const hidden = s.links.filter((l) => l.overflow);
+					for (const l of shown) { box.appendChild(renderLink(l)); }
+					if (hidden.length) {
+						const open = expanded.has(s.id);
+						box.appendChild(renderMore(s.id, hidden.length, open));
+						if (open) { for (const l of hidden) { box.appendChild(renderLink(l)); } }
+					}
 					st.appendChild(box);
 				}
 				rail.appendChild(st);

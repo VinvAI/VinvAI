@@ -38,7 +38,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
-import { defaultEnginesCloneDir, enginesSynced, pythonEnginePath } from './resolve';
+import { defaultEnginesCloneDir, engineSyncStampPath, enginesSynced } from './resolve';
 import { cargoBuildCommand, installEngines, resolveEnginesRoot, runInEnginesTerminal } from './install';
 import { ENGINE_REF, ENGINE_UPDATE_DEFAULT } from './pinned';
 
@@ -144,23 +144,35 @@ async function resolveCommit(root: string, ref: string): Promise<string | null> 
  * different one. That reads as "up to date" and is precisely the version skew
  * the pin exists to prevent.
  *
+ * The fact it reads is a stamp the sync terminal writes on success, NOT the
+ * venv's own mtime. Reading the venv was wrong in the one direction that
+ * deadlocks: `uv sync` rewrites a console script only when that package's entry
+ * points change, so a sync with nothing to do left tracelens older than the
+ * `.git/HEAD` every checkout rewrites, and the engines reported stale forever —
+ * observed on 0.2.1, where correct engines on the correct commit failed this
+ * check on every activation and took automatic re-discovery down with them.
+ *
+ * An absent stamp is NOT stale. Every engines checkout synced before the stamp
+ * existed has none, and re-running the check against a signal we do not have is
+ * how the false verdict happened in the first place; the next sync writes one.
+ *
  * Pure so the decision is testable; `environmentIsStale` supplies the facts.
  */
 export function environmentNeedsSync(input: {
 	synced: boolean;
-	venvMtimeMs: number | null;
+	stampMtimeMs: number | null;
 	headMtimeMs: number | null;
 }): boolean {
 	if (!input.synced) {
 		return true; // never built at all
 	}
-	if (input.venvMtimeMs === null || input.headMtimeMs === null) {
+	if (input.stampMtimeMs === null || input.headMtimeMs === null) {
 		return false; // cannot tell — never churn a terminal on a guess
 	}
-	// `git checkout` rewrites .git/HEAD, so a venv older than it was built for a
-	// different commit. Erring toward syncing again is safe: uv sync is
-	// idempotent and cargo build is incremental.
-	return input.venvMtimeMs < input.headMtimeMs;
+	// `git checkout` rewrites .git/HEAD, so a stamp older than it belongs to a
+	// sync that ran before the checkout. Erring toward syncing again is safe: uv
+	// sync is idempotent and cargo build is incremental.
+	return input.stampMtimeMs < input.headMtimeMs;
 }
 
 /** environmentNeedsSync against the real filesystem. */
@@ -174,7 +186,7 @@ function environmentIsStale(root: string): boolean {
 	};
 	return environmentNeedsSync({
 		synced: enginesSynced(root),
-		venvMtimeMs: mtime(pythonEnginePath(root, 'tracelens')),
+		stampMtimeMs: mtime(engineSyncStampPath(root)),
 		headMtimeMs: mtime(path.join(root, '.git', 'HEAD')),
 	});
 }
@@ -368,7 +380,7 @@ function launchUpdate(
 		'uv sync',
 		...(opts.rebuildIndex ? [cargoBuildCommand(root)] : []),
 	];
-	runInEnginesTerminal('Vinv Engines Update', steps);
+	runInEnginesTerminal('Vinv Engines Update', steps, root);
 }
 
 /**
@@ -476,11 +488,11 @@ export async function maybeUpdateEngines(
 	if (action.kind === 'up-to-date') {
 		settle();
 		if (environmentIsStale(root)) {
-			runInEnginesTerminal('Vinv Engines Sync', [
-				`cd "${root}"`,
-				'uv sync',
-				cargoBuildCommand(root),
-			]);
+			runInEnginesTerminal(
+				'Vinv Engines Sync',
+				[`cd "${root}"`, 'uv sync', cargoBuildCommand(root)],
+				root,
+			);
 			void vscode.window.showInformationMessage(
 				`Vinv: the engines are at ${ENGINE_REF}, but their environment was built for a different commit — syncing it in the terminal.`,
 			);
