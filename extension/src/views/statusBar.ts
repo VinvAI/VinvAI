@@ -13,6 +13,12 @@
  * identity, and switches to the status bar's error background whenever the
  * captures show symbols failing in their latest run — red-as-brand when all
  * is well, red-as-alarm when runtime evidence says something is broken.
+ *
+ * While work is actually running (a service up, or a harness episode in
+ * flight) it takes the warning background and a spinning icon. That state
+ * deliberately does NOT use red: red is the resting colour here, so painting
+ * live work red would be indistinguishable from idle. Precedence is
+ * failing > running > rest.
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -26,7 +32,7 @@ import {
 	indexStoreDir,
 } from '../graph/indexGraph';
 import { collectRuntimeErrorClusters } from '../harness/runtimeAnalysis';
-import { runningServiceNames } from '../bringup/serviceRunner';
+import { runningServiceNames, onServiceExit } from '../bringup/serviceRunner';
 import { isEpisodeRunning } from '../harness/episodeLoop';
 import { actionableOpportunityCount, timeSaverLine } from './optimizationPanel';
 import { optimizeReportOpenedThisSession } from './optimizationReportView';
@@ -124,7 +130,10 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 		const epoch = loadStoreEpoch(indexStoreDir(root));
 		const running = runningServiceNames();
 		const failing = currentFailingCount(root);
-		let text = `$(circuit-board) Vinv e${epoch}`;
+		// The spinner is the part that catches the eye from across the screen —
+		// motion reads before colour does, and it costs no width.
+		const spinning = running.length > 0 || isEpisodeRunning();
+		let text = `$(${spinning ? 'sync~spin' : 'circuit-board'}) Vinv e${epoch}`;
 		tooltip.appendMarkdown(
 			`**Vinv** — code map version ${epoch} (updates every time the code is re-indexed)\n\n`,
 		);
@@ -153,12 +162,25 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 				`**${timeSaverLine(savers)}** — [Open Optimize](command:vinv-vs.openOptimization)\n\n`,
 			);
 		}
-		// Error background only when runtime evidence says something is broken;
-		// otherwise the Vinv red is identity, not alarm. (When a background is
-		// set, VS Code supplies the matching foreground automatically.)
+		// Live work has to look DIFFERENT from rest, and red cannot do that job
+		// here: red is what this item already is when nothing is happening, so
+		// "turn it red while busy" would render as no change at all. A filled
+		// warning pill plus the spinner is the contrast that reads at a glance,
+		// and it is the same vocabulary VS Code's own long-running tasks use.
+		//
+		// Precedence is deliberate: broken outranks busy. A run that is producing
+		// failures should keep saying so while it runs, rather than downgrading
+		// itself to "working on it".
 		item.backgroundColor =
-			failing > 0 ? new vscode.ThemeColor('statusBarItem.errorBackground') : undefined;
-		item.color = failing > 0 ? undefined : new vscode.ThemeColor('charts.red');
+			failing > 0
+				? new vscode.ThemeColor('statusBarItem.errorBackground')
+				: spinning
+					? new vscode.ThemeColor('statusBarItem.warningBackground')
+					: undefined;
+		// When a background is set VS Code supplies the matching foreground, so
+		// an explicit colour there would fight it. Only the resting state gets
+		// the Vinv red.
+		item.color = failing > 0 || spinning ? undefined : new vscode.ThemeColor('charts.red');
 		tooltip.appendMarkdown(
 			'$(circuit-board) Click to open the **Graph Explorer**\n\n' +
 				'[Ask Vinv](command:vinv-vs.askVinv) · ' +
@@ -173,6 +195,11 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 	const timer = setInterval(update, REFRESH_MS);
 	context.subscriptions.push(
 		{ dispose: () => clearInterval(timer) },
+		// A 15s poll is fine for epoch and failing counts, which change slowly.
+		// It is not fine for the running indicator: a service that stops would
+		// keep spinning for up to fifteen seconds, which is precisely the kind
+		// of stale "still working" signal that teaches people to ignore it.
+		onServiceExit(() => update()),
 		// Refresh promptly when the window regains focus (an agent or terminal
 		// may have reindexed while the user was away).
 		vscode.window.onDidChangeWindowState((s) => {

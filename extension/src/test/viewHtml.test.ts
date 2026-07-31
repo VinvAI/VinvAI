@@ -10,7 +10,12 @@
  *     predicted_ms_effective fields are feature-detected;
  *   • findings — episode attempts render their kept/reverted outcome and the
  *     CI interval as legible text, and the empty-state copy names the real
- *     trigger (optimize.jsonl episodes).
+ *     trigger (optimize.jsonl episodes);
+ *   • dead-code section — a try-run's trace is on the page (what executed, for
+ *     how long, what it raised) with the capture and the driver one click away,
+ *     and a run that recorded nothing says so instead of rendering zeros;
+ *   • traces panel — a CLI/worker entry point renders its real invocation count
+ *     and each cell states which unit it is showing.
  */
 
 import * as assert from 'assert';
@@ -18,6 +23,7 @@ import { getJourneyHtml } from '../views/journeyView';
 import { getOptimizationReportHtml } from '../views/optimizationReportView';
 import { getFindingsHtml } from '../views/findingsView';
 import { getDeadSectionHtml } from '../views/deadCodeReportView';
+import { getTracesHtml } from '../views/tracesPanel';
 
 type Listener = (ev: unknown) => void;
 
@@ -25,6 +31,11 @@ interface ElStub {
 	textContent: string;
 	innerHTML: string;
 	disabled: boolean;
+	/** Form controls the script reads (a filter box's text, a select's value). */
+	value: string;
+	/** A <select>'s options, which scripts check before populating them. */
+	options: unknown[];
+	appendChild: (child: unknown) => void;
 	listeners: Record<string, Listener>;
 	addEventListener: (name: string, fn: Listener) => void;
 	querySelectorAll: () => unknown[];
@@ -49,6 +60,9 @@ function evalWebviewScript(html: string, expose: string[]): Sandbox {
 			textContent: '',
 			innerHTML: '',
 			disabled: false,
+			value: '',
+			options: [{}],
+			appendChild: (child) => void el.options.push(child),
 			listeners: {},
 			addEventListener: (name, fn) => {
 				el.listeners[name] = fn;
@@ -65,6 +79,7 @@ function evalWebviewScript(html: string, expose: string[]): Sandbox {
 	};
 	const doc = {
 		getElementById: (id: string) => (els[id] ??= makeEl()),
+		createElement: () => makeEl(),
 		querySelectorAll: () => [],
 		body: { clientWidth: 800 },
 	};
@@ -448,5 +463,51 @@ suite('dead code section view: the try-run evidence is on the page', () => {
 		const html = rendered([]);
 		assert.ok(html.includes('No one has tried to run this section yet'));
 		assert.ok(html.includes('Run this Path'), 'the invitation names the button that does it');
+	});
+});
+
+suite('traces panel: non-HTTP entry points are first-class rows', () => {
+	function rendered(rows: unknown[]): string {
+		const { els, winListeners } = evalWebviewScript(getTracesHtml(), ['render']);
+		winListeners.message({
+			data: { type: 'data', rows, ranges: [], activeRange: '', haveCaptures: true },
+		});
+		return els.out.innerHTML;
+	}
+
+	const cliRow = {
+		id: 'CLI_generate_cmd',
+		trigger: 'generate',
+		handler: 'generate_cmd',
+		file: 'handbook/src/handbook/cli.py',
+		line: 40,
+		kind: 'cli_command',
+		count: 2,
+	};
+
+	test('a CLI run shows its count, and the column says what the number counts', () => {
+		const html = rendered([cliRow]);
+		assert.ok(html.includes('generate'), 'the command is listed');
+		assert.ok(html.includes('>2</td>'), 'the run count is rendered, not a permanent zero');
+		assert.ok(html.includes('class="count hit"'), 'a run entry point reads as exercised');
+		assert.ok(
+			html.includes('Times this entry point ran in the captures'),
+			'the non-HTTP unit is invocations, and the cell says so',
+		);
+		assert.ok(html.includes('cli command'), 'the kind badge is not raw snake_case');
+	});
+
+	test('an HTTP route keeps the request-based unit in its tooltip', () => {
+		const html = rendered([
+			{ ...cliRow, id: 'GET_health', trigger: 'GET /health', kind: 'http_api', count: 7 },
+		]);
+		assert.ok(html.includes('Distinct traced requests that reached this endpoint'));
+		assert.ok(!html.includes('Times this entry point ran'), 'the two units never mix on one row');
+	});
+
+	test('an entry point nothing has run still lists, at zero', () => {
+		const html = rendered([{ ...cliRow, count: 0 }]);
+		assert.ok(html.includes('>0</td>'));
+		assert.ok(!html.includes('class="count hit"'), 'zero is not styled as a hit');
 	});
 });

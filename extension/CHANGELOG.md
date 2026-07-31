@@ -17,6 +17,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and
   be driven says so instead of inviting the same run again, and the Findings
   list marks sections that have been driven.
 
+- **CLI, worker and script runs are counted in the Traces panel.** Only HTTP
+  routes ever had a hit count, so a traced `python -m handbook.cli generate`
+  showed its commands at zero forever while the capture plainly held their
+  calls. Non-HTTP entry points are now counted from the captures directly, and
+  every cell says which unit it shows — requests for a route, invocations for
+  everything else.
+
 ### 🐛 Fixed
 
 - **"Address already in use" no longer reads as a broken service.** A port left
