@@ -464,6 +464,83 @@ suite('dead code section view: the try-run evidence is on the page', () => {
 		assert.ok(html.includes('No one has tried to run this section yet'));
 		assert.ok(html.includes('Run this Path'), 'the invitation names the button that does it');
 	});
+
+	test('each case shows what went in and what came back, its own trace beside it', () => {
+		// The counters say the tracer worked. What a developer came for is the
+		// behaviour: given an empty list it answered 0, given -1 it raised. One
+		// card per case, because one merged table cannot say which input produced
+		// which answer.
+		const html = rendered([
+			{
+				sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
+				outcome: 'revived', detail: 'ran', revived: ['helper_a'], rows: [1],
+				driverFile: null, traceFile: null, exitCode: 0, timedOut: false,
+				notes: '', outputTail: '',
+				trace: { functions: 1, calls: 2, totalMs: 2, errors: 1, errorTypes: ['ValueError'], top: [] },
+				cases: [
+					{
+						name: 'empty-list', why: 'the boundary',
+						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-0/trace.jsonl',
+						exitCode: 0, timedOut: false, outputTail: '',
+						trace: {
+							functions: 1, calls: 1, totalMs: 1, errors: 0, errorTypes: [],
+							top: [{
+								component: 'app.legacy.helper_a', calls: 1, ms: 1, errors: 0,
+								samples: [{ args: [{ name: 'items', render: '[int × 0]' }], result: '0', error: null, ms: 1 }],
+							}],
+						},
+					},
+					{
+						name: 'negative', why: 'the input that fails',
+						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-1/trace.jsonl',
+						exitCode: 1, timedOut: false, outputTail: '',
+						trace: {
+							functions: 1, calls: 1, totalMs: 1, errors: 1, errorTypes: ['ValueError'],
+							top: [{
+								component: 'app.legacy.helper_a', calls: 1, ms: 1, errors: 1,
+								samples: [{ args: [{ name: 'n', render: '-1' }], result: '', error: 'ValueError', ms: 1 }],
+							}],
+						},
+					},
+					{
+						name: 'needs-a-socket', why: 'the case that could not run',
+						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-2/trace.jsonl',
+						exitCode: 2, timedOut: false, outputTail: 'ConnectionRefusedError', trace: null,
+					},
+				],
+			},
+		]);
+		assert.ok(html.includes('empty-list') && html.includes('negative'), 'cases are named');
+		assert.ok(html.includes('the boundary'), 'what a case is meant to show is on the page');
+		assert.ok(html.includes('items=[int × 0]'), 'the input is shown, not just the symbol');
+		assert.ok(html.includes('raised ValueError'), 'a raise is the answer, rendered as one');
+		assert.ok(
+			html.includes('data-open="/w/.vinv/captures/deadcode-sec-a-1-1/trace.jsonl"'),
+			'each case links its OWN capture, not the run’s first one',
+		);
+		assert.ok(html.includes('This case produced no trace (exit 2)'),
+			'a case that never ran says so rather than vanishing');
+		assert.ok(html.includes('ConnectionRefusedError'), 'and its output is the evidence why');
+	});
+
+	test('a refusal with no reason does not wear the verdict badge', () => {
+		// A decline leaves no driver and no trace, so the reason is the entire
+		// evidence — an unexplained one must not read as settled.
+		const bare = {
+			sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
+			outcome: 'declined', detail: 'no reason given', revived: [], rows: [1],
+			driverFile: null, traceFile: null, exitCode: null, timedOut: false,
+			notes: '', outputTail: '', trace: null,
+		};
+		const bareHtml = rendered([bare]);
+		assert.ok(bareHtml.includes('refused, no reason'));
+		assert.ok(!bareHtml.includes('not drivable'), 'an unexplained no is not a verdict');
+
+		const reasoned = rendered([{ ...bare, notes: 'it is a setuptools entry point' }]);
+		assert.ok(reasoned.includes('not drivable'));
+		assert.ok(reasoned.includes('Why it cannot be driven: it is a setuptools entry point'),
+			'the reason is labelled as the reason, not as driver notes');
+	});
 });
 
 suite('traces panel: non-HTTP entry points are first-class rows', () => {

@@ -370,6 +370,16 @@ function getHtml(): string {
 		unavailable: 'could not start',
 	};
 
+	// A decline is the only outcome with no driver and no trace, so its reason is
+	// the entire evidence — and a decline WITHOUT one is not a verdict a reader
+	// should trust. The badge says which of the two this was.
+	function runLabel(r) {
+		if (r.outcome === 'declined' && !r.notes) {
+			return 'refused, no reason';
+		}
+		return RUN_LABEL[r.outcome] || r.outcome;
+	}
+
 	function fmtWhen(iso) {
 		const t = Date.parse(iso);
 		return Number.isFinite(t) ? new Date(t).toLocaleString() : String(iso || '');
@@ -379,16 +389,51 @@ function getHtml(): string {
 	// section — everything else on this page is static inference. So the newest
 	// run is shown open, with what the capture recorded, and the older ones as
 	// one line each so a second attempt can be compared against the first.
+	// One case's observed behaviour: not "these functions ran" but "given this,
+	// it answered that". This is the whole reason a try-run is worth reading —
+	// the counters above say the tracer worked, these rows say what the code does.
+	function caseCard(c) {
+		let html = '<div class="card"><div class="row">' +
+			'<span class="badge' + (c.trace ? (c.trace.errors ? ' hot' : ' ok') : '') + '">' +
+			esc(c.name || 'single case') + '</span>' +
+			(c.why ? '<span class="where">' + esc(c.why) + '</span>' : '') +
+			'<span class="grow"></span>' +
+			(c.traceFile ? '<button class="ghost" data-open="' + esc(c.traceFile) + '">Open trace</button>' : '') +
+			'</div>';
+		if (!c.trace) {
+			return html + '<div class="hint">This case produced no trace (exit ' +
+				esc(String(c.exitCode === null || c.exitCode === undefined ? 'none' : c.exitCode)) +
+				(c.timedOut ? ', timed out' : '') + ').' +
+				(c.outputTail ? '</div><pre>' + esc(c.outputTail.slice(-800)) + '</pre>' : '</div>') +
+				'</div>';
+		}
+		const rows = [];
+		for (const f of c.trace.top) {
+			for (const s of (f.samples || [])) {
+				rows.push('<tr><td>' + esc(f.component) + '</td>' +
+					'<td><code>' + esc((s.args || []).map((a) => a.name + '=' + a.render).join(', ') || '()') + '</code></td>' +
+					'<td class="' + (s.error ? 'err' : '') + '"><code>' +
+					esc(s.error ? 'raised ' + s.error : s.result) + '</code></td></tr>');
+			}
+		}
+		if (!rows.length) {
+			return html + '<div class="hint">The capture recorded calls but no argument or return ' +
+				'values — the tracer summarized none of them.</div></div>';
+		}
+		return html + '<table class="trace"><thead><tr><th>Symbol</th><th>Called with</th>' +
+			'<th>Answered</th></tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
+	}
+
 	function runsCard(runs) {
 		if (!runs || !runs.length) {
 			return '<div class="empty">No one has tried to run this section yet. ' +
-				'&ldquo;Run this Path&rdquo; asks the agent for a driver, runs it under vinv tracing, ' +
-				'and the trace it produces lands here.</div>';
+				'&ldquo;Run this Path&rdquo; asks the agent for a set of probe cases, runs each one ' +
+				'under vinv tracing, and lands what every call was given and what it answered here.</div>';
 		}
 		const latest = runs[0];
 		const cls = latest.outcome === 'revived' ? ' ok' : latest.outcome === 'not-reached' ? '' : ' hot';
 		let html = '<div class="card"><div class="row">' +
-			'<span class="badge' + cls + '">' + esc(RUN_LABEL[latest.outcome] || latest.outcome) + '</span>' +
+			'<span class="badge' + cls + '">' + esc(runLabel(latest)) + '</span>' +
 			'<span class="where">' + esc(fmtWhen(latest.at)) + '</span>' +
 			'<span class="grow"></span>' +
 			(latest.traceFile
@@ -403,7 +448,9 @@ function getHtml(): string {
 			html += '<div class="hint">Executed: ' + latest.revived.map(esc).join(' · ') + '</div>';
 		}
 		if (latest.notes) {
-			html += '<div class="hint">Driver notes: ' + esc(latest.notes) + '</div>';
+			html += '<div class="hint">' +
+				(latest.outcome === 'declined' ? 'Why it cannot be driven: ' : 'Driver notes: ') +
+				esc(latest.notes) + '</div>';
 		}
 		const t = latest.trace;
 		if (t) {
@@ -423,7 +470,7 @@ function getHtml(): string {
 					'<td class="num">' + f.ms + '</td>' +
 					'<td class="num' + (f.errors ? ' err' : '') + '">' + f.errors + '</td></tr>').join('') +
 				'</tbody></table>';
-			html += '<div class="hint">Counted from the capture itself, not from what the driver ' +
+			html += '<div class="hint">Counted from the captures themselves, not from what the driver ' +
 				'claimed. A function listed here executed; a section symbol missing from it did not.</div>';
 		} else if (latest.traceFile) {
 			html += '<div class="hint">The capture recorded no function exits — tracelens instrumented ' +
@@ -433,10 +480,17 @@ function getHtml(): string {
 			html += '<pre>' + esc(latest.outputTail.slice(-1500)) + '</pre>';
 		}
 		html += '</div>';
+		const cases = latest.cases || [];
+		if (cases.length) {
+			html += '<div class="hint">What each case did — one traced process per case, so ' +
+				'nothing below is inferred from a shared capture. Values are as the tracer ' +
+				'summarized them: long strings and wide containers are shown bounded.</div>';
+			html += cases.map(caseCard).join('');
+		}
 		if (runs.length > 1) {
 			html += '<div class="card"><div class="hint">Earlier attempts</div><ul class="plain">' +
 				runs.slice(1, 6).map((r) =>
-					'<li>' + esc(fmtWhen(r.at)) + ' — ' + esc(RUN_LABEL[r.outcome] || r.outcome) +
+					'<li>' + esc(fmtWhen(r.at)) + ' — ' + esc(runLabel(r)) +
 					(r.trace ? ' (' + r.trace.functions + ' functions, ' + r.trace.calls + ' calls)' : '') +
 					'</li>').join('') +
 				'</ul></div>';
@@ -472,7 +526,7 @@ function getHtml(): string {
 				'reflection, plugin registries or externally-called entry points, so this is strong evidence and not proof.</div></div>';
 		}
 
-		html += '<h2>Try-runs (what happened when this was driven)</h2>';
+		html += '<h2>Try-runs (what this code does when it is driven)</h2>';
 		html += runsCard(REPORT.runs);
 
 		html += '<h2>Walkthrough (' + REPORT.stops.length + ' stops, callees first)</h2>';

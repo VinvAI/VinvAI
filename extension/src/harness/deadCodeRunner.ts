@@ -34,6 +34,8 @@ import { runDriverUnderTracing, tracedConfig } from './tracedRun';
 import {
 	recordRun,
 	summarizeTrace,
+	summarizeTraces,
+	type DeadCodeCaseRun,
 	type DeadCodeRunOutcome,
 	type DeadCodeRunRecord,
 } from './deadCodeRuns';
@@ -74,9 +76,15 @@ export interface TryRunOutcome {
 }
 
 /**
- * "Try run this path": ask the harness to WRITE a driver for the section, run
- * it under tracelens with the workspace's own recorded configuration, and
- * report which of the section's symbols the fresh trace actually reached.
+ * "Try run this path": ask the harness to write a PROBE SUITE for the section,
+ * run each case under tracelens with the workspace's own recorded
+ * configuration, and report both which of the section's symbols the fresh
+ * traces reached and what each call was given and returned.
+ *
+ * Cases run as separate processes. The driver executes as `__main__` and is not
+ * an instrumented target package, so its own frames never appear in a capture —
+ * there would be nothing in a merged trace to attribute a call to the case that
+ * made it. One capture per case makes that attribution structural.
  *
  * The trace lands under .vinv/captures/, which is where every scan already
  * looks — so a revived symbol leaves the dead list by the normal join, not by
@@ -177,7 +185,7 @@ export async function tryRunDeadSection(
 				location: vscode.ProgressLocation.Window,
 				title: `Vinv: trying to run dead section ${section.title} under trace…`,
 			},
-			async (): Promise<TryRunOutcome> => {
+			async (progress): Promise<TryRunOutcome> => {
 				const dispatchName = `deadcode-driver-${section.id}`;
 				const reply = await dispatchAgentPrompt(
 					getHarnessId() || harnessId,
@@ -197,12 +205,24 @@ export async function tryRunDeadSection(
 				}
 				const parsed = parseDriverReply(reply);
 				if (parsed.kind === 'declined') {
+					// A reasoned decline is evidence and settles the section. A bare
+					// refusal is not: it leaves no driver, no trace and no argument, so
+					// nothing about it can be checked or disagreed with. Treating the two
+					// alike is how one unexplained "no" becomes a permanent verdict.
+					if (!parsed.reason) {
+						const detail =
+							'the agent refused to write a probe suite and gave no reason — no driver, no ' +
+							'trace, nothing to weigh. That is a missing answer rather than a verdict, so ' +
+							`this section is worth asking about again. See .vinv/logs/harness-agent-${dispatchName}.log.`;
+						void vscode.window.showWarningMessage(`Vinv: ${detail}`);
+						return settle('declined', detail);
+					}
 					const detail =
-						'the agent read this section and judged it not drivable from a script ' +
-						'(e.g. build-tool config or code needing infrastructure a driver cannot fake). ' +
-						'That is a verdict, not a failure — re-running will not change it.';
+						`the agent read this section and judged it not drivable from a script: ${parsed.reason} ` +
+						'That is a verdict, not a failure — re-running will not change it unless the ' +
+						'obstacle it names goes away.';
 					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
-					return settle('declined', detail);
+					return settle('declined', detail, { notes: parsed.reason });
 				}
 				if (parsed.kind === 'unusable') {
 					const detail =
@@ -219,31 +239,65 @@ export async function tryRunDeadSection(
 				fs.mkdirSync(tmpDir, { recursive: true });
 				const driverFile = path.join(tmpDir, `deadcode-driver-${section.id}.py`);
 				fs.writeFileSync(driverFile, driver.code, 'utf8');
-				// Under captures/ so the very next scan joins it — the same discovery
-				// path every service capture takes.
-				const outTrace = path.join(
-					workspaceRoot,
-					'.vinv',
-					'captures',
-					`deadcode-${section.id}-${Date.now()}`,
-					'trace.jsonl',
-				);
-				fs.mkdirSync(path.dirname(outTrace), { recursive: true });
+				// One process per case, so every call in a capture belongs to exactly one
+				// case. A driver that declared no cases still runs once with no argv —
+				// the single-driver behaviour this replaced. Each capture lands under
+				// captures/ so the very next scan joins it, the same discovery path
+				// every service capture takes.
+				const stamp = Date.now();
+				const cases = driver.cases.length > 0 ? driver.cases : [{ name: '', why: '' }];
+				const caseRuns: DeadCodeCaseRun[] = [];
+				for (const [i, probe] of cases.entries()) {
+					progress.report({
+						message: `case ${i + 1}/${cases.length}${probe.name ? ` — ${probe.name}` : ''}`,
+					});
+					const outTrace = path.join(
+						workspaceRoot,
+						'.vinv',
+						'captures',
+						`deadcode-${section.id}-${stamp}-${i}`,
+						'trace.jsonl',
+					);
+					fs.mkdirSync(path.dirname(outTrace), { recursive: true });
+					const run = await runDriverUnderTracing(
+						workspaceRoot,
+						driverFile,
+						probe.name ? [probe.name] : [],
+						outTrace,
+					);
+					caseRuns.push({
+						name: probe.name,
+						why: probe.why,
+						traceFile: outTrace,
+						exitCode: run.exitCode,
+						timedOut: run.timedOut,
+						outputTail: run.outputTail.slice(-2000),
+						trace: summarizeTrace(outTrace),
+					});
+				}
 
-				const run = await runDriverUnderTracing(workspaceRoot, driverFile, [], outTrace);
+				const traced = caseRuns.filter((c) => c.trace !== null);
+				const last = caseRuns[caseRuns.length - 1];
 				const evidence = {
 					driverFile,
-					traceFile: outTrace,
-					exitCode: run.exitCode,
-					timedOut: run.timedOut,
+					traceFile: caseRuns[0]?.traceFile ?? null,
+					exitCode: last?.exitCode ?? null,
+					timedOut: caseRuns.some((c) => c.timedOut),
 					notes: driver.notes,
-					outputTail: run.outputTail.slice(-4000),
-					trace: summarizeTrace(outTrace),
+					outputTail: caseRuns
+						.map((c) => (c.name ? `--- ${c.name} ---\n${c.outputTail}` : c.outputTail))
+						.join('\n')
+						.slice(-4000),
+					cases: caseRuns,
+					// Merged across cases: the verdict is about the section, and a symbol
+					// that any one case reached was reached.
+					trace: summarizeTraces(caseRuns.map((c) => c.traceFile)),
 				};
-				if (!run.ok) {
+				if (traced.length === 0) {
 					const detail =
-						`the driver produced no trace (exit ${run.exitCode ?? 'none'}` +
-						`${run.timedOut ? ', timed out' : ''}). Tail: ${run.outputTail.slice(-300) || '(no output)'}`;
+						`no case produced a trace (${caseRuns.length} attempted, last exit ` +
+						`${last?.exitCode ?? 'none'}${last?.timedOut ? ', timed out' : ''}). ` +
+						`Tail: ${last?.outputTail.slice(-300) || '(no output)'}`;
 					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
 					return settle('run-failed', detail, evidence);
 				}
@@ -262,18 +316,19 @@ export async function tryRunDeadSection(
 				} catch {
 					// the surfaces re-derive on their next push anyway
 				}
+				const ran = `${traced.length} of ${caseRuns.length} probe case(s) traced`;
 				if (revived.length > 0) {
 					const detail =
-						`the driver executed ${revived.length} of ${section.symbols.items.length} section ` +
-						`symbol(s) under trace (${revived.slice(0, 5).join(', ')}${revived.length > 5 ? '…' : ''}) — ` +
-						'they are no longer dead. This section re-forms around what is still untraced.';
+						`${ran}, executing ${revived.length} of ${section.symbols.items.length} section ` +
+						`symbol(s) (${revived.slice(0, 5).join(', ')}${revived.length > 5 ? '…' : ''}) — ` +
+						'they are no longer dead. The report now shows what each case put in and got ' +
+						'back. This section re-forms around what is still untraced.';
 					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
 					return settle('revived', detail, { ...evidence, revived });
 				}
 				const detail =
-					`the driver ran and traced${run.exitCode === 0 ? '' : ` (exit ${run.exitCode})`}, but ` +
-					'none of this section’s symbols executed — the path stayed dead even when driven. ' +
-					`Driver notes: ${driver.notes || '(none)'}`;
+					`${ran}, but none of this section’s symbols executed — the path stayed dead even ` +
+					`when driven. Driver notes: ${driver.notes || '(none)'}`;
 				void vscode.window.showWarningMessage(`Vinv: ${detail}`);
 				return settle('not-reached', detail, evidence);
 			},

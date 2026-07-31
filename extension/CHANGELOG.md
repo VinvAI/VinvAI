@@ -17,6 +17,21 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and
   be driven says so instead of inviting the same run again, and the Findings
   list marks sections that have been driven.
 
+- **"Run this Path" now shows what the code DOES, not just that it ran.** The
+  agent is asked for a set of probe cases rather than one driver — the ordinary
+  input, the boundary, the input that makes it fail — and each case runs as its
+  own traced process. The report shows, per case, what every symbol was called
+  with and what it answered, with a raise recorded as an answer rather than a
+  failed run. The values were always in the capture; the report was throwing
+  them away.
+
+- **A refusal now has to say why.** An agent that judges a dead section
+  undrivable must give a reason, which is shown as the reason. A refusal without
+  one no longer wears the "not drivable" badge — it leaves no driver and no
+  trace, so there is nothing to weigh, and it is marked as an unanswered ask
+  worth re-running. Sections that nothing calls are also no longer told to go
+  looking for an existing caller: for those, having no caller is the premise.
+
 - **CLI, worker and script runs are counted in the Traces panel.** Only HTTP
   routes ever had a hit count, so a traced `python -m handbook.cli generate`
   showed its commands at zero forever while the capture plainly held their

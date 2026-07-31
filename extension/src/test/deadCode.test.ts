@@ -42,8 +42,10 @@ import {
 import {
 	readRuns,
 	recordRun,
+	runHeadline,
 	runsForSection,
 	summarizeTrace,
+	summarizeTraces,
 	type DeadCodeRunRecord,
 } from '../harness/deadCodeRuns';
 import { buildFindings } from '../views/findingsModel';
@@ -481,26 +483,101 @@ suite('dead code: try-run driver', () => {
 		assert.ok(prompt.includes('Instrumented packages: app'));
 		assert.ok(prompt.includes('### section `'));
 		// A raising driver still traces — the prompt must forbid green-washing.
-		assert.ok(prompt.includes('Do NOT wrap everything in try/except'));
-		assert.ok(prompt.includes('{"driver": null}'), 'declining is an allowed reply');
+		// Anchored on the RULE, not the sentence carrying it. The prompt is built
+		// from a wrapped string array, so any rewording that re-flows the lines
+		// breaks a longer match while the rule itself is untouched — which is
+		// exactly how this assertion went stale once already.
+		assert.ok(prompt.includes('try/except to make the run look green'));
+		assert.ok(prompt.includes('{"driver": null, "reason"'), 'declining is an allowed reply');
+	});
+
+	test('the driver prompt asks for VARIED cases, each run on its own', () => {
+		// The surface exists to show what the code does, and one call cannot show
+		// that. The prompt must ask for several deliberately different inputs and
+		// name the argv contract that makes each one separately traceable.
+		const prompt = buildDriverPrompt(wiredSection(), new Map(), {
+			python: '/venv/bin/python',
+			targetPackages: ['app'],
+			cwd: '/repo',
+		});
+		assert.ok(prompt.includes('PROBE SUITE'));
+		assert.ok(prompt.includes('sys.argv[1]'), 'the case-selection contract is stated');
+		assert.ok(prompt.includes('<case-name>'), 'the invocation shows one case per process');
+		assert.ok(prompt.includes('VARY the inputs'));
+		assert.ok(prompt.includes('"cases"'), 'the reply shape carries the declared cases');
+		// A case that raises is evidence, not a failed run.
+		assert.ok(prompt.includes('a RESULT, not a failure'));
+	});
+
+	test('an orphan is told to build its own inputs; only a wired section is sent hunting', () => {
+		// For an orphan there is BY CONSTRUCTION no caller to find, and telling an
+		// agent to look for one invites it to conclude the section is undrivable —
+		// when the absence of callers is the premise of the whole task.
+		const env = { python: '/venv/bin/python', targetPackages: ['app'], cwd: '/repo' };
+		const report = buildDeadCode(tmpRepo(), fixture());
+		const orphan = report.sections.items.find((s) => s.reason === 'orphan');
+		assert.ok(orphan, 'the fixture has an orphan section');
+		const orphanPrompt = buildDriverPrompt(orphan, new Map(), env);
+		assert.ok(orphanPrompt.includes('NOTHING calls this code today'));
+		assert.ok(orphanPrompt.includes('reason to decline'), 'the premise is named as a premise');
+		assert.ok(
+			!orphanPrompt.includes('LOOK FOR AN EXISTING WAY IN'),
+			'there is no existing caller to look for',
+		);
+		const wiredPrompt = buildDriverPrompt(wiredSection(), new Map(), env);
+		assert.ok(wiredPrompt.includes('LOOK FOR AN EXISTING WAY IN'));
 	});
 
 	test('parseDriverReply keeps the driver, the decline and the unusable apart', () => {
 		const good = parseDriverReply(
 			'sure!\n```json\n' +
-				JSON.stringify({ driver: { code: 'import app\napp.helper_a()', notes: 'direct call' } }) +
+				JSON.stringify({
+					driver: {
+						code: 'import app\napp.helper_a()',
+						notes: 'direct call',
+						cases: [
+							{ name: 'empty', why: 'the boundary' },
+							{ name: 'typical', why: 'the ordinary input' },
+							{ name: '  ', why: 'unnamed — cannot be selected by argv' },
+							{ name: 'empty', why: 'a duplicate would produce two captures alike' },
+						],
+					},
+				}) +
 				'\n```',
 		);
 		assert.strictEqual(good.kind, 'driver');
 		if (good.kind === 'driver') {
 			assert.ok(good.code.includes('helper_a'));
 			assert.strictEqual(good.notes, 'direct call');
+			// Names become argv values, so blank and duplicate names are dropped
+			// rather than run: two cases sharing a name produce two captures that
+			// cannot be told apart, which is what the per-case split prevents.
+			assert.deepStrictEqual(good.cases.map((c) => c.name), ['empty', 'typical']);
+			assert.strictEqual(good.cases[0].why, 'the boundary');
 		}
-		// {"driver": null} is the documented decline — a verdict, not a transport
-		// failure, and the two must not collapse into one outcome.
-		assert.strictEqual(parseDriverReply(JSON.stringify({ driver: null })).kind, 'declined');
+		// A driver with no declared cases still runs — once, with no argv.
+		const bare = parseDriverReply(JSON.stringify({ driver: { code: 'import app' } }));
+		assert.deepStrictEqual(bare.kind === 'driver' && bare.cases, []);
 		assert.strictEqual(parseDriverReply(JSON.stringify({ driver: { code: '   ' } })).kind, 'unusable');
 		assert.strictEqual(parseDriverReply('no json at all').kind, 'unusable');
+	});
+
+	test('a decline carries its reason, and a bare refusal carries none', () => {
+		// {"driver": null} is the documented decline — a verdict, not a transport
+		// failure, and the two must not collapse into one outcome. The REASON is
+		// what makes it checkable: a decline leaves no driver and no trace, so
+		// without it the record holds nothing anyone could disagree with.
+		const reasoned = parseDriverReply(
+			JSON.stringify({ driver: null, reason: 'it is a setuptools entry point, not callable code' }),
+		);
+		assert.strictEqual(reasoned.kind, 'declined');
+		assert.strictEqual(
+			reasoned.kind === 'declined' && reasoned.reason,
+			'it is a setuptools entry point, not callable code',
+		);
+		const bare = parseDriverReply(JSON.stringify({ driver: null }));
+		assert.strictEqual(bare.kind, 'declined');
+		assert.strictEqual(bare.kind === 'declined' && bare.reason, '');
 	});
 
 	test('revivedSymbols counts from the overlay, not from the run outcome', () => {
@@ -570,6 +647,107 @@ suite('dead code: try-runs are kept and summarised', () => {
 		assert.strictEqual(summary!.top[0].component, 'app.legacy.helper_a');
 		assert.strictEqual(summary!.top[0].calls, 2);
 		assert.strictEqual(summary!.top[1].errors, 1);
+	});
+
+	test('the summary pairs each call’s arguments with what that call returned', () => {
+		// The point of the surface: "helper_a ran" is a fact about the tracer,
+		// "helper_a(n=3) → 'ok'" is a fact about the code. Arguments arrive on the
+		// enter row and results on the exit row, so nothing can show behaviour
+		// unless the two are paired back up.
+		const root = tmpRepo();
+		const file = traceFile(root, [
+			{ event: 'enter', component: 'app.legacy.helper_a', request_id: 'r1', thread_id: 1, depth: 0,
+				args_summary: { n: { v: 3 } } },
+			{ event: 'enter', component: 'app.legacy2.helper_b', request_id: 'r1', thread_id: 1, depth: 1,
+				parent_component: 'app.legacy.helper_a', args_summary: { items: { elem_type: 'int', len: 0 } } },
+			{ event: 'exit', component: 'app.legacy2.helper_b', request_id: 'r1', thread_id: 1, depth: 1,
+				parent_component: 'app.legacy.helper_a', duration_ms: 1, result_summary: { v: 0 } },
+			{ event: 'exit', component: 'app.legacy.helper_a', request_id: 'r1', thread_id: 1, depth: 0,
+				duration_ms: 3, result_summary: { head: 'ok' } },
+		]);
+		const summary = summarizeTrace(file);
+		assert.ok(summary);
+		// Callees before callers — a reader follows what a value did, not what ran most.
+		assert.strictEqual(summary!.top[0].component, 'app.legacy2.helper_b');
+		assert.deepStrictEqual(summary!.top[0].samples, [
+			{ args: [{ name: 'items', render: '[int × 0]' }], result: '0', error: null, ms: 1 },
+		]);
+		assert.strictEqual(summary!.top[0].parent, 'app.legacy.helper_a');
+		const a = summary!.top.find((f) => f.component === 'app.legacy.helper_a');
+		assert.deepStrictEqual(a!.samples, [
+			{ args: [{ name: 'n', render: '3' }], result: '"ok"', error: null, ms: 3 },
+		]);
+	});
+
+	test('repeated calls collapse, differing ones do not, and a raise is a result', () => {
+		// A probe case that loops does not get four hundred identical rows: the
+		// samples exist to show a RANGE, and the second identical observation adds
+		// nothing. A raise is kept as what the call answered, not dropped.
+		const root = tmpRepo();
+		const call = (n: number, result: object, error?: string) => [
+			{ event: 'enter', component: 'app.legacy.helper_a', request_id: 'r1', thread_id: 1,
+				args_summary: { n: { v: n } } },
+			{ event: 'exit', component: 'app.legacy.helper_a', request_id: 'r1', thread_id: 1,
+				duration_ms: 1, result_summary: result, error_type: error ?? null },
+		];
+		const summary = summarizeTrace(
+			traceFile(root, [
+				...call(1, { v: 1 }),
+				...call(1, { v: 1 }),
+				...call(2, { v: 2 }),
+				...call(-1, { type: 'NoneType' }, 'ValueError'),
+			]),
+		);
+		assert.strictEqual(summary!.top[0].calls, 4, 'every call is still counted');
+		assert.deepStrictEqual(
+			summary!.top[0].samples!.map((s) => `${s.args[0].render}→${s.error ?? s.result}`),
+			['1→1', '2→2', '-1→ValueError'],
+		);
+		const raised = summary!.top[0].samples!.find((s) => s.error);
+		assert.strictEqual(raised!.result, '', 'a call that raised returned nothing');
+	});
+
+	test('summarizeTraces merges the cases without crossing their values', () => {
+		const root = tmpRepo();
+		const one = path.join(root, 'case-a.jsonl');
+		const two = path.join(root, 'case-b.jsonl');
+		for (const [file, n] of [[one, 1], [two, 2]] as const) {
+			fs.writeFileSync(
+				file,
+				[
+					{ event: 'enter', component: 'app.legacy.helper_a', request_id: `r${n}`, thread_id: 1,
+						args_summary: { n: { v: n } } },
+					{ event: 'exit', component: 'app.legacy.helper_a', request_id: `r${n}`, thread_id: 1,
+						duration_ms: n, result_summary: { v: n * 10 } },
+				]
+					.map((e) => JSON.stringify(e))
+					.join('\n') + '\n',
+				'utf8',
+			);
+		}
+		const merged = summarizeTraces([one, two]);
+		assert.strictEqual(merged!.calls, 2);
+		assert.deepStrictEqual(
+			merged!.top[0].samples!.map((s) => `${s.args[0].render}→${s.result}`),
+			['1→10', '2→20'],
+		);
+		// A capture that does not exist is skipped, not fatal: a case can fail to
+		// produce a trace while its siblings ran fine.
+		assert.strictEqual(summarizeTraces([one, path.join(root, 'nope.jsonl')])!.calls, 1);
+	});
+
+	test('an unexplained refusal does not read as a settled verdict', () => {
+		// A decline leaves no driver and no trace, so the reason is the entire
+		// evidence. Without one there is nothing to weigh — and saying "not
+		// drivable" anyway is how one lazy null becomes permanent.
+		assert.strictEqual(
+			runHeadline(record({ outcome: 'declined', notes: 'it is a setuptools entry point' })),
+			'the agent judged this not drivable from a script',
+		);
+		assert.strictEqual(
+			runHeadline(record({ outcome: 'declined', notes: '' })),
+			'the agent refused without saying why — not a settled verdict',
+		);
 	});
 
 	test('a missing or span-less trace summarises to null, never to zeros', () => {
