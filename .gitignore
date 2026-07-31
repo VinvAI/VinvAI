@@ -37,12 +37,13 @@ dist/
 models/
 *.gguf
 *.safetensors
-# tiktoken downloads its BPE encoding (~1.6MB) into a cache dir that
-# token_utils.py points at its OWN package directory, so the blob lands inside
-# the source tree rather than under a temp or home path. It appears the first
-# time anything calls count_tokens — i.e. for every developer and every CI run
-# now that tiktoken is a declared dependency of core[agents].
-.tiktoken_cache/
+# Coverage artifacts. pytest-cov writes these into whichever package directory
+# it ran from, so they appear under exerciser/, tracelens/, … rather than at the
+# root — and `cov.json` is half a megabyte of machine output nobody reviews.
+.coverage
+.coverage.*
+cov.json
+htmlcov/
 
 # Local build output, logs, and stray virtualenvs
 /_winbuild/

@@ -17,7 +17,7 @@
  * Deterministic: reads only the snapshot and the consolidate inventory — no
  * traces, no running server, no LLM.
  */
-import type { EntryPoint } from './identification';
+import { entryPointLabel, type EntryPoint } from './identification';
 import type { GraphSnapshot } from '../graph/indexGraph';
 
 /** An entry point relevant to the target, with how far above it its file sits. */
@@ -141,6 +141,6 @@ export function endpointsForRows(
 	const closest = reaching.filter((r) => r.depth === minDepth);
 
 	// Stable trigger order so the picker is deterministic across rebuilds.
-	closest.sort((a, b) => (a.entry.trigger || a.entry.id).localeCompare(b.entry.trigger || b.entry.id));
+	closest.sort((a, b) => entryPointLabel(a.entry).localeCompare(entryPointLabel(b.entry)));
 	return closest;
 }

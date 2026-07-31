@@ -552,6 +552,12 @@ function getHtml(): string {
 					(s.action
 						? '<span class="badge" title="What the agent recommends after reading the code">' + esc(s.action) + '</span>'
 						: '<span class="badge env" title="No agent has read this section yet">not analysed</span>') +
+					// The empirical half: a section someone actually DROVE carries
+					// evidence no static reading can produce, and the report tab
+					// holds the trace it produced.
+					(s.lastRun
+						? '<span class="badge" title="The last time this section was driven under tracing — open the report for the trace it produced">' + esc(s.lastRun) + '</span>'
+						: '') +
 					'<span class="grow"></span><span class="go">open report →</span></div>' +
 					(s.what ? '<div class="what">' + esc(s.what) + '</div>' : '') +
 					'</div>';

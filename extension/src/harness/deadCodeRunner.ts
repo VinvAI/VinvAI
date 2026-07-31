@@ -31,6 +31,12 @@ import {
 	type BatchOutcome,
 } from './deadCodeAnalysis';
 import { runDriverUnderTracing, tracedConfig } from './tracedRun';
+import {
+	recordRun,
+	summarizeTrace,
+	type DeadCodeRunOutcome,
+	type DeadCodeRunRecord,
+} from './deadCodeRuns';
 import { enqueueDeadCodeBatch, readPendingBatches, removeBatch } from './deadCodeQueue';
 import {
 	buildGraphSnapshot,
@@ -59,17 +65,12 @@ let tryRunInFlight = false;
 
 /** How one try-run of a dead section settled. */
 export interface TryRunOutcome {
-	outcome:
-		| 'revived' // the trace reached section symbols — they are no longer dead
-		| 'not-reached' // the driver ran and traced, but none of the section executed
-		| 'no-reply' // the harness never answered (blocked, timed out, CLI missing)
-		| 'declined' // the agent judged the section not drivable from a script
-		| 'unusable-reply' // the harness answered, but no driver could be parsed
-		| 'run-failed' // the driver produced no trace at all
-		| 'unavailable'; // preconditions missing (section gone, no tracelens config…)
+	outcome: DeadCodeRunOutcome;
 	detail: string;
 	/** Section symbols the fresh trace covered, when any. */
 	revived: string[];
+	/** Where the run was written down, when it got far enough to be recorded. */
+	recorded?: boolean;
 }
 
 /**
@@ -116,6 +117,41 @@ export async function tryRunDeadSection(
 		return { outcome: 'unavailable', detail: 'harness picker dismissed', revived: [] };
 	}
 
+	/**
+	 * Writes the run down and returns it. Every terminal outcome goes through
+	 * here — a section whose driver never came back is exactly the section a
+	 * user would otherwise ask about twice.
+	 */
+	const settle = (
+		outcome: DeadCodeRunOutcome,
+		detail: string,
+		extra: Partial<DeadCodeRunRecord> = {},
+	): TryRunOutcome => {
+		const revived = extra.revived ?? [];
+		try {
+			recordRun(workspaceRoot, {
+				sectionId: section.id,
+				title: section.title,
+				at: new Date().toISOString(),
+				outcome,
+				detail,
+				revived,
+				rows: section.symbols.items.map((s) => s.row),
+				driverFile: null,
+				traceFile: null,
+				exitCode: null,
+				timedOut: false,
+				notes: '',
+				outputTail: '',
+				trace: null,
+				...extra,
+			});
+		} catch {
+			// The message still reaches the user; only the history lags.
+		}
+		return { outcome, detail, revived, recorded: true };
+	};
+
 	tryRunInFlight = true;
 	try {
 		// Same context the analysis prompt gets: the live neighbourhood is where
@@ -157,7 +193,7 @@ export async function tryRunDeadSection(
 						`(VINV_AGENT_TIMEOUT_S, default 300s), or its CLI is missing. ` +
 						`See .vinv/logs/harness-agent-${dispatchName}.log for the transcript.`;
 					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
-					return { outcome: 'no-reply', detail, revived: [] };
+					return settle('no-reply', detail);
 				}
 				const parsed = parseDriverReply(reply);
 				if (parsed.kind === 'declined') {
@@ -166,14 +202,14 @@ export async function tryRunDeadSection(
 						'(e.g. build-tool config or code needing infrastructure a driver cannot fake). ' +
 						'That is a verdict, not a failure — re-running will not change it.';
 					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
-					return { outcome: 'declined', detail, revived: [] };
+					return settle('declined', detail);
 				}
 				if (parsed.kind === 'unusable') {
 					const detail =
 						'the harness replied but no driver could be parsed from its answer — worth one ' +
 						`retry. See .vinv/logs/harness-agent-${dispatchName}.log for what it said.`;
 					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
-					return { outcome: 'unusable-reply', detail, revived: [] };
+					return settle('unusable-reply', detail);
 				}
 				const driver = parsed;
 
@@ -195,12 +231,21 @@ export async function tryRunDeadSection(
 				fs.mkdirSync(path.dirname(outTrace), { recursive: true });
 
 				const run = await runDriverUnderTracing(workspaceRoot, driverFile, [], outTrace);
+				const evidence = {
+					driverFile,
+					traceFile: outTrace,
+					exitCode: run.exitCode,
+					timedOut: run.timedOut,
+					notes: driver.notes,
+					outputTail: run.outputTail.slice(-4000),
+					trace: summarizeTrace(outTrace),
+				};
 				if (!run.ok) {
 					const detail =
 						`the driver produced no trace (exit ${run.exitCode ?? 'none'}` +
 						`${run.timedOut ? ', timed out' : ''}). Tail: ${run.outputTail.slice(-300) || '(no output)'}`;
 					void vscode.window.showWarningMessage(`Vinv: ${detail}`);
-					return { outcome: 'run-failed', detail, revived: [] };
+					return settle('run-failed', detail, evidence);
 				}
 
 				// The verdict is counted from the re-scan, never inferred from the
@@ -223,14 +268,14 @@ export async function tryRunDeadSection(
 						`symbol(s) under trace (${revived.slice(0, 5).join(', ')}${revived.length > 5 ? '…' : ''}) — ` +
 						'they are no longer dead. This section re-forms around what is still untraced.';
 					void vscode.window.showInformationMessage(`Vinv: ${detail}`);
-					return { outcome: 'revived', detail, revived };
+					return settle('revived', detail, { ...evidence, revived });
 				}
 				const detail =
 					`the driver ran and traced${run.exitCode === 0 ? '' : ` (exit ${run.exitCode})`}, but ` +
 					'none of this section’s symbols executed — the path stayed dead even when driven. ' +
 					`Driver notes: ${driver.notes || '(none)'}`;
 				void vscode.window.showWarningMessage(`Vinv: ${detail}`);
-				return { outcome: 'not-reached', detail, revived: [] };
+				return settle('not-reached', detail, evidence);
 			},
 		);
 	} finally {

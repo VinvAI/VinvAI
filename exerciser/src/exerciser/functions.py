@@ -115,7 +115,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import envconfig, store
+from . import envconfig, store, tracing
 from ._worker import worker_entrypoint
 from .exception_policy import DECAY, ExceptionPolicy, family_of, provenance_of, signature
 from .interpreter import resolve_cached
@@ -3405,6 +3405,7 @@ def run_functions(
     explore: bool = True,
     sandbox: bool | None = None,
     sandbox_policy: SandboxPolicy | None = None,
+    trace: bool = True,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Drive every discovered function target in isolated workers. Persists all
@@ -3419,6 +3420,14 @@ def run_functions(
     the exploration span RUNS: a thinly-labelled signature suppressed today is
     drawn high on some later run, reported, and finally adjudicated. The draw
     can only ever ADD a finding, so a genuine crash is reported either way.
+
+    ``trace=True`` (the default) wraps each module's worker in ``tracelens run``
+    so the calls this driver makes produce spans exactly like traffic against a
+    running service — the whole point of driving a library that has no service
+    to send traffic to. Per-module captures land under
+    ``.vinv/captures/vinv-exerciser/<service>/functions/`` and are merged into a
+    single ``trace.jsonl`` beside them. A run whose tracelens is missing still
+    drives every target; the summary's ``trace`` block says why it has no spans.
 
     ``explore=False`` turns the draw off entirely (verdicts revert to the
     deterministic posterior-mean threshold). The CLI and the campaign leave it
@@ -3585,6 +3594,18 @@ def run_functions(
             "--repo",
             str(repo),
         ]
+        # The worker is where target code actually runs, so it is where
+        # tracelens attaches. Instrument the MODULE'S OWN top-level package
+        # rather than every package in the repo: this worker only imports one
+        # module, and naming the rest would tax imports for spans nothing here
+        # can produce. The wrap is a no-op when tracelens is missing.
+        if trace:
+            module_trace = tracing.capture_path(repo, service, "functions", module)
+            cmd = tracing.tracelens_wrap(
+                cmd,
+                target_packages=[module.partition(".")[0]],
+                output=module_trace,
+            )
         # WHERE to run this module from is decided by trying, not by reading.
         # A repo's relative paths resolve against the working directory, so the
         # choice changes what the code under test reads — and no list of build
@@ -4086,6 +4107,30 @@ def run_functions(
         diagnostics.append(detail)
         log.warning("functions_import_canary %s", detail)
 
+    # Fold the per-module captures into one trace beside them. Merging here
+    # rather than per-module keeps the `captures/<session>/<slug>/trace.jsonl`
+    # shape every existing consumer already globs for, while the parts stay on
+    # disk so a single module's spans remain attributable.
+    trace_report: dict[str, Any] = {"traced": False, "reason": "tracing disabled for this run"}
+    if trace:
+        trace_report = dict(
+            tracing.trace_status(sorted({m.partition(".")[0] for m in by_module}))
+        )
+        trace_dir = tracing.capture_path(repo, service, "functions").parent
+        merged = tracing.merge_traces(trace_dir) if trace_dir.is_dir() else None
+        if merged is not None:
+            trace_report["trace_jsonl"] = str(merged)
+            trace_report["trace_bytes"] = merged.stat().st_size
+        elif trace_report.get("traced"):
+            # tracelens was present and targets were named, yet nothing landed —
+            # the one outcome that looks like success everywhere else.
+            trace_report["traced"] = False
+            trace_report["reason"] = (
+                "tracelens ran but captured no spans — the driven modules import "
+                "under a different top-level package than the one instrumented, or "
+                "every target was refused before a call was made"
+            )
+
     result: dict[str, Any] = {
         # A run that could not import the code under test found nothing BECAUSE
         # it never ran it, which is not the same claim as a clean repo.
@@ -4155,6 +4200,11 @@ def run_functions(
         "issue_clusters": len(clusters),
         "clusters": [c.to_json() for c in clusters],
         "results_file": str(store.exercise_dir(repo) / "function_results.jsonl"),
+        # Where the spans for these calls went, or why there are none. A driven
+        # library produces its trace HERE and nowhere else, so a run that
+        # silently captured nothing would look identical to one that was never
+        # meant to be traced.
+        "trace": trace_report,
     }
     store.write_json(store.exercise_dir(repo) / "functions.json", result)
     log.info(

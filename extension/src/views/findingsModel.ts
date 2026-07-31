@@ -24,6 +24,7 @@ import { describeLineage } from '../harness/runtimeAnalysis';
 import { serviceForEndpointFile } from '../bringup/targetPackages';
 import { deadCodePath, type DeadCodeReport } from './deadCodeModel';
 import { analysisPath, type DeadCodeAnalysis } from '../harness/deadCodeAnalysis';
+import { readRuns, runHeadline, runsForSection } from '../harness/deadCodeRuns';
 
 /**
  * Resolves `METHOD /path` → owning service, for every endpoint the workspace
@@ -155,6 +156,15 @@ export interface FindingsDeadSection {
 	action: string | null;
 	/** The agent's account of what the code does; empty when unanalysed. */
 	what: string;
+	/**
+	 * What the last "Run this Path" attempt established, or '' when this section
+	 * has never been driven. Carried here so the empirical half of the dead-code
+	 * story is visible in the LIST — a section that was actually run and reached
+	 * nothing is a much stronger finding than one nobody has tried.
+	 */
+	lastRun: string;
+	/** ISO timestamp of that run; '' when there is none. */
+	lastRunAt: string;
 }
 
 export interface FindingsDeadCode {
@@ -366,8 +376,13 @@ function buildDeadCodeBlock(workspaceRoot: string): FindingsDeadCode {
 		};
 	}
 	const verdicts = analysis?.verdicts ?? {};
+	const runs = readRuns(workspaceRoot);
 	const sections: FindingsDeadSection[] = (scan.sections.items ?? []).map((s) => {
 		const v = verdicts[s.id];
+		const lastRun = runsForSection(runs, {
+			id: s.id,
+			rows: (s.symbols?.items ?? []).map((x) => x.row),
+		})[0];
 		return {
 			id: s.id,
 			title: s.title,
@@ -379,6 +394,8 @@ function buildDeadCodeBlock(workspaceRoot: string): FindingsDeadCode {
 			liveCallers: s.liveCallers.length,
 			action: v?.action ?? null,
 			what: v?.what ?? '',
+			lastRun: lastRun ? runHeadline(lastRun) : '',
+			lastRunAt: lastRun?.at ?? '',
 		};
 	});
 	return {

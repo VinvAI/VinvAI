@@ -1,5 +1,10 @@
 /**
- * Ingests an EXTERNAL endpoint-test run into vinv's exercise artifacts.
+ * Ingests an EXTERNAL test run into vinv's exercise artifacts.
+ *
+ * A "unit" here is whatever was exercised: an HTTP endpoint (`GET /users`), a
+ * CLI invocation (`RUN acme-tool report`), or a driven call
+ * (`CALL acme.mod.summarize`). Only the first has a route a trace can name; the
+ * other two are how a repo with no service gets recorded at all.
  *
  * vinv's Journey/Findings views are fed by its own exerciser. A run driven by
  * anything else — an agent, a CI suite, k6, Postman — leaves those views empty
@@ -56,6 +61,12 @@ export interface IngestCheck {
 	round?: number;
 	/** Why it failed, in the harness's own words. */
 	detail?: string;
+	/**
+	 * `http_endpoint` | `cli_invocation` | `function_call`. Optional — inferred
+	 * from the label's verb when omitted, so an existing caller sending only
+	 * `METHOD /path` keeps working unchanged.
+	 */
+	unit_kind?: string;
 }
 
 export interface IngestRun {
@@ -80,12 +91,38 @@ export interface IngestResult {
 	written: string[];
 }
 
+/**
+ * An inbound HTTP request label: `METHOD /path`.
+ *
+ * Kept strict, and deliberately NOT widened to the unit grammar below: this is
+ * also what decides whether a captured root span is an inbound request tree, so
+ * loosening it would start attributing startup and import spans to units.
+ */
 const ENDPOINT_RE = /^([A-Z]+)\s+(\/\S*)$/;
+
+/**
+ * Any unit of work: `VERB target`.
+ *
+ * `GET /users`, `RUN acme-tool report --since 7d`, `CALL acme.mod.summarize`.
+ * A repo with no service still exercises units, and refusing to ingest them
+ * left an agent that had genuinely driven a CLI with nowhere to report it —
+ * the Journey and Findings views then showed nothing, which reads as "this was
+ * never tested" rather than "this was tested and not recordable".
+ */
+const UNIT_RE = /^([A-Z]+)\s+(\S.*)$/;
+
+/** The unit kind a label implies, when the caller did not say. */
+function unitKindOf(label: string): string {
+	if (ENDPOINT_RE.test(label.trim())) {
+		return 'http_endpoint';
+	}
+	return label.trim().startsWith('CALL ') ? 'function_call' : 'cli_invocation';
+}
 const P95_OUTLIER_MS = 10_000;
 
 /** "POST /run-agent" -> a filesystem- and id-safe api_id. */
 export function apiIdFor(endpoint: string): string {
-	const m = ENDPOINT_RE.exec(endpoint.trim());
+	const m = UNIT_RE.exec(endpoint.trim());
 	const method = m ? m[1] : 'ANY';
 	const p = m ? m[2] : endpoint;
 	const slug = p.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'root';
@@ -153,10 +190,12 @@ export function validateRun(run: unknown): { ok: true; run: IngestRun } | { ok: 
 		if (typeof c !== 'object' || c === null) {
 			return { ok: false, error: `checks[${i}] must be an object` };
 		}
-		if (typeof c.endpoint !== 'string' || !ENDPOINT_RE.test(c.endpoint.trim())) {
+		if (typeof c.endpoint !== 'string' || !UNIT_RE.test(c.endpoint.trim())) {
 			return {
 				ok: false,
-				error: `checks[${i}].endpoint must look like "METHOD /path" (got ${JSON.stringify(c.endpoint)})`,
+				error:
+					`checks[${i}].endpoint must look like "METHOD /path", "RUN <command>" or ` +
+					`"CALL module.function" (got ${JSON.stringify(c.endpoint)})`,
 			};
 		}
 		if (typeof c.name !== 'string' || !c.name.trim()) {
@@ -262,7 +301,9 @@ export function ingestRun(
 
 	for (const [endpoint, rows] of byEndpoint) {
 		const raw = rawOf.get(endpoint) ?? endpoint;
-		const m = ENDPOINT_RE.exec(raw)!;
+		// UNIT_RE, not ENDPOINT_RE: validateRun accepted `RUN …` / `CALL …` too,
+		// and the old non-null assertion would have thrown on exactly those.
+		const m = UNIT_RE.exec(raw)!;
 		const method = m[1];
 		// Display path carries the service suffix; the join uses the raw route.
 		const p = endpoint === raw ? m[2] : `${m[2]}  [${endpoint.split('[')[1]?.replace(']', '').trim() ?? ''}]`;
@@ -280,6 +321,7 @@ export function ingestRun(
 
 		planEndpoints.push({
 			api_id: apiId,
+			unit_kind: rows[0]?.unit_kind ?? unitKindOf(raw),
 			method,
 			path: p,
 			handler: null,

@@ -47,6 +47,7 @@ import { selectionStage, type Bounded } from '../harness/runtimeAnalysis';
 // Type-only: the verdict is the harness module's shape, and importing it as a
 // type keeps the model free of any runtime dependency on the dispatcher.
 import type { DeadSectionVerdict } from '../harness/deadCodeAnalysis';
+import { readRuns, runsForSection, type DeadCodeRunRecord } from '../harness/deadCodeRuns';
 
 /** Layers whose "never executed" is uninteresting: test and doc chunks. */
 const IGNORED_LAYERS = new Set(['tests', 'docs']);
@@ -489,6 +490,15 @@ export interface DeadSectionReport {
 	 * — never as an empty verdict.
 	 */
 	verdict: DeadSectionVerdict | null;
+	/**
+	 * Every "Run this Path" attempt that touched these symbols, newest first.
+	 *
+	 * The section's own history, kept ON the report rather than looked up by the
+	 * view: the traces a try-run produces are the only empirical evidence about
+	 * dead code this product has, and until they were carried here they were
+	 * written to `.vinv/captures/` and never shown to anyone.
+	 */
+	runs: DeadCodeRunRecord[];
 }
 
 /**
@@ -529,6 +539,10 @@ export function buildSectionReport(
 			source: sources.get(row) ?? '',
 		})),
 		verdict,
+		runs: runsForSection(readRuns(workspaceRoot), {
+			id: section.id,
+			rows: section.symbols.items.map((s) => s.row),
+		}),
 	};
 }
 

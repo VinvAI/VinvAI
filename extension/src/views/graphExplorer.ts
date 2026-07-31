@@ -20,7 +20,7 @@ import { getGraphHtml } from './graphExplorerHtml';
 import { openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore, type GraphSnapshot } from '../graph/indexGraph';
 import { runIndexQuery, hitsToRows } from '../qna/answer';
-import { loadEntryPoints } from '../identification/identification';
+import { entryPointLabel, loadEntryPoints } from '../identification/identification';
 import { endpointsForRows } from '../identification/endpointsForRow';
 
 /** The custom-editor view type; must match `contributes.customEditors`. */
@@ -146,14 +146,14 @@ async function openTraceForNode(
 		const e = reaching[0].entry;
 		await vscode.commands.executeCommand('vinv-vs.openCallTree', {
 			apiId: e.id,
-			label: e.trigger || e.id,
+			label: entryPointLabel(e),
 		});
 		return;
 	}
 
 	const picked = await vscode.window.showQuickPick(
 		reaching.map(({ entry, depth }) => ({
-			label: entry.trigger || entry.id,
+			label: entryPointLabel(entry),
 			description: entry.handler ? `${entry.handler}()` : entry.kind,
 			detail: `${entry.file}:${entry.line} · ${depth === 0 ? 'in this file' : 'calls this file'}`,
 			id: entry.id,

@@ -395,7 +395,10 @@ function getHtml(): string {
 	function renderStep(s) {
 		document.getElementById('title').textContent = s.method + ' ' + s.path;
 		document.getElementById('meta').textContent =
-			s.handler ? 'served by ' + s.handler + '()' : 'every request, input, and result for this endpoint';
+			s.handler ? 'served by ' + s.handler + '()'
+			: s.unitKind === 'cli_invocation' ? 'every run of this command, with its exit code and output'
+			: s.unitKind === 'function_call' ? 'every call driven through this function, with its arguments and result'
+			: 'every request, input, and result for this endpoint';
 		const pct = s.coverage.total ? Math.round(100 * s.coverage.covered / s.coverage.total) : 0;
 		document.getElementById('stats').innerHTML =
 			'<span class="cov" title="Functions this endpoint can reach that a captured request actually executed">Coverage <span class="bar"><span style="width:' + pct + '%"></span></span> ' +
@@ -430,15 +433,25 @@ function getHtml(): string {
 			html += '</table>';
 		}
 
-		html += '<h2>Add your own input' + (s.userPlanCount ? ' (' + s.userPlanCount + ' authored)' : '') + '</h2>' +
-			'<form class="add" id="add-form">' +
-			'<div class="full"><label>Body (JSON, empty for none)</label><textarea id="in-body" placeholder="{&quot;email&quot;: &quot;me@example.com&quot;}"></textarea></div>' +
-			'<div><label>Path params (JSON object)</label><textarea id="in-path" placeholder="{&quot;user_id&quot;: &quot;…&quot;}"></textarea></div>' +
-			'<div><label>Query params (JSON object)</label><textarea id="in-query" placeholder="{&quot;limit&quot;: 10}"></textarea></div>' +
-			'<div><label>Expected status</label><input id="in-expect" value="2xx"></div>' +
-			'<div style="align-self:end"><button type="submit">Add input</button></div>' +
-			'</form>' +
-			'<div class="empty">Saved with this endpoint\\'s planned inputs — the next <b>exerciser run</b> executes it (logging in first if this endpoint\\'s recorded flow needs it) and it becomes a permanent regression check.</div>';
+		// A body/query form belongs to an HTTP endpoint. A CLI invocation's argv
+		// comes from .vinv/services.json and a driven call's arguments are
+		// generated from type hints — offering the form on those would be a
+		// control that saves a plan nothing ever replays.
+		if (s.acceptsUserInputs) {
+			html += '<h2>Add your own input' + (s.userPlanCount ? ' (' + s.userPlanCount + ' authored)' : '') + '</h2>' +
+				'<form class="add" id="add-form">' +
+				'<div class="full"><label>Body (JSON, empty for none)</label><textarea id="in-body" placeholder="{&quot;email&quot;: &quot;me@example.com&quot;}"></textarea></div>' +
+				'<div><label>Path params (JSON object)</label><textarea id="in-path" placeholder="{&quot;user_id&quot;: &quot;…&quot;}"></textarea></div>' +
+				'<div><label>Query params (JSON object)</label><textarea id="in-query" placeholder="{&quot;limit&quot;: 10}"></textarea></div>' +
+				'<div><label>Expected status</label><input id="in-expect" value="2xx"></div>' +
+				'<div style="align-self:end"><button type="submit">Add input</button></div>' +
+				'</form>' +
+				'<div class="empty">Saved with this endpoint\\'s planned inputs — the next <b>exerciser run</b> executes it (logging in first if this endpoint\\'s recorded flow needs it) and it becomes a permanent regression check.</div>';
+		} else if (s.unitKind === 'cli_invocation') {
+			html += '<div class="empty">This is a <b>CLI invocation</b>. Its arguments come from the <code>invocations</code> recorded for this service in <code>.vinv/services.json</code> — edit them there and re-run <b>exerciser invocations</b>.</div>';
+		} else {
+			html += '<div class="empty">This is a <b>driven call</b>. Its arguments are generated from the function\\'s type hints by <b>exerciser functions</b>, not authored by hand.</div>';
+		}
 
 		document.getElementById('content').innerHTML = html;
 
@@ -446,7 +459,8 @@ function getHtml(): string {
 			el.addEventListener('click', () =>
 				vscode.postMessage({ type: 'openSource', file: el.dataset.file, line: parseInt(el.dataset.line || '1', 10) }));
 		}
-		document.getElementById('add-form').addEventListener('submit', (ev) => {
+		const addForm = document.getElementById('add-form');
+		if (addForm) addForm.addEventListener('submit', (ev) => {
 			ev.preventDefault();
 			const parse = (id, label) => {
 				const raw = document.getElementById(id).value.trim();

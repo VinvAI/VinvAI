@@ -98,12 +98,24 @@ def _endpoint_profile(
 
     latencies = [float(ex["latency_ms"]) for ex in ep_execs if ex.get("latency_ms") is not None]
 
+    # A non-HTTP unit wrote its OWN capture (the invocation oracle records the
+    # path on every row). Without this the join falls back to "the service's
+    # newest trace", which for a CLI unit is either absent or another unit's
+    # run — coverage attributed to the wrong work is worse than none.
+    unit_trace = next((ex.get("trace_jsonl") for ex in ep_execs if ex.get("trace_jsonl")), None)
+    # A driven call is not a declared entry point, so there is no api_id to look
+    # up — its `module:qualname` target IS the root. Passed as the fallback, so
+    # a unit that does happen to be declared still resolves that way first.
+    unit_symbol = api_id if ep_execs and ep_execs[0].get("unit_kind") == "function_call" else None
+
     cov = endpoint_coverage(
         repo,
         api_id,
         service=service,
         store_dir=store_dir,
+        trace=unit_trace,
         handler=handler,
+        symbol=unit_symbol,
         logger=logger,
     )
 
@@ -144,6 +156,48 @@ def _endpoint_profile(
     }
 
 
+#: How each oracle's rows name their unit, and the pseudo-method the unit reads
+#: as. The HTTP path already writes `endpoint_id`/`method`/`path`; the other two
+#: name the same three things differently because they are not endpoints.
+_UNIT_SOURCES: tuple[tuple[str, str, str, str], ...] = (
+    ("invocation_results.jsonl", "cli_invocation", "unit_id", "RUN"),
+    ("function_results.jsonl", "function_call", "target_id", "CALL"),
+)
+
+
+def unit_executions(repo: Path) -> list[dict[str, Any]]:
+    """Every exercised unit, normalized to the profile's shape.
+
+    A profile keyed strictly on HTTP endpoints made a whole class of repo
+    unprofilable: a toolchain or a library has no endpoints, so `build_profile`
+    returned "no results.jsonl" no matter how much of it had been driven. The
+    three oracles already produce the same *kind* of row — an input class, an
+    outcome, a duration — they just name their unit differently, so the join is
+    a rename rather than a second profiler.
+
+    Rows keep their `unit_kind`, so a reader can tell a driven function from a
+    served request rather than seeing them silently pooled.
+    """
+    executions: list[dict[str, Any]] = []
+    for row in store.read_jsonl(store.results_path(repo)):
+        row.setdefault("unit_kind", "http_endpoint")
+        executions.append(row)
+    for filename, kind, id_field, method in _UNIT_SOURCES:
+        for row in store.read_jsonl(store.exercise_dir(repo) / filename):
+            unit_id = row.get(id_field) or row.get("unit_id")
+            if not unit_id:
+                continue
+            row.setdefault("unit_kind", kind)
+            row["endpoint_id"] = str(unit_id)
+            row.setdefault("method", method)
+            # A CLI row's `path` is the command line; a function row has none,
+            # so the target itself is the label.
+            row["path"] = str(row.get("path") or unit_id)
+            row.setdefault("input_class", "declared")
+            executions.append(row)
+    return executions
+
+
 def build_profile(
     repo: Path,
     *,
@@ -155,9 +209,16 @@ def build_profile(
     log = logger or logging.getLogger(__name__)
     repo = repo.resolve()
 
-    executions = store.read_jsonl(store.results_path(repo))
+    executions = unit_executions(repo)
     if not executions:
-        return {"status": "error", "error": "no results.jsonl — run `exerciser run` first"}
+        return {
+            "status": "error",
+            "error": (
+                "nothing has been exercised yet — run `exerciser run` (HTTP), "
+                "`exerciser invocations` (CLIs) or `exerciser functions` (libraries) "
+                "first"
+            ),
+        }
 
     by_ep: dict[str, list[dict[str, Any]]] = {}
     meta: dict[str, tuple[str, str, str | None]] = {}
@@ -187,6 +248,10 @@ def build_profile(
             store_dir=store_dir,
             logger=log,
         )
+        # Which oracle produced this unit. Without it a driven function and a
+        # served request are indistinguishable in the profile, and the views
+        # would have to guess from the pseudo-method.
+        prof["unit_kind"] = ep_execs[0].get("unit_kind", "http_endpoint")
         profiles.append(prof)
         for inv in prof["invariants"]:
             all_invariants.append({"endpoint": f"{method} {path}", **inv})

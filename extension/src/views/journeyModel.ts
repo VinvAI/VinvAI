@@ -1,18 +1,27 @@
 /**
  * Journey data assembly — the single start-to-end walkthrough of everything
- * Vinv verified: every discovered service, then every endpoint in order with
- * its call tree, runtime coverage, latency profile, and the exact inputs and
- * outputs the exerciser drove through it.
+ * Vinv verified: every discovered service, then every UNIT OF WORK in order
+ * with its call tree, runtime coverage, latency profile, and the exact inputs
+ * and outputs the exerciser drove through it.
+ *
+ * A unit is an HTTP endpoint, a CLI invocation, or a driven function call.
+ * Endpoints come from the plan (they have input plans and call trees); the
+ * other two come from the profile, because a CLI's argv is recorded in the
+ * service inventory and a call's arguments are generated from type hints —
+ * neither has a plan to enumerate.
  *
  * Pure filesystem reads (no vscode import) so the whole assembly is unit-
  * testable against a fixture directory. Sources, all under <root>/.vinv/:
  *
- *   services.json                     — the services bringup verified
- *   exercise/scorecard.json           — per-endpoint coverage/latency/issues
- *   exercise/profile.json             — behavioral profile (fallback ordering)
- *   exercise/results.jsonl            — every probe's input → output record
- *   exercise/plan.json                — api_id ↔ METHOD/path map + semantics
- *   reports/calltree-<api_id>.json    — static tree + runtime overlay snapshot
+ *   services.json                       — the services bringup verified
+ *   exercise/scorecard.json             — per-unit coverage/latency/issues
+ *   exercise/profile.json               — behavioral profile; the ONLY source
+ *                                         for non-endpoint units
+ *   exercise/results.jsonl              — every HTTP probe's input → output
+ *   exercise/invocation_results.jsonl   — every CLI invocation's run
+ *   exercise/function_results.jsonl     — every driven call
+ *   exercise/plan.json                  — api_id ↔ METHOD/path map + semantics
+ *   reports/calltree-<api_id>.json      — static tree + runtime overlay snapshot
  *
  * User-authored inputs land in exercise/prompts/<api_id>.json as reply plans —
  * the SAME channel harness-authored scenarios use, so the engine replays them
@@ -37,9 +46,20 @@ export interface JourneyIoRow {
 	error: string | null;
 }
 
-/** One endpoint step of the walkthrough. */
+/** One step of the walkthrough — an endpoint, a CLI invocation, or a call. */
 export interface JourneyStep {
 	apiId: string;
+	/**
+	 * Which oracle produced this unit: `http_endpoint`, `cli_invocation` or
+	 * `function_call`.
+	 *
+	 * The walkthrough used to be endpoint-only, which made a whole class of repo
+	 * show an empty journey: a toolchain or a library has no endpoints, so every
+	 * step came from `plan.endpoints` and there were none — however much of it
+	 * had actually been driven and traced. Stated per step rather than inferred
+	 * from `method`, so a reader is never guessing what `RUN` or `CALL` means.
+	 */
+	unitKind: string;
 	method: string;
 	path: string;
 	handler: string | null;
@@ -142,6 +162,38 @@ function ioRowsFor(results: any[], apiId: string): JourneyIoRow[] {
 }
 
 /**
+ * IO rows for a non-HTTP unit, mapped onto the same display shape.
+ *
+ * A CLI invocation and a function call have the same *structure* as a probe —
+ * an input, an outcome, a duration — under different names. `status` carries
+ * the exit code for an invocation (`null` for a call, which has none), and the
+ * input/output columns carry the command line and its stdout, or the kwargs and
+ * the returned value.
+ */
+function unitIoRowsFor(rows: any[], unitId: string, unitKind: string): JourneyIoRow[] {
+	const out: JourneyIoRow[] = [];
+	for (let i = rows.length - 1; i >= 0 && out.length < MAX_IO_ROWS; i--) {
+		const r = rows[i];
+		const id = r?.unit_id ?? r?.target_id;
+		if (String(id ?? '') !== unitId) {
+			continue;
+		}
+		const isInvocation = unitKind === 'cli_invocation';
+		out.push({
+			strategy: String(r.strategy ?? (isInvocation ? 'invocation/declared' : 'function')),
+			inputClass: String(r.input_class ?? ''),
+			status: isInvocation && typeof r.exit_code === 'number' ? r.exit_code : null,
+			latencyMs: typeof r.latency_ms === 'number' ? r.latency_ms : null,
+			auth: false,
+			input: isInvocation ? boundedJson(r.command) : boundedJson(r.kwargs),
+			output: isInvocation ? boundedJson(r.stdout_tail) : boundedJson(r.result ?? r.effects),
+			error: r.error ? String(r.error) : null,
+		});
+	}
+	return out;
+}
+
+/**
  * Assembles the full journey for a workspace. Missing artifacts degrade to
  * empty sections (a repo that never ran the exerciser still gets services +
  * call trees); they never throw.
@@ -186,6 +238,7 @@ export function buildJourney(workspaceRoot: string): Journey {
 
 		steps.push({
 			apiId,
+			unitKind: 'http_endpoint',
 			method: String(ep.method ?? ''),
 			path: String(ep.path ?? ''),
 			handler: ep.handler ? String(ep.handler) : null,
@@ -202,6 +255,52 @@ export function buildJourney(workspaceRoot: string): Journey {
 			userPlanCount: planCount,
 		});
 	}
+	// Units that are not endpoints come from the profile, which is where every
+	// oracle's work lands. There is no plan.json for them — a CLI's argv comes
+	// from the inventory and a call's arguments are generated, so neither has an
+	// input plan to enumerate.
+	const profile = readJson(path.join(vinv, 'exercise', 'profile.json')) ?? {};
+	const invocationRows = readJsonl(path.join(vinv, 'exercise', 'invocation_results.jsonl'));
+	const functionRows = readJsonl(path.join(vinv, 'exercise', 'function_results.jsonl'));
+	for (const unit of profile.endpoints ?? []) {
+		const unitKind = String(unit.unit_kind ?? 'http_endpoint');
+		if (unitKind === 'http_endpoint') {
+			continue; // already walked above, with its plan and call tree
+		}
+		const apiId = String(unit.api_id ?? '');
+		if (!apiId) {
+			continue;
+		}
+		const cov = unit.coverage ?? {};
+		const rows = unitKind === 'cli_invocation' ? invocationRows : functionRows;
+		steps.push({
+			apiId,
+			unitKind,
+			method: String(unit.method ?? ''),
+			path: String(unit.path ?? ''),
+			handler: unit.handler ? String(unit.handler) : null,
+			coverage: {
+				covered: Number(cov.covered ?? 0),
+				total: Number(cov.total ?? 0),
+				pct: Number(cov.pct ?? 0),
+			},
+			handlerObserved: Boolean(cov.handler_observed),
+			p50Ms: Number(unit.latency?.p50_ms ?? 0),
+			p95Ms: Number(unit.latency?.p95_ms ?? 0),
+			statuses: unit.status_distribution ?? {},
+			invariants: Array.isArray(unit.invariants) ? unit.invariants.length : 0,
+			tree: null,
+			treeError: null,
+			io: unitIoRowsFor(rows, apiId, unitKind),
+			// Neither kind takes a user-authored input plan: an invocation's argv
+			// is what the inventory recorded, and a call's arguments are derived
+			// from its type hints. Offering an input box that nothing replays
+			// would be a dead control.
+			acceptsUserInputs: false,
+			userPlanCount: 0,
+		});
+	}
+
 	// Stable walk order: method-grouped, then path — reads like an API index.
 	steps.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
 

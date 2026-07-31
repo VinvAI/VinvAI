@@ -48,6 +48,29 @@ export interface EntryPoint {
 	framework: string;
 }
 
+/**
+ * The label to show for an entry point.
+ *
+ * Normally the trigger, which already reads as the thing that starts the code
+ * ("GET /health", a command name, a cron expression). The exception is a bare
+ * `__main__` guard: its declaration is identical in every script, so a repo of
+ * CLI tools lists as a wall of rows all reading "__main__". Those are named by
+ * the file that is actually run. Current engines emit that label themselves;
+ * this also repairs an apis.json written by an older `identification` binary,
+ * so the views read correctly before the engines are rebuilt.
+ */
+export function entryPointLabel(entry: {
+	trigger?: string | null;
+	file?: string | null;
+	id?: string;
+}): string {
+	const trigger = (entry.trigger ?? '').trim();
+	if (trigger === '__main__' && entry.file) {
+		return `python ${entry.file}`;
+	}
+	return trigger || entry.id || '';
+}
+
 /** One HTTP route from the back-compat `apis` array (older consolidate builds). */
 interface HttpApi {
 	id: string;

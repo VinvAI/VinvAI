@@ -16,7 +16,8 @@ repo, each independently and each after the code had been reviewed and shipped:
   3. `jsdom` — imported by scripts/e2e-graph-webview.mjs and
      scripts/e2e-unlinked-node.mjs, declared nowhere, so both headless webview
      e2e tests fail at import on any clean checkout.
-  4. `core`'s `litellm` — declared, but redirected to an in-tree shim by
+  4. `core`'s `litellm` (the `core` package has since been removed) — declared,
+     but redirected to an in-tree shim by
      `[tool.uv.sources]`, which is uv-only and absent from wheel metadata, so
      `pip install vinv-core` silently resolved a DIFFERENT package.
 
@@ -55,7 +56,6 @@ REPO = Path(__file__).resolve().parent.parent
 # Python sources to scan: every engine's src/ plus the repo's own scripts.
 PY_ROOTS = (
     "contracts",
-    "core",
     "tracelens",
     "identification",
     "handbook",

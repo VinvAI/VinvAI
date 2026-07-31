@@ -7,6 +7,7 @@ import {
 	shouldRunPinCheck,
 	type EngineUpdateMode,
 } from '../engines/update';
+import { shouldRediscoverForUpdate } from '../index/discovery';
 
 /** Baseline: a stamped build whose managed clone sits on the wrong commit. */
 function pin(
@@ -237,5 +238,58 @@ suite('engines install decision (no checkout on the machine)', () => {
 			decideInstallAction({ mode: 'never', force: true, autoAttempts: 0 }).kind,
 			'ask-install',
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Re-discovery after an extension update. An update also moves the engines to a
+// new pin, and the artifacts on disk were produced by engines this build no
+// longer ships — so the workspace is re-discovered, which is also what makes
+// Auto-Pilot start (its auto-start hangs off discovery COMPLETING).
+// ---------------------------------------------------------------------------
+
+suite('shouldRediscoverForUpdate', () => {
+	const at = (overrides: Partial<Parameters<typeof shouldRediscoverForUpdate>[0]> = {}) => ({
+		discovered: true,
+		seen: '0.2.0',
+		version: '0.2.1',
+		...overrides,
+	});
+
+	test('a version change on a discovered workspace re-discovers', () => {
+		assert.strictEqual(shouldRediscoverForUpdate(at()), true);
+	});
+
+	test('the same version does not re-discover on every window reload', () => {
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1' })), false);
+	});
+
+	test('an undiscovered workspace is left to the normal first-run path', () => {
+		// Not "false because nothing changed" — false because re-discovery is not
+		// this decision's job when there is nothing to re-do.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ discovered: false })), false);
+		assert.strictEqual(
+			shouldRediscoverForUpdate(at({ discovered: false, seen: undefined })),
+			false,
+		);
+	});
+
+	test('no recorded version is NOT treated as an update', () => {
+		// Every workspace discovered before the marker existed looks like this. A
+		// full re-index (plus the handbook and bring-up agents) on workspaces that
+		// are perfectly current is the wrong direction to err in.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: undefined })), false);
+	});
+
+	test('an unknown current version never forces work', () => {
+		// packageJSON.version missing — comparing against '' would make every
+		// activation look like a change.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ version: '' })), false);
+	});
+
+	test('a downgrade counts too', () => {
+		// Rolling back also changes which engines the extension is cut against, so
+		// the artifacts are equally stale. This is a change test, not an ordering one.
+		assert.strictEqual(shouldRediscoverForUpdate(at({ seen: '0.2.1', version: '0.2.0' })), true);
 	});
 });

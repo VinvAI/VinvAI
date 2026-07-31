@@ -39,6 +39,13 @@ import {
 	readPendingBatches,
 	removeBatch,
 } from '../harness/deadCodeQueue';
+import {
+	readRuns,
+	recordRun,
+	runsForSection,
+	summarizeTrace,
+	type DeadCodeRunRecord,
+} from '../harness/deadCodeRuns';
 import { buildFindings } from '../views/findingsModel';
 import {
 	handleDeadSectionMessage,
@@ -439,12 +446,20 @@ suite('dead code: report view routing', () => {
 			refresh: async () => void log.push('refresh'),
 			analyze: async () => void log.push('analyze'),
 			tryRun: async () => void log.push('tryRun'),
+			openArtifact: async (f) => void log.push(`artifact:${f}`),
 		};
 		await handleDeadSectionMessage({ type: 'openSource', file: 'x.py', line: 4 }, a);
 		await handleDeadSectionMessage({ type: 'refresh' }, a);
 		await handleDeadSectionMessage({ type: 'analyze' }, a);
 		await handleDeadSectionMessage({ type: 'tryRun' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:4', 'refresh', 'analyze', 'tryRun']);
+		await handleDeadSectionMessage({ type: 'openArtifact', file: 't/trace.jsonl' }, a);
+		assert.deepStrictEqual(log, [
+			'open:x.py:4',
+			'refresh',
+			'analyze',
+			'tryRun',
+			'artifact:t/trace.jsonl',
+		]);
 	});
 });
 
@@ -493,5 +508,133 @@ suite('dead code: try-run driver', () => {
 		// helper_a (row 1) traced, helper_b (row 2) still dead.
 		assert.deepStrictEqual(revivedSymbols(section, { 1: { executed: true } }), ['helper_a']);
 		assert.deepStrictEqual(revivedSymbols(section, {}), []);
+	});
+
+	test('the driver prompt forbids binding a fixed port', () => {
+		// A driver that binds the service's own port dies with "address already
+		// in use" and says nothing about whether the section can execute.
+		const prompt = buildDriverPrompt(wiredSection(), new Map(), {
+			python: '/venv/bin/python',
+			targetPackages: ['app'],
+			cwd: '/repo',
+		});
+		assert.ok(prompt.includes('Do NOT bind a fixed port'));
+		assert.ok(prompt.includes('bind port 0'), 'the alternative is named, not just the ban');
+	});
+});
+
+suite('dead code: try-runs are kept and summarised', () => {
+	function traceFile(root: string, events: object[]): string {
+		const file = path.join(root, 'trace.jsonl');
+		fs.writeFileSync(file, events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+		return file;
+	}
+
+	function record(over: Partial<DeadCodeRunRecord> = {}): DeadCodeRunRecord {
+		return {
+			sectionId: 'sec-a',
+			title: 'app/legacy.py — helper_a',
+			at: '2026-07-31T10:00:00.000Z',
+			outcome: 'not-reached',
+			detail: 'the driver ran and traced, but nothing in the section executed',
+			revived: [],
+			rows: [1, 2],
+			driverFile: null,
+			traceFile: null,
+			exitCode: 0,
+			timedOut: false,
+			notes: '',
+			outputTail: '',
+			trace: null,
+			...over,
+		};
+	}
+
+	test('summarizeTrace counts calls, time and raises per function', () => {
+		const root = tmpRepo();
+		const file = traceFile(root, [
+			{ event: 'enter', component: 'app.legacy.helper_a' },
+			{ event: 'exit', component: 'app.legacy.helper_a', duration_ms: 2.5 },
+			{ event: 'exit', component: 'app.legacy.helper_a', duration_ms: 1.5 },
+			{ event: 'exit', component: 'app.legacy2.helper_b', duration_ms: 4, error_type: 'ValueError' },
+			'not json' as unknown as object,
+		]);
+		const summary = summarizeTrace(file);
+		assert.ok(summary);
+		assert.strictEqual(summary!.functions, 2);
+		assert.strictEqual(summary!.calls, 3);
+		assert.strictEqual(summary!.totalMs, 8);
+		assert.strictEqual(summary!.errors, 1);
+		assert.deepStrictEqual(summary!.errorTypes, ['ValueError']);
+		// Busiest first, and a raising call still counts as a call: it ran.
+		assert.strictEqual(summary!.top[0].component, 'app.legacy.helper_a');
+		assert.strictEqual(summary!.top[0].calls, 2);
+		assert.strictEqual(summary!.top[1].errors, 1);
+	});
+
+	test('a missing or span-less trace summarises to null, never to zeros', () => {
+		const root = tmpRepo();
+		assert.strictEqual(summarizeTrace(path.join(root, 'nope.jsonl')), null);
+		// Enter events only: tracelens instrumented nothing that returned.
+		assert.strictEqual(
+			summarizeTrace(traceFile(root, [{ event: 'enter', component: 'x' }])),
+			null,
+			'"no measurement" must be distinguishable from "measured zero"',
+		);
+	});
+
+	test('runs persist newest-first and survive a reread', () => {
+		const root = tmpRepo();
+		recordRun(root, record({ at: '2026-07-31T10:00:00.000Z' }));
+		recordRun(root, record({ at: '2026-07-31T11:00:00.000Z', outcome: 'revived', revived: ['helper_a'] }));
+		const runs = readRuns(root);
+		assert.strictEqual(runs.length, 2);
+		assert.strictEqual(runs[0].outcome, 'revived');
+		assert.strictEqual(runs[1].outcome, 'not-reached');
+	});
+
+	test('a run stays attached to the section it reshaped, id change and all', () => {
+		const runs = [record({ sectionId: 'old-id', rows: [1, 2] })];
+		// The section the revival re-formed into: new id, overlapping symbols.
+		assert.strictEqual(runsForSection(runs, { id: 'new-id', rows: [2, 3] }).length, 1);
+		// Same id, no overlap (a re-scan that kept the id) still matches.
+		assert.strictEqual(runsForSection(runs, { id: 'old-id', rows: [9] }).length, 1);
+		// An unrelated section gets no history at all.
+		assert.strictEqual(runsForSection(runs, { id: 'other', rows: [7, 8] }).length, 0);
+	});
+
+	test('the section report and the findings list both carry the run', () => {
+		const root = tmpRepo();
+		const scan = buildDeadCode(root, fixture());
+		const section = scan.sections.items.find((s) => s.reason === 'reachable-untested');
+		assert.ok(section);
+		recordRun(
+			root,
+			record({
+				sectionId: section.id,
+				rows: section.symbols.items.map((s) => s.row),
+				outcome: 'revived',
+				revived: ['helper_a'],
+				traceFile: '/caps/deadcode-x/trace.jsonl',
+			}),
+		);
+		const report = buildSectionReport(root, section, scan.storeEpoch, null);
+		assert.strictEqual(report.runs.length, 1, 'the report tab can render the evidence');
+		assert.strictEqual(report.runs[0].traceFile, '/caps/deadcode-x/trace.jsonl');
+
+		writeDeadCodeReport(root, scan);
+		const listed = buildFindings(root).deadCode.sections.find((s) => s.id === section.id);
+		assert.strictEqual(listed?.lastRun, 'ran under trace — 1 symbol(s) executed');
+		assert.strictEqual(listed?.lastRunAt, '2026-07-31T10:00:00.000Z');
+	});
+
+	test('a section nobody has driven reports no run rather than an empty one', () => {
+		const root = tmpRepo();
+		const scan = buildDeadCode(root, fixture());
+		writeDeadCodeReport(root, scan);
+		for (const s of buildFindings(root).deadCode.sections) {
+			assert.strictEqual(s.lastRun, '');
+			assert.strictEqual(s.lastRunAt, '');
+		}
 	});
 });

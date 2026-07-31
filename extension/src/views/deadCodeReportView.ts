@@ -36,7 +36,7 @@ import { openPathInEditor } from '../support/openDocument';
 export const DEAD_SECTION_VIEW_TYPE = 'vinv.deadCodeSection';
 
 export interface DeadSectionOutbound {
-	type: 'openSource' | 'refresh' | 'analyze' | 'tryRun';
+	type: 'openSource' | 'refresh' | 'analyze' | 'tryRun' | 'openArtifact';
 	file?: string;
 	line?: number;
 }
@@ -48,6 +48,12 @@ export interface DeadSectionActions {
 	analyze: () => Promise<void>;
 	/** Have the harness write a driver and run this section under trace. */
 	tryRun: () => Promise<void>;
+	/**
+	 * Open a file a try-run produced — its driver script or its trace.jsonl.
+	 * Separate from `openSource` because these are absolute paths outside the
+	 * indexed tree, and because a trace opens at line 1, never at a symbol.
+	 */
+	openArtifact: (file: string | undefined) => Promise<void>;
 }
 
 export async function handleDeadSectionMessage(
@@ -62,6 +68,8 @@ export async function handleDeadSectionMessage(
 		await actions.analyze();
 	} else if (msg.type === 'tryRun') {
 		await actions.tryRun();
+	} else if (msg.type === 'openArtifact') {
+		await actions.openArtifact(msg.file);
 	}
 }
 
@@ -190,6 +198,15 @@ function wireDeadSection(
 			await vscode.commands.executeCommand('vinv-vs.tryRunDeadCode', { sectionId: id });
 			await push();
 		},
+		openArtifact: async (file) => {
+			await openPathInEditor(file, {
+				workspaceRoot,
+				line: 1,
+				label: 'try-run artifact',
+				preview: true,
+				viewColumn: vscode.ViewColumn.Beside,
+			});
+		},
 	};
 
 	const sub = webview.onDidReceiveMessage(
@@ -267,6 +284,18 @@ function getHtml(): string {
 			border: 1px solid var(--line); overflow-x: auto; font-family: ${VINV_FONT_MONO};
 			font-size: 11px; line-height: 1.45; }
 		.empty { color: var(--muted); font-size: 11px; padding: 6px 0; }
+		table.trace { margin-top: 8px; font-size: 11px; width: 100%; border-collapse: collapse; }
+		table.trace th { text-align: left; font-weight: 400; color: var(--muted); font-size: 9.5px;
+			letter-spacing: 0.16em; text-transform: uppercase; padding: 4px 8px 4px 0;
+			border-bottom: 1px solid var(--line); }
+		table.trace td { padding: 3px 8px 3px 0; border-bottom: 1px solid var(--line);
+			overflow-wrap: anywhere; }
+		table.trace td.num { text-align: right; font-variant-numeric: tabular-nums;
+			font-family: ${VINV_FONT_MONO}; white-space: nowrap; }
+		table.trace td.err { color: var(--accent-fg); }
+		.runbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+		.stat { font-size: 11px; color: var(--muted); }
+		.stat b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
 		.hint { color: var(--muted-2); font-size: 10.5px; margin-top: 6px; }
 		ul.plain { margin: 6px 0 0; padding-left: 18px; }
 		ul.plain li { margin: 2px 0; overflow-wrap: anywhere; }
@@ -331,6 +360,90 @@ function getHtml(): string {
 		return html + '</table></div>';
 	}
 
+	const RUN_LABEL = {
+		revived: 'symbols executed',
+		'not-reached': 'nothing executed',
+		declined: 'not drivable',
+		'run-failed': 'no trace produced',
+		'no-reply': 'harness never replied',
+		'unusable-reply': 'no usable driver',
+		unavailable: 'could not start',
+	};
+
+	function fmtWhen(iso) {
+		const t = Date.parse(iso);
+		return Number.isFinite(t) ? new Date(t).toLocaleString() : String(iso || '');
+	}
+
+	// The traces the try-run produces are the ONLY empirical evidence about this
+	// section — everything else on this page is static inference. So the newest
+	// run is shown open, with what the capture recorded, and the older ones as
+	// one line each so a second attempt can be compared against the first.
+	function runsCard(runs) {
+		if (!runs || !runs.length) {
+			return '<div class="empty">No one has tried to run this section yet. ' +
+				'&ldquo;Run this Path&rdquo; asks the agent for a driver, runs it under vinv tracing, ' +
+				'and the trace it produces lands here.</div>';
+		}
+		const latest = runs[0];
+		const cls = latest.outcome === 'revived' ? ' ok' : latest.outcome === 'not-reached' ? '' : ' hot';
+		let html = '<div class="card"><div class="row">' +
+			'<span class="badge' + cls + '">' + esc(RUN_LABEL[latest.outcome] || latest.outcome) + '</span>' +
+			'<span class="where">' + esc(fmtWhen(latest.at)) + '</span>' +
+			'<span class="grow"></span>' +
+			(latest.traceFile
+				? '<button class="ghost" data-open="' + esc(latest.traceFile) + '" title="Open the raw capture this run produced (.vinv/captures/…/trace.jsonl)">Open trace</button>'
+				: '') +
+			(latest.driverFile
+				? '<button class="ghost" data-open="' + esc(latest.driverFile) + '" title="Open the driver script the agent wrote for this section">Open driver</button>'
+				: '') +
+			'</div>';
+		html += '<div class="hint">' + esc(latest.detail) + '</div>';
+		if (latest.revived && latest.revived.length) {
+			html += '<div class="hint">Executed: ' + latest.revived.map(esc).join(' · ') + '</div>';
+		}
+		if (latest.notes) {
+			html += '<div class="hint">Driver notes: ' + esc(latest.notes) + '</div>';
+		}
+		const t = latest.trace;
+		if (t) {
+			html += '<div class="runbar">' +
+				'<span class="stat"><b>' + t.functions + '</b> functions traced</span>' +
+				'<span class="stat"><b>' + t.calls + '</b> calls</span>' +
+				'<span class="stat"><b>' + t.totalMs + '</b> ms</span>' +
+				'<span class="stat"><b>' + t.errors + '</b> raised' +
+				(t.errorTypes && t.errorTypes.length ? ' (' + t.errorTypes.map(esc).join(', ') + ')' : '') +
+				'</span></div>';
+			html += '<table class="trace"><thead><tr><th>Function the run reached</th>' +
+				'<th style="text-align:right">Calls</th><th style="text-align:right">ms</th>' +
+				'<th style="text-align:right">Raised</th></tr></thead><tbody>' +
+				t.top.map((f) =>
+					'<tr><td>' + esc(f.component) + '</td>' +
+					'<td class="num">' + f.calls + '</td>' +
+					'<td class="num">' + f.ms + '</td>' +
+					'<td class="num' + (f.errors ? ' err' : '') + '">' + f.errors + '</td></tr>').join('') +
+				'</tbody></table>';
+			html += '<div class="hint">Counted from the capture itself, not from what the driver ' +
+				'claimed. A function listed here executed; a section symbol missing from it did not.</div>';
+		} else if (latest.traceFile) {
+			html += '<div class="hint">The capture recorded no function exits — tracelens instrumented ' +
+				'nothing this run reached (usually a target package that matches no import package).</div>';
+		}
+		if (latest.outputTail && latest.outcome === 'run-failed') {
+			html += '<pre>' + esc(latest.outputTail.slice(-1500)) + '</pre>';
+		}
+		html += '</div>';
+		if (runs.length > 1) {
+			html += '<div class="card"><div class="hint">Earlier attempts</div><ul class="plain">' +
+				runs.slice(1, 6).map((r) =>
+					'<li>' + esc(fmtWhen(r.at)) + ' — ' + esc(RUN_LABEL[r.outcome] || r.outcome) +
+					(r.trace ? ' (' + r.trace.functions + ' functions, ' + r.trace.calls + ' calls)' : '') +
+					'</li>').join('') +
+				'</ul></div>';
+		}
+		return html;
+	}
+
 	function render() {
 		if (!REPORT) {
 			document.getElementById('sub').textContent = 'SECTION NOT FOUND';
@@ -359,10 +472,14 @@ function getHtml(): string {
 				'reflection, plugin registries or externally-called entry points, so this is strong evidence and not proof.</div></div>';
 		}
 
+		html += '<h2>Try-runs (what happened when this was driven)</h2>';
+		html += runsCard(REPORT.runs);
+
 		html += '<h2>Walkthrough (' + REPORT.stops.length + ' stops, callees first)</h2>';
 		if (!REPORT.stops.length) {
 			html += '<div class="empty">No symbols to walk.</div>';
 			document.getElementById('content').innerHTML = html;
+			wire(); // the try-run card is above this and still has live buttons
 			return;
 		}
 		STOP = Math.max(0, Math.min(REPORT.stops.length - 1, STOP));
@@ -401,6 +518,8 @@ function getHtml(): string {
 
 	function wire() {
 		const on = (id, fn) => { const el = document.getElementById(id); if (el) { el.addEventListener('click', fn); } };
+		document.querySelectorAll('[data-open]').forEach((el) => el.addEventListener('click', () =>
+			vscode.postMessage({ type: 'openArtifact', file: el.getAttribute('data-open') })));
 		on('prev', () => { STOP -= 1; render(); });
 		on('next', () => { STOP += 1; render(); });
 		on('open', () => {

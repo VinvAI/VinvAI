@@ -20,7 +20,7 @@ import { openJourney } from '../views/journeyView';
 import { openFindings } from '../views/findingsView';
 import { analyzeDeadCodeSections, tryRunDeadSection } from '../harness/deadCodeRunner';
 import type { CallSiteContext } from '../identification/callSiteContext';
-import { loadEntryPoints } from '../identification/identification';
+import { entryPointLabel, loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
 import { openGraphExplorer } from '../views/graphExplorer';
 import { openAskVinv } from '../views/askVinv';
@@ -224,7 +224,7 @@ export function registerCommands(
 					}
 					const picked = await vscode.window.showQuickPick(
 						entries.map((e) => ({
-							label: e.trigger || e.id,
+							label: entryPointLabel(e),
 							description: e.handler ? `${e.handler}()` : e.kind,
 							detail: `${e.file}:${e.line} · ${e.framework}`,
 							id: e.id,

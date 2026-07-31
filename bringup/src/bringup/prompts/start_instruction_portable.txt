@@ -15,8 +15,17 @@ failure. Common self-heals:
 - `command not found: python` → use **`python3`** or the venv's interpreter (`<venv>/bin/python`, or
   `<venv>\Scripts\python.exe` on Windows).
 - missing venv / deps → create it **with the project's own toolchain** and install (see below).
-- port already in use → find the holder (`lsof -nP -iTCP:<port>`, or `netstat -ano | findstr :<port>`
-  on Windows) and pick a free port, or reuse it.
+- port already in use → **never a reason to stop, and never `verified:false`.** Find the holder
+  (`lsof -nP -iTCP:<port> -sTCP:LISTEN`, or `netstat -ano | findstr :<port>` on Windows), then take
+  exactly one of two remedies. **The holder is this service** (its command line names this repo, its
+  venv, `tracelens`, or the module you are starting) → kill it and reuse the port: `kill -9 <pid>`,
+  or `taskkill //F //T //PID <pid>` from Git Bash on Windows (`taskkill /F /T /PID <pid>` from
+  PowerShell — MSYS rewrites a lone `/F` into a path); re-probe and require the port free before
+  launching. **The holder is something else** (another app, a container, a system service) → leave it
+  alone and MOVE this service to a free port: pass it explicitly (`--port <free>` or the app's own env
+  var) and use that same port everywhere afterwards — the readiness probe, the `verification.port` you
+  record, and the recorded command string. Never drop the port flag to dodge the conflict, and never
+  kill a process you cannot identify.
 - import/version conflict → prefer the project's **lockfile** resolution; hand-pin only if the lock
   cannot be honoured, then retry.
 - a genuinely **unreachable** infra dependency (DB/broker: connection refused / DNS failure) → start
@@ -222,7 +231,22 @@ writing one JSON-RPC initialize line to its stdin and getting a JSON line back o
 it that way yourself, set port/http_status/endpoint_checked to null, and optionally put the exact
 initialize object in `"request"`); `{{"type": "process"}}` for a portless worker/scheduler whose
 only oracle is staying alive past the grace window (an entry that exits immediately FAILS it even
-with exit code 0).
+with exit code 0); `{{"type": "exit"}}` for a **run-to-completion** unit (`kind: python_cli` or
+`python_library` in `.vinv/services.json`) — the exact inverse of `process`, where the process
+**exiting is the success**. It passes when the command returns the expected code (`0`, or the
+documented non-zero one recorded as `"expect_exit": <code>` inside the probe) AND the trace it
+wrote is non-empty; staying alive past the deadline FAILS, because a CLI that never returns is
+hung or waiting on stdin. Set port/http_status/endpoint_checked to null.
+
+**For a run-to-completion unit, skip the whole server protocol above.** Run each invocation wrapped
+in `tracelens run` in the FOREGROUND, let it finish, then check three things: the exit code matches,
+the trace file is non-empty (`wc -l < <trace.jsonl>` > 0), and the output looks like the work
+happened rather than a usage error. There is no port to probe, no readiness window, no process to
+kill and no port to free afterwards. An empty trace after a clean exit is the failure that matters:
+it almost always means `--target-package` named a distribution (`acme-tool`) instead of an import
+package (`acme_tool`). For `python_library` the invocation is the exerciser's function driver
+(`vinv-exerciser functions <repo> --service <name>`) under the same tracelens wrap — the library's
+own package is what `--target-package` names, never the exerciser's.
 
 **SELF-CONTAINED — the recorded command is replayed in a DIFFERENT environment from yours.** A bare
 `tracelens` resolves for you only because of your shell's `PATH` or an activated venv. Nothing that

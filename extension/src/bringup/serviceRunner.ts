@@ -5,10 +5,12 @@ import {
 	readStartCommands,
 	repairRecordedTargetPackages,
 	serviceSlug,
+	servicePort,
 	type StartCommand,
 } from './bringup';
 import { missingTargetPackage } from './targetPackages';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
+import { findFreePort, reclaimPort } from '../support/ports';
 
 /**
  * Debug type for Vinv services. Running a service as a debug *session* (rather
@@ -100,7 +102,7 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 				this.event('initialized');
 				break;
 			case 'launch':
-				this.launch();
+				void this.launch();
 				this.respond(msg);
 				break;
 			case 'configurationDone':
@@ -113,7 +115,7 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 			case 'restart':
 				this.respond(msg);
 				this.kill();
-				this.launch();
+				void this.launch();
 				break;
 			case 'terminate':
 				this.respond(msg);
@@ -133,7 +135,7 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 		this.kill();
 	}
 
-	private launch(): void {
+	private async launch(): Promise<void> {
 		const commands = readStartCommands(this.config.workspaceRoot, this.config.service);
 		if (commands.length === 0) {
 			this.output('No verified start command. Bring the service up first.\n', 'stderr');
@@ -167,6 +169,15 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 			return;
 		}
 		const gen = ++this.generation;
+		// The port comes back BEFORE the bind is attempted. A recorded command
+		// binds a fixed port, so a survivor of an earlier run (on Windows, the
+		// reparented subtree the Git-Bash stub leaves behind) makes this launch
+		// die with "address already in use" — a failure of the machine's state,
+		// not of the service, and one the user can do nothing about from here.
+		await this.reclaimRecordedPort();
+		if (gen !== this.generation) {
+			return; // stopped or restarted while we were freeing the port
+		}
 		const launchedAt = Date.now();
 		// Rolling tail of combined output — the failure evidence a harness
 		// episode gets when this run dies.
@@ -237,6 +248,47 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 				outputTail,
 			});
 		});
+	}
+
+	/**
+	 * Gets this service's recorded port back before the start command binds it.
+	 *
+	 * Never blocks the launch: a port we could not free is reported with the
+	 * holder's pid and the next free port, and the command still runs — the
+	 * server's own bind error is the ground truth, and refusing to start
+	 * because `netstat` said something we did not understand would be a worse
+	 * failure than the one this exists to prevent.
+	 */
+	private async reclaimRecordedPort(): Promise<void> {
+		const port = servicePort(this.config.workspaceRoot, this.config.service);
+		if (port === null) {
+			return;
+		}
+		let outcome;
+		try {
+			outcome = await reclaimPort(port);
+		} catch {
+			return; // diagnosis is a courtesy; never let it break a launch
+		}
+		if (!outcome.wasServing) {
+			return;
+		}
+		if (outcome.freed) {
+			this.output(
+				`[vinv] ${outcome.detail} — that was a leftover holder of ${this.config.service}'s ` +
+					'port; starting fresh.\n',
+				'console',
+			);
+			return;
+		}
+		const free = await findFreePort(port + 1);
+		this.output(
+			`[vinv] ${outcome.detail}. Starting anyway — if this exits with "address already in ` +
+				`use", either stop that process or move ${this.config.service} to a free port` +
+				(free !== null ? ` (e.g. ${free})` : '') +
+				`, updating .vinv/services.json and .vinv/start_commands/${serviceSlug(this.config.service)}.json together.\n`,
+			'stderr',
+		);
 	}
 
 	/** Kills the current process group and invalidates its exit handler. */

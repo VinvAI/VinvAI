@@ -55,11 +55,14 @@ const TOOLS = [
 	{
 		name: 'vinv_ingest_run',
 		description:
-			'Report an endpoint-test run you performed, so it appears in the Journey and ' +
-			'Findings views. Supply one entry per check with the endpoint ("METHOD /path"), ' +
-			'a scenario name, and the pass/fail verdict — the verdict is the one thing ' +
-			'traces cannot supply. Per-endpoint code coverage is joined automatically from ' +
-			'the captures. Run this AFTER the traffic has been captured by tracelens.',
+			'Report a test run you performed, so it appears in the Journey and Findings ' +
+			'views. Supply one entry per check with the unit you exercised, a scenario ' +
+			'name, and the pass/fail verdict — the verdict is the one thing traces cannot ' +
+			'supply. A unit is usually an HTTP endpoint ("METHOD /path"), but a repo with ' +
+			'no service has units too: a CLI invocation ("RUN <command>") or a driven ' +
+			'function ("CALL module.function"). Per-unit code coverage is joined ' +
+			'automatically from the captures. Run this AFTER the work has been captured ' +
+			'by tracelens.',
 		inputSchema: {
 			type: 'object',
 			properties: {
@@ -73,20 +76,37 @@ const TOOLS = [
 					items: {
 						type: 'object',
 						properties: {
-							endpoint: { type: 'string', description: '"METHOD /path", e.g. "POST /run-agent".' },
+							endpoint: {
+								type: 'string',
+								description:
+									'The unit exercised: "METHOD /path" for HTTP (e.g. "POST /run-agent"), ' +
+									'"RUN <command>" for a CLI invocation, or "CALL module.function" for a ' +
+									'driven call. Keep the verb prefix — it is what distinguishes the three ' +
+									'in every view.',
+							},
+							unit_kind: {
+								type: 'string',
+								description:
+									'http_endpoint | cli_invocation | function_call. Optional; inferred from ' +
+									'the verb prefix when omitted.',
+							},
 							service: {
 								type: 'string',
 								description:
-									'Which service serves it. Supply this whenever the repo runs more than one ' +
-									'service — three apps each serving "GET /" are three different endpoints, ' +
-									'and without this they merge into one row with pooled latencies.',
+									'Which service or CLI this belongs to. Supply this whenever the repo runs ' +
+									'more than one — three apps each serving "GET /" are three different ' +
+									'units, and without this they merge into one row with pooled latencies.',
 							},
 							name: { type: 'string', description: 'Scenario name, e.g. "malformed JSON body".' },
 							category: {
 								type: 'string',
 								description: 'positive | negative | corner | security | load.',
 							},
-							status: { type: 'number', description: 'HTTP status observed.' },
+							status: {
+								type: 'number',
+								description:
+									'HTTP status observed — or the process exit code for a CLI invocation.',
+							},
 							latency_ms: { type: 'number' },
 							input: { description: 'What was sent.' },
 							output: { description: 'What came back.' },

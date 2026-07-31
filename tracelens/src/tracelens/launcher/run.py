@@ -1339,6 +1339,17 @@ def run_main(argv: list[str] | None = None) -> None:
             mod, tail = mod_tail
             _log_diag_dispatch("runpy")
             _run_state["dispatch_token"] = "runpy"
+            # `python -m` prepends the working directory to sys.path; running the
+            # module in-process through runpy does not, so tracelens's own path
+            # is all the module resolver sees. A module that is INSTALLED
+            # resolves either way — which is why this went unnoticed — but one
+            # that merely lives in the repo (every CLI in a checkout that was
+            # never pip-installed) raised ModuleNotFoundError under tracelens
+            # for a command that runs fine without it. The script branch above
+            # already does the equivalent with the script's own directory.
+            cwd = os.getcwd()
+            if cwd not in sys.path:
+                sys.path.insert(0, cwd)
             sys.argv = [mod, *tail]
             runpy.run_module(mod, run_name="__main__", alter_sys=True)
             _flush_tracer()

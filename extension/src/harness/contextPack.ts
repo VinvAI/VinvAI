@@ -446,6 +446,21 @@ export function composePackContent(
 				'`--output` path exactly as recorded. Never "fix" a start failure by removing tracelens, ' +
 				'and never drop it because it is hard to resolve.',
 		);
+		// The single most common false failure in a fix episode: Vinv is running
+		// the service, the agent starts a second copy to check its work, and the
+		// bind error reads as "my fix broke the service".
+		lines.push(
+			'**"Address already in use" is never a reason to change the code.** Vinv may already be ' +
+				`running \`${task.service}\` on its recorded port, and the port is a machine-state ` +
+				'problem with two fixes, in this order: (1) find the holder and kill it — ' +
+				'`netstat -ano | findstr :<port>` then `taskkill /F /T /PID <pid>` on Windows ' +
+				'(`taskkill //F //T //PID <pid>` from Git Bash, where a lone `/F` is rewritten as a ' +
+				'path), `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` then `kill -9 <pid>` elsewhere; ' +
+				'(2) if the holder is not ours and must keep running, MOVE the service to a free port ' +
+				'and change it in ONE consistent set: the recorded start command, ' +
+				'`.vinv/services.json`, and whatever config or env var the app reads. Never leave the ' +
+				'two disagreeing, and never make a start command "work" by removing the port flag.',
+		);
 		lines.push(
 			'A `tracelens: command not found` (exit 127) means the command relies on a PATH it does not ' +
 				'carry — Vinv’s bring-up shell had the engine `bin/` prepended, and nothing that replays ' +

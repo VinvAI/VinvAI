@@ -1307,7 +1307,7 @@ def list_service_apis(
                         "kind": kind,
                         "service_kind": _service_kind(kind, framework),
                         "id": _entrypoint_id(kind, trigger, handler, rel),
-                        "trigger": trigger or (handler or ""),
+                        "trigger": _entrypoint_trigger(kind, trigger, handler, rel),
                         "handler": handler,
                         "file": rel,
                         "line": line,
@@ -1475,6 +1475,24 @@ def _entrypoint_id(
     return f"{prefix}_{slug or 'entry'}"
 
 
+def _entrypoint_trigger(
+    kind: str, trigger: str, handler: str | None, rel: str,
+) -> str:
+    """The human-facing label for a non-HTTP entry point.
+
+    Mostly the declared trigger (a command name, a queue, a cron expression).
+    The exception is ``script_main``: the declaration is ``if __name__ ==
+    "__main__"``, which is the SAME text in every script, so a repo of CLI tools
+    renders as a wall of rows all reading "__main__" with nothing to tell them
+    apart.  Those are labelled by the file that is actually run — the thing the
+    user types — with the guard's handler kept in the ``handler`` field as
+    before.
+    """
+    if kind == "script_main":
+        return f"python {rel}"
+    return trigger or (handler or "")
+
+
 _RE_CALL_NAME = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 # Bare function references handed to a runner: typer.run(main), Process(target=main)
 _RE_RUNNER_REF = re.compile(
@@ -1570,10 +1588,73 @@ def _api_id(method: str, path: str, handler: str | None = None) -> str:
 # =========================================================================
 
 
+def _symbol_entrypoint(
+    root: Path,
+    symbol: str,
+    store_dir: str | None,
+    log: logging.Logger,
+) -> dict[str, Any]:
+    """A synthetic entry point rooted at one indexed symbol.
+
+    ``consolidate`` finds entry points the repo DECLARES — a route decorator, a
+    Click command, a celery task. A function the exerciser drove directly is not
+    declared anywhere: it was chosen from the index because it is exported and
+    callable, which is exactly why driving it needed a harness in the first
+    place. It still has a call tree, and refusing to build one left every
+    function-level unit with no static denominator and therefore 0/0 coverage,
+    however much of it actually ran.
+
+    Accepts ``module:qualname`` (the exerciser's target id), ``path/to/f.py:name``
+    or a bare ``name``. The file half is a HINT used to disambiguate a name that
+    matches several symbols — never a requirement, so a target whose module path
+    does not line up with its file still resolves.
+    """
+    store = open_identification_store(root, store_dir)
+    try:
+        head, _, tail = symbol.rpartition(":")
+        name = (tail or symbol).rsplit(".", 1)[-1]
+        candidates = [
+            c
+            for c in store.find_symbol_by_name(name)
+            if c.get("node_type") != "doc_section"
+        ]
+        if not candidates:
+            raise LookupError(
+                f"No indexed symbol named {name!r} for {symbol!r} in {root}. Run "
+                "`index index` to (re)build the code index, or check the name."
+            )
+        hint = head.replace(".", "/").replace("\\", "/").removesuffix(".py")
+        best = candidates[0]
+        if hint:
+            for c in candidates:
+                fp = str(c.get("file_path", "")).replace("\\", "/")
+                if fp.removesuffix(".py").endswith(hint):
+                    best = c
+                    break
+        if len(candidates) > 1:
+            log.info(
+                "symbol_entrypoint ambiguous symbol=%s candidates=%d chose=%s",
+                symbol, len(candidates), best.get("file_path"),
+            )
+        return {
+            "id": symbol,
+            "kind": "function",
+            "service_kind": "library",
+            "trigger": symbol,
+            "handler": best.get("name"),
+            "file": best.get("file_path"),
+            "line": int(best.get("start_line") or 0),
+            "framework": "python",
+        }
+    finally:
+        store.close()
+
+
 def build_api_call_tree(
     project_root: Path,
     *,
-    api_id: str,
+    api_id: str | None = None,
+    symbol: str | None = None,
     service: str | None = None,
     store_dir: str | None = None,
     max_depth: int = 12,
@@ -1601,22 +1682,36 @@ def build_api_call_tree(
     log = logger or logging.getLogger(__name__)
     root = project_root.resolve()
 
-    # Reuse the verified code-based consolidation to find the handler + its file.
-    inventory = list_service_apis(
-        root,
-        service=service,
-        store_dir=store_dir,
-        logger=log,
-    )
-    entrypoints = inventory.get("entrypoints", [])
-    store_dir = inventory.get("index_store", store_dir)
+    if not api_id and not symbol:
+        raise ValueError("build_api_call_tree needs either api_id or symbol")
 
-    target = next((e for e in entrypoints if e.get("id") == api_id), None)
-    if target is None:
-        raise LookupError(
-            f"No entry point '{api_id}' in {root}. Run `identification consolidate` "
-            "to list available ids (their `id` field)."
+    if symbol and not api_id:
+        # Rooting at a symbol skips consolidation entirely: the target was never
+        # declared as an entry point, so there is nothing to look it up in.
+        target = _symbol_entrypoint(root, symbol, store_dir, log)
+    else:
+        # Reuse the verified code-based consolidation to find the handler + its file.
+        inventory = list_service_apis(
+            root,
+            service=service,
+            store_dir=store_dir,
+            logger=log,
         )
+        entrypoints = inventory.get("entrypoints", [])
+        store_dir = inventory.get("index_store", store_dir)
+
+        target = next((e for e in entrypoints if e.get("id") == api_id), None)
+        if target is None:
+            # A declared entry point wins, but the exerciser also drives symbols
+            # that were never declared. Falling back keeps one entry per unit
+            # rather than making the caller know which kind it has.
+            if symbol:
+                target = _symbol_entrypoint(root, symbol, store_dir, log)
+            else:
+                raise LookupError(
+                    f"No entry point '{api_id}' in {root}. Run `identification consolidate` "
+                    "to list available ids (their `id` field)."
+                )
 
     handler = target.get("handler")
     rel_file = target.get("file")
@@ -2231,7 +2326,8 @@ def _is_code_component(component: str) -> bool:
 def map_trace_to_tree(
     project_root: Path,
     *,
-    api_id: str,
+    api_id: str | None = None,
+    symbol: str | None = None,
     trace: str | None = None,
     service: str | None = None,
     store_dir: str | None = None,
@@ -2262,6 +2358,7 @@ def map_trace_to_tree(
     static = build_api_call_tree(
         root,
         api_id=api_id,
+        symbol=symbol,
         service=service,
         store_dir=store_dir,
         max_depth=max_depth,

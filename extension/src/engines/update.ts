@@ -184,6 +184,41 @@ function isManagedClone(root: string): boolean {
 	return path.resolve(root).toLowerCase() === path.resolve(defaultEnginesCloneDir()).toLowerCase();
 }
 
+/**
+ * True when the engines on disk are the ones THIS build was cut against, and
+ * their environment has actually been materialised for that commit.
+ *
+ * Both halves are load-bearing, for the reason environmentNeedsSync documents:
+ * a matching HEAD proves only that `git checkout` ran, not that `uv sync` and
+ * `cargo build` did. Callers use this to decide whether it is safe to start
+ * work that will invoke the engines.
+ *
+ * Deliberately conservative — anything it cannot establish (no checkout, no
+ * git, an unpinned dev build's absent ref) answers false EXCEPT the unpinned
+ * case, where there is no pin to be off and the developer's checkout is theirs
+ * to move. A false answer costs a deferral, never a wrong action.
+ */
+export async function enginesMatchPin(context: vscode.ExtensionContext): Promise<boolean> {
+	if (!ENGINE_REF) {
+		return true; // unstamped dev build: unpinned, so never "behind"
+	}
+	const root = resolveEnginesRoot(context);
+	if (!root) {
+		return false;
+	}
+	let head: string;
+	try {
+		head = (await git(root, ['rev-parse', 'HEAD'])).trim();
+	} catch {
+		return false; // not a git checkout, or no git — not ours to reason about
+	}
+	const pinned = await resolveCommit(root, ENGINE_REF);
+	if (!pinned || head !== pinned) {
+		return false;
+	}
+	return !environmentIsStale(root);
+}
+
 /** The effective update mode: user setting when set, else this build's default. */
 export function engineUpdateMode(): EngineUpdateMode {
 	const configured = vscode.workspace

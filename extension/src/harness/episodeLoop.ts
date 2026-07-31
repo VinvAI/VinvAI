@@ -17,7 +17,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
-import * as net from 'net';
 import { spawn } from 'child_process';
 import { buildGraphSnapshot, hasIndexStore, type GraphSnapshot } from '../graph/indexGraph';
 import { enrichTagsFromFeedback } from '../graph/graphEnhancer';
@@ -156,7 +155,8 @@ import {
 } from '../views/askVinv';
 import { isIdeChatAvailable } from './ideChat';
 import { enqueueEpisodeRequest } from './requestQueue';
-import { readServices, readStartCommands, serviceSlug } from '../bringup/bringup';
+import { readServices, readStartCommands, serviceSlug, servicePort } from '../bringup/bringup';
+import { describeHolders, findFreePort, portIsServing, reclaimPort } from '../support/ports';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
 
 export interface EpisodeTask extends PackTask {
@@ -219,41 +219,6 @@ function replayDeadlineMs(hardMs: number): number {
 		return raw * 1000;
 	}
 	return Math.max(hardMs, 180_000);
-}
-
-function portIsServing(port: number): Promise<boolean> {
-	return new Promise((resolve) => {
-		const socket = net.connect({ host: '127.0.0.1', port, timeout: 1000 });
-		socket.once('connect', () => {
-			socket.destroy();
-			resolve(true);
-		});
-		const fail = () => {
-			socket.destroy();
-			resolve(false);
-		};
-		socket.once('error', fail);
-		socket.once('timeout', fail);
-	});
-}
-
-/** The service's expected port: services.json first, then the start record. */
-function servicePort(workspaceRoot: string, service: string): number | null {
-	const entry = readServices(workspaceRoot).find((s) => s.name === service);
-	if (typeof entry?.port === 'number' && entry.port > 0) {
-		return entry.port;
-	}
-	try {
-		const raw = fs.readFileSync(
-			`${workspaceRoot}/.vinv/start_commands/${serviceSlug(service)}.json`,
-			'utf8',
-		);
-		const parsed = JSON.parse(raw) as { verification?: { port?: number } };
-		const p = parsed.verification?.port;
-		return typeof p === 'number' && p > 0 ? p : null;
-	} catch {
-		return null;
-	}
 }
 
 /**
@@ -357,13 +322,33 @@ export async function verifyServiceReplay(
 		// so the file refreshes and the squatter reads as an objective pass —
 		// which is exactly how a repaired command "verified" while the capture
 		// still showed the old flags' output.
-		return {
-			verdict: 'inconclusive',
-			reason:
-				`port ${port} was already serving before the replay started — a previous run of ` +
-				`'${service}' is likely still holding it. Stop that process and retry; a served ` +
-				'port cannot be attributed to the recorded command while something else owns it.',
-		};
+		//
+		// So the squatter is EVICTED rather than reported: an episode that
+		// stops here spends a whole attempt's budget to tell the user something
+		// only Vinv can fix, and the very next attempt hits the same port. The
+		// replay proceeds only once the port is genuinely ours to bind.
+		const reclaim = await reclaimPort(port);
+		if (!reclaim.freed) {
+			const free = await findFreePort(port + 1);
+			return {
+				verdict: 'inconclusive',
+				reason:
+					`port ${port} was already serving before the replay started and could not be ` +
+					`reclaimed — ${reclaim.detail}. Stop that process, or move '${service}' to a free ` +
+					`port${free !== null ? ` (e.g. ${free})` : ''} in .vinv/services.json and its ` +
+					'recorded start command; a served port cannot be attributed to the recorded ' +
+					'command while something else owns it.',
+			};
+		}
+		if (reclaim.killed.length > 0) {
+			// Said out loud in the episode record: a verification that silently
+			// killed a process the user was watching would be indistinguishable
+			// from that process crashing on its own.
+			void vscode.window.showInformationMessage(
+				`Vinv: freed port ${port} before verifying '${service}' — killed ` +
+					`${describeHolders(reclaim.killed)}, a leftover holder from an earlier run.`,
+			);
+		}
 	}
 	const child = spawn(bash, ['-lc', script], hiddenBackgroundOptions({
 		cwd: commands[0].working_directory ?? workspaceRoot,

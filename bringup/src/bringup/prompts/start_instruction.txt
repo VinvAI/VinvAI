@@ -18,8 +18,11 @@ first failure. You are a persistent operator, not a one-shot installer. When a c
    - `command not found: python` → use **`python3`**, or the venv's interpreter (`<venv>/bin/python` on
      macOS/Linux, `<venv>\Scripts\python.exe` on Windows).
    - missing venv / deps → create it **with the project's own toolchain** and install (see below).
-   - port already in use → find the holder (`lsof -nP -iTCP:<port>`, or `netstat -ano | findstr :<port>`
-     on Windows) and pick a free port, or reuse it if it is already this service.
+   - port already in use → **never a reason to stop, and never `verified:false`.** Find the holder
+     (`lsof -nP -iTCP:<port> -sTCP:LISTEN`, or `netstat -ano | findstr :<port>` on Windows), then
+     take exactly one of the two remedies in "Clear the port first" under the start step below:
+     KILL it when it is a leftover of this service, or MOVE this service to a free port when it is
+     someone else's. See that section for the platform-correct kill commands.
    - import/version conflict → prefer the project's **lockfile** resolution over hand-pinning; re-pin only
      the offending package if the lock cannot be honoured, and retry.
    - a missing infra dependency (DB/broker) → start it (per the host-vs-Docker rules) and retry. **Only if it is genuinely unreachable** (connection refused / DNS failure). A dependency that is merely **slow** (a DB pool taking 20–40s, a remote host that responds slowly) is NOT a failure — do not repoint it, swap it, or restart over it.
@@ -285,8 +288,40 @@ shell first to confirm the flags available in the installed version. Then:
    Skipping this segment causes traces to mingle with prior projects' baselines
    and downstream identification will misattribute spans across sessions.
 
-4. **Start the server as a BACKGROUND daemon — never with a blocking duration.**
-   A tracelens-wrapped server is a long-running process: it never returns to the
+4. **Clear the port first, THEN start the server as a BACKGROUND daemon — never with a
+   blocking duration.**
+
+   **Clear the port first.** A port still held by an earlier run — your own previous attempt, a
+   past bring-up, or the extension's Run button — makes this launch die instantly with "address
+   already in use". That is machine state, not a defect in the service, and it must never be
+   recorded as `verified:false`. Probe before you launch:
+   ```
+   lsof -nP -iTCP:<port> -sTCP:LISTEN                 # macOS/Linux
+   netstat -ano | grep -w LISTENING | grep ":<port>"  # Windows (your Git Bash session)
+   ```
+   Then take exactly ONE of these two remedies:
+
+   - **The holder is this service** — its command line names this repo, its venv, `tracelens`,
+     or the module you are about to start. **Kill it and reuse the port:**
+     ```
+     kill -9 <pid>                    # macOS/Linux
+     taskkill //F //T //PID <pid>     # Windows, from Git Bash (doubled slashes — see step 7)
+     ```
+     Re-probe and require the port to be free before you launch. Killing a stale copy of the
+     service you are bringing up is always correct — it is exactly the process you would have
+     replaced anyway.
+   - **The holder is something else** — another application, a container, a system service you
+     did not start. **Do not kill it. Move this service to a free port instead:** pick a port
+     nothing is listening on, pass it explicitly on the command line (`--port <free>`, or the
+     app's own env var), and then use that SAME port for everything that follows — the readiness
+     probe, the `verification.port` you record, and the command string in the deliverable. A
+     recorded command whose port disagrees with `verification.port` fails every later replay.
+
+   Never resolve a conflict by dropping the port flag and letting the app choose for itself:
+   nothing downstream can then find the service. Never resolve it by killing a process you cannot
+   identify.
+
+   **Then start it.** A tracelens-wrapped server is a long-running process: it never returns to the
    shell prompt. You MUST launch it in its own terminal session with
    **`block: false`**:
    ```
@@ -569,7 +604,32 @@ checks captures after you finish — it trusts your trajectory. If you call
 slow way (empty baseline, empty identification, wasted wall time). So do the
 checks in this section *every* time, even when you "feel sure" it is up.
 
-Concrete checklist — answer each one explicitly in your trajectory:
+**FIRST, branch on the kind.** Everything below this line — port probes, keeping
+the process in the foreground, killing it afterwards, freeing the port — applies
+to a service that STAYS UP. If `.vinv/services.json` records `{service}` as
+`kind: "python_cli"` or `"python_library"`, it does not stay up, and the correct
+protocol is the short one:
+
+> **Run-to-completion protocol.** Run each invocation, wrapped in `tracelens run`
+> exactly as a server's start command is wrapped, in the **foreground**, and let
+> it **finish**. Then verify three things: the exit code matches (`0` unless the
+> command documents another), the trace file exists and is **non-empty**
+> (`wc -l < <trace.jsonl>` > 0), and the output looks like the work actually
+> happened rather than a usage error. Record `"probe": {{"type": "exit"}}` with
+> `"port": null`. There is no port to probe, no readiness window to wait out, no
+> process to kill and no port to free afterwards — skip steps 2, 3 and the whole
+> teardown section. An empty trace after a clean exit is the one failure that
+> matters here, and it almost always means `--target-package` named a
+> distribution (`acme-tool`) instead of an import package (`acme_tool`).
+>
+> For `kind: "python_library"` the invocation is the exerciser's function driver
+> (`vinv-exerciser functions <repo> --service {service}`) wrapped in the same
+> tracelens command — the library's own functions are what gets instrumented, so
+> `--target-package` still names the library's import package, never the
+> exerciser's.
+
+Concrete checklist for a long-running service — answer each one explicitly in
+your trajectory:
 
 1. **Confirm the service's kind and expected port.** Re-read the handbook row
    for **`{service}`** in the `## Bring-up recipe (host vs container)` section
@@ -764,9 +824,24 @@ port and got a response, it is a **port** probe, whatever it is called.
   readiness is the process still running past the replayer's grace window. An
   entry that exits immediately (backgrounded form) FAILS this probe even with
   exit code 0.
+- `{{"type": "exit"}}` — a **run-to-completion** unit (`kind: python_cli` or
+  `python_library` in `.vinv/services.json`): the exact inverse of `process`.
+  There is nothing to probe because **the process exiting IS the success**. It
+  passes when the command returns the expected code — `0`, or the documented
+  non-zero one recorded as `"expect_exit": <code>` inside the probe — AND the
+  trace file it wrote is non-empty. Staying alive past the deadline FAILS: a CLI
+  that never returns is hung or waiting on stdin. Set `"port": null`,
+  `"http_status": null`, `"endpoint_checked": null`.
 
 Omitting `probe` keeps the legacy inference (port recorded → port probe, else
 process semantics) — but for any non-HTTP service, record it explicitly.
+
+**The two failure directions are equally expensive, so get `kind` right before
+you launch.** A `python_cli` verified as a server hangs this stage until the
+deadline waiting for a port that will never open; a server verified with `exit`
+fails the moment it correctly stays up. `.vinv/services.json` already recorded
+the kind — trust it unless what you observed contradicts it, and if it does,
+say so rather than forcing the wrong oracle to pass.
 
 **`added_target_packages` records the targets YOU added that the prompt did not
 list.** Leave it `[]` when you used the rendered flags unchanged; put the names

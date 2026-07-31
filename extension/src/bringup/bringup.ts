@@ -430,6 +430,31 @@ export interface StartCommand {
 }
 
 /**
+ * The port a service is expected to serve on: the inventory first, then the
+ * start record's own `verification.port`.
+ *
+ * One copy, because three callers had their own and they disagreed about the
+ * FILENAME — the start record is written under `serviceSlug(name)`, and a copy
+ * that read it under the raw name found nothing for any service whose name has
+ * a space in it, silently reporting "no port recorded" for exactly the services
+ * whose ports matter most.
+ */
+export function servicePort(workspaceRoot: string, service: string): number | null {
+	const entry = readServices(workspaceRoot).find((s) => s.name === service);
+	if (typeof entry?.port === 'number' && entry.port > 0) {
+		return entry.port;
+	}
+	try {
+		const raw = fs.readFileSync(getStartCommandPath(workspaceRoot, service), 'utf8');
+		const parsed = JSON.parse(raw) as { verification?: { port?: number } };
+		const p = parsed.verification?.port;
+		return typeof p === 'number' && p > 0 ? p : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
  * Reads the verified start command(s) recorded for a service by `bringup start`.
  * Each file holds an ordered list (e.g. a dependency to bring up first, then the
  * service itself under tracelens). Returns [] when no verified file exists.

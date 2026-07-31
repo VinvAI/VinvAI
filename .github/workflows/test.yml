@@ -35,7 +35,7 @@ jobs:
         run: uv run python scripts/check-declared-deps.py
       - name: Run engine test suites
         run: |
-          for pkg in contracts core tracelens identification handbook bringup goal embedder exerciser; do
+          for pkg in contracts tracelens identification handbook bringup goal embedder exerciser; do
             if [ -d "$pkg/tests" ] || ls "$pkg"/src/**/test_*.py >/dev/null 2>&1; then
               echo "::group::$pkg"
               (cd "$pkg" && uv run pytest -q)

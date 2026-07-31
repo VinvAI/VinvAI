@@ -484,6 +484,10 @@ def test_script_main_resolves_guard_called_handler(tmp_path: Path) -> None:
     assert mains["seed.py"]["handler"] == "main"
     # A runner reference (typer.run(cli)) resolves the bare function name.
     assert mains["tool.py"]["handler"] == "cli"
+    # Every guard declares the same "__main__" text, so the label names the file
+    # that is actually run — otherwise the views list identical rows.
+    assert mains["seed.py"]["trigger"] == "python seed.py"
+    assert mains["tool.py"]["trigger"] == "python tool.py"
 
 
 def test_external_only_guard_has_no_handler() -> None:

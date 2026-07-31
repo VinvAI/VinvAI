@@ -20,7 +20,7 @@ engines in your checkout — a dev checkout is auto-detected, no extra config.
 ## Where the code lives
 
 The Python engines are a uv workspace; each is its own package under its own
-directory (`core`, `tracelens`, `identification`, `handbook`, `bringup`,
+directory (`tracelens`, `identification`, `handbook`, `bringup`,
 `goal`, `embedder`, `exerciser`, `contracts`). Source lives in
 `<engine>/src/`, tests in `<engine>/tests/`. Edit the source there — the
 `.venv/bin/` CLIs and any binaries under `~/.vinv/` are built artifacts, not

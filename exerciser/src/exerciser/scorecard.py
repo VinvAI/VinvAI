@@ -33,6 +33,34 @@ def _traffic_only_baseline(repo: Path) -> dict[str, Any]:
     }
 
 
+#: What each unit kind is called in prose, singular/plural.
+_UNIT_NOUNS: dict[str, tuple[str, str]] = {
+    "http_endpoint": ("endpoint", "endpoints"),
+    "cli_invocation": ("CLI invocation", "CLI invocations"),
+    "function_call": ("driven call", "driven calls"),
+}
+
+
+def _units_by_kind(units: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for u in units:
+        kind = str(u.get("unit_kind", "http_endpoint"))
+        counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _unit_noun(units: list[dict[str, Any]]) -> str:
+    """The plural noun for a set of units — "endpoints" only when they are.
+
+    A mixed set gets the neutral "units", which is what the word was always
+    standing in for.
+    """
+    kinds = set(_units_by_kind(units))
+    if len(kinds) == 1:
+        return _UNIT_NOUNS.get(kinds.pop(), ("unit", "units"))[1]
+    return "units"
+
+
 def build_scorecard(
     repo: Path,
     *,
@@ -56,6 +84,12 @@ def build_scorecard(
         per_endpoint.append(
             {
                 "endpoint": f"{e['method']} {e['path']}",
+                # Which oracle produced this unit. The row is still keyed
+                # `endpoint` — every reader joins on that and the profile has
+                # always spelled a non-HTTP unit as `METHOD path` too — but a
+                # consumer that wants to say "3 CLI invocations, 12 calls"
+                # rather than "15 endpoints" needs the distinction stated.
+                "unit_kind": e.get("unit_kind", "http_endpoint"),
                 "coverage": f"{cov.get('covered', 0)}/{cov.get('total', 0)}",
                 "pct": cov.get("pct", 0.0),
                 "handler_observed": cov.get("handler_observed", False),
@@ -77,6 +111,11 @@ def build_scorecard(
                 "endpoints_total": len(endpoints),
                 "symbols_covered": profile.get("total_symbols_covered", 0),
                 "symbols_total": profile.get("total_symbols", 0),
+                # How the total breaks down by oracle. A repo reporting
+                # "14 endpoints" when it has none — because every unit is a CLI
+                # invocation or a driven call — is not wrong about the number,
+                # only about the noun.
+                "units_by_kind": _units_by_kind(endpoints),
             },
         },
         "invariants_learned": invariants.get("count", 0),
@@ -169,6 +208,23 @@ sequenceDiagram
 def render_scorecard_md(sc: dict[str, Any]) -> str:
     before = sc["coverage"]["before_traffic_only"]
     after = sc["coverage"]["after_exercised"]
+    units = sc.get("endpoints", [])
+    # "14 endpoints" on a repo that has none — because every unit is a CLI
+    # invocation or a driven call — is not wrong about the number, only about
+    # the noun. A mixed set gets "units", which is what it always meant.
+    noun = _unit_noun(units)
+    by_kind = after.get("units_by_kind") or {}
+    breakdown = (
+        [
+            "- Breakdown: "
+            + " · ".join(
+                f"**{count}** {_UNIT_NOUNS.get(kind, ('unit', 'units'))[1 if count != 1 else 0]}"
+                for kind, count in sorted(by_kind.items())
+            )
+        ]
+        if len(by_kind) > 1
+        else []
+    )
     lines: list[str] = [
         f"# Behavior scorecard — {sc.get('service') or 'service'}",
         "",
@@ -179,20 +235,22 @@ def render_scorecard_md(sc: dict[str, Any]) -> str:
         f"- Traffic-only baseline (identification tracesummary): "
         f"**{before.get('exercised', 0)}/{before.get('total', 0)}** endpoints exercised",
         f"- After exercising: **{after['endpoints_with_coverage']}/{after['endpoints_total']}** "
-        f"endpoints with coverage · "
+        f"{noun} with coverage · "
         f"**{after['symbols_covered']}/{after['symbols_total']}** symbols",
         f"- Invariants learned: **{sc['invariants_learned']}** · "
         f"Issue clusters: **{sc['issue_clusters']}**",
+        *breakdown,
         "",
-        "## Per-endpoint",
+        "## Per-unit",
         "",
-        "| endpoint | coverage | P50 | P95 | invariants | statuses |",
-        "|---|---|---|---|---|---|",
+        "| unit | kind | coverage | P50 | P95 | invariants | statuses |",
+        "|---|---|---|---|---|---|---|",
     ]
     for e in sc["endpoints"]:
         statuses = ", ".join(f"{k}:{v}" for k, v in sorted(e["statuses"].items()))
+        kind = _UNIT_NOUNS.get(str(e.get("unit_kind", "http_endpoint")), ("unit", "units"))[0]
         lines.append(
-            f"| {e['endpoint']} | {e['coverage']} ({e['pct']}%) | "
+            f"| {e['endpoint']} | {kind} | {e['coverage']} ({e['pct']}%) | "
             f"{e['p50_ms']}ms | {e['p95_ms']}ms | {e['invariants']} | {statuses} |"
         )
     lines += ["", "## Issue clusters", ""]

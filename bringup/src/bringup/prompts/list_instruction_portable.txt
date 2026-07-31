@@ -19,13 +19,24 @@ web apps (`python_web`), background/queue workers (`python_worker`), **stdio JSO
 schedulers (`python_scheduler`). A port scan finds none of the last three — find them from the
 handbook's enumeration, the manifest-scan list below, and the entry code.
 
-**A LIBRARY IS NOT A SERVICE.** A package with no runnable process of its own — no
+**"Service" is also broader than long-running.** Tracelens instruments a *process*, not a server:
+`tracelens run -t pkg -- <any command>` records a run that starts, works and exits just as
+faithfully as one that stays up. So the inventory also covers `python_cli` (a console script or
+`__main__` invoked with argv and run to completion) and `python_library` (an importable package
+with no entrypoint of its own, whose functions the exerciser calls). In a toolchain, a SDK or a
+framework these are the *only* units of work there are — omit them and the repo traces nothing.
+The discriminator is whether the entrypoint **blocks**, never whether it declares a console
+script: read the target function and see whether it parks on a serve loop or returns.
+
+**NEVER FABRICATE A `command`.** A package with no runnable process of its own — no
 `[project.scripts]` / `[tool.poetry.scripts]` console script, no `__main__.py`, no handbook
-`### Run on host` row — is a library: never fabricate a `command` for it. If another service's
-process imports and runs its code, list it with **that host app's** command/working
-directory/port (entries then differ only in which package is instrumented); if nothing in the
-repo runs it, leave it out of `services` entirely. Fewer real services beat padded unrunnable
-ones — a fabricated command burns a whole downstream bring-up attempt.
+`### Run on host` row — is a library, and inventing an entrypoint for it burns a whole downstream
+bring-up attempt. Three legitimate outcomes: if another service's process imports and runs its
+code, list it with **that host app's** command/working directory/port (entries then differ only in
+which package is instrumented); if nothing runs it but its functions can be called, list it as
+`kind: "python_library"` and **omit `command`** so the harness can synthesize the exerciser
+function driver (the normal outcome); leave it out entirely only when nothing should ever call it
+(a vendored copy, a dev-only shim, generated code).
 
 ### Candidate services (framework scan — strong prior; the handbook decides)
 
@@ -47,16 +58,24 @@ read `pyproject.toml`, `compose.yaml`, the package's own `__main__.py` / entrypo
   `[tool.poetry].name`, whichever table the manifest uses).
 - **`kind`** — `python_web` (serves HTTP), `python_worker` (background worker/consumer, no HTTP
   port), `python_stdio` (stdio JSON-RPC server — MCP style, port-less, requests on stdin /
-  responses on stdout), or `python_scheduler` (beat/cron-style scheduler process). Classify by
-  **reading the entry code** the command names: `uvicorn.run`/an ASGI app → `python_web`; a
-  `FastMCP(...)` app or `mcp` stdio transport → `python_stdio`; a celery worker → `python_worker`;
-  a beat/scheduler loop → `python_scheduler`. Verify every candidate is actually startable this
-  way before emitting it — a candidate whose entry code you could not locate does not go in the
-  file.
+  responses on stdout), `python_scheduler` (beat/cron-style scheduler process), `python_cli` (runs
+  to completion and exits), or `python_library` (no entrypoint of its own). Classify by **reading
+  the entry code** the command names: `uvicorn.run`/an ASGI app → `python_web`; a `FastMCP(...)`
+  app or `mcp` stdio transport → `python_stdio`; a celery worker → `python_worker`; a
+  beat/scheduler loop → `python_scheduler`; a target that computes something, prints it and
+  **returns** → `python_cli`. Verify every candidate is actually startable this way before
+  emitting it — a candidate whose entry code you could not locate does not go in the file.
 - **`transport`** — optional: `"http"` for `python_web`, `"stdio"` for `python_stdio`, else
   omit/`null`. A `python_stdio` service's readiness check downstream is a JSON-RPC initialize
   round-trip over stdin/stdout (recorded by Stage 2b as `"probe": {{"type": "stdio-jsonrpc"}}` in
-  start_commands), never a port probe.
+  start_commands), never a port probe. `python_cli` / `python_library` are never spoken to over a
+  transport — omit it; their downstream check is `"probe": {{"type": "exit"}}`, the process
+  running to completion with the expected exit code and a non-empty trace.
+- **`invocations`** — optional, and only for `python_cli` / `python_library`: the representative
+  ways this unit is driven, each a **complete runnable command** (not an argv fragment) with an
+  optional `purpose` and an `expect_exit` that defaults to `0`. Ground the subcommand and its argv
+  in what the repo declares — the CLI's own `--help`/command definitions, a README example, a CI
+  step, a Makefile target. Omit the field and `command` becomes the single invocation.
 - **`command`** — the native start command (NEVER `docker compose up`), taken from what the repo
   **actually declares**: the handbook's `### Run on host` row, a `[project.scripts]` /
   `[tool.poetry.scripts]` console script, a verified `python -m <module>` target (only if that
@@ -65,11 +84,12 @@ read `pyproject.toml`, `compose.yaml`, the package's own `__main__.py` / entrypo
   supported). A command you could not ground in the handbook, a manifest script, or an existing
   entrypoint file is a fabrication. **`python -m <module>:<attr>` is INVALID** — `-m` takes a
   module, not an app-factory reference. Services served by the same app process may share a
-  `command`.
+  `command`. For `python_library`, **omit `command`** entirely.
 - **`working_directory`** — absolute path the command runs from (default the candidate's own path
   from the scan, else `{root}`).
 - **`port`** — the HTTP port it listens on (**required** for `python_web`); `null` for every
-  other kind (`python_stdio` in particular MUST have `port: null`).
+  other kind (`python_stdio` / `python_cli` / `python_library` in particular MUST have
+  `port: null` — they never listen).
 - **`modules`** — the top-level **import package(s)** to instrument; each must be a valid Python
   identifier (never a directory or distribution name containing `-`).
 
@@ -105,14 +125,36 @@ no infra, no frontends:
       "working_directory": "{root}",
       "port": null,
       "modules": ["acme_mcp"]
+    }},
+    {{
+      "name": "acme-tool",
+      "kind": "python_cli",
+      "command": "acme-tool report --since 7d",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["acme_tool"],
+      "invocations": [
+        {{"command": "acme-tool report --since 7d", "purpose": "the reporting path"}},
+        {{"command": "acme-tool check ./sample", "purpose": "the validation path",
+          "expect_exit": 1}}
+      ]
+    }},
+    {{
+      "name": "acme-sdk",
+      "kind": "python_library",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["acme_sdk"]
     }}
   ]
 }}
 ```
 
 (The names above are illustrative of the **shape** — note how the service `name` may carry a dash
-while `modules` carries the underscore import package, and how the stdio server carries
-`transport: "stdio"` with `port: null`. Use the actual names for this repo.) Emit
+while `modules` carries the underscore import package, how the stdio server carries
+`transport: "stdio"` with `port: null`, how the CLI's `invocations` are each a full command with
+the second documenting a legitimate non-zero exit, and how the library entry carries **no
+`command` at all**. Use the actual names for this repo.) Emit
 **valid JSON only** (no trailing commas, no comments, no Markdown fences inside the file).
 
 ### Finish
@@ -120,7 +162,9 @@ while `modules` carries the underscore import package, and how the stdio server 
 You are done only when **`{services_json}` exists on disk** with a valid `services` array covering
 every service in the handbook. Reading and thinking are not a substitute for writing the file.
 Validation to expect: every `modules` entry must be an importable Python identifier, `kind` must
-be one of `python_web` / `python_worker` / `python_stdio` / `python_scheduler`, `python_web`
-entries must carry an integer `port`, `python_stdio` entries must carry `port: null`, `transport`
-(when present) must match the kind, and commands must be runnable (no `-m module:attr`, no
-docker).
+be one of `python_web` / `python_worker` / `python_stdio` / `python_scheduler` / `python_cli` /
+`python_library`, `python_web` entries must carry an integer `port`, `python_stdio` / `python_cli`
+/ `python_library` entries must carry `port: null`, `transport` (when present) must match the
+kind, `invocations` (when present) may only appear on `python_cli` / `python_library` and each
+entry must carry a full `command`, every entry except `python_library` must carry a `command`, and
+commands must be runnable (no `-m module:attr`, no docker).

@@ -1,7 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { buildGraphSnapshot, type GraphSnapshot } from '../graph/indexGraph';
-import type { CallNode, CallTreeEntrypoint, TraceMapResult } from './identification';
+import {
+	entryPointLabel,
+	type CallNode,
+	type CallTreeEntrypoint,
+	type TraceMapResult,
+} from './identification';
 
 /** Cap on how much of each list the digest renders — the prompt budget belongs
  * to the graph evidence; this section is orientation, not a data dump. */
@@ -135,7 +140,9 @@ function entrypointLabel(ep: CallTreeEntrypoint | undefined, apiId: string): str
 	if (!ep) {
 		return apiId;
 	}
-	return ep.kind === 'http_api' && ep.method ? `${ep.method} ${ep.path ?? ''}`.trim() : (ep.trigger ?? ep.id);
+	return ep.kind === 'http_api' && ep.method
+		? `${ep.method} ${ep.path ?? ''}`.trim()
+		: entryPointLabel(ep);
 }
 
 /**

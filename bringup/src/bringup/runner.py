@@ -1334,9 +1334,24 @@ _MODULE_COLON_RE = re.compile(r"-m\s+[A-Za-z_][\w.]*:\S+")
 # and the like — long-running, port-less, spoken to over stdin/stdout) and
 # `python_scheduler` covers beat/cron-style processes whose only observable
 # behavior is staying alive and firing jobs.
+#
+# The last two are NOT long-running, and that is the point. A repo whose Python
+# is entirely CLIs and libraries (a toolchain, a SDK, LangChain) used to produce
+# an EMPTY inventory and dead-end the whole pipeline before a single line was
+# traced. Tracelens never required a server — `tracelens run -t pkg -- <cmd>`
+# instruments any process — so the only thing missing was a name for a unit of
+# work that starts, does its job and exits:
+#   * `python_cli`     — a console script / `__main__` we invoke with argv;
+#   * `python_library`  — no runnable of its own; the exerciser's function
+#     driver is the process that calls into it.
+# Both are verified by exit code + a non-empty trace, never by a port probe.
 _INVENTORY_KINDS: tuple[str, ...] = (
     "python_web", "python_worker", "python_stdio", "python_scheduler",
+    "python_cli", "python_library",
 )
+# Kinds that run to completion. These have no port, no readiness window and no
+# process to kill afterwards — the process exiting IS the successful outcome.
+_RUN_TO_COMPLETION_KINDS: frozenset[str] = frozenset({"python_cli", "python_library"})
 # Optional additive `transport` field: how the service is spoken to.
 _INVENTORY_TRANSPORTS: tuple[str, ...] = ("http", "stdio")
 
@@ -1440,9 +1455,29 @@ def _validate_services_inventory(
                         f"function trace).{correction}"
                     )
 
+        if kind in _RUN_TO_COMPLETION_KINDS and transport is not None:
+            issues.append(
+                f"{label}: kind={kind} runs to completion — it is not spoken to over a "
+                f"transport, so `transport` must be omitted or null (got {transport!r})"
+            )
+
         command = svc.get("command")
-        if not isinstance(command, str) or not command.strip():
-            issues.append(f"{label}: `command` is missing or empty")
+        # A library has no runnable of its own — that is what makes it a library.
+        # Rather than have the agent fabricate one (the failure this prompt warns
+        # about everywhere else), the harness synthesizes the exerciser driver
+        # that calls into it. Every other kind must still name its own command.
+        if command is None and kind == "python_library":
+            pass  # harness-synthesized; nothing to validate
+        elif not isinstance(command, str) or not command.strip():
+            issues.append(
+                f"{label}: `command` is missing or empty"
+                + (
+                    " — for a library, omit it entirely and the harness supplies the "
+                    "exerciser function driver"
+                    if kind == "python_library"
+                    else ""
+                )
+            )
         else:
             if _MODULE_COLON_RE.search(command):
                 issues.append(
@@ -1469,9 +1504,117 @@ def _validate_services_inventory(
                 f"{label}: kind=python_stdio serves over stdin/stdout, not a socket — "
                 f"`port` must be null (got {port!r})"
             )
+        elif kind in _RUN_TO_COMPLETION_KINDS and port is not None:
+            issues.append(
+                f"{label}: kind={kind} runs to completion and never listens — `port` must "
+                f"be null (got {port!r}). If this really does serve HTTP, it is a "
+                "python_web service and belongs under that kind."
+            )
         elif port is not None and not port_ok:
             issues.append(f"{label}: `port` must be an integer 1-65535 or null (got {port!r})")
+
+        issues.extend(_validate_invocations(svc.get("invocations"), kind, label))
     return issues
+
+
+def _validate_invocations(invocations: Any, kind: Any, label: str) -> list[str]:
+    """Validate the optional `invocations` list on a run-to-completion entry.
+
+    One entry per representative way the unit is driven — a CLI subcommand with
+    its argv, a library scenario. Omitting the list is legal and means "the
+    single `command` is the only invocation"; what is never legal is argv sets
+    on a server, which always means the kind is wrong.
+    """
+    if invocations is None:
+        return []
+    if kind not in _RUN_TO_COMPLETION_KINDS:
+        return [
+            f"{label}: `invocations` describes argv sets for a process that runs to "
+            f"completion, but kind={kind!r} is long-running. Drop the field, or "
+            "reclassify as python_cli if this is really a CLI."
+        ]
+    if not isinstance(invocations, list) or not invocations:
+        return [f"{label}: `invocations` must be a non-empty list (got {invocations!r})"]
+
+    issues: list[str] = []
+    for j, inv in enumerate(invocations):
+        ilabel = f"{label}.invocations[{j}]"
+        if not isinstance(inv, dict):
+            issues.append(f"{ilabel}: entry is not a JSON object")
+            continue
+        icommand = inv.get("command")
+        if not isinstance(icommand, str) or not icommand.strip():
+            issues.append(
+                f"{ilabel}: `command` is missing or empty — each invocation is a FULL "
+                "runnable command, not an argv fragment appended to the service command"
+            )
+        else:
+            if _MODULE_COLON_RE.search(icommand):
+                issues.append(
+                    f"{ilabel}: command {icommand!r} uses `-m <module>:<attr>` — `-m` takes "
+                    "a module; the `module:attr` form is an app-factory reference."
+                )
+            if icommand.lstrip().startswith(("docker", "docker-compose")):
+                issues.append(
+                    f"{ilabel}: command must be the native Python command, not docker "
+                    f"(got {icommand!r})"
+                )
+        expect_exit = inv.get("expect_exit")
+        if expect_exit is not None and (
+            not isinstance(expect_exit, int) or isinstance(expect_exit, bool)
+        ):
+            issues.append(
+                f"{ilabel}: `expect_exit` must be an integer exit code or null "
+                f"(got {expect_exit!r})"
+            )
+    return issues
+
+
+def library_driver_command(project_root: Path, service_name: str) -> str:
+    """The command that drives a `python_library` entry.
+
+    A library has no entrypoint of its own, so something else has to call into
+    it. That something is the exerciser's function driver: it turns the
+    `entrypoints` inventory into a target set, generates arguments from type
+    hints and calls the exported callables in a contained worker. Bring-up wraps
+    THIS command in tracelens exactly as it wraps a server's start command — the
+    library's own functions are what gets instrumented either way.
+
+    Synthesized rather than agent-written on purpose: every other command in the
+    inventory is grounded in something the repo declares, and a library declares
+    nothing. A fabricated command is the one failure mode this stage cannot
+    absorb, so the harness supplies the only correct answer itself.
+    """
+    return f"vinv-exerciser functions {project_root.resolve()} --service {service_name}"
+
+
+def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -> list[dict[str, Any]]:
+    """Every command that drives ``svc``, normalized to full runnable entries.
+
+    Collapses the three legal spellings into one shape for Stage 2b and the
+    exerciser: an explicit `invocations` list, a bare `command` (the single
+    invocation), or a library's absent command (the synthesized driver). Each
+    entry carries `command`, `expect_exit` (default 0) and an optional `purpose`.
+    """
+    kind = svc.get("kind")
+    name = svc.get("name") or "service"
+    raw = svc.get("invocations")
+    entries: list[dict[str, Any]] = []
+    if isinstance(raw, list) and raw:
+        for inv in raw:
+            if isinstance(inv, dict) and isinstance(inv.get("command"), str):
+                entries.append(dict(inv))
+    if not entries:
+        command = svc.get("command")
+        if not isinstance(command, str) or not command.strip():
+            if kind != "python_library" or project_root is None:
+                return []
+            command = library_driver_command(project_root, str(name))
+        entries = [{"command": command}]
+    for entry in entries:
+        expect = entry.get("expect_exit")
+        entry["expect_exit"] = 0 if not isinstance(expect, int) or isinstance(expect, bool) else expect
+    return entries
 
 
 def _list_feedback_instruction(
@@ -1816,25 +1959,147 @@ def _resolve_bash() -> str | None:
 
 
 def _listening_pids(port: int) -> set[str]:
-    """PIDs currently LISTENING on ``port``, per netstat. Empty on any failure."""
+    """PIDs currently LISTENING on ``port``. Empty on any failure.
+
+    Windows reads ``netstat -ano``; POSIX tries ``lsof`` and falls back to
+    ``ss``, because neither is guaranteed present (minimal containers ship
+    iproute2 without lsof; macOS ships lsof without ss). An empty set always
+    means "could not tell", never "the port is free" — occupancy is decided by
+    :func:`_port_is_serving`, never by this.
+    """
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True, timeout=15
+            ).stdout
+        except Exception:
+            logger.warning("bringup_reap_netstat_failed port=%s", port, exc_info=True)
+            return set()
+        pids: set[str] = set()
+        for line in out.splitlines():
+            parts = line.split()
+            if (
+                len(parts) >= 5
+                and parts[0] == "TCP"
+                # Matches both `0.0.0.0:8000` and `[::]:8000`: a server bound on
+                # IPv6 only is invisible to a v4-address match, and that is
+                # exactly the holder that leaves a "free" port refusing to bind.
+                and parts[1].endswith(f":{port}")
+                and parts[3] == "LISTENING"
+            ):
+                pids.add(parts[4])
+        return pids
     try:
         out = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=15
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        pids = {ln.strip() for ln in out.splitlines() if ln.strip().isdigit()}
+        if pids:
+            return pids
+    except Exception:
+        logger.info("bringup_lsof_unavailable port=%s", port, exc_info=True)
+    try:
+        out = subprocess.run(
+            ["ss", "-ltnp"], capture_output=True, text=True, timeout=15
         ).stdout
     except Exception:
-        logger.warning("bringup_reap_netstat_failed port=%s", port, exc_info=True)
+        logger.warning("bringup_listeners_unreadable port=%s", port, exc_info=True)
         return set()
-    pids: set[str] = set()
+    pids = set()
     for line in out.splitlines():
-        parts = line.split()
-        if (
-            len(parts) >= 5
-            and parts[0] == "TCP"
-            and parts[1].endswith(f":{port}")
-            and parts[3] == "LISTENING"
-        ):
-            pids.add(parts[4])
+        if re.search(rf"[:.]{port}\b", line):
+            pids.update(re.findall(r"pid=(\d+)", line))
     return pids
+
+
+def _describe_pid(pid: str) -> str:
+    """Executable name (Windows) or argv (POSIX) for ``pid``; '' when unknown."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=15,
+            ).stdout
+            for line in out.splitlines():
+                if line.strip().startswith('"'):
+                    return line.split('","')[0].strip('"')
+            return ""
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        return out.strip().splitlines()[0] if out.strip() else ""
+    except Exception:
+        return ""
+
+
+def _kill_pid(pid: str) -> None:
+    """Kill ``pid`` and everything under it, best effort, on either platform."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False
+        )
+        return
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+    except (OSError, ValueError):
+        return
+    time.sleep(1.5)
+    try:
+        os.kill(int(pid), 0)
+        os.kill(int(pid), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass  # exited on the TERM — the good case
+
+
+def _free_port(port: int, wait_s: float = 8.0) -> tuple[bool, str]:
+    """Evict whoever is LISTENING on ``port`` and wait for it to go quiet.
+
+    Returns ``(freed, detail)``. A busy port before a replay is machine state,
+    not evidence about the recorded command: something (usually this same
+    service, survived from an earlier run) is holding the socket, so the replay
+    either fails to bind or — worse — the port probe answers instantly and the
+    squatter is credited as a passing verification. Killing the holder is the
+    remedy that lets the replay actually measure what it claims to measure.
+
+    Never raises: a port that cannot be freed is reported so the caller can say
+    so and suggest moving the service instead.
+    """
+    if not _port_is_serving(port):
+        return True, f"port {port} was free"
+    pids = sorted(_listening_pids(port))
+    if not pids:
+        return False, (
+            f"port {port} is serving but no listening pid could be identified — "
+            "it may belong to another user, a container, or WSL"
+        )
+    described = ", ".join(f"{pid} ({_describe_pid(pid) or 'unknown'})" for pid in pids)
+    for pid in pids:
+        logger.info("bringup_free_port port=%s pid=%s", port, pid)
+        _kill_pid(pid)
+    deadline = time.monotonic() + wait_s
+    while True:
+        if not _port_is_serving(port):
+            return True, f"freed port {port} by killing pid(s) {described}"
+        if time.monotonic() >= deadline:
+            return False, (
+                f"port {port} is still serving {wait_s:.0f}s after killing pid(s) "
+                f"{described} — the holder survived, or another process took the port"
+            )
+        time.sleep(0.25)
+
+
+def _free_tcp_port(start: int = 8000, tries: int = 64) -> int | None:
+    """First bindable TCP port at or above ``start`` — the relocation remedy."""
+    for candidate in range(start, min(start + tries, 65536)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(("127.0.0.1", candidate))
+                return candidate
+            except OSError:
+                continue
+    return None
 
 
 def _process_start_time(pid: int) -> float | None:
@@ -2104,7 +2369,12 @@ def verify_replay(
     - ``{"type": "process"}`` — an explicitly declared long-runner with no
       cheaper oracle: alive past the grace window passes, exiting before it
       (even cleanly) fails. Without a declared probe, a portless clean exit
-      keeps the legacy worker semantics (exit 0 + refreshed trace = pass).
+      keeps the legacy worker semantics (exit 0 + refreshed trace = pass);
+    - ``{"type": "exit"}`` — the run-to-completion oracle for ``python_cli`` /
+      ``python_library``. The exact inverse of ``process``: the unit MUST exit,
+      with the expected code (``probe.expect_exit``, default 0), having
+      refreshed a non-empty trace. Staying alive past the deadline is the
+      failure here, because a CLI that never returns is hung.
 
     Every polling path is bounded by an ABSOLUTE wall-clock deadline
     (``VINV_REPLAY_DEADLINE_S``, default 180s): a process that stays alive but
@@ -2127,12 +2397,12 @@ def verify_replay(
     probe = verification.get("probe") if isinstance(verification, dict) else None
     probe = probe if isinstance(probe, dict) else None
     probe_type = probe.get("type") if probe else None
-    if probe_type not in (None, "port", "stdio-jsonrpc", "process"):
+    if probe_type not in (None, "port", "stdio-jsonrpc", "process", "exit"):
         return {
             "ok": False,
             "reason": (
                 f"unknown probe type {probe_type!r} in verification.probe — "
-                "supported types: 'port', 'stdio-jsonrpc', 'process'"
+                "supported types: 'port', 'stdio-jsonrpc', 'process', 'exit'"
             ),
             "output_tail": "",
         }
@@ -2145,10 +2415,15 @@ def verify_replay(
                 "reason": "probe type 'port' but no port recorded in verification",
                 "output_tail": "",
             }
-    if probe_type in ("stdio-jsonrpc", "process"):
+    if probe_type in ("stdio-jsonrpc", "process", "exit"):
         # These oracles are port-less by definition; ignore any stray port.
         port = None
     explicit_process = probe_type == "process"
+    explicit_exit = probe_type == "exit"
+    expect_exit = probe.get("expect_exit") if probe else None
+    expect_exit = (
+        expect_exit if isinstance(expect_exit, int) and not isinstance(expect_exit, bool) else 0
+    )
 
     budget_s = float(os.environ.get("VINV_BRINGUP_REPLAY_BUDGET_S", "240"))
     portless_grace_s = float(os.environ.get("VINV_BRINGUP_REPLAY_GRACE_S", "12"))
@@ -2179,6 +2454,30 @@ def verify_replay(
         return _verify_stdio_replay(
             project_root, service, script, probe or {}, bash, deadline_s
         )
+
+    # The port has to be OURS before the replay starts, for two reasons that
+    # pull in the same direction: a squatter makes the command fail to bind
+    # ("address already in use", reported as if the recorded command were
+    # wrong), and — worse — the readiness probe below would answer on the FIRST
+    # poll against a process this replay never started, crediting the squatter
+    # with a pass. Evicting it is what makes the verification measure the
+    # command it is verifying.
+    if port is not None:
+        freed, detail = _free_port(port)
+        logger.info("bringup_replay_port_precheck service=%s %s", service, detail)
+        if not freed:
+            alternative = _free_tcp_port(port + 1)
+            return {
+                "ok": False,
+                "reason": (
+                    f"cannot verify: {detail}. Stop that process, or move `{service}` to a "
+                    f"free port"
+                    + (f" (e.g. {alternative})" if alternative else "")
+                    + " — change it in the recorded command, in `verification.port`, and in "
+                    "the app's own config together, then record again."
+                ),
+                "output_tail": "",
+            }
 
     log = tempfile.NamedTemporaryFile(
         mode="w+b", prefix=f"vinv_replay_{service}_", suffix=".log", delete=False
@@ -2223,11 +2522,63 @@ def verify_replay(
         except OSError:
             return False
 
+    def _trace_nonempty() -> bool:
+        """Did this run actually record spans?
+
+        For a run-to-completion unit an empty trace is the whole failure mode:
+        the command ran, exited 0 and instrumented nothing — usually a
+        `--target-package` that matches no import package, which a mtime check
+        alone would wave through.
+        """
+        if not isinstance(trace_path, str) or not trace_path:
+            return True
+        try:
+            return os.path.getsize(trace_path) > 0
+        except OSError:
+            return False
+
     try:
         while True:
             elapsed = time.monotonic() - started
             code = proc.poll()
             if code is not None:
+                if explicit_exit:
+                    if code == expect_exit and _trace_refreshed() and _trace_nonempty():
+                        return {
+                            "ok": True,
+                            "seconds": round(elapsed, 1),
+                            "port": None,
+                            "probe": "exit",
+                            "exit_code": code,
+                            "ran_to_completion": True,
+                        }
+                    if code != expect_exit:
+                        reason = (
+                            f"exited with code {code} after {elapsed:.1f}s, expected "
+                            f"{expect_exit} — the invocation itself failed. Fix the "
+                            "command (or record the documented non-zero code as "
+                            "`expect_exit` if this exit IS the correct behavior)."
+                        )
+                    elif not _trace_refreshed():
+                        reason = (
+                            f"exited cleanly in {elapsed:.1f}s but did not refresh the "
+                            "recorded trace — the command that ran was not the "
+                            "tracelens-wrapped one, or it wrote somewhere else"
+                        )
+                    else:
+                        reason = (
+                            f"exited cleanly in {elapsed:.1f}s but the trace is EMPTY — "
+                            "tracelens instrumented nothing. The usual cause is a "
+                            "`--target-package` naming a distribution rather than an "
+                            "import package, so no module ever matched."
+                        )
+                    return {
+                        "ok": False,
+                        "reason": reason,
+                        "exit_code": code,
+                        "seconds": round(elapsed, 1),
+                        "output_tail": _tail(),
+                    }
                 if (
                     port is None and code == 0
                     and not explicit_process and _trace_refreshed()
@@ -2293,19 +2644,35 @@ def verify_replay(
                         result["verdict"] = "not-a-service"
                         result["reason"] = (
                             f"ran to completion in {elapsed:.1f}s (exit 0, no surviving "
-                            "processes, clean output) — this looks like a run-to-completion "
-                            "CLI, not a long-running service; reclassify as kind=cli and "
-                            "skip bring-up"
+                            "processes, clean output) — this is a run-to-completion CLI, "
+                            "not a long-running service. It is still a unit of work worth "
+                            "tracing: reclassify the inventory entry as kind=python_cli "
+                            "and record `\"probe\": {\"type\": \"exit\"}`, which accepts "
+                            "exactly this outcome instead of failing on it."
                         )
                 return result
             if port is not None and _port_is_serving(port):
                 return {"ok": True, "seconds": round(elapsed, 1), "port": port}
-            if port is None and elapsed >= portless_grace_s:
+            # Surviving the grace window is success for a long-runner and the
+            # opposite for an `exit` unit, which has to actually return.
+            if port is None and elapsed >= portless_grace_s and not explicit_exit:
                 result = {"ok": True, "seconds": round(elapsed, 1), "port": None}
                 if explicit_process:
                     result["probe"] = "process"
                 return result
             if elapsed >= deadline_s:
+                if explicit_exit:
+                    return {
+                        "ok": False,
+                        "reason": (
+                            f"deadline: probe type 'exit' declares a unit that runs to "
+                            f"completion, but it was still running after {deadline_s:.0f}s "
+                            "— it is hung, waiting on input, or is really a long-running "
+                            "service that belongs under a different kind"
+                        ),
+                        "seconds": round(elapsed, 1),
+                        "output_tail": _tail(),
+                    }
                 return {
                     "ok": False,
                     "reason": (

@@ -409,7 +409,14 @@ function getHtml(label: string): string {
 		}
 		.node.clickable { cursor: pointer; }
 		.node.clickable:hover { background: var(--bg-2); box-shadow: inset 2px 0 0 var(--accent-fg); }
-		.node.notrun { opacity: 0.45; }
+		/* A not-run row is de-emphasised by HUE, never by opacity. A blanket
+		   opacity multiplies every child toward the background regardless of
+		   theme: at 0.45 the path, the "not run" tag and the badges measured
+		   1.6:1 (dark) / 1.8:1 (light) — effectively invisible — and the function
+		   name 4.4:1 / 3.2:1. The palette's muted tier already encodes "secondary"
+		   at a ratio that holds in both themes, so use it and leave the row's
+		   detail text at the same contrast it has everywhere else. */
+		.node.notrun .name .fn { color: var(--muted); }
 		.caret {
 			cursor: pointer; width: 14px; display: inline-block; text-align: center;
 			color: var(--muted-2); user-select: none; flex: none;
@@ -860,9 +867,14 @@ function getHtml(label: string): string {
 			const ep = result.entrypoint || {};
 			const tree = result.tree;
 
+			// A bare __main__ guard reads the same in every script, so name those by
+			// the file that is actually run (mirrors entryPointLabel on the host side,
+			// which also covers an apis.json written by an older engine build).
 			const headerLabel = ep.kind === 'http_api' && ep.method
 				? ep.method + ' ' + ep.path
-				: (ep.trigger || ep.id || 'Call Tree');
+				: (ep.trigger === '__main__' && ep.file
+					? 'python ' + ep.file
+					: (ep.trigger || ep.id || 'Call Tree'));
 			document.getElementById('title').textContent = headerLabel;
 			document.getElementById('root-meta').textContent =
 				(ep.handler ? ep.handler + '()' : '') +

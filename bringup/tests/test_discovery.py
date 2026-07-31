@@ -25,7 +25,9 @@ from bringup.runner import (  # noqa: E402
     _discover_distributions,
     _discover_traceable_packages,
     _validate_services_inventory,
+    library_driver_command,
     list_instruction,
+    service_invocations,
 )
 
 
@@ -281,6 +283,107 @@ def test_validate_rejects_unknown_kind_and_transport(tmp_path: Path) -> None:
     issues = _validate_services_inventory([svc])
     assert any("python_stdio" in i for i in issues)      # allowed kinds are named
     assert any("carrier-pigeon" in i for i in issues)
+
+
+# ── Run-to-completion kinds ───────────────────────────────────────
+
+
+def _cli_service(tmp_path: Path) -> dict:
+    return {
+        "name": "acme-tool",
+        "kind": "python_cli",
+        "command": "acme-tool report --since 7d",
+        "working_directory": str(tmp_path),
+        "port": None,
+        "modules": ["acme_tool"],
+    }
+
+
+def test_validate_accepts_cli_and_library_kinds(tmp_path: Path) -> None:
+    cli = _cli_service(tmp_path) | {
+        "invocations": [
+            {"command": "acme-tool report --since 7d", "purpose": "the reporting path"},
+            {"command": "acme-tool check ./sample", "expect_exit": 1},
+        ]
+    }
+    # A library carries no `command` at all — that is what makes it a library,
+    # and the harness synthesizes the driver rather than having one fabricated.
+    library = {
+        "name": "acme-sdk",
+        "kind": "python_library",
+        "working_directory": str(tmp_path),
+        "port": None,
+        "modules": ["acme_sdk"],
+    }
+    assert _validate_services_inventory([cli, library]) == []
+
+
+def test_validate_rejects_port_on_run_to_completion_kinds(tmp_path: Path) -> None:
+    issues = _validate_services_inventory([_cli_service(tmp_path) | {"port": 8080}])
+    assert any("runs to completion" in i and "port" in i for i in issues)
+
+
+def test_validate_rejects_transport_on_cli(tmp_path: Path) -> None:
+    issues = _validate_services_inventory([_cli_service(tmp_path) | {"transport": "http"}])
+    assert any("transport" in i for i in issues)
+
+
+def test_validate_requires_command_except_for_library(tmp_path: Path) -> None:
+    headless_cli = _cli_service(tmp_path)
+    headless_cli.pop("command")
+    issues = _validate_services_inventory([headless_cli])
+    assert any("`command` is missing" in i for i in issues)
+
+
+def test_validate_rejects_invocations_on_long_running_kind(tmp_path: Path) -> None:
+    # argv sets on a server always mean the kind is wrong, so say so rather than
+    # accepting a field that nothing downstream would ever read.
+    svc = _valid_service(tmp_path) | {"invocations": [{"command": "acme-payment --once"}]}
+    issues = _validate_services_inventory([svc])
+    assert any("long-running" in i and "python_cli" in i for i in issues)
+
+
+def test_validate_rejects_malformed_invocations(tmp_path: Path) -> None:
+    bad = _cli_service(tmp_path) | {
+        "invocations": [
+            {"purpose": "no command at all"},
+            {"command": "docker compose run acme-tool"},
+            {"command": "acme-tool report", "expect_exit": "zero"},
+        ]
+    }
+    issues = _validate_services_inventory([bad])
+    assert any("invocations[0]" in i and "`command` is missing" in i for i in issues)
+    assert any("invocations[1]" in i and "docker" in i for i in issues)
+    assert any("invocations[2]" in i and "expect_exit" in i for i in issues)
+
+
+def test_validate_rejects_empty_invocations_list(tmp_path: Path) -> None:
+    issues = _validate_services_inventory([_cli_service(tmp_path) | {"invocations": []}])
+    assert any("non-empty list" in i for i in issues)
+
+
+def test_service_invocations_normalizes_all_three_spellings(tmp_path: Path) -> None:
+    # Explicit list wins; a bare command becomes the single invocation; a library
+    # with no command gets the synthesized exerciser driver.
+    explicit = service_invocations(
+        _cli_service(tmp_path)
+        | {"invocations": [{"command": "acme-tool check", "expect_exit": 1}]}
+    )
+    assert [(e["command"], e["expect_exit"]) for e in explicit] == [("acme-tool check", 1)]
+
+    bare = service_invocations(_cli_service(tmp_path))
+    assert [(e["command"], e["expect_exit"]) for e in bare] == [
+        ("acme-tool report --since 7d", 0)
+    ]
+
+    library = service_invocations(
+        {"name": "acme-sdk", "kind": "python_library", "modules": ["acme_sdk"]},
+        project_root=tmp_path,
+    )
+    assert len(library) == 1
+    assert library[0]["command"] == library_driver_command(tmp_path, "acme-sdk")
+    assert "vinv-exerciser functions" in library[0]["command"]
+    assert library[0]["expect_exit"] == 0
 
 
 def test_validate_web_transport_must_be_http(tmp_path: Path) -> None:

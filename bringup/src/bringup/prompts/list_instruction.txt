@@ -17,20 +17,41 @@ services up one at a time.
   (`python_stdio` — MCP servers and the like, spoken to over stdin/stdout, no port), and
   beat/cron-style schedulers (`python_scheduler`). A port scan finds none of the last three —
   find them from the handbook's enumeration, the manifest-scan list below, and the entry code.
+- **"Service" is also broader than long-running.** Tracelens instruments a *process*, not a
+  server: `tracelens run -t pkg -- <any command>` records a run that starts, works and exits
+  just as faithfully as one that stays up. So the inventory also covers the two units of work
+  that never listen on anything:
+  - `python_cli` — a console script or `__main__` the repo declares, invoked with argv and run
+    to completion (`acme-tool report --since 7d`);
+  - `python_library` — an importable package with **no entrypoint of its own**, whose functions
+    are called by the exerciser's function driver.
+
+  These are not consolation prizes for repos without a server. In a toolchain, a SDK or a
+  framework (LangChain and its kin) they are the *only* units of work there are, and an
+  inventory that omits them traces nothing at all.
 - **EXCLUDE stateful infrastructure** (Postgres, MySQL, Redis, ClickHouse, Kafka, Mongo, etc.,
   i.e. the handbook's `### Run in Docker` table). We do **not** instrument or bring those up here;
   the start stage starts them as a dependency when needed. They must **not** appear in your output.
 - **EXCLUDE non-Python processes** (Node/Vite/Next frontends). Only Python services count.
-- **A LIBRARY IS NOT A SERVICE — do not force one to become one.** A Python package with **no
+- **NEVER FABRICATE A `command`.** This is the rule the library case used to be a special case of,
+  and it is the only one that still bites: a command grounded in nothing wastes an entire
+  downstream bring-up attempt before anyone notices it cannot work. A Python package with **no
   runnable process of its own** — no `[project.scripts]` / `[tool.poetry.scripts]` console script,
-  no `__main__.py`, no handbook `### Run on host` row naming it — is a library. Never fabricate a
-  `command` for it. Two legitimate outcomes for a library:
+  no `__main__.py`, no handbook `### Run on host` row naming it — is a library, and inventing an
+  entrypoint for it is the classic way to break this rule. Three legitimate outcomes:
   1. **Its code runs inside another service's process** (the app imports it): list it as a service
      entry whose `command`, `working_directory` and `port` are **the host app's own** (the shared-
      command case below) — the entries then differ only in which package tracelens instruments.
-  2. **Nothing in the repo runs it**: leave it OUT of `services` entirely. An inventory with fewer,
-     real services beats one padded with unrunnable entries — a fabricated command wastes an entire
-     downstream bring-up attempt before anyone notices it can't work.
+  2. **Nothing in the repo runs it, but its functions can be called**: list it as
+     `kind: "python_library"` and **omit `command` entirely**. The harness synthesizes the
+     exerciser function driver — you are not being asked to guess one, and writing one anyway is
+     the fabrication this rule forbids. This is the normal outcome for a library.
+  3. **It should not be driven at all** (a vendored copy, a dev-only shim, generated code): leave
+     it out of `services`.
+
+  Outcome 2 is what makes a library-only repo tractable. Reserve outcome 3 for packages nothing
+  should ever call — not for "I could not find its entrypoint", which is what `python_library`
+  exists to express.
 
 ### Candidate services (framework scan — strong prior; the handbook decides)
 
@@ -58,16 +79,27 @@ services up one at a time.
     HTTP port;
   - `python_stdio` — a stdio JSON-RPC server (an MCP server or similar): long-running, port-less,
     reads requests from stdin and writes JSON responses to stdout;
-  - `python_scheduler` — a beat/cron-style scheduler process (celery beat, apscheduler runner).
+  - `python_scheduler` — a beat/cron-style scheduler process (celery beat, apscheduler runner);
+  - `python_cli` — a console script / `__main__` that runs to completion and exits (a Click or
+    argparse CLI, a batch job, a report generator, a migration runner);
+  - `python_library` — an importable package with no entrypoint of its own, driven by the
+    exerciser calling its functions.
 - **`transport`** — optional: `"http"` for `python_web`, `"stdio"` for `python_stdio`, else omit
-  or `null`.
+  or `null`. `python_cli` and `python_library` are never spoken to over a transport — omit it.
 - **VERIFY each candidate is actually startable by READING ITS ENTRY CODE before you emit it.**
   Open the module the command names (the console script's target function, the `__main__.py`, the
-  uvicorn app path) and confirm it really constructs a server / worker / stdio loop. This read is
-  also how you classify `kind`: a console script whose target calls `uvicorn.run(...)` is
-  `python_web`; one that builds a `FastMCP(...)` app or opens an `mcp` stdio transport is
-  `python_stdio`; a celery `worker_main`/`Worker` is `python_worker`; a beat/scheduler loop is
-  `python_scheduler`. A candidate whose entry code you could not locate does not go in the file.
+  uvicorn app path) and confirm it really constructs a server / worker / stdio loop — or that it
+  returns. This read is also how you classify `kind`: a console script whose target calls
+  `uvicorn.run(...)` is `python_web`; one that builds a `FastMCP(...)` app or opens an `mcp` stdio
+  transport is `python_stdio`; a celery `worker_main`/`Worker` is `python_worker`; a beat/scheduler
+  loop is `python_scheduler`. **A console script whose target computes something, prints it and
+  returns is `python_cli`** — that is a unit of work, not a failed server, and it belongs in the
+  file. A candidate whose entry code you could not locate does not go in the file.
+
+  **The discriminator is whether the entrypoint blocks, never whether it declares a console
+  script.** A repo can declare a dozen `[project.scripts]` where one parks on `serve_forever` and
+  eleven return — that is one `python_web` and eleven `python_cli`, not one service and eleven
+  omissions. Read the target function and see which it does.
 - **`command`** — the native start command that runs this service (NEVER `docker compose up`), taken
   from what the repo **actually declares**: the handbook's `### Run on host` row, a
   `[project.scripts]` / `[tool.poetry.scripts]` console script (e.g. `acme-payment-serve`), a
@@ -81,17 +113,37 @@ services up one at a time.
   app-factory reference that only uvicorn/gunicorn understand. If several services are served by the
   **same** app process it is fine for them to share the same `command` — they differ only in which
   package tracelens instruments at start.
+  For `python_cli` the same grounding rule applies to the *whole* invocation: the subcommand and
+  its argv must come from something the repo declares — the CLI's own `--help`/`@click.command`
+  definitions, a README example, a CI workflow step, a Makefile target, a test that shells out.
+  For `python_library`, **omit `command`** and let the harness synthesize the driver.
+- **`invocations`** — optional, and only for `python_cli` / `python_library`: the representative
+  ways this unit is driven, one entry per way. Each is a **complete runnable command**, not an
+  argv fragment: `{{"command": "acme-tool report --since 7d", "purpose": "weekly report",
+  "expect_exit": 0}}`. `expect_exit` defaults to `0` — set it only where the documented behavior
+  is a non-zero exit (a linter that reports findings, a check command). Omit the field entirely
+  and `command` becomes the single invocation, which is the right answer for a CLI with one real
+  mode. Prefer two or three invocations that exercise genuinely different code paths over ten
+  variations of the same flag; each one is a separate traced run.
 - **`working_directory`** — absolute path the command runs from (default the candidate's own path
   from the scan, else `{root}`).
 - **`port`** — the HTTP port it listens on (**required** for `python_web`); `null` for every other
-  kind (`python_stdio` in particular MUST have `port: null` — it has no socket).
+  kind (`python_stdio` in particular MUST have `port: null` — it has no socket, and `python_cli` /
+  `python_library` MUST have `port: null` — they never listen at all).
 - **Readiness for non-HTTP kinds** — a `python_stdio` service cannot be probed on a port. Its
   readiness check (used by Stage 2b and the replay gate) is a **JSON-RPC initialize round-trip**:
   spawn the command, write one `{{"jsonrpc":"2.0","id":1,"method":"initialize",...}}` line to its
   stdin, expect a JSON line back on stdout. Stage 2b records this as
   `"probe": {{"type": "stdio-jsonrpc"}}` in the start_commands file (`"process"` for
-  workers/schedulers that just have to stay alive, `"port"` for web). You don't run the probe in
-  this read-only stage — but classify `kind` correctly so Stage 2b knows which oracle to use.
+  workers/schedulers that just have to stay alive, `"port"` for web, `"exit"` for the
+  run-to-completion kinds). You don't run the probe in this read-only stage — but classify `kind`
+  correctly so Stage 2b knows which oracle to use.
+- **Readiness for the run-to-completion kinds** — there is nothing to probe, because the process
+  **exiting is the successful outcome**. Stage 2b runs the tracelens-wrapped invocation to
+  completion and accepts it when the exit code matches and the trace is non-empty. Getting `kind`
+  wrong in this direction is expensive in both directions: a CLI filed as `python_web` hangs
+  Stage 2b until its deadline waiting for a port that never opens, and a server filed as
+  `python_cli` fails the moment it does not exit.
 - **`modules`** — the top-level **import package(s)** tracelens instruments for this service
   (`--target-package`). Use the import package(s) from the scan — each must be a valid Python
   identifier. A directory or distribution name containing `-` is NEVER a module name. Add another
@@ -137,14 +189,36 @@ The JSON must have exactly this shape (one entry per Python service, no infra, n
       "working_directory": "{root}",
       "port": null,
       "modules": ["acme_mcp"]
+    }},
+    {{
+      "name": "acme-tool",
+      "kind": "python_cli",
+      "command": "acme-tool report --since 7d",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["acme_tool"],
+      "invocations": [
+        {{"command": "acme-tool report --since 7d", "purpose": "the reporting path"}},
+        {{"command": "acme-tool check ./sample", "purpose": "the validation path",
+          "expect_exit": 1}}
+      ]
+    }},
+    {{
+      "name": "acme-sdk",
+      "kind": "python_library",
+      "working_directory": "{root}",
+      "port": null,
+      "modules": ["acme_sdk"]
     }}
   ]
 }}
 ```
 
 (The names above are illustrative of the **shape** — note how the service `name` may carry a dash
-while `modules` carries the underscore import package, and how the stdio server carries
-`transport: "stdio"` with `port: null`. Use the actual names for this repo.) Emit
+while `modules` carries the underscore import package, how the stdio server carries
+`transport: "stdio"` with `port: null`, how the CLI's `invocations` are each a full command with
+the second one documenting a legitimate non-zero exit, and how the library entry carries **no
+`command` at all**. Use the actual names for this repo.) Emit
 **valid JSON only** (no trailing commas, no comments in the actual file). Do **not** wrap it in
 Markdown fences inside the file. After `save_file` returns `status: success`, run
 `cat '{services_json}'` once via `send_terminal_command` to confirm it landed and parses, then end
@@ -167,7 +241,10 @@ every service in the handbook. That means: you called
 
 After you finish, the harness validates the file deterministically — every `modules` entry must be
 an importable Python identifier, `kind` must be one of `python_web` / `python_worker` /
-`python_stdio` / `python_scheduler`, `python_web` entries must carry an integer `port`,
-`python_stdio` entries must carry `port: null`, `transport` (when present) must be `"http"` or
-`"stdio"` and match the kind, commands must be runnable (no `-m module:attr`, no docker) — and
-re-opens this task with the exact violations if it fails. Get it right the first time.
+`python_stdio` / `python_scheduler` / `python_cli` / `python_library`, `python_web` entries must
+carry an integer `port`, `python_stdio` / `python_cli` / `python_library` entries must carry
+`port: null`, `transport` (when present) must be `"http"` or `"stdio"` and match the kind,
+`invocations` (when present) may only appear on `python_cli` / `python_library` and each entry
+must carry a full `command`, every entry except `python_library` must carry a `command`, and
+commands must be runnable (no `-m module:attr`, no docker) — and re-opens this task with the exact
+violations if it fails. Get it right the first time.

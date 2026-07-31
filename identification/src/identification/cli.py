@@ -87,7 +87,9 @@ Pass --service NAME to label the output. Writes
 _CALLTREE_HELP = """\
 Build the call tree for ONE entry point.
 
-Identify the entry point by --api-id (any `id` from `consolidate`). Writes
+Identify it by --api-id (any `id` from `consolidate`), or by --symbol
+(`module:qualname`) for a function no declaration names — the shape the
+exerciser drives directly. Writes
 <repo>/.vinv/identification/<id>.calltree.json and prints an indented tree.
 --max-depth caps recursion. Requires an existing index.
 """
@@ -148,8 +150,19 @@ def consolidate_cmd(
 @click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
 @click.option(
     "--api-id",
-    required=True,
+    default=None,
     help="Entry-point id from `consolidate` (e.g. POST_tool_id_probe, HOOK_startup_x).",
+)
+@click.option(
+    "--symbol",
+    default=None,
+    help=(
+        "Root the tree at an indexed symbol instead — `module:qualname`, "
+        "`path/to/file.py:name` or a bare name. For a function the exerciser "
+        "drove directly, which no entry-point declaration names. One of "
+        "--api-id / --symbol is required; with both, the declared entry point "
+        "wins and the symbol is the fallback."
+    ),
 )
 @click.option(
     "--service", default=None, help="Optional service label passed through to consolidation."
@@ -164,7 +177,8 @@ def consolidate_cmd(
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
 def calltree_cmd(
     repo_path: str,
-    api_id: str,
+    api_id: str | None,
+    symbol: str | None,
     service: str | None,
     store_dir: str | None,
     max_depth: int,
@@ -173,10 +187,14 @@ def calltree_cmd(
 ) -> None:
     _configure_logging(verbose)
     log = logging.getLogger("identification.calltree")
+    if not api_id and not symbol:
+        _emit({"status": "error", "error": "one of --api-id / --symbol is required"})
+        return
     try:
         result = build_api_call_tree(
             Path(repo_path),
             api_id=api_id,
+            symbol=symbol,
             service=service,
             store_dir=store_dir,
             max_depth=max_depth,

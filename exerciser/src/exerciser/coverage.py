@@ -249,9 +249,15 @@ def endpoint_coverage(
     store_dir: str | None = None,
     trace: str | None = None,
     handler: str | None = None,
+    symbol: str | None = None,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """Coverage facts for one endpoint from the newest capture.
+
+    ``symbol`` roots the static tree at an indexed function instead of a
+    declared entry point — what a driven call is. Without it a function-level
+    unit had no static denominator at all, so however much of it ran it
+    reported 0/0.
 
     Returns a dict with ``covered_ids`` (the join-key set for the reward),
     ``covered``/``total``/``pct``, ``uncovered`` names and ``handler_observed``.
@@ -267,6 +273,7 @@ def endpoint_coverage(
         result = map_trace_to_tree(
             repo,
             api_id=api_id,
+            symbol=symbol,
             trace=trace,
             service=service,
             store_dir=store_dir,

@@ -23,14 +23,14 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as http from 'http';
-import * as net from 'net';
 import * as path from 'path';
 import { getBinPath } from '../tracelens/bin';
 import { getHandbookEnv, getHarnessId, isAutoEpisodesEnabled } from '../config/settings';
 import { dispatchAgentPrompt, isHarnessBusy } from './harnessRunner';
 import { isEpisodeRunning } from './episodeLoop';
 import { runGoalAgent, type AgentSpawn } from './binaryAgents';
-import { readServices, readStartCommands, serviceSlug } from '../bringup/bringup';
+import { readServices, readStartCommands, serviceSlug, servicePort } from '../bringup/bringup';
+import { describeHolders, portHolders, portIsServing } from '../support/ports';
 import { isServiceRunning, runningServiceNames, startService } from '../bringup/serviceRunner';
 import { loadCorpus, resolveSymbol, type SummaryDict, type TraceCorpus } from '../runtime/traceStore';
 import { readInsightManifest, recomputeIssues } from './insightRunner';
@@ -498,43 +498,6 @@ export function judgeProbe(
 	return { verdict: 'pass' };
 }
 
-/** The service's expected port: services.json first, then the start record. */
-function servicePort(workspaceRoot: string, service: string): number | null {
-	const entry = readServices(workspaceRoot).find((s) => s.name === service);
-	if (typeof entry?.port === 'number' && entry.port > 0) {
-		return entry.port;
-	}
-	try {
-		const raw = fs.readFileSync(
-			path.join(workspaceRoot, '.vinv', 'start_commands', `${serviceSlug(service)}.json`),
-			'utf8',
-		);
-		const parsed = JSON.parse(raw) as { verification?: { port?: number } };
-		const p = parsed.verification?.port;
-		return typeof p === 'number' && p > 0 ? p : null;
-	} catch {
-		return null;
-	}
-}
-
-/** The running service to probe: prefer a live session with a known port. */
-/** One TCP connect to 127.0.0.1:port — the same check the episode loop uses. */
-function portIsServing(port: number): Promise<boolean> {
-	return new Promise((resolve) => {
-		const socket = net.connect({ host: '127.0.0.1', port, timeout: 1000 });
-		socket.once('connect', () => {
-			socket.destroy();
-			resolve(true);
-		});
-		const fail = (): void => {
-			socket.destroy();
-			resolve(false);
-		};
-		socket.once('error', fail);
-		socket.once('timeout', fail);
-	});
-}
-
 /** How long to wait for a service we just launched to accept connections. */
 const SERVICE_START_TIMEOUT_MS = 90_000;
 
@@ -574,6 +537,17 @@ async function ensureServiceUp(
 		}
 		await new Promise((r) => setTimeout(r, 1000));
 	}
+	// "It never came up" is the least useful sentence in the log when the cause
+	// is that something else owns the port and the bind failed in the first
+	// second. Name the holder while we still can.
+	const holders = await portHolders(target.port);
+	note(
+		holders.length
+			? `${target.service} never served on port ${target.port} — it is held by ` +
+					`${describeHolders(holders)}. Stop that process, or move the service to a free port.`
+			: `${target.service} never served on port ${target.port} within ` +
+					`${SERVICE_START_TIMEOUT_MS / 1000}s.`,
+	);
 	return false;
 }
 

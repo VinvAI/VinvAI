@@ -478,6 +478,16 @@ Added after auditing the live `.vinv` state and captures in this workspace.
 
 ### 3.1 `core` is unused by this repo — deliberately, not accidentally
 
+> **Resolved 2026-07-31: `core` has been deleted from the monorepo.** The
+> reachability finding below was re-confirmed (no importer, no workspace
+> dependent, no console script, never spawned by the extension) and the package
+> was removed along with `dspy-ai`, the vendored `litellm` shim, `openai`,
+> `tiktoken`, `pexpect`, and `websocket-client`. Everything in Part 1 that this
+> section is the origin of — the uncapped `pydantic`/`jsonschema`/`httpx`/
+> `pyyaml` divergences and the shim-substitution inversion in §3.2 — is
+> therefore moot. The section is kept as the record of why. Source remains in
+> git history.
+
 Measured: `core` is **18,389 lines across 69 files**, declares **no console script**,
 is depended on by **no workspace member**, is imported by **nothing**, and the
 extension never spawns it. Its git history is the initial public release plus

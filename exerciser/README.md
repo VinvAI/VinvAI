@@ -15,11 +15,29 @@ probes already use.
 ## Pipeline (mirrors identification's CLI shape)
 
 ```
-vinv-exerciser plan    <repo> [--service X] [--base-url URL] [--store-dir DIR] [--seed N]
-vinv-exerciser run     <repo> --base-url http://127.0.0.1:PORT [--budget N] [--rounds K] [--seed N]
-vinv-exerciser profile <repo> [--service X]
-vinv-exerciser regress <repo> --base-url http://127.0.0.1:PORT
+vinv-exerciser plan        <repo> [--service X] [--base-url URL] [--store-dir DIR] [--seed N]
+vinv-exerciser run         <repo> --base-url http://127.0.0.1:PORT [--budget N] [--rounds K] [--seed N]
+vinv-exerciser invocations <repo> [--service X] [--timeout S] [--no-trace]
+vinv-exerciser profile     <repo> [--service X]
+vinv-exerciser regress     <repo> --base-url http://127.0.0.1:PORT
 ```
+
+**Not every repo has endpoints.** A toolchain, a SDK or a framework exposes CLIs
+and importable functions and nothing else, so there is no base URL to send
+anything to. Those are exercised by the other two oracles, and both wrap the
+work in `tracelens run` so a driven CLI or a called function produces spans
+exactly as a served request does:
+
+| unit | inventoried as | driven by | capture |
+|------|----------------|-----------|---------|
+| HTTP endpoint | `python_web` | `run --base-url …` | the service's own bring-up trace |
+| CLI invocation | `python_cli` | `invocations` | `.vinv/captures/vinv-exerciser/<service>/invocations/` |
+| exported function | `python_library` | `functions` | `.vinv/captures/vinv-exerciser/<service>/functions/` |
+
+A CLI's argv comes from the `invocations` its `.vinv/services.json` entry
+records; a library has no entrypoint of its own, so the function driver is what
+runs it. The verdict for an invocation is the **expected** exit code, not
+"non-zero is bad" — a check command that exits 1 on findings is working.
 
 Artifacts land under `<repo>/.vinv/exercise/`:
 
@@ -28,6 +46,7 @@ Artifacts land under `<repo>/.vinv/exercise/`:
 | `plan.json` | `plan` | per-endpoint input plan across three provenance layers |
 | `prompts/*.json` | `plan` | harness prompts for `needs-semantics` endpoints (goal-engine pattern) |
 | `results.jsonl` | `run` | every execution: endpoint, input, strategy, status, latency, shape-hash, error |
+| `invocations.json` / `invocation_results.jsonl` | `invocations` | one row per CLI run: command, exit code vs expected, duration, stdout/stderr tails, spans captured |
 | `bandit.json` | `run` | Thompson posteriors per (endpoint, strategy) |
 | `profile.json` / `profile.md` | `profile` | behavioral profile + human report (testflow Phase-10 shape) |
 | `invariants.json` | `profile` | learned invariants with Laplace confidence |

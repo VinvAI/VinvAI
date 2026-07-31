@@ -40,13 +40,6 @@ dev = [
     # absent they passed while covering nothing. Installing it at the root
     # makes the adopted arm actually run under the `uv sync` CI performs.
     "hypothesis-jsonschema>=0.23.0,<0.24.0",
-    # core's DSPy agent runtime is an OPTIONAL extra (see core/pyproject.toml):
-    # nothing in this repo drives it, and keeping dspy/litellm out of the base
-    # install is what stops `pip install vinv-core` silently resolving BerriAI
-    # litellm in place of the in-tree shim. But three of core's test files DO
-    # exercise the dspy path, so the extra is installed here — a capability the
-    # tests cover must be present under the root `uv sync` CI performs.
-    "vinv-core[agents]",
 ]
 
 # Python version policy (see issue #14). Ceiling is <3.15 for every member.
@@ -59,13 +52,10 @@ dev = [
 # workspace member has to be named as a source rather than resolved from PyPI —
 # where the `tracelens` name belongs to an unrelated third-party project.
 tracelens = { workspace = true }
-# Same reason: the root dev group depends on `vinv-core[agents]`.
-vinv-core = { workspace = true }
 
 [tool.uv.workspace]
 members = [
     "contracts",
-    "core",
     "tracelens",
     "identification",
     "handbook",

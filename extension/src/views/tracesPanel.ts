@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
 	hasCaptures,
+	entryPointLabel,
 	loadEntryPoints,
 	getTraceSummary,
 	type EntryPoint,
@@ -73,7 +74,7 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 		entries
 			.map((e) => ({
 				id: e.id,
-				trigger: e.trigger,
+				trigger: entryPointLabel(e),
 				handler: e.handler ?? '',
 				file: e.file,
 				line: e.line,

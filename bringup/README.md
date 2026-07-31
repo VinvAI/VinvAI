@@ -12,6 +12,29 @@ Two commands, run in order:
 | `bringup list <repo>` | Read the repo's handbook and write an inventory of its services to `.vinv/services.json`. Installs nothing, starts nothing. |
 | `bringup start <repo> --service NAME` | Install that service's dependencies and start it under the tracer, so every call lands in a trace for later analysis. |
 
+## `// 00 · what counts as a service`
+
+Tracelens instruments a **process**, not a server, so the inventory is not
+limited to things that stay up. Six kinds, and the discriminator between the
+first four and the last two is whether the entrypoint **blocks** — never whether
+it declares a console script:
+
+| kind | what it is | readiness probe |
+| --- | --- | --- |
+| `python_web` | serves HTTP | the port accepts a connection |
+| `python_worker` | queue/background consumer | alive past the grace window |
+| `python_stdio` | stdio JSON-RPC (MCP-style) | an `initialize` round-trip |
+| `python_scheduler` | beat/cron process | alive past the grace window |
+| `python_cli` | console script that runs to completion | **exit code + a non-empty trace** |
+| `python_library` | importable package, no entrypoint of its own | as above, driven by the exerciser |
+
+The last two matter more than they look: in a toolchain, a SDK or a framework
+they are the *only* units of work there are, and an inventory that omits them
+traces nothing at all. A `python_cli` entry carries `invocations` (the argv sets
+the repo declares); a `python_library` entry carries **no `command`** — the
+harness supplies the exerciser's function driver rather than let one be
+fabricated.
+
 ## `// 01 · install`
 
 ```bash

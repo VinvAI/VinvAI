@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
 	hasCaptures,
+	entryPointLabel,
 	loadEntryPoints,
 	getTraceSummary,
 	type EntryPoint,
@@ -265,7 +266,7 @@ function iconForKind(kind: string): string {
  */
 export class SessionItem extends vscode.TreeItem {
 	constructor(entry: EntryPoint, traceCount?: number) {
-		super(entry.trigger || entry.id, vscode.TreeItemCollapsibleState.None);
+		super(entryPointLabel(entry), vscode.TreeItemCollapsibleState.None);
 		// Slugged entry-point ids can collide (e.g. two routes normalising to the
 		// same id); qualify with kind/file/line so each tree row stays unique.
 		this.id = `${entry.kind}:${entry.id}:${entry.file}:${entry.line}`;
@@ -277,7 +278,7 @@ export class SessionItem extends vscode.TreeItem {
 		this.description = traceCount === undefined ? handler : String(traceCount);
 		this.contextValue = 'vinv.entrypoint';
 		this.tooltip = [
-			entry.trigger,
+			entryPointLabel(entry),
 			traceCount !== undefined ? `trace hits: ${traceCount}` : undefined,
 			entry.handler ? `handler: ${entry.handler}` : undefined,
 			`${entry.file}:${entry.line}`,
@@ -290,7 +291,7 @@ export class SessionItem extends vscode.TreeItem {
 		this.command = {
 			command: 'vinv-vs.openCallTree',
 			title: 'Open Call Tree',
-			arguments: [{ apiId: entry.id, label: entry.trigger || entry.id }],
+			arguments: [{ apiId: entry.id, label: entryPointLabel(entry) }],
 		};
 	}
 }

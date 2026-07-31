@@ -8,7 +8,7 @@
     "fault oracle skipped 2 target(s): no annotated parameter to derive a contract from"
   ],
   "interpreter": {
-    "python": "<venv>/bin/python",
+    "python": "<python>",
     "origin": "vinv's own interpreter",
     "handed_off": false,
     "python_version": "3.13.14",
@@ -19,20 +19,21 @@
     },
     "third_party": {
       "declared": 1,
-      "present": 1
+      "present": 0
     },
     "missing_sample": [
-      "demo-app"
+      "demo-app",
+      "requests"
     ],
     "considered": [
       {
-        "python": "<venv>/bin/python",
+        "python": "<python>",
         "origin": "vinv's own interpreter",
         "detail": "fallback",
         "ok": true,
         "python_version": "3.13.14",
         "repo_distributions_present": "0/1",
-        "third_party_present": "1/1",
+        "third_party_present": "0/1",
         "error": null
       }
     ]
@@ -51,17 +52,17 @@
   "issues_merged": 1,
   "warm_started_arms": 4,
   "violations": 1,
-  "repeat_violations": 1,
+  "repeat_violations": 0,
   "credited_signatures": 1,
-  "new_ground": 2,
+  "new_ground": 3,
   "stopped": "budget-exhausted",
   "by_technique": {
     "contract-faults": {
-      "plays": 1,
+      "plays": 2,
       "violations": 0,
-      "coverage_sum": 1,
-      "cost_sum": 1.0,
-      "posterior_mean": 0.4286
+      "coverage_sum": 2,
+      "cost_sum": 11.549,
+      "posterior_mean": 0.375
     },
     "deterministic": {
       "plays": 0,
@@ -71,20 +72,20 @@
       "posterior_mean": 0.4839
     },
     "schedule": {
-      "plays": 3,
+      "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 3.0,
-      "posterior_mean": 0.4815
+      "cost_sum": 14.9941,
+      "posterior_mean": 0.4
     }
   },
   "by_oracle": {
     "concurrency": {
-      "plays": 3,
+      "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 3.0,
-      "posterior_mean": 0.4815
+      "cost_sum": 14.9941,
+      "posterior_mean": 0.4
     },
     "crash": {
       "plays": 0,
@@ -94,11 +95,11 @@
       "posterior_mean": 0.4839
     },
     "fault": {
-      "plays": 1,
+      "plays": 2,
       "violations": 0,
-      "coverage_sum": 1,
-      "cost_sum": 1.0,
-      "posterior_mean": 0.4286
+      "coverage_sum": 2,
+      "cost_sum": 11.549,
+      "posterior_mean": 0.375
     }
   },
   "preferred": {
@@ -106,5 +107,5 @@
     "technique": "deterministic",
     "oracle": "crash"
   },
-  "campaign_file": "<repo>/.vinv/exercise/campaign.json"
+  "campaign_file": "<repo>\\.vinv\\exercise\\campaign.json"
 }

@@ -70,6 +70,12 @@ export function evidenceFileForKind(kind: string): string {
 		// most on an unconfigured repo.
 		case 'import-error':
 			return 'function_results.jsonl';
+		// The invocation oracle drives a `python_cli` / `python_library` unit —
+		// a repo with no service to send requests to. Its rows are the only
+		// evidence such a repo produces, and `results.jsonl` there is empty.
+		case 'invocation-failure':
+		case 'invocation-timeout':
+			return 'invocation_results.jsonl';
 		case 'differential-mismatch':
 			return 'differential_results.jsonl';
 		case 'fault-crash':

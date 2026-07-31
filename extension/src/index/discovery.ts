@@ -26,6 +26,7 @@ import {
 	runBringupStartViaHarness,
 } from '../harness/harnessRunner';
 import { ensureHarnessChosen } from '../harness/harnessPicker';
+import { enginesMatchPin } from '../engines/update';
 
 /** Combined outcome of a Discover Project run. */
 export interface DiscoveryResult {
@@ -277,17 +278,82 @@ export function isProjectDiscovered(workspaceRoot: string): boolean {
 let autoDiscovering = false;
 
 /**
+ * The extension version a workspace last auto-discovered under.
+ *
+ * Keyed PER WORKSPACE, not globally: one machine holds several, each carries its
+ * own index and services, and each needs its own pass after an update. A single
+ * global marker would let whichever window activated first consume the update on
+ * behalf of workspaces that never re-ran anything.
+ */
+const DISCOVERED_VERSION_KEY = 'vinv.autoDiscover.versionByWorkspace';
+
+function discoveredVersions(context: vscode.ExtensionContext): Record<string, string> {
+	return context.globalState.get<Record<string, string>>(DISCOVERED_VERSION_KEY) ?? {};
+}
+
+async function rememberDiscoveredVersion(
+	context: vscode.ExtensionContext,
+	root: string,
+	version: string,
+): Promise<void> {
+	await context.globalState.update(DISCOVERED_VERSION_KEY, {
+		...discoveredVersions(context),
+		[root]: version,
+	});
+}
+
+/**
+ * Whether an already-discovered workspace should be discovered AGAIN because the
+ * extension has been updated since its last pass. Pure — the caller supplies the
+ * facts — so the "does this re-index on every window reload" question has an
+ * answer that can be tested rather than argued about.
+ *
+ * `seen === undefined` deliberately does NOT count as an update. It is the state
+ * of every workspace discovered before this marker existed, and of one whose
+ * globalState was cleared; treating "I have no record" as "you just updated"
+ * would force a full re-index on workspaces that are perfectly current. The cost
+ * is that the first update after this ships is not detected for those
+ * workspaces — recording the version and going quiet is the safe direction.
+ */
+export function shouldRediscoverForUpdate(input: {
+	discovered: boolean;
+	seen: string | undefined;
+	version: string;
+}): boolean {
+	if (!input.discovered) {
+		return false; // not discovered at all — the normal first-run path handles it
+	}
+	if (!input.version || !input.seen) {
+		return false;
+	}
+	return input.seen !== input.version;
+}
+
+/**
  * Runs discovery automatically for the open workspace when it makes sense to —
  * triggered on extension startup and on workspace-folder changes. It is a no-op
  * (returns silently) unless every precondition holds:
  *   • the auto-discover toggle is on (Settings tab / vinv.autoDiscover.enabled),
  *   • a folder is open, and
- *   • the project isn't already fully discovered (index + handbook + services).
+ *   • the project isn't already fully discovered (index + handbook + services),
+ *     OR the extension has been updated since this workspace's last pass.
  *
- * The last guard keeps reopening an already-discovered workspace cheap:
- * re-indexing and the expensive handbook/bring-up agents only run the first time
- * (or after a failed/partial run), not on every reload. Users can always
- * re-trigger manually from the Project status row or the Configure panel.
+ * The already-discovered guard keeps reopening a workspace cheap: re-indexing and
+ * the expensive handbook/bring-up agents do not run on every reload. The update
+ * exception exists because an extension update also moves the engines to a new
+ * pin, and the contracts between them are versioned (the index store format, the
+ * MCP payload shapes, the recorded start commands) — so the artifacts on disk
+ * were produced by engines this build no longer ships. Re-running discovery is
+ * also what makes an update behave like an install end to end: Auto-Pilot's
+ * auto-start hangs off discovery COMPLETING (see harness/autoPilot), so a
+ * workspace that never re-discovers never gets the pipeline either.
+ *
+ * The engines must already be on this build's pin before any of that: the pin
+ * update is fire-and-forget in a terminal (git checkout + uv sync + cargo build,
+ * minutes on a cold build), and discovering against half-rebuilt engines would
+ * produce exactly the version skew the pin exists to prevent. When they are not
+ * ready the marker is deliberately NOT written, so the next window retries —
+ * which is also the first moment the engines are usable.
  */
 export async function maybeAutoDiscover(context: vscode.ExtensionContext): Promise<void> {
 	if (autoDiscovering) {
@@ -301,12 +367,30 @@ export async function maybeAutoDiscover(context: vscode.ExtensionContext): Promi
 		return;
 	}
 	const root = folder.uri.fsPath;
-	if (isProjectDiscovered(root)) {
-		return; // already discovered — nothing to do
+	const version = String(context.extension.packageJSON.version ?? '');
+	const discovered = isProjectDiscovered(root);
+
+	if (discovered) {
+		if (!shouldRediscoverForUpdate({ discovered, seen: discoveredVersions(context)[root], version })) {
+			// Current (or first sighting): record what this workspace is on so the
+			// NEXT update is detectable, and leave the artifacts alone.
+			await rememberDiscoveredVersion(context, root, version);
+			return;
+		}
+		if (!(await enginesMatchPin(context))) {
+			return; // engines still moving to the pin — retry on the next window
+		}
+		console.log(
+			`Vinv: extension updated to ${version} since this workspace's last pass — re-discovering`,
+		);
 	}
+
 	autoDiscovering = true;
 	try {
 		await runDiscovery(context, root);
+		// Only a completed pass counts. A failed or cancelled run must be
+		// retried by the next activation, not marked as done for this version.
+		await rememberDiscoveredVersion(context, root, version);
 	} finally {
 		autoDiscovering = false;
 	}

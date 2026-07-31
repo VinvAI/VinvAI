@@ -64,6 +64,32 @@ suite('exerciseIngest: validation refuses to invent an oracle', () => {
 		assert.ok(!r.ok && /METHOD \/path/.test(r.error));
 	});
 
+	test('a CLI invocation and a driven call are valid units', () => {
+		// A repo with no service still exercises units. Refusing these left an
+		// agent that had genuinely driven a CLI with nowhere to report it, and
+		// the views then read as "never tested" rather than "not recordable".
+		const r = validateRun({
+			checks: [
+				{ endpoint: 'RUN acme-tool report --since 7d', name: 'weekly report', passed: true },
+				{ endpoint: 'CALL acme.mod.summarize', name: 'summarize', passed: true },
+			],
+		});
+		assert.strictEqual(r.ok, true);
+	});
+
+	test('the rejection message names all three unit forms', () => {
+		const r = validateRun({ checks: [{ endpoint: 'whatever', name: 'x', passed: true }] });
+		assert.strictEqual(r.ok, false);
+		assert.ok(!r.ok && /RUN <command>/.test(r.error));
+		assert.ok(!r.ok && /CALL module\.function/.test(r.error));
+	});
+
+	test('a unit label without a verb is still rejected', () => {
+		// Widening the grammar must not turn it off: a bare string is not a unit.
+		assert.strictEqual(validateRun({ checks: [{ endpoint: 'acme-tool report', name: 'x', passed: true }] }).ok, false);
+		assert.strictEqual(validateRun({ checks: [{ endpoint: 'RUN', name: 'x', passed: true }] }).ok, false);
+	});
+
 	test('an empty run is rejected', () => {
 		assert.strictEqual(validateRun({ checks: [] }).ok, false);
 		assert.strictEqual(validateRun(null).ok, false);

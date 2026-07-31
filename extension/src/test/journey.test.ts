@@ -110,6 +110,103 @@ suite('journey: data assembly', () => {
 		assert.deepStrictEqual(j.steps, []);
 		assert.strictEqual(j.services.length, 0);
 	});
+
+	test('endpoint steps are tagged http_endpoint', () => {
+		const root = tmpRepo();
+		seedRepo(root);
+		const j = buildJourney(root);
+		assert.ok(j.steps.every((s) => s.unitKind === 'http_endpoint'));
+	});
+
+	test('walks CLI invocations and driven calls, not just endpoints', () => {
+		// A toolchain or library repo has no endpoints at all. The walkthrough
+		// used to be built solely from plan.endpoints, so such a repo showed an
+		// empty journey however much of it had been driven and traced.
+		const root = tmpRepo();
+		write(root, '.vinv/services.json', {
+			services: [{ name: 'acme-tool', kind: 'python_cli', port: null, command: 'acme-tool' }],
+		});
+		write(root, '.vinv/exercise/profile.json', {
+			endpoints: [
+				{
+					api_id: 'acme-tool#0', unit_kind: 'cli_invocation',
+					method: 'RUN', path: 'acme-tool report --since 7d', handler: null,
+					latency: { p50_ms: 120.5, p95_ms: 180.0 },
+					coverage: { covered: 6, total: 9, pct: 66.7, handler_observed: false },
+					status_distribution: { '0': 1 }, invariants: [],
+				},
+				{
+					api_id: 'acme.mod:summarize', unit_kind: 'function_call',
+					method: 'CALL', path: 'acme.mod:summarize', handler: null,
+					latency: { p50_ms: 0.4, p95_ms: 0.9 },
+					coverage: { covered: 2, total: 2, pct: 100 },
+					status_distribution: {}, invariants: [{ kind: 'type' }],
+				},
+			],
+		});
+		write(
+			root,
+			'.vinv/exercise/invocation_results.jsonl',
+			JSON.stringify({
+				unit_id: 'acme-tool#0', unit_kind: 'cli_invocation',
+				command: 'acme-tool report --since 7d', exit_code: 0, latency_ms: 120.5,
+				stdout_tail: 'rows=42', input_class: 'declared',
+			}),
+		);
+		write(
+			root,
+			'.vinv/exercise/function_results.jsonl',
+			JSON.stringify({
+				target_id: 'acme.mod:summarize', unit_kind: 'function_call',
+				kwargs: { n: 3 }, result: 'rows=6', input_class: 'schema', latency_ms: 0.4,
+			}),
+		);
+
+		const j = buildJourney(root);
+
+		// Looked up by id, not position: the walk order is a locale-collated
+		// sort on the label, which is not what this test is about.
+		const byId = new Map(j.steps.map((s) => [s.apiId, s]));
+		assert.deepStrictEqual(
+			[...byId.keys()].sort(),
+			['acme-tool#0', 'acme.mod:summarize'],
+		);
+		const cli = byId.get('acme-tool#0')!;
+		assert.strictEqual(cli.unitKind, 'cli_invocation');
+		assert.strictEqual(cli.method, 'RUN');
+		assert.strictEqual(cli.p95Ms, 180.0);
+		assert.strictEqual(cli.coverage.covered, 6);
+		// The exit code occupies the status column; the command and its stdout
+		// are the input/output pair.
+		assert.strictEqual(cli.io[0].status, 0);
+		assert.ok(cli.io[0].input.includes('--since 7d'));
+		assert.ok(cli.io[0].output.includes('rows=42'));
+		// Neither kind replays a user-authored plan, so the input box stays off.
+		assert.strictEqual(cli.acceptsUserInputs, false);
+
+		const call = byId.get('acme.mod:summarize')!;
+		assert.strictEqual(call.unitKind, 'function_call');
+		assert.strictEqual(call.invariants, 1);
+		assert.strictEqual(call.io[0].status, null, 'a call has no exit code');
+		assert.ok(call.io[0].output.includes('rows=6'));
+	});
+
+	test('an http_endpoint entry in the profile is not walked twice', () => {
+		// The profile carries every unit including endpoints; those already came
+		// from the plan, with their call trees and input plans attached.
+		const root = tmpRepo();
+		seedRepo(root);
+		write(root, '.vinv/exercise/profile.json', {
+			endpoints: [
+				{
+					api_id: 'GET_health', unit_kind: 'http_endpoint',
+					method: 'GET', path: '/health', coverage: {}, invariants: [],
+				},
+			],
+		});
+		const j = buildJourney(root);
+		assert.strictEqual(j.steps.filter((s) => s.apiId === 'GET_health').length, 1);
+	});
 });
 
 suite('journey: user-authored input plans', () => {

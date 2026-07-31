@@ -12,7 +12,7 @@ evidence naming the exact symbol and line. Hold yourself to that standard here.
 A single monorepo:
 
 - **Python engines** — a [uv](https://docs.astral.sh/uv/) workspace. Members:
-  `contracts`, `core`, `tracelens`, `identification`, `handbook`, `bringup`,
+  `contracts`, `tracelens`, `identification`, `handbook`, `bringup`,
   `goal`, `embedder`, `exerciser`.
 - **Rust semantic index** — `index/`.
 - **TypeScript editor extension** — `extension/`.

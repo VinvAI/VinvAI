@@ -27,6 +27,7 @@ from .differential import run_differential
 from .environment import run_environment
 from .faults import run_faults
 from .functions import run_functions
+from .invocations import DEFAULT_INVOCATION_TIMEOUT_S, run_invocations
 from .plan import build_plan
 from .profile import build_profile
 from .regress import replay_suite
@@ -86,14 +87,19 @@ verify every endpoint of a service.
        automatically. Writes functions.json, function_results.jsonl. Needs no
        running service. --no-sandbox leaves the unverified set refused;
        `exerciser containment` reports which tier this host can provide.
-  4. exerciser campaign <repo> [--base-url URL] [--budget N]
+  4. exerciser invocations <repo> [--service X]
+       Run each invocation `.vinv/services.json` records for a `python_cli` or
+       `python_library` service, wrapped in tracelens. This is what exercises a
+       repo whose Python is CLIs rather than servers — there is no base URL to
+       send anything to. Writes invocations.json, invocation_results.jsonl.
+  5. exerciser campaign <repo> [--base-url URL] [--budget N]
        Allocate ONE budget across every armed oracle by Thompson sampling over
        (target x technique x oracle) — instead of driving each oracle
        exhaustively. Writes campaign.json; reports which technique paid.
-  5. exerciser profile <repo>
+  6. exerciser profile <repo>
        Build the behavioral profile + learned invariants.
        Writes profile.json, profile.md, invariants.json.
-  6. exerciser regress <repo> --base-url http://127.0.0.1:PORT
+  7. exerciser regress <repo> --base-url http://127.0.0.1:PORT
        Replay the accumulated behavior suite and report diffs.
 
 Requires identification's apis.json (run `identification consolidate` first) and,
@@ -248,6 +254,18 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
         "has something to read. 0 leaves induced tables empty."
     ),
 )
+@click.option(
+    "--trace/--no-trace",
+    default=True,
+    show_default=True,
+    help=(
+        "Wrap each module's worker in `tracelens run` so the calls this driver "
+        "makes produce spans — the only way a library with no service of its own "
+        "gets a trace. Captures land under "
+        ".vinv/captures/vinv-exerciser/<service>/functions/. --no-trace still "
+        "drives every target; it just records nothing."
+    ),
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def functions_cmd(
     repo_path,
@@ -262,6 +280,7 @@ def functions_cmd(
     sandbox_keep_root,
     services,
     seed_rows,
+    trace,
     verbose,
 ):
     _configure_logging(verbose)
@@ -287,7 +306,48 @@ def functions_cmd(
             python=python,
             sandbox=sandbox,
             sandbox_policy=policy,
+            trace=trace,
             logger=logging.getLogger("exerciser.functions"),
+        )
+    except Exception as exc:
+        _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
+        return
+    _emit(result)
+
+
+@main.command("invocations")
+@click.argument("repo_path", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--service",
+    default=None,
+    help="Drive only this service (default: every python_cli / python_library entry).",
+)
+@click.option(
+    "--timeout",
+    default=DEFAULT_INVOCATION_TIMEOUT_S,
+    show_default=True,
+    help="Wall-clock seconds per invocation; one that outruns it is reported as a timeout.",
+)
+@click.option(
+    "--trace/--no-trace",
+    default=True,
+    show_default=True,
+    help=(
+        "Wrap each invocation in `tracelens run` against the service's own "
+        "`modules`, so a CLI run produces spans exactly as a served request does. "
+        "Captures land under .vinv/captures/vinv-exerciser/<service>/invocations/."
+    ),
+)
+@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
+def invocations_cmd(repo_path, service, timeout, trace, verbose):
+    _configure_logging(verbose)
+    try:
+        result = run_invocations(
+            Path(repo_path),
+            service=service,
+            timeout_s=timeout,
+            trace=trace,
+            logger=logging.getLogger("exerciser.invocations"),
         )
     except Exception as exc:
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
