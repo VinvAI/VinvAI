@@ -5,9 +5,53 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.2] — 2026-07-31
 
 ### ✨ Added
+
+- **Repos with no server are traced now.** Pointed at a toolchain, an SDK or a
+  library, the pipeline produced an empty inventory and stopped before a single
+  line was traced — it only knew how to describe a unit of work that starts and
+  stays up. CLIs and libraries are first-class units: a CLI carries the argv
+  sets the repo itself declares, a library is driven function by function rather
+  than through a command someone made up, and readiness is judged on the
+  expected exit code plus a non-empty trace instead of on a port that is never
+  going to open.
+
+- **Every kind of unit gets a call tree and a report.** The insight pass built
+  only for HTTP routes, so CLI commands, workers, scheduled jobs, stdio servers
+  and `__main__` scripts could run any number of times and still have no call
+  tree to open, no report, and no row in the Flow rail or Findings. The overlay
+  is now built for every unit the captures saw — including a function the
+  exerciser drove directly, which is declared nowhere in the code.
+
+- **The Traces panel says how each unit ran, not just that it ran.** Every row
+  carries kind, handler, hits, coverage, p50/p95 latency, the ok/raised split
+  with the exception types behind it, runtime errors, and a button that opens
+  its call tree. The numbers come from the captures themselves rather than from
+  an exerciser's report, so a unit nothing drove still has them, and a CLI run,
+  a worker task and an HTTP request are all measured the same way. The Findings
+  latency profile reads the same source, and both refresh as new traffic
+  arrives instead of freezing at the last exercise run.
+
+- **CLIs actually get driven when there is no service.** The service-free pass
+  ran the contract campaign alone and called it "exercising functions and
+  contracts" — accurate, and precisely the gap, because a repo with no served
+  port is usually a repo whose units are console scripts. Their invocations now
+  run first and unconditionally, with argv taken from what the repo declares. A
+  repo with no CLI or library unit skips the step at no cost.
+
+- **Live work is visible in the status bar.** A run in progress shows a filled
+  pill and a spinning icon — red was already the item's resting colour, so it
+  could never signal anything — with failing taking precedence over running, so
+  a run that is producing failures keeps saying so. It also refreshes when a
+  service exits, instead of spinning for up to fifteen seconds after the thing
+  it is reporting on has stopped.
+
+- **The Findings empty state offers the buttons it was describing.**
+  Auto-Pilot and Run Exercise are one click away, and a headline of all zeros
+  now distinguishes "we drove your services and found nothing wrong" from
+  "nothing has run yet" — opposite readings that used to render identically.
 
 - **"Run this Path" keeps its trace.** Every try-run of a dead-code section is
   now recorded and shown in that section's report: what the fresh capture
@@ -50,6 +94,20 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and
   carry the same two remedies (kill a stale copy of this service, or move the
   service to a free port and record it consistently). Set
   `VINV_RECLAIM_PORTS=0` to keep the diagnosis and skip the killing.
+
+- **The Traces panel could stay empty on a repo full of entry points.** "No
+  traced endpoints match" against an inventory holding 115 of them, 45 of them
+  CLI commands: the list was loaded once when the panel opened and the refresh
+  only ever updated counts, so a panel opened before discovery finished stayed
+  blank until it was reopened — and the refresh bailed out entirely when no
+  captures existed, which is exactly the state that needed the retry.
+
+- **A slow import is no longer reported as a hung call.** Running a function
+  worker under the tracer charged the tracer's own startup — importing
+  OpenTelemetry, installing the import hook, opening the capture — to the
+  module's time allowance, so a package that is merely slow to import came back
+  as `ModuleTimeout`: a candidate deadlock, and a defect that was never there.
+  Tracer startup is charged to the harness that asked for it.
 
 ## [0.2.1] — 2026-07-31
 
