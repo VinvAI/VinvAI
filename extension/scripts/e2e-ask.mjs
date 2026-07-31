@@ -20,9 +20,20 @@ const question = process.argv[3] ?? 'How does the bringup verify a recorded star
 
 const out = mkdtempSync(join(tmpdir(), 'vinv-e2e-ask-'));
 const stub = join(out, 'vscode-stub.mjs');
+// The stub has to satisfy every vscode surface the pipeline actually touches on
+// this path, not just the ones it names. `workspace.getConfiguration` is the one
+// that matters: engine resolution calls it before the index binary is located,
+// so a stub without it threw "getConfiguration is not a function" inside
+// runIndexQuery — which gatherEvidence catches — and the run always ended
+// "no evidence at all: retrieval or store is broken". This harness could not
+// pass on a healthy machine, and its failure text blamed the store.
 writeFileSync(
 	stub,
-	'export default {}; export const window = {}; export const commands = {}; export const workspace = { workspaceFolders: [] };',
+	`const cfg = { get: (_key, fallback) => fallback, has: () => false, inspect: () => undefined, update: async () => {} };
+export const workspace = { workspaceFolders: [], getConfiguration: () => cfg };
+export const window = { showErrorMessage: () => Promise.resolve(undefined), showWarningMessage: () => Promise.resolve(undefined) };
+export const commands = { executeCommand: () => Promise.resolve(undefined) };
+export default { workspace, window, commands };`,
 );
 
 await build({

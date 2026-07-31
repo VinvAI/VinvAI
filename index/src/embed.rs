@@ -91,7 +91,6 @@ fn embed_batch(cfg: &GatewayConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, 
     let url = cfg.endpoint("embeddings");
     let body = serde_json::json!({ "model": cfg.embedding_model, "input": inputs });
 
-    let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
     let attempts = config::embed_max_retries().saturating_add(1);
     let mut delay = Duration::from_millis(500);
     let mut last_error = String::new();
@@ -101,6 +100,16 @@ fn embed_batch(cfg: &GatewayConfig, inputs: &[String]) -> Result<Vec<Vec<f32>>, 
             std::thread::sleep(delay);
             delay = delay.saturating_mul(2).min(Duration::from_secs(8));
         }
+        // A FRESH agent per attempt, so a retry cannot inherit the previous
+        // attempt's pooled connection. A server that answers an error without
+        // consuming the request body leaves that connection desynchronized, and
+        // the retry then reads the leftover body as a request line and comes
+        // back `400 Bad request syntax` — a hard, non-retryable status by the
+        // match below. Observed against the local embedder while it loaded its
+        // model: the 503 the retry loop exists for became a fatal 400 on the
+        // second attempt, so every query failed for the whole warm-up window.
+        // One extra TCP handshake per retry is a rounding error next to that.
+        let agent = ureq::AgentBuilder::new().timeout(TIMEOUT).build();
         let mut req = agent.post(&url).set("Content-Type", "application/json");
         if !cfg.api_key.is_empty() {
             req = req.set("Authorization", &format!("Bearer {}", cfg.api_key));

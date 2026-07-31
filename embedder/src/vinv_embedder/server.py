@@ -91,24 +91,63 @@ class _Handler(BaseHTTPRequestHandler):
 
     # -- helpers -------------------------------------------------------------
 
-    def _send_json(self, code: int, payload: dict, headers: dict | None = None) -> None:
+    def _send_json(
+        self, code: int, payload: dict, headers: dict | None = None, close: bool = False
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if close:
+            # Framing is unrecoverable (an unread body we will not drain): tell
+            # the client so, and make the stdlib handler actually hang up.
+            self.send_header("Connection", "close")
+            self.close_connection = True
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
     def _send_error_json(
-        self, code: int, message: str, err_type: str, headers: dict | None = None
+        self,
+        code: int,
+        message: str,
+        err_type: str,
+        headers: dict | None = None,
+        close: bool = False,
     ) -> None:
         self._send_json(
             code,
             {"error": {"message": message, "type": err_type, "code": code}},
             headers=headers,
+            close=close,
         )
+
+    def _drain_body(self) -> None:
+        """Consume the request body so a kept-alive connection stays framed.
+
+        An early error return that never reads ``rfile`` leaves the body sitting
+        in the socket. With ``protocol_version = "HTTP/1.1"`` the connection is
+        reused, so the next request on it starts parsing mid-JSON and the server
+        answers ``400 Bad request syntax ('{"input":[...')``.
+
+        That turns a *retryable* shed into a *fatal* one. The index engine
+        retries 429/5xx and treats every other status as a hard error, so a
+        client correctly riding out the multi-minute model load would get one
+        503, reuse the pooled connection, receive the bogus 400, and give up —
+        making retrieval fail for the whole warm-up window instead of waiting
+        the ``Retry-After`` out.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        remaining = min(length, self.server.max_body)
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 64 * 1024))
+            if not chunk:
+                return  # peer stopped writing; the connection is done either way
+            remaining -= len(chunk)
 
     def _client_disconnected(self) -> bool:
         """Best-effort peek: has the peer already hung up?
@@ -173,6 +212,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             if self.path not in EMBED_PATHS:
+                self._drain_body()
                 self._send_error_json(404, f"no such route: {self.path}", "not_found")
                 return
             self._handle_embeddings()
@@ -186,6 +226,9 @@ class _Handler(BaseHTTPRequestHandler):
         # shed with the same Retry-After clients already honour for overload
         # rather than blocking a request behind a multi-minute load.
         if not getattr(self.server.engine, "ready", True):
+            # Drain FIRST: this is the shed a client is meant to retry, and an
+            # unread body would poison the very connection it retries on.
+            self._drain_body()
             self._send_error_json(
                 503,
                 "model is still loading; retry shortly",
@@ -196,14 +239,22 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
-            self._send_error_json(400, "invalid Content-Length", "invalid_request_error")
+            # No trustworthy length ⇒ no way to know where this body ends.
+            self._send_error_json(
+                400, "invalid Content-Length", "invalid_request_error", close=True
+            )
             return
         if length <= 0:
             self._send_error_json(400, "empty request body", "invalid_request_error")
             return
         if length > self.server.max_body:
+            # Deliberately NOT drained — reading an oversized body to keep the
+            # connection alive is exactly the cost the cap exists to refuse.
             self._send_error_json(
-                413, f"request body exceeds {self.server.max_body} bytes", "payload_too_large"
+                413,
+                f"request body exceeds {self.server.max_body} bytes",
+                "payload_too_large",
+                close=True,
             )
             return
 

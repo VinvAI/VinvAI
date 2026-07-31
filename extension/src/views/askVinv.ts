@@ -938,6 +938,19 @@ async function answerQuestion(
 				priorInsufficiency: prior,
 				snapshot,
 			});
+			// Retrieval is the ONLY anchor source for a question typed into the
+			// panel — a seeded question still has the node the user clicked, but a
+			// typed one has nothing else. When the index query FAILED (not
+			// "matched nothing") and the walk came back empty, every attempt from
+			// here hands the model a context section with no code in it, and the
+			// answer that comes back reads like any other. Say what actually broke
+			// instead, and do not spend the retrial budget re-running the same
+			// failing query.
+			if (evidence.retrievalError && evidence.hits.length === 0 && evidence.slice.length === 0) {
+				throw new Error(
+					`Code search is unavailable, so there is no evidence to answer from — ${evidence.retrievalError}`,
+				);
+			}
 			const prompt = buildQnaPrompt(
 				question,
 				evidence,

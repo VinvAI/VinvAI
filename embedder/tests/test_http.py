@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -247,10 +248,14 @@ def _bare_handler(conn, engine=None, body: bytes | None = None, full=False):
         h.server = FakeQueueServer(engine, full=full)
     h.sent: list[tuple[int, dict]] = []
     h.sent_headers: list = []
+    # Whether each reply asked to hang up — the shed paths must NOT, so the
+    # client's retry can reuse the connection it already has.
+    h.sent_close: list[bool] = []
 
-    def _record(code, payload, headers=None):
+    def _record(code, payload, headers=None, close=False):
         h.sent.append((code, payload))
         h.sent_headers.append(headers)
+        h.sent_close.append(close)
 
     h._send_json = _record
     return h
@@ -457,3 +462,93 @@ class TestEstimateTokens:
         texts = [CountingStr("x" * 8) for _ in range(500)]
         server_mod._estimate_tokens(texts)
         assert len_calls[0] == server_mod._TOKEN_SAMPLE_ITEMS  # only the sample scanned
+
+
+# ---------------------------------------------------------------------------
+# Keep-alive framing on the shed paths. The server speaks HTTP/1.1, so an early
+# error return that never reads the request body leaves it in the socket and the
+# NEXT request on that connection gets parsed starting mid-JSON. The index
+# engine retries 429/5xx and treats every other status as fatal, so the 503 it
+# is supposed to ride out came back as a hard 400 on the retry — retrieval then
+# failed for the entire (multi-minute, on CPU) model load rather than waiting.
+# ---------------------------------------------------------------------------
+
+
+class LoadingEngine(StubEngine):
+    """An engine that has not finished loading — the warm-up window."""
+
+    ready = False
+
+
+def _read_response(sock) -> tuple[int, bytes]:
+    """Reads exactly one HTTP response (status line + headers + framed body)."""
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    status = int(head.split(b"\r\n", 1)[0].split()[1])
+    length = 0
+    for line in head.split(b"\r\n")[1:]:
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value.strip())
+    while len(rest) < length:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        rest += chunk
+    return status, rest[:length]
+
+
+@pytest.fixture
+def loading_srv():
+    server = EmbedderServer(("127.0.0.1", 0), LoadingEngine())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield server.server_address
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=5)
+
+
+class TestKeepAliveFramingWhileLoading:
+    def test_retry_on_a_reused_connection_still_gets_503(self, loading_srv):
+        host, port = loading_srv
+        body = json.dumps({"model": "m", "input": ["some query text"]}).encode()
+        request = (
+            b"POST /v1/embeddings HTTP/1.1\r\n"
+            b"Host: %s\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: %d\r\n"
+            b"\r\n%s" % (host.encode(), len(body), body)
+        )
+        with socket.create_connection((host, port), timeout=10) as sock:
+            sock.sendall(request)
+            first, _ = _read_response(sock)
+            sock.sendall(request)  # the retry, on the SAME pooled connection
+            second, payload = _read_response(sock)
+
+        assert first == 503
+        # The regression: an undrained body made this a 400 "Bad request
+        # syntax", which the index engine classifies as fatal and never retries.
+        assert second == 503, f"retry on a reused connection got {second}: {payload!r}"
+        assert json.loads(payload)["error"]["code"] == 503
+
+    def test_health_stays_usable_on_the_same_connection(self, loading_srv):
+        host, port = loading_srv
+        body = json.dumps({"model": "m", "input": ["q"]}).encode()
+        with socket.create_connection((host, port), timeout=10) as sock:
+            sock.sendall(
+                b"POST /v1/embeddings HTTP/1.1\r\nHost: %s\r\n"
+                b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s"
+                % (host.encode(), len(body), body)
+            )
+            assert _read_response(sock)[0] == 503
+            sock.sendall(b"GET /health HTTP/1.1\r\nHost: %s\r\n\r\n" % host.encode())
+            status, payload = _read_response(sock)
+
+        assert status == 503
+        assert json.loads(payload)["status"] == "loading"

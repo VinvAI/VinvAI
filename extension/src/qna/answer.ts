@@ -76,8 +76,20 @@ export async function runIndexQuery(
 	}
 	const binPath = getBinPath(context, 'index');
 	const storeDir = indexStoreDir(workspaceRoot);
-	// Queries embed through the local sidecar; make sure it is serving.
-	await ensureEmbedder(context);
+	// Queries embed through the local sidecar; make sure it is serving. A false
+	// here is NOT on its own fatal — the store may be configured against a remote
+	// gateway (INDEX_GATEWAY_URL), which needs no sidecar at all — but it is by
+	// far the most common reason the query below fails, so it is worth naming in
+	// the error when it does. Ignoring the result entirely (the old behaviour)
+	// meant a sidecar that never came up produced only the binary's generic
+	// complaint, several layers away from the thing the user has to start.
+	const embedderReady = await ensureEmbedder(context);
+	const fail = (message: string): Error =>
+		new Error(
+			embedderReady
+				? message
+				: `${message} (the local embedding sidecar never came up — Vinv could not start it)`,
+		);
 	return new Promise((resolve, reject) => {
 		execFile(
 			binPath,
@@ -85,18 +97,18 @@ export async function runIndexQuery(
 			{ maxBuffer: 32 * 1024 * 1024, env: getIndexEnv(path.dirname(binPath)) },
 			(error, stdout, stderr) => {
 				if (!stdout) {
-					reject(new Error(error?.message ?? stderr ?? 'index query produced no output'));
+					reject(fail(error?.message ?? stderr ?? 'index query produced no output'));
 					return;
 				}
 				try {
 					const parsed = JSON.parse(stdout) as IndexQueryResult;
 					if (parsed.status === 'error') {
-						reject(new Error(parsed.error ?? 'index query failed'));
+						reject(fail(parsed.error ?? 'index query failed'));
 						return;
 					}
 					resolve(parsed.results ?? []);
 				} catch {
-					reject(new Error('index query returned unreadable output'));
+					reject(fail('index query returned unreadable output'));
 				}
 			},
 		);
@@ -158,6 +170,14 @@ export interface QnaEvidence {
 	walkMass: Map<number, number>;
 	/** The anchor rows the walk restarted at (seeds + resolved hits). */
 	anchorRows: number[];
+	/**
+	 * Why retrieval returned nothing, when the index query itself FAILED (as
+	 * opposed to legitimately matching nothing). Retrieval is degraded, not
+	 * fatal, for a seeded question — the clicked node still anchors the walk —
+	 * so this is reported rather than thrown, and the caller decides. Absent on
+	 * every successful query.
+	 */
+	retrievalError?: string;
 }
 
 /**
@@ -730,6 +750,7 @@ export async function gatherEvidence(
 	const snapshot = options?.snapshot ?? buildGraphSnapshot(workspaceRoot);
 	const seeds = (options?.seedRows ?? []).filter((r) => r >= 0 && r < snapshot.nodes.length);
 	let hits: IndexHit[] = [];
+	let retrievalError: string | undefined;
 	try {
 		hits = await runIndexQuery(
 			context,
@@ -737,10 +758,18 @@ export async function gatherEvidence(
 			seededSearchQuery(snapshot, question, seeds),
 			topK,
 		);
-	} catch {
-		// No embeddings/key or empty store: continue with graph-only evidence.
+	} catch (e) {
+		// No embeddings/key or empty store: continue with graph-only evidence —
+		// which is real evidence for a SEEDED question (the node the user clicked
+		// anchors the walk) and is nothing at all without one. Kept on the result
+		// instead of being dropped: callers that have no other anchor must be able
+		// to tell "found nothing" from "could not look".
+		retrievalError = e instanceof Error ? e.message : String(e);
 	}
 	const evidence = assembleEvidence(workspaceRoot, snapshot, question, hits, options);
+	if (retrievalError) {
+		evidence.retrievalError = retrievalError;
+	}
 	appendRetrievalEvent({
 		type: 'decision',
 		ts: new Date().toISOString(),
