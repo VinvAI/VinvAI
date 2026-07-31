@@ -17,6 +17,7 @@ import * as assert from 'assert';
 import { getJourneyHtml } from '../views/journeyView';
 import { getOptimizationReportHtml } from '../views/optimizationReportView';
 import { getFindingsHtml } from '../views/findingsView';
+import { getDeadSectionHtml } from '../views/deadCodeReportView';
 
 type Listener = (ev: unknown) => void;
 
@@ -361,5 +362,91 @@ suite('findings view: episode attempts render legibly', () => {
 		assert.ok(html.includes('Data the tests created'), 'ledger section title is plain');
 		assert.ok(html.includes('>still there</span>'), 'uncleaned row is a sentence a non-expert reads');
 		assert.ok(html.includes('fingerprint') || findings.issues.length === 0, 'issue id labeled fingerprint');
+	});
+});
+
+suite('dead code section view: the try-run evidence is on the page', () => {
+	const section = {
+		id: 'sec-a',
+		title: 'app/legacy.py — helper_a',
+		reason: 'reachable-untested',
+		layer: 'service',
+		lines: 40,
+		files: ['app/legacy.py'],
+		liveCallers: ['handler (app/api.py:3)'],
+		tourOrder: [],
+		symbols: { items: [], lineage: [] },
+	};
+
+	function rendered(runs: unknown[]): string {
+		const { els, winListeners } = evalWebviewScript(getDeadSectionHtml(), ['render']);
+		winListeners.message({
+			data: {
+				type: 'section',
+				report: { section, stops: [], storeEpoch: 7, verdict: null, runs },
+				stale: false,
+			},
+		});
+		return els.content.innerHTML;
+	}
+
+	test('a section that was driven shows what the capture recorded, and how to open it', () => {
+		const html = rendered([
+			{
+				sectionId: 'sec-a',
+				title: section.title,
+				at: '2026-07-31T10:00:00.000Z',
+				outcome: 'revived',
+				detail: 'the driver executed 1 of 2 section symbol(s) under trace',
+				revived: ['helper_a'],
+				rows: [1, 2],
+				driverFile: '/w/.vinv/tmp/deadcode-driver-sec-a.py',
+				traceFile: '/w/.vinv/captures/deadcode-sec-a-1/trace.jsonl',
+				exitCode: 0,
+				timedOut: false,
+				notes: 'calls helper_a with a fake request',
+				outputTail: '',
+				trace: {
+					functions: 2,
+					calls: 3,
+					totalMs: 8,
+					errors: 1,
+					errorTypes: ['ValueError'],
+					top: [
+						{ component: 'app.legacy.helper_a', calls: 2, ms: 4, errors: 0 },
+						{ component: 'app.legacy2.helper_b', calls: 1, ms: 4, errors: 1 },
+					],
+				},
+			},
+		]);
+		assert.ok(html.includes('Try-runs'), 'the run has its own section, not a toast');
+		assert.ok(html.includes('symbols executed'), 'the outcome is a plain phrase');
+		assert.ok(html.includes('app.legacy.helper_a'), 'the traced functions are listed');
+		assert.ok(html.includes('functions traced'), 'the capture summary is on screen');
+		assert.ok(html.includes('ValueError'), 'what the run raised is named');
+		assert.ok(html.includes('data-open="/w/.vinv/captures/deadcode-sec-a-1/trace.jsonl"'),
+			'the trace itself is one click away');
+		assert.ok(html.includes('data-open="/w/.vinv/tmp/deadcode-driver-sec-a.py"'),
+			'so is the driver that produced it');
+		assert.ok(html.includes('calls helper_a with a fake request'), "the driver's own note is kept");
+	});
+
+	test('a run that produced no spans says so instead of showing zeros', () => {
+		const html = rendered([
+			{
+				sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
+				outcome: 'not-reached', detail: 'nothing executed', revived: [], rows: [1],
+				driverFile: null, traceFile: '/w/trace.jsonl', exitCode: 0, timedOut: false,
+				notes: '', outputTail: '', trace: null,
+			},
+		]);
+		assert.ok(html.includes('recorded no function exits'));
+		assert.ok(!html.includes('functions traced'), 'no fabricated measurement');
+	});
+
+	test('a section nobody has driven invites the run instead of showing an empty card', () => {
+		const html = rendered([]);
+		assert.ok(html.includes('No one has tried to run this section yet'));
+		assert.ok(html.includes('Run this Path'), 'the invitation names the button that does it');
 	});
 });

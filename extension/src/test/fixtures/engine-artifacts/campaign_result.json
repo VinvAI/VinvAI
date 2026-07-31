@@ -61,7 +61,7 @@
       "plays": 2,
       "violations": 0,
       "coverage_sum": 2,
-      "cost_sum": 11.549,
+      "cost_sum": 18.0124,
       "posterior_mean": 0.375
     },
     "deterministic": {
@@ -75,7 +75,7 @@
       "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 14.9941,
+      "cost_sum": 35.832,
       "posterior_mean": 0.4
     }
   },
@@ -84,7 +84,7 @@
       "plays": 2,
       "violations": 1,
       "coverage_sum": 1,
-      "cost_sum": 14.9941,
+      "cost_sum": 35.832,
       "posterior_mean": 0.4
     },
     "crash": {
@@ -98,7 +98,7 @@
       "plays": 2,
       "violations": 0,
       "coverage_sum": 2,
-      "cost_sum": 11.549,
+      "cost_sum": 18.0124,
       "posterior_mean": 0.375
     }
   },

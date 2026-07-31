@@ -3227,6 +3227,14 @@ def cluster_function_failures(
     )
 
 
+#: Extra outer-backstop slack when the worker runs under tracelens.
+#:
+#: The tracer's own startup — importing OpenTelemetry, installing the AST import
+#: hook, opening the capture — happens before the target module is touched, and
+#: it is HARNESS cost, not the module's. Charging it to the module's allowance
+#: is what turns "this package is slow to import" into a reported hung call.
+_TRACER_STARTUP_SLACK_S = 10.0
+
 #: Share of the modules that ATTEMPTED an import which must fail with one
 #: identical exception before it is read as a shared precondition rather than as
 #: a defect per module. Paired with an absolute floor, because "both of my two
@@ -3572,6 +3580,15 @@ def run_functions(
     supplied_config.update(envconfig.answered_config(repo))
     supplied_config.update(envconfig.blocked_module_answers(repo))
 
+    # The outer backstop is sized as "the budgets, plus slack for HARNESS
+    # startup". With tracing on the harness is a whole extra layer in front of
+    # the module: the launcher imports OpenTelemetry and installs the AST hook
+    # before the target's own import begins. Slack sized for a bare interpreter
+    # made the tracer's startup come out of the MODULE's allowance, so a repo
+    # whose import was already slow started reporting `ModuleTimeout` — "a call
+    # hung" — for a module that merely loaded slowly behind a tracer.
+    outer_slack_s = 5.0 + (_TRACER_STARTUP_SLACK_S if trace else 0.0)
+
     for module, mod_targets in sorted(by_module.items()):
         plan_file = tmp_dir / f"{module.replace('.', '_')}.plan.json"
         store.write_json(
@@ -3661,7 +3678,7 @@ def run_functions(
                     # clock (a C-level spin, a SIGKILL-only hang). Setting it AT
                     # the call budget is what made every slow import look like a
                     # hung call.
-                    timeout=module_timeout_s + call_budget_s + 5.0,
+                    timeout=module_timeout_s + call_budget_s + outer_slack_s,
                     cwd=str(module_cwd),
                     env=env,
                 )
@@ -3683,7 +3700,7 @@ def run_functions(
                         env=env,
                         cwd=module_cwd,
                         stdout=proc.stdout or "",
-                        timeout_s=module_timeout_s + call_budget_s + 5.0,
+                        timeout_s=module_timeout_s + call_budget_s + outer_slack_s,
                     )
                     # Only adopt the retry's result when there WAS one. A module
                     # whose failure named nothing actionable keeps the rows it
@@ -3770,7 +3787,7 @@ def run_functions(
                                     text=True,
                                     encoding="utf-8",
                                     errors="replace",
-                                    timeout=module_timeout_s + call_budget_s + 5.0,
+                                    timeout=module_timeout_s + call_budget_s + outer_slack_s,
                                     cwd=str(better),
                                     env=env,
                                 )

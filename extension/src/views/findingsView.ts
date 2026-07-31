@@ -359,8 +359,43 @@ function getHtml(): string {
 	const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 	const pct = (x) => (x >= 0 ? '+' : '') + (100 * x).toFixed(1) + '%';
 
+	/**
+	 * Has anything been exercised at all?
+	 *
+	 * A wall of zeros cannot say WHICH zero it is, and the two meanings are
+	 * opposites: "we drove your services and found nothing wrong" is the best
+	 * possible result, while "nothing has run yet" means the panel is reporting
+	 * on an empty set. Read off totals and volumes, never off the issue count —
+	 * zero issues is exactly what a clean exercised repo looks like.
+	 */
+	function nothingExercised(f) {
+		const h = f.headline;
+		return h.endpointsTotal === 0
+			&& h.symbolsTotal === 0
+			&& h.regressCases === 0
+			&& (h.episodesAccepted + h.episodesReverted) === 0;
+	}
+
 	function tiles(f) {
 		const h = f.headline;
+		if (nothingExercised(f)) {
+			const svc = (f.services || []);
+			const named = svc.slice(0, 3).map((s) => esc(s.name)).join(', ');
+			document.getElementById('tiles').innerHTML =
+				'<div class="tile empty-state" style="grid-column:1/-1;text-align:left">' +
+				'<div class="k">No traces yet</div>' +
+				'<div class="v" style="font-size:12px;font-weight:normal;line-height:1.5">' +
+				'Nothing has been exercised, so there is nothing to report — these are not ' +
+				'findings of zero problems.' +
+				(svc.length
+					? ' Vinv found <b>' + svc.length + '</b> service' + (svc.length === 1 ? '' : 's') +
+					  ' to drive' + (named ? ' (' + named + (svc.length > 3 ? ', …' : '') + ')' : '') + '.'
+					: ' No services are inventoried yet — run <b>Discover</b> first.') +
+				'<br><br>Bring a service up, then run <b>Exercise</b> to drive it under the tracer. ' +
+				'Coverage, issues and dead code all appear here once a run has been captured.' +
+				'</div></div>';
+			return;
+		}
 		const t = [
 			{ k: 'Endpoints covered', v: h.endpointsCovered + '<small>/' + h.endpointsTotal + '</small>',
 				tip: 'Endpoints where at least one test request actually ran code' },

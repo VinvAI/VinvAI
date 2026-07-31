@@ -172,6 +172,6 @@
       "demo"
     ],
     "trace_jsonl": "<repo>\\.vinv\\captures\\vinv-exerciser\\repo\\functions\\trace.jsonl",
-    "trace_bytes": 28366
+    "trace_bytes": 28381
   }
 }

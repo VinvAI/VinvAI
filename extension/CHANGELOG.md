@@ -5,6 +5,30 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### ✨ Added
+
+- **"Run this Path" keeps its trace.** Every try-run of a dead-code section is
+  now recorded and shown in that section's report: what the fresh capture
+  actually executed (functions, calls, milliseconds, what it raised), the
+  agent's own note about what the driver drives, and one click each to open the
+  trace and the driver. Failed attempts are kept too, so a section that cannot
+  be driven says so instead of inviting the same run again, and the Findings
+  list marks sections that have been driven.
+
+### 🐛 Fixed
+
+- **"Address already in use" no longer reads as a broken service.** A port left
+  held by an earlier run is now reclaimed before anything tries to bind it —
+  the Run button, the episode-loop replay oracle, and bring-up's own replay
+  gate all identify the holding process, kill it, and wait for the socket to
+  close. When the holder cannot be freed, the message names the pid and offers
+  a free port instead of failing silently. Bring-up and fix-episode prompts now
+  carry the same two remedies (kill a stale copy of this service, or move the
+  service to a free port and record it consistently). Set
+  `VINV_RECLAIM_PORTS=0` to keep the diagnosis and skip the killing.
+
 ## [0.2.1] — 2026-07-31
 
 ### 🐛 Fixed
