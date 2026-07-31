@@ -475,6 +475,18 @@ async function insightPassOnce(
 							pct: map.coverage.pct,
 						}
 					: undefined,
+				latency: map?.latency
+					? {
+							calls: map.latency.calls,
+							ok: map.latency.ok,
+							error: map.latency.error,
+							errorTypes: map.latency.error_types ?? [],
+							p50Ms: map.latency.p50_ms,
+							p95Ms: map.latency.p95_ms,
+							maxMs: map.latency.max_ms,
+							blockedMs: map.latency.blocked_ms,
+						}
+					: undefined,
 				handler: ep.handler,
 				calltreePath,
 				reportPath,

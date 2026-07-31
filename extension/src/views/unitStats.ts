@@ -1,188 +1,159 @@
 /**
- * Per-unit runtime facts, joined from the artifacts that already hold them.
+ * Per-unit runtime facts, computed from the captures.
  *
- * The Traces panel showed one number — hits — and nothing else, so a list of
- * everything the captures saw could not answer the first question anyone asks
- * of it: did it work, how fast was it, how much of it ran. Every one of those
- * facts was already on disk, in two different files, keyed two different ways:
+ * Every number here comes from the tracelens JSONL in `.vinv/captures` — the
+ * evidence itself — and never from an exerciser's scorecard. That is a
+ * deliberate reversal. The scorecard is a REPORT: a snapshot an exerciser wrote
+ * about the units it drove, keyed by the label it displayed them under. Reading
+ * it made three things structurally impossible:
  *
- *   - `.vinv/exercise/scorecard.json` — per unit DRIVEN by an exerciser (vinv's
- *     own or an external harness ingested through exerciseIngest): coverage,
- *     p50/p95 latency, the status-code distribution, checks and failures.
- *   - `.vinv/reports/index.json` (the insight manifest) — per unit the CAPTURES
- *     saw at all: runtime-overlay coverage, error count, and whether a call-tree
- *     snapshot exists to open.
+ *   - a unit no exerciser drove had no numbers at all, however much traffic the
+ *     captures had recorded for it — which is most of a real repo, and all of
+ *     production traffic;
+ *   - CLI commands, workers, scheduled jobs and driven functions could not be
+ *     described in the same terms as an HTTP route, because the scorecard's
+ *     latency and status fields were written by the HTTP oracle;
+ *   - the join had to go through a display label (`GET /items/{id}` with a
+ *     service suffix when two services collide) rather than the entry-point id
+ *     every view keys on, so rows silently dropped whenever the two spellings
+ *     disagreed.
  *
- * The two overlap but neither contains the other: a unit can be exercised
- * without a manifest entry (the pass has not run yet) and traced without ever
- * being exercised (production traffic, a bring-up smoke run). So both are read
- * and merged per unit, and the source of the coverage number is recorded —
- * "12/40 of the tree ran under this capture" and "the suite covered 12/40" are
- * different claims and the view must not present them as one.
+ * The capture answers all three uniformly: an entry point's own handler spans
+ * carry a duration and an outcome whatever kind of starting point it is, and
+ * they are matched to the entry point by module + handler name — the same join
+ * the hit count already used.
  *
- * The join is deliberately forgiving about keys. The ingest path stamps
- * `api_id` on every scorecard row, so that is used when present; vinv's own
- * exerciser writes only the unit label (`GET /health`, `RUN acme-tool report`),
- * which is matched against the entry point's trigger. A row that matches
- * neither is dropped rather than guessed at.
+ * What the captures CANNOT supply is an HTTP status code: tracelens records a
+ * span's outcome (`status: ok | error` plus `error_type`), not the response
+ * code the framework returned. So the outcome column is ok/raised, which is a
+ * fact about every kind of unit, rather than a 200/500 histogram that would
+ * only ever be populated for routes.
+ *
+ * The authority is `identification tracemap`, read from the insight manifest:
+ * the engine owns the trace→unit join and computes coverage AND the latency
+ * distribution there, so every Vinv surface quotes the same numbers instead of
+ * each deriving its own. Reading the captures directly here is the fallback for
+ * units the insight pass has not built yet — without it the panel goes blank
+ * between a run finishing and the pass completing, which is exactly when
+ * someone is looking at it.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { entryPointLabel } from '../identification/identification';
+import { entryPointFacts, type ComponentFacts, type EntryPointLike } from '../identification/entryPointHits';
 import type { EndpointInsight } from '../harness/pipelineState';
 
-/** Coverage of a unit's call tree, and which pass measured it. */
+/** Coverage of a unit's call tree, as the runtime overlay measured it. */
 export interface UnitCoverage {
 	executed: number;
 	total: number;
 	pct: number;
-	/**
-	 * `exercised` — the exerciser drove this unit and measured what its inputs
-	 * reached. `traced` — the runtime overlay measured what the captures
-	 * happened to run. Never averaged together.
-	 */
-	source: 'exercised' | 'traced';
 }
 
-/** Everything the panel can say about one unit beyond its name and hit count. */
+/** Everything the captures can say about one unit beyond its hit count. */
 export interface UnitStats {
 	coverage?: UnitCoverage;
-	/** Median latency in ms, over the checks the exerciser ran. */
+	/** Median duration of this unit's own invocations, ms. */
 	p50Ms?: number;
 	p95Ms?: number;
-	/** Status code → count, e.g. `{ "200": 12, "500": 1 }`. `none` = never completed. */
-	statuses?: Record<string, number>;
-	/** Checks run against this unit, and how many of them failed. */
-	checks?: number;
-	failed?: number;
-	/** Runtime errors seen anywhere under this unit's call tree. */
+	maxMs?: number;
+	/** Of the total wall time, the part spent waiting rather than computing. */
+	blockedMs?: number;
+	/**
+	 * Which pass produced the latency: the engine's runtime overlay (the
+	 * authority every other Vinv surface quotes) or a direct read of the
+	 * captures, used until the insight pass has built this unit.
+	 */
+	measuredBy?: 'overlay' | 'captures';
+	/** Invocations that returned, and that raised. */
+	ok?: number;
+	error?: number;
+	/** Exception types raised by the unit itself, worst first. */
+	errorTypes?: string[];
+	/** Runtime errors seen anywhere under this unit's call tree (overlay-wide). */
 	errorCount?: number;
 	/** True when a call-tree snapshot has been built and can be opened. */
 	hasCallTree?: boolean;
-	/** ISO timestamp of the insight build this row's overlay facts came from. */
+	/** ISO timestamp of the insight build this row's coverage came from. */
 	lastBuilt?: string;
 }
 
-/** The subset of a scorecard row this join reads. */
-export interface ScorecardRow {
-	endpoint?: string;
-	api_id?: string;
-	/** "covered/total" as the scorecard spells it. */
-	coverage?: string;
-	pct?: number;
-	p50_ms?: number;
-	p95_ms?: number;
-	statuses?: Record<string, number>;
-	checks?: number;
-	failed?: number;
-}
-
-/** The subset of an entry point this join needs to key on. */
-export interface UnitKey {
-	id: string;
-	trigger?: string | null;
-	file?: string | null;
-}
-
-/** Parses the scorecard's "12/40" coverage spelling; undefined when unusable. */
-function parseCoverage(text: string | undefined, pct: number | undefined): UnitCoverage | undefined {
-	const m = /^(\d+)\s*\/\s*(\d+)$/.exec((text ?? '').trim());
-	if (!m) {
+/**
+ * The p-th percentile of `values`, or undefined when there is nothing to take
+ * one of. Nearest-rank on a sorted copy — the same method the exerciser used,
+ * so a number that appears in both places reads the same.
+ */
+export function percentile(values: number[], p: number): number | undefined {
+	if (values.length === 0) {
 		return undefined;
 	}
-	const executed = Number(m[1]);
-	const total = Number(m[2]);
-	if (total <= 0) {
-		// 0/0 is not 0% coverage, it is no denominator — a unit whose static tree
-		// could not be built. Rendering it as 0% reads as "nothing ran".
-		return undefined;
-	}
+	const s = [...values].sort((a, b) => a - b);
+	const at = Math.min(s.length - 1, Math.floor((s.length * p) / 100));
+	return Math.round(s[at] * 10) / 10;
+}
+
+/** Turns one unit's captured spans into the numbers a view renders. */
+export function statsFromFacts(facts: ComponentFacts): UnitStats {
 	return {
-		executed,
-		total,
-		pct: typeof pct === 'number' ? pct : Math.round((executed / total) * 1000) / 10,
-		source: 'exercised',
+		p50Ms: percentile(facts.durations, 50),
+		p95Ms: percentile(facts.durations, 95),
+		ok: facts.ok,
+		error: facts.error,
+		errorTypes: [...facts.errorTypes.entries()]
+			.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+			.map(([type]) => type),
 	};
 }
 
 /**
- * Merges scorecard rows and manifest entries into per-unit stats, keyed by
- * entry-point id.
+ * Merges what the engine measured with what the raw captures say.
  *
- * Pure: the caller supplies the parsed artifacts. The exerciser's numbers win
- * for coverage where both exist — it drove the unit deliberately and measured
- * the result, where the overlay only reports what a capture happened to catch.
+ * The manifest WINS. Its numbers come from `identification tracemap`, which
+ * owns the trace→unit join and computes the distribution at the only level
+ * where "one invocation of this unit" is defined; every other consumer of that
+ * join (the exerciser's coverage, smoke reports, the runtime MCP tools) reads
+ * the same engine, so a p95 quoted here matches a p95 quoted there.
+ *
+ * The capture-derived facts are the FALLBACK, for units the insight pass has
+ * not built yet. Without them the panel would go blank between a run finishing
+ * and the pass completing — which is exactly when someone is watching it.
+ *
+ * Coverage is taken only when it has a denominator: 0/0 means the static tree
+ * could not be built, which is not the claim "none of it ran" and must not
+ * render as 0%.
  */
 export function joinUnitStats(
-	rows: ScorecardRow[],
+	facts: Map<string, ComponentFacts>,
 	insights: EndpointInsight[],
-	units: UnitKey[],
 ): Map<string, UnitStats> {
 	const byId = new Map<string, UnitStats>();
-	const stats = (id: string): UnitStats => {
-		let s = byId.get(id);
-		if (!s) {
-			s = {};
-			byId.set(id, s);
-		}
-		return s;
-	};
-
-	// The manifest first, so the exerciser's coverage can overwrite the overlay's.
-	const known = new Set(units.map((u) => u.id));
+	for (const [id, f] of facts) {
+		byId.set(id, { ...statsFromFacts(f), measuredBy: 'captures' });
+	}
 	for (const insight of insights) {
-		if (!known.has(insight.id) && units.length > 0) {
-			continue; // a unit the current inventory no longer lists
-		}
-		const s = stats(insight.id);
+		const s = byId.get(insight.id) ?? {};
 		s.errorCount = insight.errorCount;
 		s.hasCallTree = Boolean(insight.calltreePath);
 		s.lastBuilt = insight.lastBuilt;
 		if (insight.coverage && insight.coverage.total > 0) {
-			s.coverage = { ...insight.coverage, source: 'traced' };
+			s.coverage = {
+				executed: insight.coverage.executed,
+				total: insight.coverage.total,
+				pct: insight.coverage.pct,
+			};
 		}
-	}
-
-	// A label→id index for the scorecards that carry no api_id.
-	const idByLabel = new Map<string, string>();
-	for (const u of units) {
-		for (const label of [u.trigger ?? '', entryPointLabel(u)]) {
-			if (label && !idByLabel.has(label)) {
-				idByLabel.set(label, u.id);
-			}
+		if (insight.latency && insight.latency.calls > 0) {
+			s.p50Ms = insight.latency.p50Ms;
+			s.p95Ms = insight.latency.p95Ms;
+			s.maxMs = insight.latency.maxMs;
+			s.blockedMs = insight.latency.blockedMs;
+			s.ok = insight.latency.ok;
+			s.error = insight.latency.error;
+			s.errorTypes = insight.latency.errorTypes;
+			s.measuredBy = 'overlay';
 		}
-	}
-
-	for (const row of rows) {
-		const id =
-			row.api_id && known.has(row.api_id)
-				? row.api_id
-				: (idByLabel.get((row.endpoint ?? '').trim()) ?? (row.api_id || ''));
-		if (!id) {
-			continue;
-		}
-		const s = stats(id);
-		const covered = parseCoverage(row.coverage, row.pct);
-		if (covered) {
-			s.coverage = covered;
-		}
-		if (typeof row.p50_ms === 'number') {
-			s.p50Ms = row.p50_ms;
-		}
-		if (typeof row.p95_ms === 'number') {
-			s.p95Ms = row.p95_ms;
-		}
-		if (row.statuses && Object.keys(row.statuses).length > 0) {
-			s.statuses = row.statuses;
-		}
-		if (typeof row.checks === 'number') {
-			s.checks = row.checks;
-		}
-		if (typeof row.failed === 'number') {
-			s.failed = row.failed;
-		}
+		byId.set(insight.id, s);
 	}
 	return byId;
 }
@@ -196,20 +167,23 @@ function readJson(file: string): unknown {
 }
 
 /**
- * Reads both artifacts off disk and joins them. Returns an empty map when
- * neither exists — a workspace that has only just been traced is the normal
- * case, not an error.
+ * Reads the captures (and the insight manifest for coverage) and returns the
+ * per-unit stats, keyed by entry-point id.
+ *
+ * `traceFile` restricts the read to one capture — the Traces panel's time
+ * window filter passes the trimmed trace it built, so the percentiles describe
+ * the selected range and not all history.
  */
-export function readUnitStats(workspaceRoot: string, units: UnitKey[]): Map<string, UnitStats> {
-	const scorecard = readJson(
-		path.join(workspaceRoot, '.vinv', 'exercise', 'scorecard.json'),
-	) as { endpoints?: ScorecardRow[] } | null;
+export function readUnitStats(
+	workspaceRoot: string,
+	units: EntryPointLike[],
+	traceFile?: string,
+): Map<string, UnitStats> {
 	const manifest = readJson(path.join(workspaceRoot, '.vinv', 'reports', 'index.json')) as {
 		endpoints?: EndpointInsight[];
 	} | null;
 	return joinUnitStats(
-		Array.isArray(scorecard?.endpoints) ? scorecard.endpoints : [],
+		entryPointFacts(workspaceRoot, units, traceFile),
 		Array.isArray(manifest?.endpoints) ? manifest.endpoints : [],
-		units,
 	);
 }

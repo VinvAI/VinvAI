@@ -709,12 +709,11 @@ suite('traces panel: non-HTTP entry points are first-class rows', () => {
 				count: 12,
 				coveragePct: 30,
 				coverageText: '12/40',
-				coverageSource: 'exercised',
 				p50: 8,
 				p95: 1400,
-				statuses: { '200': 11, '500': 1 },
-				checks: 12,
-				failed: 1,
+				ok: 11,
+				raised: 1,
+				errorTypes: ['KeyError'],
 				errors: 2,
 				built: true,
 			},
@@ -723,18 +722,15 @@ suite('traces panel: non-HTTP entry points are first-class rows', () => {
 		assert.ok(html.includes('8ms'), 'p50 is rendered');
 		assert.ok(html.includes('1.4s'), 'a slow p95 is rendered in seconds, not four digits of ms');
 		assert.ok(html.includes('class="num slow"'), 'and reads as slow');
-		assert.ok(html.includes('200 ×11') && html.includes('500 ×1'), 'every status code is on the row');
-		assert.ok(html.includes('chip bad'), 'a 5xx does not read the same as a 2xx');
-		assert.ok(html.includes('11/12'), 'checks show what passed of what ran');
+		assert.ok(html.includes('ok ×11') && html.includes('raised ×1'), 'the outcome of every invocation is on the row');
+		assert.ok(html.includes('chip bad') && html.includes('KeyError'), 'a raise names its exception and does not read as a success');
 		assert.ok(html.includes('Call tree'), 'every row can open its call tree');
 	});
 
-	test('a unit with no exerciser run shows dashes, never invented zeros', () => {
-		// Traffic-only units have coverage and hits but no percentiles: 0ms and
-		// "0 checks passed" would both be lies about work nobody did.
-		const html = rendered([{ ...cliRow, coveragePct: 40, coverageText: '2/5', coverageSource: 'traced' }]);
-		assert.ok(html.includes('bar-t mid traced'), 'an overlay-measured bar is marked as such');
-		assert.ok(html.includes('What the captures happened to run'), 'and says which pass measured it');
+	test('a unit the captures never timed shows dashes, never invented zeros', () => {
+		// 0ms and "0 ok" would both be claims about measurements nobody made.
+		const html = rendered([{ ...cliRow, coveragePct: 40, coverageText: '2/5' }]);
+		assert.ok(html.includes('bar-t mid'), 'coverage still renders as a bar');
 		assert.ok(!html.includes('0ms'), 'no latency is not zero latency');
 		assert.ok(html.includes('dash'), 'the empty cells are dashes');
 	});

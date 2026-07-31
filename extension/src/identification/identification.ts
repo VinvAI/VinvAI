@@ -406,6 +406,26 @@ export interface TraceMapResult extends CallTreeResult {
 	requests_matched?: string[];
 	/** False when the handler never ran in this capture (nothing to overlay). */
 	handler_observed?: boolean;
+	/**
+	 * How this unit's OWN invocations went — the duration distribution and the
+	 * outcome of the handler's spans.
+	 *
+	 * The engine computes it because the engine already owns the trace→unit
+	 * join; deriving percentiles extension-side meant a second trace parser with
+	 * its own definition of "one invocation". Present for every kind of unit: a
+	 * CLI run and a driven function are timed the same way a request is.
+	 */
+	latency?: {
+		calls: number;
+		ok: number;
+		error: number;
+		error_types: string[];
+		p50_ms: number;
+		p95_ms: number;
+		max_ms: number;
+		total_ms: number;
+		blocked_ms: number;
+	};
 	coverage?: {
 		static_functions: number;
 		executed: number;

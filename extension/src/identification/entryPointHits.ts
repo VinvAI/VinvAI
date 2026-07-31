@@ -40,10 +40,29 @@ export interface EntryPointLike {
 	id: string;
 	handler: string | null;
 	file: string;
+	/**
+	 * The exact trace component this unit IS, when it is known outright.
+	 *
+	 * A function the exerciser drove is named by its target — `acme.mod.summarize`
+	 * — and no declaration gives it a file to derive a module prefix from. Matching
+	 * that name exactly is both simpler and stricter than the module+handler
+	 * heuristic below, so when it is present it decides on its own.
+	 */
+	component?: string;
 }
 
 /** Bytes of the file head kept to notice a rewrite rather than an append. */
 const HEAD_BYTES = 256;
+
+/**
+ * Durations kept per component, most recent wins.
+ *
+ * A long-lived service's trace holds unbounded spans for one component, and the
+ * panel only ever needs a distribution to take percentiles from. Keeping the
+ * most recent N is both bounded and the more honest window: "how slow is this
+ * now" is the question being asked, not "how slow has it ever been".
+ */
+const MAX_SAMPLES = 10_000;
 
 interface FileCursor {
 	/** Bytes already consumed. */
@@ -52,8 +71,8 @@ interface FileCursor {
 	remainder: string;
 	/** First bytes of the file, to tell an append from a rewrite. */
 	head: string;
-	/** component → enter events seen so far in this file. */
-	counts: Map<string, number>;
+	/** component → everything this file has said about it so far. */
+	facts: Map<string, ComponentFacts>;
 }
 
 const cursors = new Map<string, FileCursor>();
@@ -102,6 +121,9 @@ export function moduleCandidates(file: string): string[] {
  * the prefix test is `startsWith`, not equality.
  */
 export function componentMatches(component: string, entry: EntryPointLike): boolean {
+	if (entry.component) {
+		return component === entry.component;
+	}
 	const handler = (entry.handler ?? '').trim();
 	if (!handler || !component) {
 		return false;
@@ -115,8 +137,40 @@ export function componentMatches(component: string, entry: EntryPointLike): bool
 	);
 }
 
-/** Adds one file's newly-appended `enter` events into its cursor. */
-function advance(file: string): Map<string, number> {
+/** What one capture says about one component, accumulated incrementally. */
+export interface ComponentFacts {
+	/** `enter` events — one per invocation. */
+	calls: number;
+	/** `exit` durations in ms, the most recent MAX_SAMPLES of them. */
+	durations: number[];
+	/** Exits that ended ok, and that raised. */
+	ok: number;
+	error: number;
+	/** Exception types seen, with how many exits raised each. */
+	errorTypes: Map<string, number>;
+}
+
+function emptyFacts(): ComponentFacts {
+	return { calls: 0, durations: [], ok: 0, error: 0, errorTypes: new Map() };
+}
+
+/** Merges `b` into `a` (used to sum one component across several captures). */
+function mergeFacts(a: ComponentFacts, b: ComponentFacts): void {
+	a.calls += b.calls;
+	a.ok += b.ok;
+	a.error += b.error;
+	for (const d of b.durations) {
+		if (a.durations.length < MAX_SAMPLES) {
+			a.durations.push(d);
+		}
+	}
+	for (const [t, n] of b.errorTypes) {
+		a.errorTypes.set(t, (a.errorTypes.get(t) ?? 0) + n);
+	}
+}
+
+/** Adds one file's newly-appended events into its cursor. */
+function advance(file: string): Map<string, ComponentFacts> {
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(file);
@@ -135,17 +189,17 @@ function advance(file: string): Map<string, number> {
 			fs.closeSync(fd);
 		}
 	} catch {
-		return cursors.get(file)?.counts ?? new Map();
+		return cursors.get(file)?.facts ?? new Map();
 	}
 	let cursor = cursors.get(file);
 	// Shrunk, or a different file under the same name (the window filter
 	// rewrites its trace on every poll): start over rather than read garbage.
 	if (!cursor || stat.size < cursor.offset || head !== cursor.head) {
-		cursor = { offset: 0, remainder: '', head, counts: new Map() };
+		cursor = { offset: 0, remainder: '', head, facts: new Map() };
 		cursors.set(file, cursor);
 	}
 	if (stat.size === cursor.offset) {
-		return cursor.counts;
+		return cursor.facts;
 	}
 	let chunk = '';
 	try {
@@ -160,7 +214,7 @@ function advance(file: string): Map<string, number> {
 			fs.closeSync(fd);
 		}
 	} catch {
-		return cursor.counts;
+		return cursor.facts;
 	}
 	const lines = (cursor.remainder + chunk).split('\n');
 	// The last element is either a partial line (the writer is mid-flush) or
@@ -170,27 +224,76 @@ function advance(file: string): Map<string, number> {
 		if (!line.trim()) {
 			continue;
 		}
-		let ev: { event?: string; component?: string };
+		let ev: {
+			event?: string;
+			component?: string;
+			duration_ms?: number;
+			status?: string;
+			error_type?: string | null;
+		};
 		try {
-			ev = JSON.parse(line) as { event?: string; component?: string };
+			ev = JSON.parse(line) as typeof ev;
 		} catch {
 			continue;
 		}
-		if (ev.event !== 'enter' || !ev.component) {
+		if (!ev.component || (ev.event !== 'enter' && ev.event !== 'exit')) {
 			continue;
 		}
-		cursor.counts.set(ev.component, (cursor.counts.get(ev.component) ?? 0) + 1);
+		let f = cursor.facts.get(ev.component);
+		if (!f) {
+			f = emptyFacts();
+			cursor.facts.set(ev.component, f);
+		}
+		if (ev.event === 'enter') {
+			f.calls += 1;
+			continue;
+		}
+		// An exit is where the RUN reports itself: how long it took and whether
+		// it raised. Both were read off this same line and dropped, which is why
+		// every latency number in the product had to come from an exerciser's
+		// own bookkeeping instead of from the capture.
+		if (typeof ev.duration_ms === 'number' && Number.isFinite(ev.duration_ms)) {
+			if (f.durations.length < MAX_SAMPLES) {
+				f.durations.push(ev.duration_ms);
+			} else {
+				// Full: keep the most recent window rather than the first N.
+				f.durations.shift();
+				f.durations.push(ev.duration_ms);
+			}
+		}
+		if (ev.status === 'error') {
+			f.error += 1;
+			if (ev.error_type) {
+				f.errorTypes.set(ev.error_type, (f.errorTypes.get(ev.error_type) ?? 0) + 1);
+			}
+		} else {
+			f.ok += 1;
+		}
 	}
-	return cursor.counts;
+	return cursor.facts;
+}
+
+/** component → everything the given traces say about it, merged. */
+export function componentFacts(traceFiles: string[]): Map<string, ComponentFacts> {
+	const total = new Map<string, ComponentFacts>();
+	for (const file of traceFiles) {
+		for (const [component, facts] of advance(file)) {
+			let into = total.get(component);
+			if (!into) {
+				into = emptyFacts();
+				total.set(component, into);
+			}
+			mergeFacts(into, facts);
+		}
+	}
+	return total;
 }
 
 /** component → invocations, summed over the given traces. */
 export function countInvocations(traceFiles: string[]): Map<string, number> {
 	const total = new Map<string, number>();
-	for (const file of traceFiles) {
-		for (const [component, n] of advance(file)) {
-			total.set(component, (total.get(component) ?? 0) + n);
-		}
+	for (const [component, facts] of componentFacts(traceFiles)) {
+		total.set(component, facts.calls);
 	}
 	return total;
 }
@@ -227,4 +330,49 @@ export function entryPointHits(
 		}
 	}
 	return hits;
+}
+
+/**
+ * Everything the captures say about each entry point, keyed by entry-point id.
+ *
+ * The same join as `entryPointHits` — the entry point's own handler spans — but
+ * carrying the rest of what those spans recorded: how long each invocation took
+ * and whether it raised. This is the ONLY source that can answer those
+ * questions for every kind of unit, which is why both the Traces panel and the
+ * Findings latency profile read it rather than an exerciser's scorecard: a
+ * scorecard exists only for units an exerciser drove, is keyed by a display
+ * label rather than an entry-point id, and is a snapshot taken when it was
+ * written. The captures are the evidence all of it was derived from.
+ */
+export function entryPointFacts(
+	workspaceRoot: string,
+	entries: EntryPointLike[],
+	traceFile?: string,
+): Map<string, ComponentFacts> {
+	const files = traceFile
+		? [traceFile]
+		: findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'));
+	const components = componentFacts(files);
+	const byEntry = new Map<string, ComponentFacts>();
+	if (components.size === 0) {
+		return byEntry;
+	}
+	for (const entry of entries) {
+		let acc: ComponentFacts | undefined;
+		for (const [component, facts] of components) {
+			if (!componentMatches(component, entry)) {
+				continue;
+			}
+			if (!acc) {
+				acc = emptyFacts();
+			}
+			mergeFacts(acc, facts);
+		}
+		// Absent, not zeroed: a unit the captures never saw has no latency, and
+		// rendering 0ms would state a measurement nobody made.
+		if (acc && acc.calls > 0) {
+			byEntry.set(entry.id, acc);
+		}
+	}
+	return byEntry;
 }

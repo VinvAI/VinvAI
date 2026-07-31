@@ -25,6 +25,81 @@ import { serviceForEndpointFile } from '../bringup/targetPackages';
 import { deadCodePath, type DeadCodeReport } from './deadCodeModel';
 import { analysisPath, type DeadCodeAnalysis } from '../harness/deadCodeAnalysis';
 import { readRuns, runHeadline, runsForSection } from '../harness/deadCodeRuns';
+import { readEntryPoints, entryPointLabel } from '../identification/identification';
+import { readUnitInventory } from './unitInventory';
+import { readUnitStats } from './unitStats';
+
+/** One row of the latency profile, before its service is attributed. */
+interface UnitProfileRow {
+	/** Entry-point id, used to attribute the row to a service. */
+	id: string;
+	endpoint: string;
+	unitKind: string;
+	p50Ms: number;
+	p95Ms: number;
+	coverage: string;
+	handlerObserved: boolean;
+	statuses: Record<string, number>;
+}
+
+/** The entry-point `kind` spelled the way the Findings view names units. */
+function unitKindOf(kind: string): string {
+	if (kind === 'http_api') {
+		return 'http_endpoint';
+	}
+	return kind === 'function' ? 'function_call' : 'cli_invocation';
+}
+
+/**
+ * The latency profile, computed from the captures.
+ *
+ * This used to be `scorecard.endpoints` — an exerciser's own summary of the
+ * units it drove. That made the section describe a fraction of the workspace
+ * (nothing else has a scorecard row), report `0/0` coverage and a "not reached"
+ * badge whenever the exerciser's label-keyed join missed, and go stale the
+ * moment new traffic arrived without a re-run. The captures answer the same
+ * questions for every unit, in the same terms, as of this second.
+ *
+ * Only units the captures actually SAW are listed: a latency profile of things
+ * that never ran is a list of zeros, and "never ran" is what the dead-code
+ * section is for.
+ */
+function unitProfile(workspaceRoot: string): UnitProfileRow[] {
+	const units = readUnitInventory(workspaceRoot, readEntryPoints(workspaceRoot));
+	const stats = readUnitStats(workspaceRoot, units);
+	const rows: UnitProfileRow[] = [];
+	for (const u of units) {
+		const s = stats.get(u.id);
+		const ran = (s?.ok ?? 0) + (s?.error ?? 0);
+		if (!s || ran === 0) {
+			continue;
+		}
+		const statuses: Record<string, number> = {};
+		if (s.ok) {
+			statuses.ok = s.ok;
+		}
+		if (s.error) {
+			statuses.error = s.error;
+		}
+		rows.push({
+			id: u.id,
+			endpoint: entryPointLabel(u),
+			unitKind: unitKindOf(u.kind),
+			p50Ms: Math.round(s.p50Ms ?? 0),
+			p95Ms: Math.round(s.p95Ms ?? 0),
+			// Blank, never "0/0": no overlay yet is not zero coverage.
+			coverage: s.coverage ? `${s.coverage.executed}/${s.coverage.total}` : '',
+			handlerObserved: true,
+			statuses,
+		});
+	}
+	// Busiest first, then slowest — the same order the Traces panel uses.
+	return rows.sort(
+		(a, b) =>
+			(b.statuses.ok ?? 0) + (b.statuses.error ?? 0) -
+				((a.statuses.ok ?? 0) + (a.statuses.error ?? 0)) || b.p95Ms - a.p95Ms,
+	);
+}
 
 /**
  * Resolves `METHOD /path` → owning service, for every endpoint the workspace
@@ -639,18 +714,9 @@ export function buildFindings(workspaceRoot: string): Findings {
 			value: Number(o.value ?? 0),
 		})),
 		regress,
-		endpoints: (scorecard.endpoints ?? []).map((e: any) => ({
-			endpoint: String(e.endpoint ?? ''),
-			unitKind: String(e.unit_kind ?? 'http_endpoint'),
-			service: serviceForUnit(serviceIndex, serviceNames, [
-				String(e.endpoint ?? ''),
-				unitIdForLabel.get(String(e.endpoint ?? '')),
-			]),
-			p50Ms: Number(e.p50_ms ?? 0),
-			p95Ms: Number(e.p95_ms ?? 0),
-			coverage: String(e.coverage ?? ''),
-			handlerObserved: Boolean(e.handler_observed),
-			statuses: e.statuses ?? {},
+		endpoints: unitProfile(workspaceRoot).map((u) => ({
+			...u,
+			service: serviceForUnit(serviceIndex, serviceNames, [u.endpoint, u.id]),
 		})),
 		state: {
 			created: Number(pollution.created ?? ledger.length),

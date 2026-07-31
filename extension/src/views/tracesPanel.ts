@@ -3,13 +3,14 @@ import {
 	hasCaptures,
 	entryPointLabel,
 	loadEntryPoints,
+	readEntryPoints,
 	getTraceSummary,
-	type EntryPoint,
 } from '../identification/identification';
 import { buildFilteredTrace } from '../identification/traceFilter';
 import { entryPointHits } from '../identification/entryPointHits';
 import type { SessionTimeRange } from './sessionsView';
 import { readUnitStats, type UnitStats } from './unitStats';
+import { readUnitInventory, type InventoryUnit } from './unitInventory';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
 /**
@@ -44,17 +45,16 @@ interface TraceRow {
 	line: number;
 	kind: string;
 	count: number;
-	/** Percentage of the unit's call tree that ran, and which pass measured it. */
+	/** Percentage of the unit's call tree that ran, per the runtime overlay. */
 	coveragePct?: number;
 	coverageText?: string;
-	coverageSource?: string;
-	/** Latency over the checks an exerciser ran against this unit. */
+	/** Duration of this unit's own invocations, from the captured spans. */
 	p50?: number;
 	p95?: number;
-	/** Status code → count. `none` means the request never completed. */
-	statuses?: Record<string, number>;
-	checks?: number;
-	failed?: number;
+	/** Invocations that returned, and that raised, with the exception types. */
+	ok?: number;
+	raised?: number;
+	errorTypes?: string[];
 	/** Runtime errors under this unit's call tree. */
 	errors?: number;
 	/** Whether a call-tree snapshot has already been built for this unit. */
@@ -81,9 +81,13 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 		{ enableScripts: true, retainContextWhenHidden: true },
 	);
 
-	let entries: EntryPoint[] = [];
+	// Declared entry points PLUS the units only an exerciser knows about (a
+	// driven function is declared nowhere) — see readUnitInventory.
+	let entries: InventoryUnit[] = [];
 	let counts = new Map<string, number>();
 	let stats = new Map<string, UnitStats>();
+	/** The engine's own words when the inventory could not be loaded. */
+	let loadError = '';
 	let range: SessionTimeRange | undefined;
 	let polling = false;
 	let disposed = false;
@@ -102,12 +106,11 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 					count: counts.get(e.id) ?? 0,
 					coveragePct: s?.coverage?.pct,
 					coverageText: s?.coverage ? `${s.coverage.executed}/${s.coverage.total}` : undefined,
-					coverageSource: s?.coverage?.source,
 					p50: s?.p50Ms,
 					p95: s?.p95Ms,
-					statuses: s?.statuses,
-					checks: s?.checks,
-					failed: s?.failed,
+					ok: s?.ok,
+					raised: s?.error,
+					errorTypes: s?.errorTypes,
 					errors: s?.errorCount,
 					built: s?.hasCallTree,
 				};
@@ -126,6 +129,7 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 				ranges: TIME_PRESETS.map((r) => r.label),
 				activeRange: range?.label ?? '',
 				haveCaptures: hasCaptures(root),
+				error: loadError,
 			});
 		}
 	};
@@ -144,12 +148,20 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 		if (entries.length === 0) {
 			polling = true;
 			try {
-				entries = await loadEntryPoints(context, root);
+				entries = readUnitInventory(root, await loadEntryPoints(context, root));
+				loadError = '';
 				if (entries.length > 0) {
 					post();
 				}
-			} catch {
-				// Discovery not ready yet — the next tick tries again.
+			} catch (e) {
+				// The engine ANSWERED, with an error — most often "no code index for
+				// this workspace". Swallowing it left the panel on its loading state
+				// forever with nothing on screen to act on, so it is carried to the
+				// view. The on-disk inventory is tried anyway: a stale entry-point
+				// list at zero hits beats an empty panel.
+				loadError = e instanceof Error ? e.message : String(e);
+				entries = readUnitInventory(root, readEntryPoints(root));
+				post();
 			} finally {
 				polling = false;
 			}
@@ -185,10 +197,11 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 				next.set(e.id, e.trace_count);
 			}
 			counts = next;
-			// Coverage, latency and status codes come from artifacts other passes
-			// write, not from this poll — re-read each tick so a run that finishes
-			// while the panel is open fills its columns in without a reopen.
-			stats = readUnitStats(root, entries);
+			// Latency and outcome are read from the SAME captures the counts come
+			// from, and through the same time window: a filtered range must narrow
+			// the percentiles too, or the panel would show last week's p95 beside
+			// this minute's hit count.
+			stats = readUnitStats(root, entries, traceFile);
 			post();
 		} catch {
 			// No trace yet, or an older binary without tracesummary — keep the last
@@ -221,7 +234,15 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 	const timer = setInterval(() => void pollOnce(), TRACE_POLL_MS);
 	panel.onDidDispose(() => clearInterval(timer));
 
-	entries = await loadEntryPoints(context, root);
+	// Unguarded, this rejection escaped the command: the first post() never ran
+	// and the webview kept its "Loading…" placeholder for the life of the tab,
+	// with the reason — usually a missing code index — visible nowhere.
+	try {
+		entries = readUnitInventory(root, await loadEntryPoints(context, root));
+	} catch (e) {
+		loadError = e instanceof Error ? e.message : String(e);
+		entries = readUnitInventory(root, readEntryPoints(root));
+	}
 	post();
 	void pollOnce();
 }
@@ -295,7 +316,7 @@ button.tree:hover { border-color: var(--accent-fg); color: var(--accent-fg); }
   <select id="range"><option value="">All time</option></select>
 </div>
 <div id="out"><div class="empty">Loading…</div></div>
-<p class="legend">Coverage is how much of the unit's call tree ran — solid when an exerciser drove it, faded when it is what the captures happened to catch. Latency and status codes come from the checks an exerciser ran, so a unit only traffic reached shows hits and coverage but no percentiles.</p>
+<p class="legend">Every column is read from the tracelens captures, for every kind of unit: hits are the entry point's own invocations, P50/P95 the duration of those invocations, and Outcome whether they returned or raised. Coverage is how much of the unit's call tree the captures executed. A time filter narrows all of them together. Outcome is not HTTP status codes — a capture records that a span returned or raised, which is a fact about a CLI run and a driven function too.</p>
 </div>
 <script>
 const vscode = acquireVsCodeApi();
@@ -322,43 +343,34 @@ function render(){
     if (r.coveragePct === undefined || r.coveragePct === null) return dash;
     const pct = Math.max(0, Math.min(100, r.coveragePct));
     const band = pct >= 70 ? '' : (pct >= 35 ? ' mid' : ' low');
-    const faded = r.coverageSource === 'traced' ? ' traced' : '';
-    const how = r.coverageSource === 'traced'
-      ? 'What the captures happened to run through this unit'
-      : 'What the exerciser\\'s inputs reached when it drove this unit';
-    return '<span class="cov" title="' + esc(r.coverageText + ' symbols · ' + how) + '">' +
-      '<span class="bar-t' + band + faded + '"><i style="width:' + pct + '%"></i></span>' +
+    return '<span class="cov" title="' + esc(r.coverageText +
+      ' symbols of this unit\\'s call tree executed in the captures') + '">' +
+      '<span class="bar-t' + band + '"><i style="width:' + pct + '%"></i></span>' +
       pct + '%</span>';
   }
-  // Status codes are the run's own verdict — 2xx, 4xx and 5xx must not read the
-  // same, and a "none" (the request never completed) must not read as success.
-  function statuses(r) {
-    const s = r.statuses;
-    if (!s) return dash;
-    const keys = Object.keys(s).sort();
-    if (!keys.length) return dash;
-    return keys.map(k => {
-      const cls = k === 'none' ? 'bad' : (k[0] === '2' ? 'ok' : (k[0] === '5' ? 'bad' : 'warn'));
-      const label = k === 'none' ? 'ERR' : k;
-      const title = k === 'none' ? 'Requests that never completed' : 'HTTP ' + k;
-      return '<span class="chip ' + cls + '" title="' + esc(title) + '">' + esc(label) + ' ×' + s[k] + '</span>';
-    }).join('');
-  }
-  function checks(r) {
-    if (r.checks === undefined || r.checks === null) return dash;
-    const failed = r.failed || 0;
-    return failed > 0
-      ? '<span class="err" title="' + failed + ' of ' + r.checks + ' checks failed">' + (r.checks - failed) + '/' + r.checks + '</span>'
-      : '<span title="all checks passed">' + r.checks + '/' + r.checks + '</span>';
+  // The capture's own verdict per invocation. Not HTTP status codes: tracelens
+  // records whether a span returned or raised (and with what), not the response
+  // code a framework wrote — and this column has to mean the same thing for a
+  // CLI run and a driven function as it does for a route.
+  function outcome(r) {
+    if (r.ok === undefined && r.raised === undefined) return dash;
+    const ok = r.ok || 0, raised = r.raised || 0;
+    let out = '';
+    if (ok) out += '<span class="chip ok" title="Invocations that returned normally">ok ×' + ok + '</span>';
+    if (raised) {
+      const types = (r.errorTypes || []).join(', ');
+      out += '<span class="chip bad" title="' + esc('Invocations that raised' + (types ? ': ' + types : '')) +
+        '">raised ×' + raised + '</span>';
+    }
+    return out || dash;
   }
   out.innerHTML = '<table><thead><tr>' +
     '<th>Entry point</th><th>Kind</th><th>Handler</th>' +
     '<th class="num" title="How often this ran: requests for HTTP routes, invocations for everything else">Hits</th>' +
     '<th class="num" title="Symbols of this unit\\'s call tree that executed">Coverage</th>' +
-    '<th class="num" title="Median latency over the checks run against this unit">P50</th>' +
-    '<th class="num" title="95th-percentile latency — the slow tail users actually feel">P95</th>' +
-    '<th title="Status codes returned across those checks">Responses</th>' +
-    '<th class="num" title="Checks that passed, of those run">Checks</th>' +
+    '<th class="num" title="Median duration of this unit\\'s own invocations, from the captured spans">P50</th>' +
+    '<th class="num" title="95th-percentile duration — the slow tail users actually feel">P95</th>' +
+    '<th title="How the captured invocations ended: returned, or raised (with the exception type)">Outcome</th>' +
     '<th class="num" title="Runtime errors raised anywhere under this unit\\'s call tree">Errors</th>' +
     '<th></th></tr></thead><tbody>' +
     rows.map(r => '<tr class="row' + (r.count > 0 ? '' : ' cold') + '" data-id="' + esc(r.id) + '" data-label="' + esc(r.trigger) + '">' +
@@ -369,8 +381,7 @@ function render(){
       '<td class="num">' + cov(r) + '</td>' +
       '<td class="num">' + ms(r.p50) + '</td>' +
       '<td class="num' + (r.p95 >= 1000 ? ' slow' : '') + '">' + ms(r.p95) + '</td>' +
-      '<td>' + statuses(r) + '</td>' +
-      '<td class="num">' + checks(r) + '</td>' +
+      '<td>' + outcome(r) + '</td>' +
       '<td class="num' + (r.errors > 0 ? ' err' : '') + '">' + (r.errors === undefined ? dash : r.errors) + '</td>' +
       '<td class="act"><button class="tree" title="' +
         esc(r.built ? 'Open the call tree with its runtime overlay' : 'Build and open the call tree for this unit') +
@@ -396,6 +407,13 @@ window.addEventListener('message', e => {
     m.ranges.forEach(r => { const o = document.createElement('option'); o.value = r; o.textContent = r; range.appendChild(o); });
   }
   range.value = m.activeRange;
+  // An empty list with a reason is actionable; an empty list without one reads
+  // as a broken panel. The engine's own sentence names the missing piece (most
+  // often the code index) far better than any wording invented here.
+  if (!ROWS.length && m.error) {
+    out.innerHTML = '<div class="empty">No entry points could be listed.<br><br>' + esc(m.error) + '</div>';
+    return;
+  }
   if (!m.haveCaptures) { out.innerHTML = '<div class="empty">No captures yet — run a service under tracing first.</div>'; return; }
   render();
 });

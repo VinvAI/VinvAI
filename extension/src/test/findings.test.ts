@@ -24,6 +24,32 @@ function write(root: string, rel: string, data: unknown): void {
 	);
 }
 
+/**
+ * A capture holding one enter/exit pair per span.
+ *
+ * The latency profile is built from these, not from the scorecard: a report of
+ * what an exerciser drove could only ever describe the units it drove, and
+ * described them in HTTP terms. Tests therefore have to supply the evidence,
+ * the same way the product does.
+ */
+function writeCapture(root: string, service: string, spans: [string, number, string?][]): void {
+	const lines: string[] = [];
+	for (const [component, ms, errorType] of spans) {
+		lines.push(JSON.stringify({ event: 'enter', component, depth: 0, request_id: 'r1' }));
+		lines.push(
+			JSON.stringify({
+				event: 'exit',
+				component,
+				duration_ms: ms,
+				status: errorType ? 'error' : 'ok',
+				error_type: errorType ?? null,
+				request_id: 'r1',
+			}),
+		);
+	}
+	write(root, `.vinv/captures/vinv-bringup/${service}/trace.jsonl`, lines.join('\n') + '\n');
+}
+
 function seed(root: string): void {
 	write(root, '.vinv/exercise/scorecard.json', {
 		coverage: { after_exercised: { endpoints_with_coverage: 16, endpoints_total: 23, symbols_covered: 37, symbols_total: 44 } },
@@ -278,52 +304,79 @@ suite('findings: service attribution', () => {
 	 * it. Before the prefix was read, every CLI row and CLI issue counted as
 	 * unattributed and vanished the moment a service chip was clicked.
 	 */
-	test('a CLI invocation attributes to the service its unit id names', () => {
+	test('a CLI command attributes to the service its unit id names', () => {
 		const root = tmpRepo();
 		write(root, '.vinv/services.json', {
 			services: [{ name: 'acme-tool', kind: 'python_cli', command: 'acme-tool' }],
 		});
+		write(root, '.vinv/identification/apis.json', {
+			status: 'ok',
+			entrypoints: [
+				{
+					kind: 'cli_command', id: 'acme-tool#0', trigger: 'check', handler: 'check_cmd',
+					file: 'acme/cli.py', line: 10, framework: 'click',
+				},
+			],
+		});
+		// A driven call is declared nowhere — the exerciser's own plan is the only
+		// place it is named, and its spans are matched by that dotted target.
 		write(root, '.vinv/exercise/profile.json', {
 			endpoints: [
-				{ api_id: 'acme-tool#0', method: 'RUN', path: 'acme-tool --check', unit_kind: 'cli_invocation' },
 				{ api_id: 'acme.mod:summarize', method: 'CALL', path: 'acme.mod:summarize', unit_kind: 'function_call' },
 			],
 		});
 		write(root, '.vinv/exercise/scorecard.json', {
 			coverage: { after_exercised: { units_by_kind: { cli_invocation: 1, function_call: 1 } } },
-			endpoints: [
-				{ endpoint: 'RUN acme-tool --check', unit_kind: 'cli_invocation', coverage: '3/6' },
-				{ endpoint: 'CALL acme.mod:summarize', unit_kind: 'function_call', coverage: '1/2' },
-			],
 		});
+		writeCapture(root, 'acme-tool', [
+			['acme.cli.check_cmd', 12],
+			['acme.mod.summarize', 30],
+		]);
 		write(root, '.vinv/exercise/issues.json', {
 			clusters: [{ kind: 'crash', title: 'exited 2', signature: 'z', endpoint_id: 'acme-tool#0' }],
 		});
 		const f = buildFindings(root);
 
-		assert.strictEqual(f.endpoints[0].service, 'acme-tool');
-		assert.strictEqual(f.endpoints[0].unitKind, 'cli_invocation');
+		const cli = f.endpoints.find((e) => e.unitKind === 'cli_invocation');
+		const call = f.endpoints.find((e) => e.unitKind === 'function_call');
+		assert.strictEqual(cli?.service, 'acme-tool');
 		assert.strictEqual(f.issues[0].service, 'acme-tool');
 		assert.deepStrictEqual(f.servicesWithFindings, ['acme-tool']);
 		// A driven call's target is a module path, which names a file rather than
 		// a service — unattributed on purpose, not by omission.
-		assert.strictEqual(f.endpoints[1].service, undefined);
-		assert.strictEqual(f.endpoints[1].unitKind, 'function_call');
+		assert.strictEqual(call?.service, undefined);
+		assert.strictEqual(call?.p50Ms, 30, 'a driven call is timed like anything else');
 		assert.deepStrictEqual(f.headline.unitsByKind, { cli_invocation: 1, function_call: 1 });
 	});
 
-	test('a scorecard with no units_by_kind is counted from its own rows', () => {
+	test('the latency profile lists what the captures saw, not what a report claims', () => {
 		const root = tmpRepo();
-		write(root, '.vinv/exercise/scorecard.json', {
-			endpoints: [
-				{ endpoint: 'GET /a' },
-				{ endpoint: 'RUN acme-tool', unit_kind: 'cli_invocation' },
+		write(root, '.vinv/identification/apis.json', {
+			status: 'ok',
+			entrypoints: [
+				{ kind: 'http_api', id: 'GET_a', trigger: 'GET /a', handler: 'a', file: 'app/api.py', line: 1, framework: 'fastapi' },
+				{ kind: 'http_api', id: 'GET_never', trigger: 'GET /never', handler: 'never', file: 'app/api.py', line: 9, framework: 'fastapi' },
 			],
 		});
+		// A scorecard claiming a unit ran must not put it on the page, and must
+		// not supply its numbers either.
+		write(root, '.vinv/exercise/scorecard.json', {
+			endpoints: [{ endpoint: 'GET /never', p50_ms: 5, p95_ms: 9, coverage: '4/4', handler_observed: true }],
+		});
+		writeCapture(root, 'api', [
+			['app.api.a', 10],
+			['app.api.a', 400, 'KeyError'],
+		]);
+
 		const f = buildFindings(root);
-		// A row written before `unit_kind` existed is HTTP by construction.
-		assert.deepStrictEqual(f.headline.unitsByKind, { http_endpoint: 1, cli_invocation: 1 });
+
+		assert.strictEqual(f.endpoints.length, 1, 'only the unit the captures actually saw');
+		assert.strictEqual(f.endpoints[0].endpoint, 'GET /a');
 		assert.strictEqual(f.endpoints[0].unitKind, 'http_endpoint');
+		assert.strictEqual(f.endpoints[0].p95Ms, 400);
+		assert.deepStrictEqual(f.endpoints[0].statuses, { ok: 1, error: 1 });
+		assert.strictEqual(f.endpoints[0].handlerObserved, true, 'it ran — never badged "not reached"');
+		assert.strictEqual(f.endpoints[0].coverage, '', 'no overlay yet is blank, never 0/0');
 	});
 
 	test('no identification or services artifact leaves everything unattributed', () => {

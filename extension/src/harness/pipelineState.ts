@@ -29,6 +29,19 @@ export interface InsightCoverage {
 	pct: number;
 }
 
+/** A unit's own invocations, as the runtime overlay measured them. */
+export interface InsightLatency {
+	calls: number;
+	ok: number;
+	error: number;
+	errorTypes: string[];
+	p50Ms: number;
+	p95Ms: number;
+	maxMs: number;
+	/** Of the total wall time, the part spent waiting rather than computing. */
+	blockedMs: number;
+}
+
 /** One endpoint's built insight artifacts, as recorded in the manifest. */
 export interface EndpointInsight {
 	/** Entry-point id (identification's api id). */
@@ -51,6 +64,11 @@ export interface EndpointInsight {
 	 * exists for anything the captures saw.
 	 */
 	coverage?: InsightCoverage;
+	/**
+	 * Latency and outcome for this unit, from the same overlay as the coverage.
+	 * Absent on manifests written before the engine emitted it.
+	 */
+	latency?: InsightLatency;
 	/** Absolute path of the call-tree JSON artifact, or null when it failed. */
 	calltreePath: string | null;
 	/** Absolute path of the smoke/flamegraph HTML report, or null when it failed. */
