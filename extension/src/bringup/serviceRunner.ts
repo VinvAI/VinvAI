@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { spawn, type ChildProcess } from 'child_process';
 import {
+	completionExitCode,
 	readServices,
 	readStartCommands,
 	repairRecordedTargetPackages,
@@ -37,6 +38,12 @@ export interface ServiceExitEvent {
 	exitCode: number | null;
 	/** True when the command exited with 0 almost immediately (backgrounding smell). */
 	instantExit: boolean;
+	/**
+	 * The exit code this unit was contracted to finish with, or null when it is
+	 * a long-running server. Non-null means the run ENDING is the success case,
+	 * so listeners must not read termination itself as failure evidence.
+	 */
+	completionExit: number | null;
 	/** Last ~4KB of the service's combined output. */
 	outputTail: string;
 }
@@ -224,7 +231,12 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 			if (gen !== this.generation) {
 				return;
 			}
-			const instantExit = code === 0 && Date.now() - launchedAt < 5000;
+			// A run-to-completion unit finishing quickly is the contract, not the
+			// backgrounding smell this heuristic exists to catch — only a server
+			// can "exit instantly" in the sense that matters.
+			const completionExit = completionExitCode(this.config.workspaceRoot, this.config.service);
+			const instantExit =
+				completionExit === null && code === 0 && Date.now() - launchedAt < 5000;
 			if (instantExit) {
 				this.output(
 					'Start command exited immediately with code 0 — it likely backgrounds ' +
@@ -233,7 +245,12 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 					'stderr',
 				);
 			}
-			this.output(`\n[${this.config.service}] exited with code ${code ?? 'null'}\n`, 'console');
+			this.output(
+				completionExit !== null && code === completionExit
+					? `\n[${this.config.service}] ran to completion (exit ${code}) — its trace is ready.\n`
+					: `\n[${this.config.service}] exited with code ${code ?? 'null'}\n`,
+				'console',
+			);
 			// Outcome only — never the output tail, which is the client's own
 			// application output (kept local for the episode evidence).
 			this.event('exited', { exitCode: code ?? 0 });
@@ -245,6 +262,7 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 				workspaceRoot: this.config.workspaceRoot,
 				exitCode: code,
 				instantExit,
+				completionExit,
 				outputTail,
 			});
 		});

@@ -73,6 +73,28 @@ import {
 export { collectRuntimeErrorClusters, selectHotspots, type ErrorCluster, type Hotspot };
 
 function serviceFixTask(event: ServiceExitEvent): EpisodeTask {
+	// A run-to-completion unit only reaches here on the WRONG exit code, so its
+	// criteria must be about the invocation succeeding — handing it the server
+	// criteria below would aim the agent at turning a CLI into a daemon.
+	if (event.completionExit !== null) {
+		return {
+			kind: 'service-fix',
+			trigger: 'service-exit',
+			service: event.service,
+			title: `Fix run-to-completion unit '${event.service}'`,
+			issue:
+				`Running the verified command for '${event.service}' failed: it exited with code ` +
+				`${event.exitCode ?? 'null'}, but this unit is contracted to finish with ` +
+				`${event.completionExit}. It is a run-to-completion CLI, NOT a long-running ` +
+				'server — do not change it into one.\n\n' +
+				`Output tail:\n\`\`\`\n${event.outputTail || '(no output captured)'}\n\`\`\``,
+			successCriteria: [
+				`The recorded command in .vinv/start_commands/${event.service}.json runs to completion and exits with code ${event.completionExit}`,
+				'The run still produces a non-empty trace at the recorded trace_jsonl path',
+				'No new errors appear in the output',
+			],
+		};
+	}
 	const symptom = event.instantExit
 		? 'the recorded start command exited instantly with code 0 (it likely backgrounds itself)'
 		: `the service exited with code ${event.exitCode ?? 'null'}`;
@@ -251,13 +273,24 @@ export async function dispatchIssueEpisode(
 export function registerAutoTriggers(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		onServiceExit((event) => {
-			const failed = (event.exitCode !== null && event.exitCode !== 0) || event.instantExit;
+			// A run-to-completion unit is judged against its contracted exit code,
+			// never against the fact that it ended: a CLI that finishes its work is
+			// the success case, and dispatching a fix episode for it burns the
+			// harness on a service that did exactly what it was asked to do.
+			const failed =
+				event.completionExit !== null
+					? event.exitCode !== event.completionExit
+					: (event.exitCode !== null && event.exitCode !== 0) || event.instantExit;
 			if (!failed) {
 				return;
 			}
-			const summary = event.instantExit
-				? `service '${event.service}' exited instantly (backgrounding start command)`
-				: `service '${event.service}' exited with code ${event.exitCode}`;
+			const summary =
+				event.completionExit !== null
+					? `run-to-completion unit '${event.service}' exited with code ${event.exitCode} ` +
+						`(expected ${event.completionExit})`
+					: event.instantExit
+						? `service '${event.service}' exited instantly (backgrounding start command)`
+						: `service '${event.service}' exited with code ${event.exitCode}`;
 			void offerOrDispatch(context, event.workspaceRoot, serviceFixTask(event), summary);
 		}),
 	);

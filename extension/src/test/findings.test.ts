@@ -127,6 +127,8 @@ suite('findings: message routing', () => {
 			walk: async () => void log.push('walk'),
 			openDeadSection: async (id) => void log.push(`dead:${id}`),
 			analyzeDeadCode: async () => void log.push('analyze'),
+			runExercise: async () => void log.push('exercise'),
+			autoPilot: async () => void log.push('autopilot'),
 		};
 		await handleFindingsMessage({ type: 'openSource', file: 'x.py', line: 3 }, a);
 		await handleFindingsMessage({ type: 'refresh' }, a);
@@ -141,7 +143,14 @@ suite('findings: message routing', () => {
 		// Same rule as dispatchFix: a section message with no id names no section.
 		await handleFindingsMessage({ type: 'openDeadSection' }, a);
 		await handleFindingsMessage({ type: 'analyzeDeadCode' }, a);
-		assert.deepStrictEqual(log, ['open:x.py:3', 'refresh', 'fix:abc123', 'walk', 'dead:aa11bb22cc33', 'analyze']);
+		// The empty state's two buttons. Without a route they render as controls
+		// that do nothing, which is worse than the text they replaced.
+		await handleFindingsMessage({ type: 'runExercise' }, a);
+		await handleFindingsMessage({ type: 'autoPilot' }, a);
+		assert.deepStrictEqual(log, [
+			'open:x.py:3', 'refresh', 'fix:abc123', 'walk', 'dead:aa11bb22cc33', 'analyze',
+			'exercise', 'autopilot',
+		]);
 	});
 });
 

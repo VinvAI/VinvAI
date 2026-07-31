@@ -454,6 +454,46 @@ export function servicePort(workspaceRoot: string, service: string): number | nu
 	}
 }
 
+/** Service kinds that run to completion rather than staying up and serving. */
+const RUN_TO_COMPLETION_KINDS = new Set(['python_cli', 'python_library']);
+
+/**
+ * The exit code a run-to-completion unit is contracted to finish with, or null
+ * when the service is a long-running server.
+ *
+ * Two sources, because either alone leaves a hole: the start record's
+ * `verification.probe` is the authoritative contract (it carries a documented
+ * non-zero `expect_exit` for units like linters), but it only exists once
+ * bring-up has verified the service — so the inventory's `kind` covers a unit
+ * whose start record is missing or still `verified: false`.
+ *
+ * Callers need this to tell "finished its work" from "died": for a CLI the
+ * defining event is a clean exit, and treating that as a crash dispatches a
+ * fix episode against a service that did exactly what it was asked to do.
+ */
+export function completionExitCode(workspaceRoot: string, service: string): number | null {
+	try {
+		const raw = fs.readFileSync(getStartCommandPath(workspaceRoot, service), 'utf8');
+		const parsed = JSON.parse(raw) as {
+			verification?: { probe?: { type?: string; expect_exit?: unknown } };
+		};
+		const probe = parsed.verification?.probe;
+		if (probe?.type === 'exit') {
+			const expect = probe.expect_exit;
+			return typeof expect === 'number' && Number.isInteger(expect) ? expect : 0;
+		}
+		// A recorded probe of any other type means bring-up verified this as a
+		// server — that fact outranks the inventory's coarser `kind`.
+		if (typeof probe?.type === 'string') {
+			return null;
+		}
+	} catch {
+		// No start record yet — fall through to the inventory.
+	}
+	const entry = readServices(workspaceRoot).find((s) => s.name === service);
+	return entry?.kind && RUN_TO_COMPLETION_KINDS.has(entry.kind) ? 0 : null;
+}
+
 /**
  * Reads the verified start command(s) recorded for a service by `bringup start`.
  * Each file holds an ordered list (e.g. a dependency to bring up first, then the

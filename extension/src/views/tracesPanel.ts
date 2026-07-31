@@ -98,7 +98,32 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 	};
 
 	const pollOnce = async (): Promise<void> => {
-		if (polling || disposed || !panel?.visible || !hasCaptures(root)) {
+		if (polling || disposed || !panel?.visible) {
+			return;
+		}
+		// Entry points are loaded once when the panel opens, and the poll below
+		// only ever refreshed COUNTS — so a panel opened before discovery finished
+		// (or before `bringup list` inventoried the CLIs) showed "No traced
+		// endpoints match" forever. Retried here, AHEAD of the captures gate: the
+		// list is what the panel is for, and a repo with no captures yet is
+		// precisely when it is both empty and worth filling. One identification
+		// call per tick while empty, none once it fills.
+		if (entries.length === 0) {
+			polling = true;
+			try {
+				entries = await loadEntryPoints(context, root);
+				if (entries.length > 0) {
+					post();
+				}
+			} catch {
+				// Discovery not ready yet — the next tick tries again.
+			} finally {
+				polling = false;
+			}
+		}
+		// Counts come from the captures; without any there is nothing to count,
+		// but the entry list above is still worth showing at zero.
+		if (!hasCaptures(root)) {
 			return;
 		}
 		polling = true;

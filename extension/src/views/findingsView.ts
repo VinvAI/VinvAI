@@ -25,7 +25,9 @@ import { dispatchClusterFix } from '../harness/exerciseRunner';
 export const FINDINGS_VIEW_TYPE = 'vinv.findings';
 
 export interface FindingsOutbound {
-	type: 'openSource' | 'refresh' | 'dispatchFix' | 'walk' | 'openDeadSection' | 'analyzeDeadCode';
+	type:
+		| 'openSource' | 'refresh' | 'dispatchFix' | 'walk' | 'openDeadSection'
+		| 'analyzeDeadCode' | 'runExercise' | 'autoPilot';
 	file?: string;
 	line?: number;
 	/** Cluster fingerprint for 'dispatchFix'. */
@@ -44,6 +46,10 @@ export interface FindingsActions {
 	openDeadSection: (sectionId: string) => Promise<void>;
 	/** Ask the harness about every unanalysed section, in batches. */
 	analyzeDeadCode: () => Promise<void>;
+	/** Drive the inventoried services under the tracer. */
+	runExercise: () => Promise<void>;
+	/** Set up, bring up and exercise everything — the zero-traces path. */
+	autoPilot: () => Promise<void>;
 }
 
 export async function handleFindingsMessage(
@@ -62,6 +68,10 @@ export async function handleFindingsMessage(
 		await actions.openDeadSection(msg.sectionId);
 	} else if (msg.type === 'analyzeDeadCode') {
 		await actions.analyzeDeadCode();
+	} else if (msg.type === 'runExercise') {
+		await actions.runExercise();
+	} else if (msg.type === 'autoPilot') {
+		await actions.autoPilot();
 	}
 }
 
@@ -210,6 +220,12 @@ function wireFindings(
 		},
 		// Every unanalysed section in one go: the batcher decides how many prompts
 		// that is, which is the whole reason it exists.
+		runExercise: async () => {
+			await vscode.commands.executeCommand('vinv-vs.runExercise');
+		},
+		autoPilot: async () => {
+			await vscode.commands.executeCommand('vinv-vs.autoPilot');
+		},
 		analyzeDeadCode: async () => {
 			await vscode.commands.executeCommand('vinv-vs.analyzeDeadCode');
 			await push();
@@ -391,9 +407,25 @@ function getHtml(): string {
 					? ' Vinv found <b>' + svc.length + '</b> service' + (svc.length === 1 ? '' : 's') +
 					  ' to drive' + (named ? ' (' + named + (svc.length > 3 ? ', …' : '') + ')' : '') + '.'
 					: ' No services are inventoried yet — run <b>Discover</b> first.') +
-				'<br><br>Bring a service up, then run <b>Exercise</b> to drive it under the tracer. ' +
-				'Coverage, issues and dead code all appear here once a run has been captured.' +
+				'<br><br>Coverage, issues and dead code all appear here once a run has been ' +
+				'captured.' +
+				'<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">' +
+				// Auto-Pilot leads: with zero traces the service is usually not up
+				// either, and Exercise alone would have nothing to drive. Both are
+				// offered because a user who already has a service running should
+				// not have to sit through setup to get to the part they wanted.
+				'<button id="empty-autopilot" class="act" title="Sets the services up, brings them up, ' +
+				'drives them, and dispatches fixes">Auto-Pilot — set up and run everything</button>' +
+				'<button id="empty-exercise" class="act" title="Drives the services that are ' +
+				'already up. Bring one up first, or use Auto-Pilot.">Run Exercise</button>' +
+				'</div>' +
 				'</div></div>';
+			// Wired here rather than in the shared post-render pass: this markup is
+			// written by an early return, so that pass never sees these nodes.
+			const ap = document.getElementById('empty-autopilot');
+			if (ap) { ap.addEventListener('click', () => vscode.postMessage({ type: 'autoPilot' })); }
+			const ex = document.getElementById('empty-exercise');
+			if (ex) { ex.addEventListener('click', () => vscode.postMessage({ type: 'runExercise' })); }
 			return;
 		}
 		const t = [
