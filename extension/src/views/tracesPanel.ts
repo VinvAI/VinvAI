@@ -7,6 +7,7 @@ import {
 	type EntryPoint,
 } from '../identification/identification';
 import { buildFilteredTrace } from '../identification/traceFilter';
+import { entryPointHits } from '../identification/entryPointHits';
 import type { SessionTimeRange } from './sessionsView';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
@@ -141,6 +142,13 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 			}
 			const summary = await getTraceSummary(context, root, traceFile);
 			const next = new Map<string, number>();
+			// Non-HTTP entry points FIRST, so the engine's own numbers overwrite
+			// them wherever both have an answer: tracesummary counts distinct
+			// server requests, which is the better unit for a route, and it is
+			// the number every other HTTP surface agrees with.
+			for (const [id, hits] of entryPointHits(root, entries, traceFile)) {
+				next.set(id, hits);
+			}
 			for (const e of summary.endpoints ?? []) {
 				next.set(e.id, e.trace_count);
 			}
@@ -182,6 +190,11 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 	void pollOnce();
 }
 
+/** Exported for the webview render tests (the script is evaluated headless). */
+export function getTracesHtml(): string {
+	return html();
+}
+
 function html(): string {
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -212,9 +225,9 @@ tr.row:hover td { background: var(--bg-2); }
 .empty { color: var(--muted); padding: 24px 0; }
 </style></head>
 <body><div class="wrap">
-<h1>Traced endpoints</h1>
+<h1>Traced entry points</h1>
 <div class="bar">
-  <input id="q" type="text" placeholder="Filter endpoints…" autocomplete="off">
+  <input id="q" type="text" placeholder="Filter entry points…" autocomplete="off">
   <select id="range"><option value="">All time</option></select>
 </div>
 <div id="out"><div class="empty">Loading…</div></div>
@@ -230,14 +243,21 @@ function render(){
   const needle = q.value.trim().toLowerCase();
   const rows = ROWS.filter(r => !needle ||
     (r.trigger + ' ' + r.handler + ' ' + r.file).toLowerCase().includes(needle));
-  if (!rows.length) { out.innerHTML = '<div class="empty">No traced endpoints match.</div>'; return; }
-  out.innerHTML = '<table><thead><tr><th>Endpoint</th><th>Handler</th><th>Kind</th>' +
-    '<th style="text-align:right">Hits</th></tr></thead><tbody>' +
+  if (!rows.length) { out.innerHTML = '<div class="empty">No entry points match.</div>'; return; }
+  // The unit differs by kind and the column cannot show both, so each cell
+  // says which one it is: a route counts requests, everything else counts the
+  // times its own handler ran (one CLI run, one worker task, one script).
+  const unit = (r) => r.kind === 'http_api'
+    ? 'Distinct traced requests that reached this endpoint'
+    : 'Times this entry point ran in the captures (its handler entered ' + r.count + '×)';
+  out.innerHTML = '<table><thead><tr><th>Entry point</th><th>Handler</th><th>Kind</th>' +
+    '<th style="text-align:right" title="How often this ran: requests for HTTP routes, invocations for everything else">Hits</th></tr></thead><tbody>' +
     rows.map(r => '<tr class="row" data-id="' + esc(r.id) + '" data-label="' + esc(r.trigger) + '">' +
       '<td class="trigger">' + esc(r.trigger) + '</td>' +
       '<td class="handler">' + esc(r.handler || '—') + '</td>' +
-      '<td><span class="kind">' + esc(r.kind) + '</span></td>' +
-      '<td class="count' + (r.count > 0 ? ' hit' : '') + '">' + r.count + '</td></tr>').join('') +
+      '<td><span class="kind">' + esc(r.kind.replace(/_/g, ' ')) + '</span></td>' +
+      '<td class="count' + (r.count > 0 ? ' hit' : '') + '" title="' + esc(unit(r)) + '">' +
+      r.count + '</td></tr>').join('') +
     '</tbody></table>';
   out.querySelectorAll('tr.row').forEach(tr => tr.addEventListener('click', () =>
     vscode.postMessage({ type: 'open', id: tr.dataset.id, label: tr.dataset.label })));
