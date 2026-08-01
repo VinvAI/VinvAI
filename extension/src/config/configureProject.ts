@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from '../views/webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from '../views/webviewTheme';
 import {
 	getHarnessId,
 	setHarnessId,
@@ -299,7 +299,7 @@ export function getFormHtml(
 		.pane { display: none; max-width: 760px; }
 		.pane.active { display: block; }
 		h2 {
-			font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400;
+			font-family: ${VINV_FONT_MONO}; font-weight: 400;
 			font-size: 30px; line-height: 1.05; letter-spacing: -0.01em; margin: 0 0 8px;
 		}
 		h3 {

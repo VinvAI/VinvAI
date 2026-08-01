@@ -15,7 +15,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 import { openPathInEditor } from '../support/openDocument';
 import {
 	optimizationSourceInstance,
@@ -229,7 +229,7 @@ function getReportHtml(): string {
 		${VINV_BASE_CSS}
 		body { padding: 18px 22px 40px; font-size: 12.5px; }
 		header { border-bottom: 1px solid var(--line); margin-bottom: 14px; padding-bottom: 12px; }
-		h1 { font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400; font-size: 24px; line-height: 1.1; margin: 0 0 6px; }
+		h1 { font-family: ${VINV_FONT_MONO}; font-weight: 400; font-size: 24px; line-height: 1.1; margin: 0 0 6px; }
 		.meta { color: var(--muted); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }
 		.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 12px; }
 		.tile { border: 1px solid var(--line-strong); padding: 10px 12px; background: var(--bg-2); }

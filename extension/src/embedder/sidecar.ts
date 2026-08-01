@@ -38,6 +38,35 @@ const HEALTH_CACHE_MS = 30_000;
  */
 const SPAWN_HEALTH_TIMEOUT_MS = 600_000;
 
+/**
+ * Narration channel for a caller that owns a progress surface (the Ask Vinv
+ * thinking line, an index-build notification). Called with one human-readable
+ * line whenever the sidecar's state changes or the wait ticks on.
+ */
+export type EmbedderStatus = (label: string) => void;
+
+/**
+ * Everyone currently listening to the wait, not just the caller that won the
+ * `ensureInFlight` race.
+ *
+ * The panel warms the sidecar on open (silently) and then narrates the first
+ * question — with a single stored callback the silent warm would win, and the
+ * question would sit through the whole multi-minute load with nothing to show
+ * for it. Listeners are registered for the duration of one call and always
+ * removed, so a closed panel's callback cannot outlive it.
+ */
+const statusListeners = new Set<EmbedderStatus>();
+
+function announce(label: string): void {
+	for (const listener of statusListeners) {
+		try {
+			listener(label);
+		} catch {
+			// A listener that throws (disposed webview) must not abort the wait.
+		}
+	}
+}
+
 let ownedChild: ChildProcess | null = null;
 let lastHealthyAt = 0;
 let ensureInFlight: Promise<boolean> | null = null;
@@ -102,12 +131,27 @@ export function isEmbedderStarting(timeoutMs = 1_500): Promise<boolean> {
 	});
 }
 
-/** Polls /health until it answers or the deadline passes. */
+/**
+ * Polls /health until it answers or the deadline passes, narrating the wait to
+ * `onStatus` roughly once a second.
+ *
+ * The narration is not decoration: a cached cold start runs for minutes (see
+ * SPAWN_HEALTH_TIMEOUT_MS), and a caller that shows nothing for that long is
+ * indistinguishable from one that has hung. The elapsed seconds travel with the
+ * label so the reader can see it is progressing, not stuck.
+ */
 async function waitForHealth(deadline: number): Promise<boolean> {
+	const startedAt = Date.now();
+	let announcedAt = 0;
 	while (Date.now() < deadline) {
 		if (await isEmbedderHealthy()) {
 			lastHealthyAt = Date.now();
 			return true;
+		}
+		const elapsed = Math.round((Date.now() - startedAt) / 1000);
+		if (Date.now() - announcedAt >= 1_000) {
+			announcedAt = Date.now();
+			announce(`loading the embedding model — first run takes a few minutes (${elapsed}s)`);
 		}
 		await sleep(500);
 	}
@@ -143,12 +187,25 @@ export function ensureEmbedderRunning(opts?: {
 	override?: string;
 	extensionDir?: string;
 	waitMs?: number;
+	/** Narrates the wait (see EmbedderStatus). Omitted by silent callers. */
+	onStatus?: EmbedderStatus;
 }): Promise<boolean> {
 	if (Date.now() - lastHealthyAt < HEALTH_CACHE_MS) {
 		return Promise.resolve(true);
 	}
+	// Registered around the WHOLE call — including the branch that joins an
+	// already-in-flight ensure — so a caller that arrives mid-load still hears
+	// the rest of the wait instead of blocking silently.
+	if (opts?.onStatus) {
+		statusListeners.add(opts.onStatus);
+	}
+	const unlisten = () => {
+		if (opts?.onStatus) {
+			statusListeners.delete(opts.onStatus);
+		}
+	};
 	if (ensureInFlight) {
-		return ensureInFlight;
+		return ensureInFlight.finally(unlisten);
 	}
 	ensureInFlight = (async () => {
 		try {
@@ -170,6 +227,7 @@ export function ensureEmbedderRunning(opts?: {
 			// answered yet is far more likely to be mid-load (minutes, on CPU)
 			// than wedged, and killing it would restart that load from zero.
 			if ((await isEmbedderStarting()) || (await findEmbedderPids()).length > 0) {
+				announce('the embedding model is already loading — waiting for it');
 				return waitForHealth(deadline);
 			}
 
@@ -177,6 +235,7 @@ export function ensureEmbedderRunning(opts?: {
 			if (!cmd) {
 				return false; // engines not installed — callers surface the install step
 			}
+			announce('starting the local embedding sidecar…');
 			const child = spawn(
 				cmd.file,
 				[...cmd.prefixArgs, 'serve', '--port', String(EMBEDDER_PORT)],
@@ -199,10 +258,19 @@ export function ensureEmbedderRunning(opts?: {
 				}
 			});
 			ownedChild = child;
+			const spawnedAt = Date.now();
+			let announcedAt = 0;
 			while (Date.now() < deadline) {
 				if (await isEmbedderHealthy()) {
 					lastHealthyAt = Date.now();
 					return true;
+				}
+				if (Date.now() - announcedAt >= 1_000) {
+					announcedAt = Date.now();
+					announce(
+						'loading the embedding model — first run takes a few minutes ' +
+							`(${Math.round((Date.now() - spawnedAt) / 1000)}s)`,
+					);
 				}
 				if (ownedChild === null) {
 					// The spawn died (port race with another window, missing model, …).
@@ -225,7 +293,9 @@ export function ensureEmbedderRunning(opts?: {
 			ensureInFlight = null;
 		}
 	})();
-	return ensureInFlight;
+	// The stored promise stays raw so joiners can attach their OWN unlisten;
+	// this caller's listener is dropped when its own await settles.
+	return ensureInFlight.finally(unlisten);
 }
 
 /** Stops the sidecar — but only when this process was the one that spawned it. */

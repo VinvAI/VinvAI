@@ -14,7 +14,7 @@
  * - THE LAYOUT BREATHES: repulsion and edge rest-length scale with node count,
  *   a collision pass separates overlapping discs, and the view auto-fits.
  */
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
 export function getGraphHtml(): string {
 	return `<!DOCTYPE html>
@@ -51,7 +51,7 @@ export function getGraphHtml(): string {
 			padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--bg);
 		}
 		h1 {
-			font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400;
+			font-family: ${VINV_FONT_MONO}; font-weight: 400;
 			font-size: 20px; margin: 0; letter-spacing: -0.01em;
 		}
 		.meta { color: var(--muted); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }
@@ -150,8 +150,7 @@ export function getGraphHtml(): string {
 		<input id="search" type="text" placeholder="search symbols… (Enter = semantic)" />
 		<div class="mode-switch">
 			<button id="m-explore" class="active" title="Browse the whole graph — click a node to isolate it and its links">Explore</button>
-			<button id="m-runtime" title="Overlay captured traces: ringed nodes actually executed (red ring = errors)">Runtime</button>
-			<button id="m-diff" title="What changed this epoch (solid red ring) and everything downstream of it (dashed ring)">Diff Impact</button>
+			<button id="m-diff" title="What you have changed (solid red ring) and everything downstream of it (dashed ring)">Diff Impact</button>
 			<button id="m-tour" title="Dependency-ordered walkthrough of the highest-ranked symbols">Tour</button>
 		</div>
 		<button class="v-btn primary" id="btn-ask" title="Ask a question about the selected node (or the whole codebase)">Ask Vinv</button>
@@ -219,7 +218,15 @@ export function getGraphHtml(): string {
 	// untraced nodes are and nothing else — not what they do, not whether anything
 	// still points at them, not what to do about them — so it moved to Findings,
 	// where it is a list of sections each opening its own walkthrough report.
-	let mode = 'explore';           // explore | runtime | diff | tour
+	// 'runtime' was a fourth mode with its own switch button; the button is gone,
+	// so the mode === 'runtime' branches below are never taken and the CANVAS
+	// overlay they drove is no longer reachable: executed/error rings and the
+	// hollow "never ran" discs. Per-node runtime facts are untouched — the detail
+	// panel still reports executions, errors and Trace & Flamegraph, the file
+	// panel still labels each symbol, and observed call arrows still draw for the
+	// selected node. Restoring the overlay = re-adding the button and the two
+	// mode arrays below; nothing else was deleted.
+	let mode = 'explore';           // explore | diff | tour
 	let expanded = new Set();       // files rendered at symbol level
 	let selected = null;            // display-node id
 	let neighborIds = new Set();    // direct neighbors of the selected node
@@ -362,10 +369,15 @@ export function getGraphHtml(): string {
 	// ---- diff impact: changed symbols + inbound invoke closure, per file ----
 	function computeImpact() {
 		changedFiles = new Set(); impactedFiles = new Set();
-		if (!snapshot || snapshot.store_epoch <= 0) { return; }
+		if (!snapshot) { return; }
+		// Changed = the host's changed-file set (git uncommitted, or recent mtime
+		// outside a repo) — NOT the content epoch, which on a first index marks
+		// every chunk and lit the whole map up.
+		const changedSet = new Set(snapshot.changed_files || []);
+		if (!changedSet.size) { return; }
 		const changedRows = [];
 		for (const n of snapshot.nodes) {
-			if (n.epoch === snapshot.store_epoch) { changedRows.push(n.row); changedFiles.add(n.file); }
+			if (changedSet.has(n.file)) { changedRows.push(n.row); changedFiles.add(n.file); }
 		}
 		const inbound = new Map();
 		for (const e of snapshot.edges) {
@@ -1253,6 +1265,12 @@ export function getGraphHtml(): string {
 			}
 			html += '<div class="actions">' +
 				'<button class="v-btn primary" data-act="expand" title="Replace this file node with one node per symbol">Expand Symbols</button>' +
+				// In Diff Impact, a CHANGED file's first question is "what did I
+				// change here" — the diff answers it; the file alone does not.
+				// Impacted-but-unchanged files have no diff, so they keep the open.
+				(mode === 'diff' && changedFiles.has(n.file)
+					? '<button class="v-btn" data-act="opendiff" data-file="' + esc(n.file) + '" title="Show this file&apos;s changes: HEAD against your working tree">Open Diff</button>'
+					: '') +
 				'<button class="v-btn" data-act="open" data-file="' + esc(n.file) + '" data-line="1" title="Open this file in the editor">Open File in Editor</button>' +
 				'<button class="v-btn" data-act="ask-file" title="Ask a question with this file preloaded as context">Ask Vinv About This File</button>' +
 				(errRows.length ? '<button class="v-btn" data-act="harness" data-row="' + errRows[0] + '" title="Dispatch a fix episode to the coding agent with the observed errors as evidence">Fix with Coding Agent</button>' : '') +
@@ -1263,24 +1281,24 @@ export function getGraphHtml(): string {
 			for (const row of rows.slice(0, 80)) {
 				const s = snapshot.nodes[row];
 				const rt = snapshot.runtime[row];
-				const isNew = snapshot.store_epoch > 0 && s.epoch === snapshot.store_epoch;
 				html += '<div class="sym" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="jump to ' + esc(s.file) + ':' + s.start_line + '">' +
-					'<span class="nm">' + esc(s.name) + (isNew ? ' <span style="color:var(--accent-fg)">●</span>' : '') + '</span>' +
+					'<span class="nm">' + esc(s.name) + '</span>' +
 					'<span class="rt' + (rt && (rt.current_errors ?? rt.errors) > 0 ? ' err' : '') + '">' + (rt ? rtLabel(rt) : '') + '</span></div>';
 			}
 			html += '</div></div>';
-			// Diff context: say WHAT changed here this epoch, not just that it did.
-			if (snapshot.store_epoch > 0) {
-				const changedRows = g.rows.filter((row) => snapshot.nodes[row].epoch === snapshot.store_epoch);
-				if (changedRows.length) {
-					html += '<div class="section"><span class="v-label">changed in epoch ' + snapshot.store_epoch + ' · ' + changedRows.length + '</span><div>';
-					for (const row of changedRows.slice(0, 20)) {
-						const s = snapshot.nodes[row];
-						html += '<div class="sym" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="jump to ' + esc(s.file) + ':' + s.start_line + '">' +
-							'<span class="nm">' + esc(s.name) + '</span><span class="rt">reindexed</span></div>';
-					}
-					html += '</div></div>';
-				}
+			// Diff context. This used to be a per-symbol "● / reindexed" marker keyed
+			// on node.epoch === store_epoch, which marked EVERY symbol on a first
+			// index (all chunks are stamped with the store epoch) — the same defect
+			// that lit up the whole map. The changed set is file level, so the honest
+			// statement is about the file, and "which lines" is the diff's job.
+			// Gated on the mode, like the Open Diff button it points at: changedFiles
+			// is computed when Diff Impact is entered and outlives leaving it.
+			if (mode === 'diff' && changedFiles.has(n.file)) {
+				const why = snapshot.change_source === 'git'
+					? 'uncommitted changes vs HEAD'
+					: 'edited in the last ' + (snapshot.change_window_minutes || 30) + ' min (no git repo)';
+				html += '<div class="section"><span class="v-label">changed</span>' +
+					'<div class="sub">' + why + ' — open the diff above to see what.</div></div>';
 			}
 			html += linksHtml(id);
 		} else {
@@ -1304,8 +1322,14 @@ export function getGraphHtml(): string {
 			} else {
 				html += '<div class="sub">runtime: never executed in captured traces</div>';
 			}
+			const symChanged = mode === 'diff' && changedFiles.has(s.file);
 			html += '<div class="actions">' +
-				'<button class="v-btn primary" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="Jump to ' + esc(s.file) + ':' + s.start_line + '">Open in Editor</button>' +
+				// Same rule as the file panel: in Diff Impact the diff leads for a
+				// changed file, and jumping to the symbol stays available beside it.
+				(symChanged
+					? '<button class="v-btn primary" data-act="opendiff" data-file="' + esc(s.file) + '" title="Show this file&apos;s changes: HEAD against your working tree">Open Diff</button>'
+					: '') +
+				'<button class="v-btn' + (symChanged ? '' : ' primary') + '" data-act="open" data-file="' + esc(s.file) + '" data-line="' + s.start_line + '" title="Jump to ' + esc(s.file) + ':' + s.start_line + '">Open in Editor</button>' +
 				'<button class="v-btn" data-act="ask" data-row="' + n.row + '" title="Ask a question with this symbol preloaded as context">Ask Vinv About This</button>' +
 				'<button class="v-btn" data-act="harness" data-row="' + n.row + '" title="Dispatch a fix episode to the coding agent with this symbol as evidence">Fix with Coding Agent</button>' +
 				(rt ? '<button class="v-btn" data-act="trace" title="Open the runtime call tree and latency flamegraph">Trace &amp; Flamegraph</button>' : '') +
@@ -1329,6 +1353,8 @@ export function getGraphHtml(): string {
 				const act = el.getAttribute('data-act');
 				if (act === 'open') {
 					vscode.postMessage({ type: 'openSource', file: el.getAttribute('data-file'), line: Number(el.getAttribute('data-line')) });
+				} else if (act === 'opendiff') {
+					vscode.postMessage({ type: 'openDiff', file: el.getAttribute('data-file') });
 				} else if (act === 'expand') {
 					expandFile(n.file);
 				} else if (act === 'collapse') {
@@ -1377,17 +1403,26 @@ export function getGraphHtml(): string {
 				discovered + ' runtime-only, dashed) — arrows show caller → callee';
 		}
 		if (mode === 'diff') {
-			if (snapshot.store_epoch <= 0) { return 'no epochs yet — reindex after a change'; }
+			const src = snapshot.change_source;
+			const mins = snapshot.change_window_minutes || 30;
+			const basis = src === 'git'
+				? 'uncommitted (git)'
+				: src === 'recent'
+					? 'edited in the last ' + mins + ' min (no git repo)'
+					: 'change source unavailable';
+			if (src === 'none') { return 'cannot tell what changed — no git repo and no readable file times'; }
 			return changedFiles.size
-				? changedFiles.size + ' files changed this epoch (solid ring) → ' +
+				? changedFiles.size + ' files ' + basis + ' (solid ring) → ' +
 					Math.max(0, impactedFiles.size - changedFiles.size) + ' impacted downstream (dashed) · click any node to inspect'
-				: 'nothing changed in epoch ' + snapshot.store_epoch;
+				: (src === 'git'
+					? 'working tree is clean — nothing uncommitted to show'
+					: 'no files edited in the last ' + mins + ' min');
 		}
 		return '';
 	}
 	function setMode(m) {
 		mode = m;
-		for (const id of ['explore', 'runtime', 'diff', 'tour']) {
+		for (const id of ['explore', 'diff', 'tour']) {
 			document.getElementById('m-' + id).classList.toggle('active', id === m);
 		}
 		document.getElementById('tourbox').style.display = m === 'tour' ? 'block' : 'none';
@@ -1400,7 +1435,7 @@ export function getGraphHtml(): string {
 		else { fitView(modeNodes()); }
 		setStatus(modeStatus());
 	}
-	['explore', 'runtime', 'diff', 'tour'].forEach((m) => {
+	['explore', 'diff', 'tour'].forEach((m) => {
 		document.getElementById('m-' + m).addEventListener('click', () => setMode(m));
 	});
 	// ---- guided tour ----

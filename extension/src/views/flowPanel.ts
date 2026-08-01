@@ -20,7 +20,7 @@ import * as path from 'path';
 import { apiIdFromCallTreePath, buildCallTreeReport } from '../harness/insightRunner';
 import { captureServiceFor } from '../bringup/bringup';
 import { readEntryPoints } from '../identification/identification';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 import { openPathInEditor, resolveOpenTarget } from '../support/openDocument';
 import type { FlowStateSource } from './flowStateSource';
 import type { FlowLink, FlowModel } from './flowModel';
@@ -382,7 +382,7 @@ function getFlowHtml(cspSource: string): string {
 			font-size: 10px; font-weight: 600; letter-spacing: 0.24em;
 			text-transform: uppercase; color: var(--ink);
 		}
-		.brand em { font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 11px; }
+		.brand em { font-family: ${VINV_FONT_MONO}; font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--muted); font-size: 11px; }
 	</style>
 </head>
 <body>

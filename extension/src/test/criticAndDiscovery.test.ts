@@ -51,6 +51,8 @@ function snapshotOf(
 		tour: [],
 		runtime,
 		flow_edges: [],
+		changed_files: [],
+		change_source: 'none',
 	};
 }
 

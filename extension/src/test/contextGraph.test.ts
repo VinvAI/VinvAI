@@ -735,6 +735,8 @@ suite('Harness handover pack (graph + evidence transfer)', () => {
 					}
 				: {},
 			flow_edges: flow,
+			changed_files: [],
+			change_source: 'none',
 		};
 	}
 	const budgets: PackBudgets = {

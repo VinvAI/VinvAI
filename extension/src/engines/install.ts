@@ -24,7 +24,7 @@ import {
 	resolveIndexBinary,
 	uvPath,
 } from './resolve';
-import { ensureEmbedderRunning, isEmbedderHealthy } from '../embedder/sidecar';
+import { ensureEmbedderRunning, isEmbedderHealthy, type EmbedderStatus } from '../embedder/sidecar';
 import { ENGINE_REF } from './pinned';
 
 /** Official, non-interactive installer command for a missing prerequisite. */
@@ -65,10 +65,16 @@ function installPrerequisite(tool: 'uv' | 'rust', label: string): void {
  * serving (reusing any healthy instance) with this window's engines-root
  * resolution. Call before any index build or query.
  */
-export function ensureEmbedder(context: vscode.ExtensionContext): Promise<boolean> {
+export function ensureEmbedder(
+	context: vscode.ExtensionContext,
+	// Narrates the wait for a caller with a progress surface (the Ask Vinv
+	// thinking line). Omitted by background callers, which stay silent.
+	onStatus?: EmbedderStatus,
+): Promise<boolean> {
 	return ensureEmbedderRunning({
 		override: enginesPathSetting(),
 		extensionDir: context.extensionPath,
+		onStatus,
 	});
 }
 

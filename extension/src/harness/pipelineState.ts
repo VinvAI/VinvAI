@@ -328,10 +328,15 @@ export interface ChangedSymbol {
 	file: string;
 }
 
-/** What changed this index epoch and how far it reaches. */
+/** What is currently changed in the working tree and how far it reaches. */
 export interface DiffImpact {
-	/** The store epoch this summary describes. */
+	/** The store epoch this summary was computed against. */
 	epoch: number;
+	/**
+	 * How "changed" was determined: `git` = uncommitted working set, `recent` =
+	 * mtime window (no repo), `none` = could not tell.
+	 */
+	source: 'git' | 'recent' | 'none';
 	changedSymbols: ChangedSymbol[];
 	/** Symbols in the inbound (caller) closure of the changes. */
 	impactedCount: number;

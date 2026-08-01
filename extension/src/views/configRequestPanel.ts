@@ -35,7 +35,7 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 
-import { VINV_BASE_CSS, VINV_FONT_MONO, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
 /** One variable the engine could not supply, as `envconfig` describes it. */
 export interface ConfigRequest {
@@ -275,7 +275,7 @@ export function getConfigPanelHtml(cspSource: string, model: ConfigPanelModel): 
 <style>
 ${VINV_BASE_CSS}
 body { font-family: ${VINV_FONT_MONO}; padding: 18px 20px; }
-h1 { font-family: ${VINV_FONT_SERIF}; font-style: italic; font-size: 22px; margin: 0 0 4px; }
+h1 { font-family: ${VINV_FONT_MONO}; font-weight: 400; font-size: 22px; margin: 0 0 4px; }
 .sub { color: var(--muted); font-size: 12px; margin-bottom: 18px; }
 .field { border: 1px solid var(--line); padding: 12px 14px; margin-bottom: 14px; }
 label { display: flex; align-items: center; gap: 8px; }

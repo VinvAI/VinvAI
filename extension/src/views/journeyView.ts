@@ -14,7 +14,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 import { buildJourney, appendUserPlan, type Journey, type UserPlan } from './journeyModel';
 import { openPathInEditor } from '../support/openDocument';
 
@@ -199,7 +199,7 @@ function getHtml(): string {
 			border-bottom: 1px solid var(--line); margin-bottom: 14px; padding-bottom: 12px;
 		}
 		h1 {
-			font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400;
+			font-family: ${VINV_FONT_MONO}; font-weight: 400;
 			font-size: 24px; line-height: 1.1; margin: 0 0 6px;
 		}
 		.meta { color: var(--muted); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }

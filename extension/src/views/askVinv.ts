@@ -8,7 +8,7 @@
  * bandit ledger as explicit rewards.
  */
 import * as vscode from 'vscode';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from './webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 import { openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore } from '../graph/indexGraph';
 import {
@@ -29,6 +29,7 @@ import { appendRetrievalEvent, retrievalEpoch } from '../mcp/retrievalTelemetry'
 import { indexStoreDir } from '../graph/indexGraph';
 import { enrichTagsFromFeedback } from '../graph/graphEnhancer';
 import { getHarnessId, qnaEscalationMode } from '../config/settings';
+import { ensureEmbedder } from '../engines/install';
 import { getHarness, runHarnessPrompt } from '../harness/harnessRunner';
 import {
 	appendTranscriptEntry,
@@ -87,6 +88,16 @@ const recentAnswers = new Map<string, { question: string; hits: IndexHit[] }>();
  */
 let lastAsk: { question: string; decisionId: string; feedbackGiven: boolean } | undefined;
 const REPHRASE_SIMILARITY = 0.6;
+
+/**
+ * Which scene the loader plays. Each one names a real state of the answer
+ * pipeline, not a mood: 'waiting' is the embedding model loading into memory,
+ * 'dig' is retrieval + the context walk, 'send' is the question sitting with
+ * the coding harness, 'hammer' is a retrial re-walking the graph after an
+ * insufficient verdict, 'dance' is the answer landing. The webview CSS keys off
+ * the same strings.
+ */
+type LoaderAct = 'waiting' | 'dig' | 'send' | 'hammer' | 'dance';
 
 interface AskMessage {
 	type:
@@ -383,6 +394,15 @@ export function openAskVinv(
 		enableScripts: true,
 		retainContextWhenHidden: true,
 	});
+	// Start the embedding sidecar NOW, not on the first question. A cached cold
+	// start runs for minutes on CPU, and paying it after the user has typed is
+	// what made the panel look broken: retrieval cannot embed the question until
+	// the model is in memory, so the whole wait landed on question one. Opening
+	// the panel is the earliest honest signal that a question is coming, so the
+	// load overlaps with the user typing it. Fire-and-forget: it reports through
+	// the same status channel the answer loop listens on, and a failure here is
+	// surfaced by the question that needs it, not by a toast nobody asked for.
+	void ensureEmbedder(context);
 	panel.webview.html = getHtml();
 	panel.onDidDispose(() => {
 		panel = undefined;
@@ -904,7 +924,16 @@ async function answerQuestion(
 	// up to max_retrials LLM calls + subprocesses must not keep burning after
 	// the user has moved on.
 	const generation = ++answerGeneration;
-	post({ type: 'thinking', label: 'gathering evidence…' });
+	// Every thinking update carries the loader ACT it belongs to, so the panel's
+	// skeleton shows what is actually happening rather than one generic spinner:
+	// jumping jacks while the embedding model loads, digging while evidence is
+	// gathered, throwing while the model is asked, a sledgehammer on a retrial.
+	const think = (label: string, act: LoaderAct) => post({ type: 'thinking', label, act });
+	// Sidecar cold start and index search are the two retrieval stages worth
+	// distinguishing — the first can run for minutes, the second for seconds.
+	const onProgress = (label: string, stage: 'embedder' | 'retrieval') =>
+		think(label, stage === 'embedder' ? 'waiting' : 'dig');
+	think('gathering evidence…', 'dig');
 	try {
 		// Failure-driven retrial loop: ask, read the model's own sufficiency
 		// verdict AND the deterministic critic's grounding check, and when
@@ -937,6 +966,7 @@ async function answerQuestion(
 				budgetGrowth: Math.pow(walk.retry_budget_growth, attempt),
 				priorInsufficiency: prior,
 				snapshot,
+				onProgress,
 			});
 			// Retrieval is the ONLY anchor source for a question typed into the
 			// panel — a seeded question still has the node the user clicked, but a
@@ -958,12 +988,16 @@ async function answerQuestion(
 			);
 			const harness = getHarness(getHarnessId());
 			mode = harness.label;
-			post({
-				type: 'thinking',
-				label: attempt === 0 ? `asking ${harness.label}…` : `retrial ${attempt} — asking ${harness.label} again…`,
-			});
+			think(
+				attempt === 0
+					? `asking ${harness.label}…`
+					: `retrial ${attempt} — asking ${harness.label} again…`,
+				'send',
+			);
 			const run = await runHarnessPrompt(getHarnessId(), workspaceRoot, 'qna', prompt, {
-				onUpdate: (line) => post({ type: 'thinking', label: line }),
+				// The agent's own output keeps the 'send' act: the question is with
+				// the model and this is it answering.
+				onUpdate: (line) => think(line, 'send'),
 			});
 			if (!run.ok) {
 				throw new Error(run.detail ?? 'harness run failed');
@@ -1012,10 +1046,10 @@ async function answerQuestion(
 			// reason travels with the retrial so the model knows why it is
 			// being asked again.
 			const missingForRetry = [...verdict.missing, ...critic.ungrounded];
-			post({
-				type: 'thinking',
-				label: `answer reported missing evidence (${missingForRetry.join('; ') || 'unspecified'}) — re-walking the graph…`,
-			});
+			think(
+				`answer reported missing evidence (${missingForRetry.join('; ') || 'unspecified'}) — re-walking the graph…`,
+				'hammer',
+			);
 			const resolved = await resolveMissingAnchors(
 				context,
 				workspaceRoot,
@@ -1164,7 +1198,7 @@ function getHtml(): string {
 		header { flex: none; position: relative; padding: 14px 18px 10px; border-bottom: 1px solid var(--line); }
 		.head-actions { position: absolute; top: 16px; right: 18px; display: flex; gap: 6px; }
 		h1 {
-			font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400;
+			font-family: ${VINV_FONT_MONO}; font-weight: 400;
 			font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em;
 		}
 		#mode { color: var(--muted); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }
@@ -1200,8 +1234,86 @@ function getHtml(): string {
 		/* Dispatch is the one action that DOES something — filled brand accent so it pops. */
 		.fb.dispatch { background: var(--accent); border-color: var(--accent); color: #ffffff; }
 		.fb.dispatch:hover { background: var(--accent-soft); border-color: var(--accent-soft); color: #ffffff; }
-		#thinking { display: none; color: var(--muted); font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; padding: 0 18px 8px; }
-		#thinking::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 8px; animation: v-pulse 2.4s ease-in-out infinite; }
+		#thinking { display: none; padding: 0 18px 8px; align-items: center; gap: 12px; }
+		#thinking.on { display: flex; }
+		#thinking-label { color: var(--muted); font-size: 10.5px; letter-spacing: 0.16em; text-transform: uppercase; }
+		/* The loader: five scenes stacked, only the active act displayed. Idle
+		   scenes are display:none, so their keyframes cost nothing. */
+		#act { position: relative; width: 74px; height: 52px; flex: none; }
+		#act svg { display: none; position: absolute; inset: 0; width: 74px; height: 52px; overflow: visible; }
+		#thinking[data-act="waiting"] .sc-waiting,
+		#thinking[data-act="dig"] .sc-dig,
+		#thinking[data-act="send"] .sc-send,
+		#thinking[data-act="hammer"] .sc-hammer,
+		#thinking[data-act="dance"] .sc-dance { display: block; }
+		#act g, #act path, #act circle, #act rect { transform-box: view-box; }
+		#act .bone { stroke: var(--muted); }
+		#act .fill { fill: var(--bg-2); }
+		#act .ground { stroke: var(--line-strong); }
+		#act .eye { fill: var(--accent); }
+		#act .dg-d1, #act .dg-d2, #act .dg-d3 { fill: var(--muted); }
+		/* -- waiting: jumping jacks (the embedding model warming up) -- */
+		.jj-b { transform-origin: 30px 46px; animation: jj-hop .52s cubic-bezier(.4,0,.5,1) infinite; }
+		.jj-aL { transform-origin: 30px 20px; animation: jj-aL .52s ease-in-out infinite; }
+		.jj-aR { transform-origin: 30px 20px; animation: jj-aR .52s ease-in-out infinite; }
+		.jj-lL { transform-origin: 30px 31px; animation: jj-lL .52s ease-in-out infinite; }
+		.jj-lR { transform-origin: 30px 31px; animation: jj-lR .52s ease-in-out infinite; }
+		@keyframes jj-hop { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-4px) } }
+		@keyframes jj-aL { 0%,100% { transform: rotate(0) } 50% { transform: rotate(-118deg) } }
+		@keyframes jj-aR { 0%,100% { transform: rotate(0) } 50% { transform: rotate(118deg) } }
+		@keyframes jj-lL { 0%,100% { transform: rotate(0) } 50% { transform: rotate(-20deg) } }
+		@keyframes jj-lR { 0%,100% { transform: rotate(0) } 50% { transform: rotate(20deg) } }
+		/* -- dig: gathering evidence -- */
+		.dg-b { transform-origin: 16px 44px; animation: dg-pitch 1.05s cubic-bezier(.4,0,.5,1) infinite; }
+		.dg-a { transform-origin: 15px 19px; animation: dg-swing 1.05s cubic-bezier(.4,0,.5,1) infinite; }
+		.dg-d1 { animation: dg-f1 1.05s cubic-bezier(.2,.6,.5,1) infinite; }
+		.dg-d2 { animation: dg-f2 1.05s cubic-bezier(.2,.6,.5,1) infinite; }
+		.dg-d3 { animation: dg-f3 1.05s cubic-bezier(.2,.6,.5,1) infinite; }
+		@keyframes dg-pitch { 0%,100% { transform: rotate(-7deg) } 34% { transform: rotate(9deg) } 60% { transform: rotate(-4deg) } }
+		@keyframes dg-swing { 0%,100% { transform: rotate(-34deg) } 34% { transform: rotate(26deg) } 62% { transform: rotate(-20deg) } }
+		@keyframes dg-f1 { 0%,33% { opacity: 0; transform: translate(0,0) } 40% { opacity: 1 } 100% { opacity: 0; transform: translate(9px,-17px) } }
+		@keyframes dg-f2 { 0%,36% { opacity: 0; transform: translate(0,0) } 44% { opacity: 1 } 100% { opacity: 0; transform: translate(15px,-11px) } }
+		@keyframes dg-f3 { 0%,38% { opacity: 0; transform: translate(0,0) } 46% { opacity: 1 } 100% { opacity: 0; transform: translate(4px,-13px) } }
+		/* -- send: the question goes to the harness -- */
+		.sd-b { transform-origin: 16px 44px; animation: sd-lean 2s ease-in-out infinite; }
+		.sd-a { transform-origin: 16px 19px; animation: sd-throw 2s cubic-bezier(.3,0,.3,1) infinite; }
+		.sd-h { transform-origin: 16px 16px; animation: sd-look 2s ease-in-out infinite; }
+		.sd-p { animation: sd-fly 2s cubic-bezier(.2,.5,.4,1) infinite; }
+		@keyframes sd-throw { 0%,22% { transform: rotate(52deg) } 34% { transform: rotate(-74deg) } 60%,100% { transform: rotate(52deg) } }
+		@keyframes sd-lean { 0%,22% { transform: rotate(-4deg) } 36% { transform: rotate(7deg) } 60%,100% { transform: rotate(-4deg) } }
+		@keyframes sd-look { 0%,22% { transform: rotate(0) } 40%,64% { transform: rotate(-13deg) } 84%,100% { transform: rotate(0) } }
+		@keyframes sd-fly { 0%,30% { opacity: 1; transform: translate(0,0) rotate(0) }
+			64% { opacity: 1; transform: translate(26px,-13px) rotate(-10deg) }
+			78% { opacity: 0; transform: translate(38px,-19px) rotate(-14deg) }
+			79%,100% { opacity: 0; transform: translate(0,0) rotate(0) } }
+		/* -- hammer: a retrial re-walking the graph -- */
+		.hm-s { animation: hm-shake 1.25s linear infinite; }
+		.hm-b { transform-origin: 16px 44px; animation: hm-lean 1.25s cubic-bezier(.35,0,.4,1) infinite; }
+		.hm-a { transform-origin: 15px 19px; animation: hm-smash 1.25s cubic-bezier(.35,0,.4,1) infinite; }
+		.hm-r { transform-origin: 40px 44px; animation: hm-jolt 1.25s linear infinite; }
+		.hm-k { transform-origin: 40px 37px; animation: hm-spark 1.25s linear infinite; }
+		@keyframes hm-smash { 0% { transform: rotate(-120deg) } 30% { transform: rotate(-132deg) } 46% { transform: rotate(34deg) }
+			58% { transform: rotate(28deg) } 100% { transform: rotate(-120deg) } }
+		@keyframes hm-lean { 0%,30% { transform: rotate(-6deg) } 46% { transform: rotate(11deg) } 100% { transform: rotate(-6deg) } }
+		@keyframes hm-shake { 0%,44%,54%,100% { transform: translate(0,0) } 47% { transform: translate(-1.5px,1px) } 50% { transform: translate(1.5px,-.5px) } }
+		@keyframes hm-jolt { 0%,44%,100% { transform: translateY(0) scaleY(1) } 47% { transform: translateY(2px) scaleY(.88) } 56% { transform: translateY(0) scaleY(1) } }
+		@keyframes hm-spark { 0%,43% { opacity: 0; transform: scale(.4) } 47% { opacity: 1; transform: scale(1) } 58%,100% { opacity: 0; transform: scale(1.5) } }
+		/* -- dance: the answer landed -- */
+		.dc-b { transform-origin: 30px 46px; animation: dc-hop .46s cubic-bezier(.4,0,.5,1) infinite; }
+		.dc-h { transform-origin: 30px 16px; animation: dc-bop .46s ease-in-out infinite; }
+		.dc-aL { transform-origin: 30px 19px; animation: dc-aL .46s ease-in-out infinite; }
+		.dc-aR { transform-origin: 30px 19px; animation: dc-aR .46s ease-in-out infinite; }
+		.dc-lL { transform-origin: 30px 30px; animation: dc-lL .46s ease-in-out infinite; }
+		.dc-lR { transform-origin: 30px 30px; animation: dc-lR .46s ease-in-out infinite; }
+		@keyframes dc-hop { 0%,100% { transform: translateY(0) rotate(-6deg) } 50% { transform: translateY(-5px) rotate(6deg) } }
+		@keyframes dc-bop { 0%,100% { transform: rotate(11deg) } 50% { transform: rotate(-11deg) } }
+		@keyframes dc-aL { 0%,100% { transform: rotate(74deg) } 50% { transform: rotate(-88deg) } }
+		@keyframes dc-aR { 0%,100% { transform: rotate(-88deg) } 50% { transform: rotate(74deg) } }
+		@keyframes dc-lL { 0%,100% { transform: rotate(-19deg) } 50% { transform: rotate(21deg) } }
+		@keyframes dc-lR { 0%,100% { transform: rotate(21deg) } 50% { transform: rotate(-19deg) } }
+		/* Motion is decoration here — the label always carries the same state in
+		   words, so freezing every scene loses nothing. */
+		@media (prefers-reduced-motion: reduce) { #act * { animation: none !important; } }
 		footer { flex: none; padding: 12px 18px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; }
 		#input {
 			flex: 1; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 0;
@@ -1282,7 +1394,104 @@ function getHtml(): string {
 		and the captured runtime evidence — every claim cites the symbols it came from, and runtime
 		facts are marked when the code changed after the trace.</div>
 	</div>
-	<div id="thinking"></div>
+	<div id="thinking" data-act="dig">
+		<div id="act" aria-hidden="true">
+			<svg class="sc-waiting" viewBox="0 0 60 52" fill="none" stroke-width="1.7" stroke-linecap="round">
+				<line class="ground" x1="6" y1="46" x2="54" y2="46" stroke-width="2"/>
+				<g class="jj-b bone" stroke="currentColor">
+					<circle class="fill" cx="30" cy="11" r="6.4" stroke="none"/>
+					<circle cx="30" cy="11" r="6.4"/>
+					<circle class="eye" cx="27.8" cy="10.6" r="1.3" stroke="none"/>
+					<circle class="eye" cx="32.2" cy="10.6" r="1.3" stroke="none"/>
+					<path d="M30 17.6 v14"/>
+					<path d="M25.8 20 h8.4 M25.8 23.6 h8.4" stroke-width="1"/>
+					<path class="jj-aL" d="M30 20 l-10 8"/>
+					<path class="jj-aR" d="M30 20 l10 8"/>
+					<path class="jj-lL" d="M30 31 l-5 15"/>
+					<path class="jj-lR" d="M30 31 l5 15"/>
+				</g>
+			</svg>
+			<svg class="sc-dig" viewBox="0 0 60 52" fill="none" stroke-width="1.7" stroke-linecap="round">
+				<line class="ground" x1="4" y1="46" x2="56" y2="46" stroke-width="2"/>
+				<path class="fill" d="M34 46 q7 -8 14 0"/>
+				<circle class="dg-d1" cx="35" cy="40" r="1.5" fill="currentColor"/>
+				<circle class="dg-d2" cx="37" cy="41" r="1.2" fill="currentColor"/>
+				<circle class="dg-d3" cx="33.5" cy="41.5" r="1" fill="currentColor"/>
+				<g class="dg-b bone" stroke="currentColor">
+					<circle class="fill" cx="16" cy="9" r="6.6" stroke="none"/>
+					<circle cx="16" cy="9" r="6.6"/>
+					<circle class="eye" cx="13.6" cy="8.6" r="1.4" stroke="none"/>
+					<circle class="eye" cx="18.6" cy="8.6" r="1.4" stroke="none"/>
+					<path d="M16 16 v13"/>
+					<path d="M11.6 19 h8.8 M11.6 22.6 h8.8" stroke-width="1.1"/>
+					<path d="M16 29 l-5 15"/><path d="M16 29 l6 15"/>
+					<g class="dg-a">
+						<path d="M15 19 l11 7"/><path d="M15 22 l11 4"/>
+						<path d="M15 20.5 L34 33" stroke-width="1.9"/>
+						<path class="fill" d="M32 31 l6 2.5 -2.5 5 -5.5 -4 z"/>
+					</g>
+				</g>
+			</svg>
+			<svg class="sc-send" viewBox="0 0 60 52" fill="none" stroke-width="1.7" stroke-linecap="round">
+				<line class="ground" x1="4" y1="46" x2="56" y2="46" stroke-width="2"/>
+				<g class="sd-b bone" stroke="currentColor">
+					<g class="sd-h">
+						<circle class="fill" cx="16" cy="9" r="6.6" stroke="none"/>
+						<circle cx="16" cy="9" r="6.6"/>
+						<circle class="eye" cx="13.6" cy="8.6" r="1.4" stroke="none"/>
+						<circle class="eye" cx="18.6" cy="8.6" r="1.4" stroke="none"/>
+					</g>
+					<path d="M16 16 v13"/>
+					<path d="M11.6 19 h8.8 M11.6 22.6 h8.8" stroke-width="1.1"/>
+					<path d="M16 29 l-5 15"/><path d="M16 29 l5 15"/>
+					<path d="M16 19 l-7 8"/>
+					<g class="sd-a">
+						<path d="M16 19 l9 -6"/>
+						<g class="sd-p"><path class="fill" d="M24 8 l10 4 -10 4 2 -4 z"/></g>
+					</g>
+				</g>
+			</svg>
+			<svg class="sc-hammer" viewBox="0 0 60 52" fill="none" stroke-width="1.7" stroke-linecap="round">
+				<g class="hm-s">
+					<line class="ground" x1="4" y1="46" x2="56" y2="46" stroke-width="2"/>
+					<path class="hm-r fill" d="M34 44 l4 -7 6 1 3 6 z"/>
+					<g class="hm-k"><path d="M40 34 v-5 M45 36 l5 -3 M35 36 l-5 -3" stroke="var(--accent)" stroke-width="1.3"/></g>
+					<g class="hm-b bone" stroke="currentColor">
+						<circle class="fill" cx="16" cy="9" r="6.6" stroke="none"/>
+						<circle cx="16" cy="9" r="6.6"/>
+						<circle class="eye" cx="13.6" cy="8.6" r="1.4" stroke="none"/>
+						<circle class="eye" cx="18.6" cy="8.6" r="1.4" stroke="none"/>
+						<path d="M16 16 v13"/>
+						<path d="M11.6 19 h8.8 M11.6 22.6 h8.8" stroke-width="1.1"/>
+						<path d="M16 29 l-5.5 15"/><path d="M16 29 l6.5 15"/>
+						<g class="hm-a">
+							<path d="M15 19 l10 6"/><path d="M15 22 l10 3"/>
+							<path d="M15 20.5 L33 31" stroke-width="1.9"/>
+							<rect class="fill" x="31.5" y="27.5" width="8" height="5.5" rx="1"/>
+						</g>
+					</g>
+				</g>
+			</svg>
+			<svg class="sc-dance" viewBox="0 0 60 52" fill="none" stroke-width="1.7" stroke-linecap="round">
+				<line class="ground" x1="6" y1="46" x2="54" y2="46" stroke-width="2"/>
+				<g class="dc-b bone" stroke="currentColor">
+					<g class="dc-h">
+						<circle class="fill" cx="30" cy="9" r="6.6" stroke="none"/>
+						<circle cx="30" cy="9" r="6.6"/>
+						<circle class="eye" cx="27.6" cy="8.6" r="1.4" stroke="none"/>
+						<circle class="eye" cx="32.6" cy="8.6" r="1.4" stroke="none"/>
+					</g>
+					<path d="M30 16 v14"/>
+					<path d="M25.6 19 h8.8 M25.6 22.6 h8.8" stroke-width="1.1"/>
+					<path class="dc-aL" d="M30 19 l-9 8"/>
+					<path class="dc-aR" d="M30 19 l9 8"/>
+					<path class="dc-lL" d="M30 30 l-6 14"/>
+					<path class="dc-lR" d="M30 30 l6 14"/>
+				</g>
+			</svg>
+		</div>
+		<div id="thinking-label"></div>
+	</div>
 	<div id="hints"></div>
 	<footer>
 		<textarea id="input" rows="2" placeholder="Ask about the code — or type / for commands (goal, budget, fix…)"></textarea>
@@ -1296,6 +1505,27 @@ function getHtml(): string {
 	const log = document.getElementById('log');
 	const input = document.getElementById('input');
 	const thinking = document.getElementById('thinking');
+	const thinkingLabel = document.getElementById('thinking-label');
+	// Timer for the one-beat dance after an answer lands; cleared whenever the
+	// loader is shown or hidden again so a fast follow-up question can never be
+	// cut short by the previous answer's celebration.
+	let danceTimer;
+	function showThinking(label, act) {
+		clearTimeout(danceTimer);
+		if (act) { thinking.dataset.act = act; }
+		thinkingLabel.textContent = label;
+		thinking.classList.add('on');
+	}
+	function hideThinking() {
+		clearTimeout(danceTimer);
+		thinking.classList.remove('on');
+	}
+	// The answer landed: let the skeleton dance for one beat, then clear. The
+	// wait is over either way, so this can never delay anything the user needs.
+	function celebrate() {
+		showThinking('done', 'dance');
+		danceTimer = setTimeout(function () { thinking.classList.remove('on'); }, 1200);
+	}
 	let busy = false;
 	// The episode block currently receiving thinking lines (undefined between
 	// episodes, so a stray update opens its own block rather than being lost).
@@ -1423,8 +1653,7 @@ function getHtml(): string {
 		busy = true;
 		makeTurn(q);
 		log.scrollTop = log.scrollHeight;
-		thinking.style.display = 'block';
-		thinking.textContent = 'gathering evidence…';
+		showThinking('gathering evidence…', 'dig');
 		vscode.postMessage({ type: 'ask', question: q });
 	}
 	document.getElementById('send').addEventListener('click', ask);
@@ -1475,11 +1704,10 @@ function getHtml(): string {
 			el.textContent = msg.label;
 			el.style.display = 'block';
 		} else if (msg.type === 'thinking') {
-			thinking.style.display = 'block';
-			thinking.textContent = msg.label;
+			showThinking(msg.label, msg.act);
 		} else if (msg.type === 'answer') {
 			busy = false;
-			thinking.style.display = 'none';
+			celebrate();
 			document.getElementById('seed').style.display = 'none';
 			const turns = log.querySelectorAll('.turn');
 			let turn = turns[turns.length - 1];
@@ -1494,7 +1722,7 @@ function getHtml(): string {
 			// on panel open (resuming the active session) or a session switch.
 			busy = false;
 			epBlock = undefined;
-			thinking.style.display = 'none';
+			hideThinking();
 			document.getElementById('seed').style.display = 'none';
 			log.innerHTML = '';
 			for (const e of msg.entries || []) {
@@ -1785,7 +2013,7 @@ function getHtml(): string {
 			busy = false;
 			epBlock = undefined;
 			goalCard = undefined;
-			thinking.style.display = 'none';
+			hideThinking();
 			document.getElementById('seed').style.display = 'none';
 			log.innerHTML = '';
 			addNotice(msg.text);
@@ -1796,7 +2024,7 @@ function getHtml(): string {
 			log.scrollTop = log.scrollHeight;
 		} else if (msg.type === 'error') {
 			busy = false;
-			thinking.style.display = 'none';
+			hideThinking();
 			const turns = log.querySelectorAll('.turn');
 			const turn = turns[turns.length - 1];
 			if (turn) {

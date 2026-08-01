@@ -17,7 +17,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getGraphHtml } from './graphExplorerHtml';
-import { openPathInEditor } from '../support/openDocument';
+import { openDiffAgainstHead, openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore, type GraphSnapshot } from '../graph/indexGraph';
 import { runIndexQuery, hitsToRows } from '../qna/answer';
 import { entryPointLabel, loadEntryPoints } from '../identification/identification';
@@ -30,6 +30,7 @@ export const GRAPH_VIEW_TYPE = 'vinv.graphExplorer';
 export interface OutboundMessage {
 	type:
 		| 'openSource'
+		| 'openDiff'
 		| 'semanticSearch'
 		| 'ask'
 		| 'harness'
@@ -50,6 +51,7 @@ export interface OutboundMessage {
  */
 export interface GraphActions {
 	openSource: (file: string | undefined, line?: number) => Promise<void>;
+	openDiff: (file: string | undefined) => Promise<void>;
 	refresh: () => void;
 	semanticSearch: (query: string) => Promise<void>;
 	ask: (row?: number) => Promise<void>;
@@ -71,6 +73,9 @@ export async function handleGraphMessage(
 	switch (msg.type) {
 		case 'openSource':
 			await actions.openSource(msg.file, msg.line);
+			return;
+		case 'openDiff':
+			await actions.openDiff(msg.file);
 			return;
 		case 'refresh':
 			actions.refresh();
@@ -274,6 +279,9 @@ export class GraphExplorerEditorProvider implements vscode.CustomReadonlyEditorP
 					preview: true,
 					viewColumn: vscode.ViewColumn.Beside,
 				});
+			},
+			openDiff: async (file) => {
+				await openDiffAgainstHead(file, { workspaceRoot, label: 'source file' });
 			},
 			refresh: () => rebuild(),
 			semanticSearch: async (query) => {

@@ -18,6 +18,7 @@ import {
 	readSessionTag,
 	type SessionMark,
 } from '../runtime/traceStore';
+import { detectChangedFiles, type ChangeSource } from './changedFiles';
 
 /** One symbol chunk as stored in .vinv/index/chunks.jsonl (text omitted). */
 export interface GraphNode {
@@ -53,7 +54,7 @@ export interface FileGroup {
 	symbols: number;
 	/** Sum of member PageRanks — sizes the file bubble. */
 	rank: number;
-	/** True when any member symbol changed in the current store epoch. */
+	/** True when this file is in the diff-impact changed set (see changedFiles.ts). */
 	changed: boolean;
 	/** Rows of the member symbols (for expansion). */
 	rows: number[];
@@ -221,6 +222,16 @@ export interface GraphSnapshot {
 	runtime: Record<number, RuntimeOverlay>;
 	/** Observed caller→callee edges from raw trace captures. */
 	flow_edges: FlowEdge[];
+	/**
+	 * Files diff impact treats as changed — git's uncommitted working set, or
+	 * (outside a repo) files touched in the last {@link RECENT_WINDOW_MINUTES}.
+	 * NOT derived from epochs: see changedFiles.ts.
+	 */
+	changed_files: string[];
+	/** How `changed_files` was determined, for the diff-mode legend. */
+	change_source: ChangeSource;
+	/** Window in minutes, on the `recent` fallback only. */
+	change_window_minutes?: number;
 }
 
 /** Legend order — foundational layers first, periphery last. */
@@ -416,7 +427,7 @@ export function loadStoreEpoch(storeDir: string): number {
 export function buildFileLevel(
 	nodes: GraphNode[],
 	edges: GraphEdge[],
-	storeEpoch: number,
+	changedFiles: ReadonlySet<string>,
 ): { files: FileGroup[]; fileEdges: FileEdge[] } {
 	const groups = new Map<string, FileGroup>();
 	for (const n of nodes) {
@@ -428,7 +439,7 @@ export function buildFileLevel(
 		g.symbols += 1;
 		g.rank += n.rank;
 		g.rows.push(n.row);
-		if (storeEpoch > 0 && n.epoch === storeEpoch) {
+		if (changedFiles.has(n.file)) {
 			g.changed = true;
 		}
 	}
@@ -1208,7 +1219,11 @@ export function buildGraphSnapshot(workspaceRoot: string): GraphSnapshot {
 	const nodes = loadNodes(storeDir);
 	const edges = loadEdges(storeDir, nodes.length);
 	const storeEpoch = loadStoreEpoch(storeDir);
-	const { files, fileEdges } = buildFileLevel(nodes, edges, storeEpoch);
+	const changed = detectChangedFiles(
+		workspaceRoot,
+		new Set(nodes.map((n) => n.file)),
+	);
+	const { files, fileEdges } = buildFileLevel(nodes, edges, changed.files);
 	const { runtime, flow } = loadRuntimeAndFlow(workspaceRoot, nodes, edges);
 	return {
 		generated_at: new Date().toISOString(),
@@ -1224,6 +1239,9 @@ export function buildGraphSnapshot(workspaceRoot: string): GraphSnapshot {
 		tour: buildTour(nodes, edges),
 		runtime,
 		flow_edges: flow,
+		changed_files: [...changed.files],
+		change_source: changed.source,
+		change_window_minutes: changed.windowMinutes,
 	};
 }
 

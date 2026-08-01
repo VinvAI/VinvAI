@@ -10,7 +10,7 @@ import {
 	type TraceMapResult,
 } from './identification';
 import { captureServiceFor } from '../bringup/bringup';
-import { VINV_BASE_CSS, VINV_FONT_SERIF } from '../views/webviewTheme';
+import { VINV_BASE_CSS, VINV_FONT_MONO } from '../views/webviewTheme';
 import { getTraceMemory, memoryForNode, type TraceMemory } from './traceMemory';
 import { generateSmokeReport } from '../tracelens/report';
 import { openSmokeReport } from './smokeReportView';
@@ -388,7 +388,7 @@ function getHtml(label: string): string {
 		}
 		.head-left { min-width: 0; }
 		h1 {
-			font-family: ${VINV_FONT_SERIF}; font-style: italic; font-weight: 400;
+			font-family: ${VINV_FONT_MONO}; font-weight: 400;
 			font-size: 24px; line-height: 1.1; letter-spacing: -0.01em; margin: 0 0 6px;
 		}
 		.meta { color: var(--muted); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; }

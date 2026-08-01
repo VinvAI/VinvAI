@@ -1,22 +1,20 @@
 /**
  * Shared design system for Vinv webviews, ported from the vinv.ai site so the
  * extension's panels read as the same product: white/black/red, JetBrains Mono
- * body, serif-italic display headings, uppercase micro-labels, sharp corners,
- * and the grid + grain backdrop.
+ * everywhere, uppercase micro-labels, sharp corners, and the grid + grain
+ * backdrop. There is exactly one typeface — the sidebar, the panels and their
+ * display headings all use VINV_FONT_MONO, so nothing reads as a second font.
  *
  * Palette variables are defined on <body> and keyed off the theme classes VS
  * Code stamps there (vscode-light / vscode-dark / vscode-high-contrast), so
- * every panel follows the editor's light/dark setting automatically. The web
- * fonts (JetBrains Mono / Instrument Serif) are first in the stacks; when not
- * installed on the user's machine they fall back to the editor's mono font and
- * a system serif, which keeps the look without bundling font files.
+ * every panel follows the editor's light/dark setting automatically. JetBrains
+ * Mono is first in the stack; when it is not installed on the user's machine it
+ * falls back to the editor's mono font, which keeps the look without bundling
+ * font files.
  */
 
 export const VINV_FONT_MONO =
 	"'JetBrains Mono', var(--vscode-editor-font-family, ui-monospace), ui-monospace, Consolas, monospace";
-
-export const VINV_FONT_SERIF =
-	"'Instrument Serif', 'Iowan Old Style', Georgia, 'Times New Roman', serif";
 
 export const VINV_BASE_CSS = `
 	/* ===== Vinv palette (light default, mirrors vinv.ai styles.css) =====
@@ -139,10 +137,9 @@ export const VINV_BASE_CSS = `
 	}
 	.v-label::before { content: '// '; color: var(--accent-fg); }
 
-	/* serif-italic display heading */
+	/* display heading — same mono face as the rest of the UI, just larger */
 	.v-display {
-		font-family: ${VINV_FONT_SERIF};
-		font-style: italic;
+		font-family: ${VINV_FONT_MONO};
 		font-weight: 400;
 		letter-spacing: -0.01em;
 		color: var(--ink);

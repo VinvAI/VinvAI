@@ -45,6 +45,14 @@ import {
 } from '../harness/runtimeAnalysis';
 import { indexStoreDir } from '../graph/indexGraph';
 
+/**
+ * Live progress of the retrieval leg. `stage` is what the caller renders
+ * against — the panel picks a different loader scene for a sidecar cold start
+ * than for the index search itself — so consumers never have to pattern-match
+ * on the human label to work out what is happening.
+ */
+export type QnaProgress = (label: string, stage: 'embedder' | 'retrieval') => void;
+
 /** One hit from `index query`, as rendered by the Rust binary. */
 export interface IndexHit {
 	score: number;
@@ -70,26 +78,30 @@ export async function runIndexQuery(
 	workspaceRoot: string,
 	query: string,
 	topK: number,
+	// Live narration for a caller with a progress surface: the sidecar's cold
+	// start dominates the wall-clock of a first question (minutes, on CPU), and
+	// without this the panel showed one frozen label for all of it.
+	onProgress?: QnaProgress,
 ): Promise<IndexHit[]> {
 	if (!isBinAvailable(context, 'index')) {
 		throw new Error('the Vinv index engine is not installed yet');
 	}
 	const binPath = getBinPath(context, 'index');
 	const storeDir = indexStoreDir(workspaceRoot);
-	// Queries embed through the local sidecar; make sure it is serving. A false
-	// here is NOT on its own fatal — the store may be configured against a remote
-	// gateway (INDEX_GATEWAY_URL), which needs no sidecar at all — but it is by
-	// far the most common reason the query below fails, so it is worth naming in
-	// the error when it does. Ignoring the result entirely (the old behaviour)
-	// meant a sidecar that never came up produced only the binary's generic
-	// complaint, several layers away from the thing the user has to start.
-	const embedderReady = await ensureEmbedder(context);
-	const fail = (message: string): Error =>
-		new Error(
-			embedderReady
-				? message
-				: `${message} (the local embedding sidecar never came up — Vinv could not start it)`,
+	// Queries embed through the local sidecar, and getIndexEnv (below) points
+	// INDEX_GATEWAY_URL at exactly that sidecar — so when it never comes up
+	// there is no remote gateway left that could serve the embedding, and the
+	// query below can only fail. Spawning it anyway just spends a subprocess to
+	// rediscover that, then reports the binary's generic complaint several
+	// layers away from the thing the user actually has to start. Say it here.
+	if (!(await ensureEmbedder(context, (label) => onProgress?.(label, 'embedder')))) {
+		throw new Error(
+			'the local embedding sidecar never came up, so the question could not be embedded — ' +
+				'Vinv tried to start `vinv-embedder serve` and it did not begin serving. ' +
+				'Check .vinv/logs, or run "Vinv: Install Vinv Engines" if the engines are missing.',
 		);
+	}
+	onProgress?.('searching the code index…', 'retrieval');
 	return new Promise((resolve, reject) => {
 		execFile(
 			binPath,
@@ -97,18 +109,18 @@ export async function runIndexQuery(
 			{ maxBuffer: 32 * 1024 * 1024, env: getIndexEnv(path.dirname(binPath)) },
 			(error, stdout, stderr) => {
 				if (!stdout) {
-					reject(fail(error?.message ?? stderr ?? 'index query produced no output'));
+					reject(new Error(error?.message ?? stderr ?? 'index query produced no output'));
 					return;
 				}
 				try {
 					const parsed = JSON.parse(stdout) as IndexQueryResult;
 					if (parsed.status === 'error') {
-						reject(fail(parsed.error ?? 'index query failed'));
+						reject(new Error(parsed.error ?? 'index query failed'));
 						return;
 					}
 					resolve(parsed.results ?? []);
 				} catch {
-					reject(fail('index query returned unreadable output'));
+					reject(new Error('index query returned unreadable output'));
 				}
 			},
 		);
@@ -342,6 +354,12 @@ export interface EvidenceOptions {
 	 * whole retrial loop — and saves a full store read per attempt.
 	 */
 	snapshot?: GraphSnapshot;
+	/**
+	 * Live narration of the retrieval leg (sidecar cold start, index query).
+	 * Every retrial attempt calls gatherEvidence again, so the panel keeps
+	 * reporting instead of going quiet after the first pass.
+	 */
+	onProgress?: QnaProgress;
 }
 
 /**
@@ -757,6 +775,7 @@ export async function gatherEvidence(
 			workspaceRoot,
 			seededSearchQuery(snapshot, question, seeds),
 			topK,
+			options?.onProgress,
 		);
 	} catch (e) {
 		// No embeddings/key or empty store: continue with graph-only evidence —

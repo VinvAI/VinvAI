@@ -118,3 +118,84 @@ export async function openPathInEditor(
 		return false;
 	}
 }
+
+/** The slice of the built-in Git extension's API this module needs. */
+interface GitApiLike {
+	toGitUri(uri: vscode.Uri, ref: string): vscode.Uri;
+}
+
+/**
+ * The built-in Git extension's API, or null when git is unavailable.
+ *
+ * `toGitUri(uri, 'HEAD')` is the documented way to address a file's committed
+ * content; `vscode.diff` against it is exactly what "Open Changes" in the SCM
+ * view does. Going through the extension API rather than the `git.openChange`
+ * COMMAND is deliberate: that command is internal to vscode.git, takes an
+ * undocumented argument shape, and silently targets the active editor when the
+ * argument is not what it expects.
+ */
+async function gitApi(): Promise<GitApiLike | null> {
+	const ext = vscode.extensions.getExtension<{
+		getAPI(version: 1): GitApiLike;
+	}>('vscode.git');
+	if (!ext) {
+		return null; // git support disabled or stripped from this build
+	}
+	try {
+		const exports = ext.isActive ? ext.exports : await ext.activate();
+		return exports.getAPI(1);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Opens a file's working-tree-vs-HEAD diff — what the user has actually changed.
+ *
+ * Falls back to opening the file itself, with a notice, whenever a diff is not
+ * the honest thing to show: no git extension, or the workspace is not a repo.
+ * An UNTRACKED file needs no special case — its HEAD side resolves to empty, so
+ * the diff renders as an all-additions file, which is the truth.
+ *
+ * Returns true when a diff was opened, false when it fell back or failed.
+ */
+export async function openDiffAgainstHead(
+	rawPath: string | undefined,
+	opts: { workspaceRoot?: string; label?: string } = {},
+): Promise<boolean> {
+	const label = opts.label ?? 'file';
+	const resolved = resolveOpenTarget(rawPath, opts.workspaceRoot, label);
+	if (!resolved.ok || !resolved.absPath) {
+		void vscode.window.showErrorMessage(resolved.error ?? `Vinv: could not open ${label}.`);
+		return false;
+	}
+	const uri = vscode.Uri.file(resolved.absPath);
+	const api = await gitApi();
+	if (!api) {
+		void vscode.window.showInformationMessage(
+			'Vinv: no git repository here — opening the file instead of a diff.',
+		);
+		await openPathInEditor(rawPath, { ...opts, preview: true });
+		return false;
+	}
+	const base = path.basename(resolved.absPath);
+	try {
+		await vscode.commands.executeCommand(
+			'vscode.diff',
+			api.toGitUri(uri, 'HEAD'),
+			uri,
+			`${base} (HEAD ↔ working tree)`,
+			{ preview: true, viewColumn: vscode.ViewColumn.Beside },
+		);
+		return true;
+	} catch (e) {
+		// A diff that cannot be produced (no HEAD yet in a fresh repo, file
+		// outside the repo) is still a click that must do something visible.
+		const reason = e instanceof Error ? e.message : String(e);
+		void vscode.window.showInformationMessage(
+			`Vinv: could not diff ${base} (${reason}) — opening the file instead.`,
+		);
+		await openPathInEditor(rawPath, { ...opts, preview: true });
+		return false;
+	}
+}

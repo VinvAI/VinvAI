@@ -32,6 +32,7 @@ import {
 	type ArgExample,
 } from '../harness/probeRunner';
 import { computeDiffImpact, staleEndpointIds } from '../index/diffImpact';
+import { parsePorcelain, withinWindow, RECENT_WINDOW_MINUTES } from '../graph/changedFiles';
 import { shouldAutoEnhance, stateFromRecord } from '../index/enhanceRunner';
 import { composeIssues, issueSignature, summarizeTree } from '../harness/insightRunner';
 import type { CallNode } from '../identification/identification';
@@ -343,10 +344,10 @@ suite('probe judging', () => {
 
 suite('diff impact: change awareness', () => {
 	const nodes = [
-		{ name: 'a', file: 'a.py', epoch: 5 }, // changed this epoch
-		{ name: 'b', file: 'b.py', epoch: 1 }, // calls a → impacted
-		{ name: 'c', file: 'c.py', epoch: 1 }, // calls b → impacted transitively
-		{ name: 'd', file: 'd.py', epoch: 1 }, // unrelated
+		{ name: 'a', file: 'a.py' }, // in the changed set
+		{ name: 'b', file: 'b.py' }, // calls a → impacted
+		{ name: 'c', file: 'c.py' }, // calls b → impacted transitively
+		{ name: 'd', file: 'd.py' }, // unrelated
 	];
 	const edges: Array<{ src: number; dst: number; kind: 'invoke' | 'contains' }> = [
 		{ src: 1, dst: 0, kind: 'invoke' },
@@ -355,7 +356,7 @@ suite('diff impact: change awareness', () => {
 	];
 
 	test('changed symbols + inbound closure, mirroring the explorer diff mode', () => {
-		const impact = computeDiffImpact(nodes, edges, 5);
+		const impact = computeDiffImpact(nodes, edges, new Set(['a.py']));
 		assert.deepStrictEqual(
 			impact.changedSymbols.map((c) => c.name),
 			['a'],
@@ -364,10 +365,23 @@ suite('diff impact: change awareness', () => {
 		assert.deepStrictEqual([...impact.impactedFiles].sort(), ['a.py', 'b.py', 'c.py']);
 	});
 
-	test('epoch 0 (fresh full index) reports no changes', () => {
-		const impact = computeDiffImpact(nodes, edges, 0);
+	test('a clean working tree reports no changes (was: every symbol on a first index)', () => {
+		// Regression: the old predicate was `node.epoch === storeEpoch`, and a
+		// first index assigns EVERY chunk epoch 1 with a store epoch of 1 — so
+		// the whole map rendered as changed. The changed set is now the authority.
+		const impact = computeDiffImpact(nodes, edges, new Set(), 1);
 		assert.strictEqual(impact.changedSymbols.length, 0);
 		assert.strictEqual(impact.impactedCount, 0);
+		assert.deepStrictEqual(impact.impactedFiles, []);
+	});
+
+	test('every changed file seeds the closure, and impact unions across them', () => {
+		const impact = computeDiffImpact(nodes, edges, new Set(['a.py', 'd.py']));
+		assert.deepStrictEqual(
+			impact.changedSymbols.map((c) => c.name).sort(),
+			['a', 'd'],
+		);
+		assert.strictEqual(impact.impactedCount, 4); // a + b + c, plus d itself
 	});
 
 	test('endpoints overlapping a changed symbol are stale — others are not', () => {
@@ -380,6 +394,64 @@ suite('diff impact: change awareness', () => {
 		);
 		assert.deepStrictEqual(stale, ['hit']);
 		assert.deepStrictEqual(staleEndpointIds([{ id: 'e', symbols: ['a'] }], []), []);
+	});
+});
+
+suite('diff impact: what counts as changed', () => {
+	const NUL = '\0';
+
+	test('porcelain -z yields staged, unstaged and untracked paths', () => {
+		const out = [
+			' M src/a.ts', // unstaged modification
+			'M  src/b.ts', // staged modification
+			'MM src/c.ts', // staged AND further modified
+			'?? src/new.ts', // untracked
+			'A  src/added.ts', // staged add
+			'D  src/gone.ts', // staged delete
+		].join(NUL) + NUL;
+		assert.deepStrictEqual(
+			[...parsePorcelain(out)].sort(),
+			['src/a.ts', 'src/added.ts', 'src/b.ts', 'src/c.ts', 'src/gone.ts', 'src/new.ts'],
+		);
+	});
+
+	test('a rename reports both sides and consumes its source token', () => {
+		// `R  new\0old\0 M other\0` — the source token must NOT be parsed as an entry.
+		const out = 'R  src/new.ts' + NUL + 'src/old.ts' + NUL + ' M src/other.ts' + NUL;
+		assert.deepStrictEqual(
+			[...parsePorcelain(out)].sort(),
+			['src/new.ts', 'src/old.ts', 'src/other.ts'],
+		);
+	});
+
+	test('paths are rebased onto the workspace prefix, outsiders dropped', () => {
+		// Workspace is <repo>/extension; git reports repo-root-relative paths.
+		const out = [' M extension/src/a.ts', ' M index/src/lib.rs'].join(NUL) + NUL;
+		assert.deepStrictEqual([...parsePorcelain(out, 'extension/')], ['src/a.ts']);
+	});
+
+	test('a clean tree parses to an empty set', () => {
+		assert.strictEqual(parsePorcelain('').size, 0);
+		assert.strictEqual(parsePorcelain(NUL).size, 0);
+	});
+
+	test('the no-repo fallback keeps only files inside the window', () => {
+		const now = 1_700_000_000_000;
+		const min = 60_000;
+		const recent = withinWindow(
+			[
+				{ file: 'fresh.ts', mtimeMs: now - 5 * min },
+				{ file: 'edge.ts', mtimeMs: now - RECENT_WINDOW_MINUTES * min }, // exactly at the floor
+				{ file: 'stale.ts', mtimeMs: now - 31 * min },
+				{ file: 'ancient.ts', mtimeMs: now - 400 * min },
+			],
+			now,
+		);
+		assert.deepStrictEqual([...recent].sort(), ['edge.ts', 'fresh.ts']);
+	});
+
+	test('the fallback window is 30 minutes', () => {
+		assert.strictEqual(RECENT_WINDOW_MINUTES, 30);
 	});
 });
 

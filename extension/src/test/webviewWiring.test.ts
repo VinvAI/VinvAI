@@ -426,6 +426,7 @@ suite('Webview button wiring', () => {
 					void line;
 					return src.open(file);
 				},
+				openDiff: async (file) => void calls.push(`diff:${file}`),
 				refresh: () => calls.push('refresh'),
 				semanticSearch: async (q) => void calls.push(`search:${q}`),
 				ask: async (row) => void calls.push(`ask:${row}`),
@@ -469,6 +470,16 @@ suite('Webview button wiring', () => {
 				'refresh',
 				'search:auth',
 			]);
+		});
+
+		test('openDiff routes to the diff action, not the plain open', async () => {
+			// Diff Impact's node button must reach openDiff: routing it to openSource
+			// would silently degrade back to "open the file", which is the behavior
+			// being replaced.
+			const a = actions('/root');
+			await handleGraphMessage(gmsg({ type: 'openDiff', file: 'src/a.ts' }), a.acts);
+			assert.deepStrictEqual(a.calls, ['diff:src/a.ts']);
+			assert.deepStrictEqual(a.src.opened, []);
 		});
 	});
 

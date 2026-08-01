@@ -151,6 +151,8 @@ function makeSnapshot(nodes: GraphNode[], edges: GraphEdge[], storeEpoch = 1): G
 		files: [],
 		file_edges: [],
 		flow_edges: [],
+		changed_files: [],
+		change_source: 'none',
 		tour: [],
 		runtime: {},
 	};
@@ -199,10 +201,10 @@ suite('Graph Explorer data model', () => {
 			const edges = loadEdges(dir, nodes.length);
 			assert.strictEqual(edges.length, 1);
 			assert.strictEqual(loadStoreEpoch(dir), 3);
-			const { files } = buildFileLevel(nodes, edges, 3);
+			const { files } = buildFileLevel(nodes, edges, new Set(['x.py']));
 			assert.strictEqual(files.length, 2);
 			const changed = files.find((f) => f.file === 'x.py');
-			assert.strictEqual(changed?.changed, true, 'epoch==storeEpoch marks the file changed');
+			assert.strictEqual(changed?.changed, true, 'membership in the changed set marks the file');
 			const unchanged = files.find((f) => f.file === 'y.py');
 			assert.strictEqual(unchanged?.changed, false);
 		} finally {
