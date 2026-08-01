@@ -5,6 +5,20 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] — 2026-08-02
+
+Maintenance only — no behaviour changes. The extension is unchanged from 0.2.3;
+this release exists to re-pin the engines onto a green tree, so an install
+fetches a checkout whose lint gate and end-to-end harness both build.
+
+- The bring-up and exerciser sources are formatted and lint-clean. The lint
+  workflow scopes to whole changed files rather than changed lines, so the
+  parameterized-invocations work pulled ten pre-existing files into the gate and
+  failed on debt none of it introduced. Tests pass unchanged either side of it.
+- The end-to-end harness reads the call graph through `build_with_stats`. Its
+  plain-tuple sibling is test-only, so the harness — a bin crate compiled
+  without that flag — could not build against it.
+
 ## [0.2.3] — 2026-08-02
 
 ### ✨ Added
