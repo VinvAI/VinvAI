@@ -30,9 +30,26 @@ import * as path from 'path';
 import { execFile } from 'child_process';
 import { getBinPath, isBinAvailable } from '../tracelens/bin';
 import { ensureEmbedder } from '../engines/install';
-import { getIndexEnv } from '../config/settings';
+import { getIndexEnv, getHarnessId } from '../config/settings';
+import { dispatchAgentPrompt } from '../harness/harnessRunner';
 import { chatViaHarness, type ChatTurn, type IndexHit } from '../qna/answer';
-import { indexStoreDir } from './indexGraph';
+import { indexStoreDir, loadStoreEpoch } from './indexGraph';
+import {
+	countCallers,
+	decisionKey,
+	enhanceDir,
+	groupPending,
+	orderGroups,
+	parseJsonlRows,
+	planShards,
+	readOutRows,
+	readRanks,
+	remainder,
+	shardName,
+	validateOut,
+	writeShards,
+	type PendingGroup,
+} from './enhanceShards';
 
 /** One record from pending_edges.jsonl. */
 export interface PendingEdge {
@@ -297,6 +314,303 @@ export async function adjudicatePendingEdges(
 		applied = await runIndexUpdate(context, workspaceRoot);
 	}
 	return { pending: queue.length, resolved, abstained, applied };
+}
+
+// ---------------------------------------------------------------------------
+// shard-file adjudication (the default path — see graph/enhanceShards.ts)
+// ---------------------------------------------------------------------------
+
+/** Callers per shard. `VINV_ENHANCER_SHARD_ITEMS`, default 100. */
+function shardItems(): number {
+	const raw = Number.parseInt(process.env.VINV_ENHANCER_SHARD_ITEMS ?? '', 10);
+	return Number.isInteger(raw) && raw >= 1 && raw <= 1000 ? raw : 100;
+}
+
+/**
+ * Ceiling on shards per pass. `VINV_ENHANCER_SHARDS`, default 9.
+ *
+ * Not a target: the count comes from the queue at `shardItems()` callers each
+ * (551 references make six), and this only stops a monorepo planning hundreds.
+ * What it excludes is reported as `skipped`, never silently dropped.
+ */
+function maxShards(): number {
+	const raw = Number.parseInt(process.env.VINV_ENHANCER_SHARDS ?? '', 10);
+	return Number.isInteger(raw) && raw >= 1 && raw <= 64 ? raw : 9;
+}
+
+/**
+ * Shard sessions in flight at once. `VINV_ENHANCER_CONCURRENCY`, default 3.
+ *
+ * Separate from the shard COUNT on purpose: holding sessions at 100 references
+ * means more of them, and firing nine agent CLIs simultaneously would put the
+ * machine under load the old per-reference path never reached (it capped at 4
+ * lightweight one-shot chats). Queueing costs wall-clock, not sessions.
+ */
+function shardConcurrency(): number {
+	const raw = Number.parseInt(process.env.VINV_ENHANCER_CONCURRENCY ?? '', 10);
+	return Number.isInteger(raw) && raw >= 1 && raw <= 16 ? raw : 3;
+}
+
+/** Runs `task` over `items` with at most `limit` in flight, preserving order. */
+async function boundedPool<T, R>(
+	items: T[],
+	limit: number,
+	task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results = new Array<R>(items.length);
+	let cursor = 0;
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const index = cursor++;
+			if (index >= items.length) {
+				return;
+			}
+			results[index] = await task(items[index], index);
+		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(limit, items.length) }, worker),
+	);
+	return results;
+}
+
+/**
+ * Extra passes over whatever a session left unanswered.
+ * `VINV_ENHANCER_TOPUPS`, default 2 — bounded so a shard that keeps dying
+ * cannot spin. What survives all passes stays pending, which the per-epoch
+ * record already treats as the terminal "done, N unresolvable" state.
+ */
+function topUpRounds(): number {
+	const raw = Number.parseInt(process.env.VINV_ENHANCER_TOPUPS ?? '', 10);
+	return Number.isInteger(raw) && raw >= 0 && raw <= 10 ? raw : 2;
+}
+
+/**
+ * Wall-clock budget for one shard session. `VINV_ENHANCER_SHARD_TIMEOUT_S`,
+ * default 40 minutes — a hundred references, several of which want the caller
+ * file opened. The shared 5-minute agent budget would SIGKILL every shard about
+ * a fifth of the way through; incremental appends make that survivable rather
+ * than fatal, but paying it on every run would burn the top-up budget instead.
+ */
+function shardTimeoutMs(): number {
+	const raw = Number.parseFloat(process.env.VINV_ENHANCER_SHARD_TIMEOUT_S ?? '');
+	return (Number.isFinite(raw) && raw > 0 ? raw : 2400) * 1000;
+}
+
+/**
+ * The shard prompt. Deliberately short: the work is in the file, not here.
+ *
+ * It asks the agent to OPEN THE CALLER, which the inlined per-reference prompt
+ * could never do — rule 1 is import reachability and that prompt shipped no
+ * imports, so it demanded a judgement while withholding the evidence for it.
+ */
+export function buildShardPrompt(shardRel: string, outRel: string, callers: number): string {
+	return [
+		'You are resolving ambiguous code references in this repository.',
+		'',
+		`Read \`${shardRel}\`. Each line is one question: a referenced \`name\`, the`,
+		'candidate definitions that share it, and the `callers` that reference it.',
+		`There are ${callers} callers to decide in total.`,
+		'',
+		'For each caller, decide which candidate it actually calls. Weigh, in this',
+		'order of evidence strength:',
+		'1. Import reachability — OPEN THE CALLER FILE and read its imports. Can it',
+		'   reach the candidate at all? A candidate it cannot reach is out.',
+		'2. Path proximity and cohesion — code calls within its own module,',
+		'   package or service before crossing boundaries.',
+		'3. Kind agreement — a call targets a function/method; extending targets a',
+		'   class. A kind mismatch is disqualifying.',
+		'4. Summary fit — does the candidate’s behavior match what the caller needs?',
+		'',
+		'When two candidates remain genuinely indistinguishable (copy-pasted twins',
+		'in parallel services), ABSTAIN. A wrong edge poisons PageRank and',
+		'blast-radius analysis; a missing one merely stays pending.',
+		'',
+		`Append one JSON object per line to \`${outRel}\`, in this exact shape:`,
+		'  {"src_id": "<caller src_id>", "name": "<name>", "dst_id": "<candidate id>"}',
+		'  {"src_id": "<caller src_id>", "name": "<name>", "dst_id": null}',
+		'',
+		'Append AFTER EACH DECISION — do not accumulate them and write at the end.',
+		'If you stop early, everything already written is kept and only the rest is',
+		'asked again. Answer only for callers listed in the shard file, and use only',
+		'the candidate ids given for that caller’s line.',
+	].join('\n');
+}
+
+/** Outcome of a full shard-based adjudication run. */
+export interface ShardOutcome extends AdjudicationOutcome {
+	/** Shard sessions dispatched (including top-up passes). */
+	sessions: number;
+	/** Callers past the shard budget — never silently dropped. */
+	skipped: number;
+}
+
+/**
+ * Runs one shard: writes are already on disk, so this dispatches the session
+ * and reads back whatever it managed to record. Falls back to parsing the
+ * final reply when the out-file is missing or empty — harnesses differ in how
+ * reliably they write files, and a session that answered in its reply is not a
+ * failed session.
+ */
+async function runShard(
+	workspaceRoot: string,
+	index: number,
+	shard: PendingGroup[],
+	epoch: number,
+	dispatch: ShardDispatch,
+): Promise<unknown[]> {
+	const shardRel = `.vinv/index/enhance/${shardName(index, 'shard')}`;
+	const outRel = `.vinv/index/enhance/${shardName(index, 'out')}`;
+	const prompt = buildShardPrompt(shardRel, outRel, countCallers(shard));
+	const reply = await dispatch(index, prompt, shard);
+	const rows = readOutRows(workspaceRoot, index, epoch);
+	if (rows.length > 0) {
+		return rows;
+	}
+	return reply ? parseJsonlRows(reply) : [];
+}
+
+/**
+ * How a shard reaches an agent. Injected so the whole plan → dispatch → merge
+ * → resume loop can be exercised against a stub that writes out-files, with no
+ * CLI process and no tokens spent — the parts worth testing are the sharding
+ * and the merge, not the agent.
+ */
+export type ShardDispatch = (
+	index: number,
+	prompt: string,
+	shard: PendingGroup[],
+) => Promise<string | null>;
+
+/** The real one: a headless, MCP-bypassed session per shard. */
+export function harnessShardDispatch(
+	workspaceRoot: string,
+	onUpdate?: (line: string) => void,
+): ShardDispatch {
+	return (index, prompt) =>
+		dispatchAgentPrompt(
+			getHarnessId(),
+			workspaceRoot,
+			`enhance-shard-${index + 1}`,
+			prompt,
+			undefined,
+			onUpdate,
+			shardTimeoutMs(),
+		);
+}
+
+/**
+ * Adjudicates the pending queue through shard files instead of one CLI process
+ * per reference. Returns the same shape as `adjudicatePendingEdges` plus how
+ * many sessions it actually cost and what the budget left behind.
+ */
+export async function adjudicateViaShards(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	options?: {
+		token?: vscode.CancellationToken;
+		onProgress?: (done: number, total: number) => void;
+		/** Stub the agent (tests); defaults to a real harness session. */
+		dispatch?: ShardDispatch;
+		/** Skip the `index update` (tests) — nothing to apply without an index. */
+		apply?: boolean;
+	},
+): Promise<ShardOutcome> {
+	const storeDir = indexStoreDir(workspaceRoot);
+	const done = readAdjudicated(storeDir);
+	const records = readPendingEdges(storeDir).filter(
+		(r) => !done.has(`${r.src_id}\u0000${r.name}`),
+	);
+	const empty: ShardOutcome = {
+		pending: 0,
+		resolved: 0,
+		abstained: 0,
+		applied: false,
+		sessions: 0,
+		skipped: 0,
+	};
+	if (records.length === 0) {
+		return empty;
+	}
+
+	let epoch: number;
+	try {
+		epoch = loadStoreEpoch(storeDir);
+	} catch {
+		return empty;
+	}
+
+	const ranks = readRanks(storeDir);
+	const ordered = orderGroups(groupPending(records, ranks), ranks !== null);
+	const dispatch = options?.dispatch ?? harnessShardDispatch(workspaceRoot);
+	const plan = planShards(ordered, {
+		itemsPerShard: shardItems(),
+		maxShards: maxShards(),
+	});
+	const total = countCallers(plan.shards.flat());
+
+	const overrides: Array<{ src_id: string; dst_id: string; name: string; kind: string }> = [];
+	const abstentions: Array<{ src_id: string; name: string; dst_id: null }> = [];
+	const decided = new Set<string>();
+	let sessions = 0;
+
+	let round = plan.shards;
+	for (let pass = 0; pass <= topUpRounds(); pass++) {
+		if (round.length === 0 || options?.token?.isCancellationRequested) {
+			break;
+		}
+		// Each pass republishes the work: writeShards clears the directory, so a
+		// previous pass's out-file can never be re-read as this pass's answers.
+		writeShards(workspaceRoot, epoch, round);
+		const results = await boundedPool(round, shardConcurrency(), (shard, i) => {
+			sessions += 1;
+			return runShard(workspaceRoot, i, shard, epoch, dispatch);
+		});
+
+		round.forEach((shard, i) => {
+			const outcome = validateOut(shard, results[i]);
+			for (const row of outcome.overrides) {
+				if (!decided.has(decisionKey(row.src_id, row.name))) {
+					decided.add(decisionKey(row.src_id, row.name));
+					overrides.push(row);
+				}
+			}
+			for (const row of outcome.abstentions) {
+				if (!decided.has(decisionKey(row.src_id, row.name))) {
+					decided.add(decisionKey(row.src_id, row.name));
+					abstentions.push(row);
+				}
+			}
+		});
+		options?.onProgress?.(decided.size, total);
+		round = round
+			.map((shard) => remainder(shard, decided))
+			.filter((shard) => shard.length > 0);
+	}
+
+	// Abstentions are persisted alongside resolutions. The Rust loader skips a
+	// null `dst_id` (no edge), while `readAdjudicated` keys on src_id+name and
+	// so stops re-asking it — "I looked, and the evidence is insufficient" is a
+	// decision, and without recording it every later pass re-asks it forever.
+	appendJsonl(path.join(storeDir, 'edge_overrides.jsonl'), [...overrides, ...abstentions]);
+	let applied = false;
+	if (overrides.length > 0 && options?.apply !== false) {
+		applied = await runIndexUpdate(context, workspaceRoot);
+	}
+	// The work is banked; the scratch directory is not worth keeping.
+	try {
+		fs.rmSync(enhanceDir(workspaceRoot), { recursive: true, force: true });
+	} catch {
+		// Best-effort: a leftover directory is rewritten by the next run.
+	}
+	return {
+		pending: total,
+		resolved: overrides.length,
+		abstained: abstentions.length,
+		applied,
+		sessions,
+		skipped: plan.skipped,
+	};
 }
 
 const TAG_SYSTEM = [

@@ -23,6 +23,27 @@ pub struct PendingEdge {
     pub candidates: Vec<usize>,
 }
 
+/// Why unresolved references were NOT published for adjudication. Reported so a
+/// queue that shrinks by two thirds can say which measurement did it — a silent
+/// drop reads as the index having gotten worse.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BuildStats {
+    /// No candidate shares the caller's language (FFI, or a coincidental name).
+    pub cross_lang: usize,
+    /// Called through a receiver this repository does not define — a library
+    /// call, whose only correct adjudication is abstention.
+    pub external_receiver: usize,
+    /// The name has more same-language definitions than `INDEX_MAX_CANDIDATES`:
+    /// a generic verb of this codebase, which no adjudicator can disambiguate.
+    pub generic_name: usize,
+    /// Referenced through a receiver far more often than this repository
+    /// defines it — a library method, whatever it happens to be called.
+    pub library_method: usize,
+    /// Ambiguities settled for free because exactly one candidate shared the
+    /// caller's language. Not a suppression — an edge that used to be pending.
+    pub resolved_by_lang: usize,
+}
+
 /// Build the edge list and the PageRank vector for a set of chunks.
 /// `overrides` carries adjudicated edges (from the agent layer) that the
 /// name-based resolver could not decide on its own; they participate in
@@ -31,10 +52,34 @@ pub fn build(
     chunks: &[Chunk],
     overrides: &[Edge],
 ) -> (Vec<Edge>, Vec<f32>, Vec<PendingEdge>) {
+    let (edges, ranks, pending, _) = build_with_stats(chunks, overrides);
+    (edges, ranks, pending)
+}
+
+/// `build`, plus the tally of references deliberately kept out of the pending
+/// queue. Separate entry point so the common callers keep the plain tuple.
+pub fn build_with_stats(
+    chunks: &[Chunk],
+    overrides: &[Edge],
+) -> (Vec<Edge>, Vec<f32>, Vec<PendingEdge>, BuildStats) {
     let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, c) in chunks.iter().enumerate() {
         by_name.entry(c.name.as_str()).or_default().push(i);
     }
+
+    // Every identifier this repository defines: symbol names plus file stems
+    // (a module alias is spelled with its file's stem). A receiver outside this
+    // set belongs to a library, which is the fact that separates
+    // `user_controller.provision_user` from `JSON.parse` WITHOUT either one
+    // having to appear on a list. See `is_ubiquitous` for why the list is still
+    // needed one layer down, inside `resolve`.
+    let owned: HashSet<&str> = by_name
+        .keys()
+        .copied()
+        .chain(chunks.iter().map(|c| file_stem(&c.file)))
+        .collect();
+    let max_candidates = config::max_pending_candidates();
+    let mut stats = BuildStats::default();
 
     let mut edges: Vec<Edge> = Vec::new();
     let mut seen: HashSet<(usize, usize, u8)> = HashSet::new();
@@ -58,7 +103,17 @@ pub fn build(
         }
     }
 
-    let mut pending: Vec<PendingEdge> = Vec::new();
+    /// An unresolved reference that passed the per-call rules and is waiting on
+    /// the repo-wide one.
+    struct Staged {
+        src: usize,
+        call: String,
+        bare: String,
+        candidates: Vec<usize>,
+        through_receiver: bool,
+    }
+
+    let mut staged: Vec<Staged> = Vec::new();
     let overridden: HashSet<(usize, &str)> = overrides
         .iter()
         .filter(|e| e.src < chunks.len() && e.dst < chunks.len())
@@ -74,7 +129,7 @@ pub fn build(
         for call in &c.calls {
             // Pending and overrides are keyed on the bare name: the receiver is
             // part of the call path, not of any symbol's name.
-            let name = call.rsplit('.').next().unwrap_or(call.as_str());
+            let (receiver_root, name, through_receiver) = split_reference(call);
             // An adjudicated edge settles this reference outright. Resolving it
             // again by name would add a *second* invoke edge whenever the
             // resolver disagrees with the adjudication, so the decision from
@@ -85,25 +140,72 @@ pub fn build(
             match resolve(&by_name, call, &c.file, chunks, Some(i)) {
                 Some(ti) => add(i, ti, "invoke", &mut edges),
                 None => {
-                    // A dotted call on a ubiquitous stdlib method name that
-                    // `resolve` left unresolved is unresolved BY DESIGN — it is
-                    // a library call staying an external leaf, not an ambiguity
-                    // awaiting adjudication. Emitting it as pending sent every
-                    // `x.get`/`items.append` in the repo to the LLM adjudicator
-                    // (~80% of the queue on this codebase), spending calls on
-                    // references whose only correct answer is abstention.
-                    if call.contains('.') && is_ubiquitous(name) {
+                    // What reaches adjudication is decided by three facts
+                    // MEASURED IN THIS REPOSITORY, never by a list of names
+                    // someone judged boring. A denylist ("get", "append",
+                    // "format", …) suppressed ~80% of a Python/JS queue and
+                    // nothing at all in a Go or Java tree, while missing
+                    // `JSON.parse` — 15% of this repo's queue on its own —
+                    // because `parse` never made the list.
+                    let candidates = match by_name.get(name) {
+                        Some(c) if c.len() > 1 => c,
+                        _ => continue, // unique or unknown: nothing to adjudicate
+                    };
+
+                    // 1. Receiver ownership. `user_controller.provision_user`
+                    //    names a module this repo defines; `JSON.parse`,
+                    //    `subprocess.run` and `img.resize(...).save` do not.
+                    //    A call through a foreign receiver is a library call
+                    //    whose only correct adjudication is abstention — and it
+                    //    must be judged BEFORE the language collapse below, or
+                    //    `"…".format` would bind to the one project `format`.
+                    if through_receiver && !owned.contains(receiver_root) {
+                        stats.external_receiver += 1;
                         continue;
                     }
-                    if let Some(candidates) = by_name.get(name) {
-                        if candidates.len() > 1 {
-                            pending.push(PendingEdge {
-                                src: i,
-                                name: call.clone(),
-                                candidates: candidates.clone(),
-                            });
+
+                    // 2. Language agreement. A caller cannot invoke a symbol in
+                    //    another language without a binding layer, so a
+                    //    candidate set that shares no language is a coincidence
+                    //    of spelling — and one that collapses to a single
+                    //    same-language definition is settled by a hard fact,
+                    //    not a guess. Polyglot repos pay for this in genuine
+                    //    FFI edges; a missing edge stays pending, a wrong one
+                    //    poisons PageRank.
+                    let lang = chunks[i].lang.as_str();
+                    let same_lang: Vec<usize> =
+                        candidates.iter().copied().filter(|&ci| chunks[ci].lang == lang).collect();
+                    match same_lang.len() {
+                        0 => {
+                            stats.cross_lang += 1;
+                            continue;
                         }
+                        1 => {
+                            stats.resolved_by_lang += 1;
+                            add(i, same_lang[0], "invoke", &mut edges);
+                            continue;
+                        }
+                        _ => {}
                     }
+
+                    // 3. In-repo name frequency. Past the cutoff the name is a
+                    //    generic verb of this codebase and does not identify a
+                    //    target for anyone — resolver or adjudicator.
+                    if same_lang.len() > max_candidates {
+                        stats.generic_name += 1;
+                        continue;
+                    }
+
+                    // Staged, not published: rule 4 below is a property of the
+                    // whole repository (how often this name is called through
+                    // a receiver), which is not known until every call is seen.
+                    staged.push(Staged {
+                        src: i,
+                        call: call.clone(),
+                        bare: name.to_string(),
+                        candidates: same_lang,
+                        through_receiver,
+                    });
                 }
             }
         }
@@ -114,8 +216,49 @@ pub fn build(
         }
     }
 
+    // 4. Library-method detection, which only the whole repository can answer.
+    //
+    //    `store.get(...)` and `user_controller.provision_user(...)` are
+    //    indistinguishable one call at a time: both go through a receiver this
+    //    repo defines, both name something defined more than once. What tells
+    //    them apart is how the codebase USES the name. `get` appears at 351
+    //    receiver call sites against 4 definitions; `provision_user` appears at
+    //    a handful against three. A project function is not invoked through
+    //    hundreds of different receivers — a container method is.
+    //
+    //    This is the measurement that replaces the old denylist's real work.
+    //    That list caught `get`/`push`/`append` by having been told about them,
+    //    and caught nothing in a Go or Java tree; this catches them because of
+    //    what they do here, and works the same in any language.
+    let mut receiver_refs: HashMap<&str, usize> = HashMap::new();
+    for s in &staged {
+        if s.through_receiver {
+            *receiver_refs.entry(s.bare.as_str()).or_insert(0) += 1;
+        }
+    }
+    let min_refs = config::library_method_refs();
+    let mut pending: Vec<PendingEdge> = Vec::new();
+    for s in &staged {
+        if s.through_receiver {
+            let refs = receiver_refs.get(s.bare.as_str()).copied().unwrap_or(0);
+            // Both halves matter. The floor keeps a small repo's three-call
+            // helper out of it; the ratio is what makes this a measurement
+            // rather than a threshold — a name only looks like a library method
+            // when it is called far more often than this repo could define it.
+            if refs >= min_refs && refs > s.candidates.len() * 2 {
+                stats.library_method += 1;
+                continue;
+            }
+        }
+        pending.push(PendingEdge {
+            src: s.src,
+            name: s.call.clone(),
+            candidates: s.candidates.clone(),
+        });
+    }
+
     let rank = pagerank(chunks.len(), &edges);
-    (edges, rank, pending)
+    (edges, rank, pending, stats)
 }
 
 /// Resolve a reference to a defining chunk, preferring the same file.
@@ -130,13 +273,8 @@ fn resolve(
     chunks: &[Chunk],
     src: Option<usize>,
 ) -> Option<usize> {
-    let (receiver, name) = match reference.rsplit_once('.') {
-        Some((receiver, name)) => (receiver, name),
-        None => ("", reference),
-    };
-    let receiver_root = receiver.split('.').next().unwrap_or("");
-    let through_receiver =
-        !receiver.is_empty() && !matches!(receiver_root, "self" | "cls" | "this");
+    let (receiver_root, name, through_receiver) = split_reference(reference);
+    let has_receiver = reference.len() > name.len();
 
     let mut candidates: Vec<usize> = by_name.get(name)?.clone();
 
@@ -172,7 +310,7 @@ fn resolve(
     // whichever single project function happens to be named `format`, grafting
     // that subtree onto every f-string-averse call site in the repo. Unresolved
     // is correct: the call still appears in trees as an external leaf.
-    if !receiver.is_empty() && is_ubiquitous(name) {
+    if has_receiver && is_ubiquitous(name) {
         let same: Vec<usize> = candidates
             .iter()
             .copied()
@@ -219,6 +357,24 @@ fn resolve(
     best
 }
 
+/// Split a callee path into `(receiver_root, bare name, through_receiver)`.
+///
+/// `binary_controller.get_binary` -> `("binary_controller", "get_binary", true)`;
+/// `walk` -> `("", "walk", false)`. A `self`/`cls`/`this` receiver is the
+/// caller's own object rather than a foreign one, so it does not count as
+/// going through a receiver. Shared by the resolver and the pending gate so the
+/// two cannot drift apart on what "has a receiver" means.
+fn split_reference(reference: &str) -> (&str, &str, bool) {
+    let (receiver, name) = match reference.rsplit_once('.') {
+        Some((receiver, name)) => (receiver, name),
+        None => ("", reference),
+    };
+    let receiver_root = receiver.split('.').next().unwrap_or("");
+    let through_receiver =
+        !receiver.is_empty() && !matches!(receiver_root, "self" | "cls" | "this");
+    (receiver_root, name, through_receiver)
+}
+
 /// Number of leading *directory* components two file paths share.
 /// `a/b/x.py` vs `a/b/y.py` -> 2; `x.py` vs `y.py` -> 0.
 fn shared_dir_prefix(a: &str, b: &str) -> usize {
@@ -232,8 +388,25 @@ fn shared_dir_prefix(a: &str, b: &str) -> usize {
 /// frameworks (`session.get`, `"…".format`, `items.append`, `res.json`). A
 /// receiver call on one of these is a library call until proven otherwise, so
 /// it may resolve via a module-stem or same-file match but never by name
-/// uniqueness alone. Mirror of `_UBIQUITOUS_METHODS` in
-/// `identification/src/identification/runner.py` — keep in sync.
+/// uniqueness alone.
+///
+/// SCOPE: this list governs RESOLUTION only. It no longer decides what reaches
+/// the adjudication queue — `build_with_stats` measures receiver ownership,
+/// language agreement and in-repo name frequency instead, which generalize to
+/// languages this list has never heard of.
+///
+/// It cannot be replaced here by the same measurements. Receiver ownership is
+/// the right test for `"…".format`, but applied to resolution it would also
+/// refuse `foo.bar()` where `bar` is defined exactly once in the repo — almost
+/// always the correct target. Telling those apart needs type inference on the
+/// receiver, which the parser does not do. Until it does, the list stays, and
+/// it is consulted only after the module-stem and same-file rules have had
+/// their chance.
+///
+/// `_UBIQUITOUS_METHODS` in `identification/src/identification/runner.py` holds
+/// the same names for its own resolver. The two are NOT mirrors and do not need
+/// to be kept in sync: this one gates a name binding by uniqueness, that one
+/// gates `resolve_target`. Change either on its own evidence.
 fn is_ubiquitous(name: &str) -> bool {
     matches!(
         name,
@@ -623,6 +796,182 @@ mod tests {
         ];
         let (_, _, pending) = build(&bare, &[]);
         assert_eq!(pending.len(), 1, "bare ambiguous names still go to adjudication");
+    }
+
+    // ---- the pending gate: measurements, not a list of names ----------------
+    //
+    // Every case below uses a method name that is NOT in `is_ubiquitous`. That
+    // is the point: the old gate suppressed only names someone had listed, so
+    // `JSON.parse` alone was 15% of this repo's adjudication queue.
+
+    fn chunk_in(lang: &str, name: &str, file: &str, calls: &[&str]) -> Chunk {
+        Chunk { lang: lang.to_string(), ..chunk(name, file, None, calls) }
+    }
+
+    #[test]
+    fn a_receiver_this_repo_does_not_define_is_a_library_call() {
+        // `JSON` is not a symbol here and names no file: `JSON.parse` is the
+        // standard library, however many project functions are called `parse`.
+        let chunks = vec![
+            chunk("caller", "app/main.js", None, &["JSON.parse"]),
+            chunk("parse", "a/args.js", None, &[]),
+            chunk("parse", "b/query.js", None, &[]),
+        ];
+        let (edges, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert!(edges.iter().all(|e| e.kind != "invoke"), "must not guess an edge");
+        assert!(pending.is_empty(), "a library call must never reach adjudication");
+        assert_eq!(stats.external_receiver, 1);
+    }
+
+    #[test]
+    fn a_receiver_this_repo_does_define_still_reaches_adjudication() {
+        // `engine` IS a symbol here, so `engine.parse` is a project call whose
+        // target is genuinely ambiguous — exactly what adjudication is for.
+        let chunks = vec![
+            chunk("caller", "app/main.js", None, &["engine.parse"]),
+            chunk("engine", "core/engine_obj.js", None, &[]),
+            chunk("parse", "a/args.js", None, &[]),
+            chunk("parse", "b/query.js", None, &[]),
+        ];
+        let (_, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert_eq!(pending.len(), 1, "an owned receiver is not a library call");
+        assert_eq!(stats.external_receiver, 0);
+    }
+
+    #[test]
+    fn candidates_in_another_language_are_a_spelling_coincidence() {
+        let chunks = vec![
+            chunk_in("python", "caller", "svc/app.py", &["render_row"]),
+            chunk_in("rust", "render_row", "index/src/fmt.rs", &[]),
+            chunk_in("rust", "render_row", "index/src/view.rs", &[]),
+        ];
+        let (edges, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert!(edges.iter().all(|e| e.kind != "invoke"));
+        assert!(pending.is_empty(), "no candidate shares the caller's language");
+        assert_eq!(stats.cross_lang, 1);
+    }
+
+    #[test]
+    fn one_same_language_candidate_settles_it_without_an_adjudicator() {
+        // The ambiguity is only across languages; within Python there is
+        // exactly one definition, which is a fact rather than a guess.
+        let chunks = vec![
+            chunk_in("python", "caller", "svc/app.py", &["render_row"]),
+            chunk_in("rust", "render_row", "index/src/fmt.rs", &[]),
+            // Deliberately NOT under svc/: a shared directory prefix would let
+            // the nearest-candidate rule resolve it before the gate is reached,
+            // and this test is about the language collapse doing the work.
+            chunk_in("python", "render_row", "web/render.py", &[]),
+        ];
+        let (edges, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert!(
+            edges.iter().any(|e| e.kind == "invoke" && e.src == 0 && e.dst == 2),
+            "the one same-language definition is the target",
+        );
+        assert!(pending.is_empty());
+        assert_eq!(stats.resolved_by_lang, 1);
+    }
+
+    #[test]
+    fn a_name_defined_everywhere_is_generic_rather_than_ambiguous() {
+        // Nine definitions of `save` in one language: past the cutoff the name
+        // does not identify a target for the resolver OR an adjudicator.
+        let mut chunks = vec![chunk("caller", "app/main.py", None, &["save"])];
+        for i in 0..9 {
+            chunks.push(chunk("save", &format!("svc{i}/model.py"), None, &[]));
+        }
+        let (_, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert!(pending.is_empty(), "9 candidates exceeds INDEX_MAX_CANDIDATES (8)");
+        assert_eq!(stats.generic_name, 1);
+
+        // Just inside the cutoff it is still a real ambiguity.
+        let mut fewer = vec![chunk("caller", "app/main.py", None, &["save"])];
+        for i in 0..8 {
+            fewer.push(chunk("save", &format!("svc{i}/model.py"), None, &[]));
+        }
+        let (_, _, pending, stats) = build_with_stats(&fewer, &[]);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(stats.generic_name, 0);
+    }
+
+    #[test]
+    fn suppression_works_in_languages_the_old_list_never_covered() {
+        // Go: `Close` (capitalized) is absent from `is_ubiquitous`, which only
+        // ever knew lowercase Python/JS spellings. Ownership does not care.
+        let go = vec![
+            chunk_in("go", "Handle", "srv/handler.go", &["w.Close"]),
+            chunk_in("go", "Close", "io/writer.go", &[]),
+            chunk_in("go", "Close", "net/conn.go", &[]),
+        ];
+        let (_, _, pending, stats) = build_with_stats(&go, &[]);
+        assert!(pending.is_empty(), "`w` is not defined here — library call");
+        assert_eq!(stats.external_receiver, 1);
+
+        // Java: same story for `toString`.
+        let java = vec![
+            chunk_in("java", "render", "app/Render.java", &["sb.toString"]),
+            chunk_in("java", "toString", "model/User.java", &[]),
+            chunk_in("java", "toString", "model/Order.java", &[]),
+        ];
+        let (_, _, pending, stats) = build_with_stats(&java, &[]);
+        assert!(pending.is_empty());
+        assert_eq!(stats.external_receiver, 1);
+    }
+
+    #[test]
+    fn a_name_called_through_many_receivers_is_a_library_method() {
+        // `get` reached 351 receiver call sites against 4 definitions on this
+        // repository — a container method, not a project symbol. No list says
+        // so; the codebase's own usage does, which is what makes this work in
+        // languages the old denylist never covered.
+        let mut chunks = vec![
+            chunk("get", "store/kv.py", None, &[]),
+            chunk("get", "cache/lru.py", None, &[]),
+            chunk("holder", "app/holder.py", None, &[]),
+        ];
+        for i in 0..30 {
+            chunks.push(chunk(&format!("caller{i}"), &format!("app/m{i}.py"), None, &["holder.get"]));
+        }
+        let (_, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert!(pending.is_empty(), "30 receiver call sites, 2 definitions");
+        assert_eq!(stats.library_method, 30);
+    }
+
+    #[test]
+    fn a_project_helper_called_a_few_times_is_still_adjudicated() {
+        // The same shape below the floor: a handful of call sites through an
+        // owned receiver is exactly what adjudication exists to settle.
+        let mut chunks = vec![
+            chunk("provision_user", "admin/a.py", None, &[]),
+            chunk("provision_user", "payment/b.py", None, &[]),
+            chunk("holder", "app/holder.py", None, &[]),
+        ];
+        for i in 0..3 {
+            chunks.push(chunk(
+                &format!("caller{i}"),
+                &format!("app/m{i}.py"),
+                None,
+                &["holder.provision_user"],
+            ));
+        }
+        let (_, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert_eq!(pending.len(), 3);
+        assert_eq!(stats.library_method, 0);
+    }
+
+    #[test]
+    fn a_self_call_is_not_a_foreign_receiver() {
+        // `self`/`cls`/`this` are the caller's own object: the ownership rule
+        // must not fire on them, or every method call in an OO codebase would
+        // be classified as a library call.
+        let chunks = vec![
+            chunk("caller", "a/svc.py", Some("Svc"), &["self.render_row"]),
+            chunk("render_row", "b/one.py", None, &[]),
+            chunk("render_row", "c/two.py", None, &[]),
+        ];
+        let (_, _, pending, stats) = build_with_stats(&chunks, &[]);
+        assert_eq!(pending.len(), 1, "a self-call stays a normal ambiguity");
+        assert_eq!(stats.external_receiver, 0);
     }
 
     #[test]

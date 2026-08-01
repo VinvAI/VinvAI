@@ -179,6 +179,34 @@ pub fn max_snippet_lines() -> usize {
         .unwrap_or(300)
 }
 
+/// How many same-language definitions a name may have before an unresolved
+/// reference to it is treated as a generic verb of THIS repository rather than
+/// an ambiguity worth adjudicating. `INDEX_MAX_CANDIDATES`, default 8.
+///
+/// Measured per repo rather than listed: `save`/`run` are generic here, `Close`
+/// would be in a Go tree, `toString` in a Java one. Above the cutoff no
+/// adjudicator beats the resolver — the name simply does not identify a target.
+pub fn max_pending_candidates() -> usize {
+    env_nonempty("INDEX_MAX_CANDIDATES")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 2)
+        .unwrap_or(8)
+}
+
+/// How many receiver call sites a name needs before it is judged a library
+/// method rather than a project symbol. `INDEX_LIBRARY_METHOD_REFS`, default 25.
+///
+/// Paired with a ratio test (references must also exceed twice the number of
+/// definitions), so this is a floor that keeps small repositories out of it,
+/// not the rule itself. Lower it to prune harder; raise it to send more
+/// receiver calls to adjudication.
+pub fn library_method_refs() -> usize {
+    env_nonempty("INDEX_LIBRARY_METHOD_REFS")
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n >= 2)
+        .unwrap_or(25)
+}
+
 /// RRF constant `K` in `1/(K + rank)`. `INDEX_RRF_K`, default 60 (the value
 /// from the original RRF paper; sweep it against the eval set before changing).
 pub fn rrf_k() -> f32 {

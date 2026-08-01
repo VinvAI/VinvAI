@@ -25,8 +25,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
 	adjudicatePendingEdges,
+	adjudicateViaShards,
 	readAdjudicated,
 	readPendingEdges,
+	type AdjudicationOutcome,
 } from '../graph/graphEnhancer';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { isHarnessBusy } from '../harness/harnessRunner';
@@ -44,6 +46,10 @@ export interface EnhanceRecord {
 	resolved: number;
 	remaining: number;
 	ranAt: string;
+	/** Harness sessions the run cost (shard mode: single digits, not hundreds). */
+	sessions?: number;
+	/** Callers past the shard budget — recorded so a cap is never silent. */
+	skipped?: number;
 }
 
 /** Reads the persisted record, or null when never run / unreadable. */
@@ -160,15 +166,23 @@ export async function maybeAutoEnhance(
 	enhanceRunning = true;
 	publishEnhanceState({ epoch, resolved: 0, remaining: open, status: 'running' });
 	try {
-		const outcome = await adjudicatePendingEdges(context, workspaceRoot, {
-			onProgress: (done, total) =>
-				publishEnhanceState({
-					epoch,
-					resolved: done,
-					remaining: total - done,
-					status: 'running',
-				}),
-		});
+		const onProgress = (done: number, total: number): void =>
+			publishEnhanceState({
+				epoch,
+				resolved: done,
+				remaining: total - done,
+				status: 'running',
+			});
+		// Shard files by default: a handful of agent sessions reading the queue
+		// off disk, instead of one CLI process per reference (888 of them on
+		// this repository). `VINV_ENHANCER_MODE=records` restores the old path
+		// — the rollback, and what the manual Enhance Graph command still uses.
+		// Widened rather than a union: the record only ever reads these two
+		// extras, and the per-record path simply leaves them undefined.
+		const outcome: AdjudicationOutcome & { sessions?: number; skipped?: number } =
+			process.env.VINV_ENHANCER_MODE === 'records'
+				? await adjudicatePendingEdges(context, workspaceRoot, { onProgress })
+				: await adjudicateViaShards(context, workspaceRoot, { onProgress });
 		// The applied `index update` may have advanced the epoch — record the
 		// POST-run epoch so our own update never re-arms the runner.
 		let recordedEpoch = epoch;
@@ -183,6 +197,8 @@ export async function maybeAutoEnhance(
 			resolved: outcome.resolved,
 			remaining,
 			ranAt: new Date().toISOString(),
+			...(outcome.sessions === undefined ? {} : { sessions: outcome.sessions }),
+			...(outcome.skipped === undefined ? {} : { skipped: outcome.skipped }),
 		};
 		writeEnhanceRecord(workspaceRoot, final);
 		publishEnhanceState(stateFromRecord(final));

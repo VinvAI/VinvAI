@@ -1052,6 +1052,13 @@ export function dispatchAgentPrompt(
 	// the edits land in one tree per trigger.
 	cwd?: string,
 	onUpdate?: (line: string) => void,
+	// Wall-clock bound for THIS dispatch. Defaults to the shared 5-minute
+	// budget, which fits a verification agent answering one question but not a
+	// batch worker grinding through a shard of a hundred references — that one
+	// asks for tens of minutes. Raising the global default instead would let a
+	// genuinely hung episode sit undetected for just as long, so the budget
+	// belongs to the caller that knows the shape of its own work.
+	timeoutMs?: number,
 ): Promise<string | null> {
 	const harness = getHarness(harnessId);
 	if (harness.kind !== 'cli' || !harness.bin) {
@@ -1135,7 +1142,7 @@ export function dispatchAgentPrompt(
 		const timer = setTimeout(() => {
 			killProcessTree(child, 'SIGKILL');
 			settle(null);
-		}, agentDispatchTimeoutMs());
+		}, timeoutMs ?? agentDispatchTimeoutMs());
 		child.on('error', () => {
 			clearTimeout(timer);
 			settle(null);

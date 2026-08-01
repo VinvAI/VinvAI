@@ -143,7 +143,8 @@ fn cmd_index(
     let epoch = assign_epochs(&mut chunks, previous.as_ref());
 
     let overrides = load_edge_overrides(&dir, &chunks);
-    let (edges, ranks, pending_edges) = timed("graph_build", || graph::build(&chunks, &overrides));
+    let (edges, ranks, pending_edges, graph_stats) =
+        timed("graph_build", || graph::build_with_stats(&chunks, &overrides));
     write_pending_edges(&dir, &chunks, &pending_edges);
     apply_ranks(&mut chunks, &ranks);
     apply_tag_overrides(&dir, &mut chunks);
@@ -178,6 +179,8 @@ fn cmd_index(
         "symbols": store.chunks.len(),
         "edges": store.edges.len(),
         "dim": dim,
+        "pending_edges": pending_edges.len(),
+        "pending_suppressed": suppression_json(&graph_stats),
     }))
 }
 
@@ -574,7 +577,8 @@ fn incremental(
     let epoch = assign_epochs(&mut chunks, Some(&old));
 
     let overrides = load_edge_overrides(dir, &chunks);
-    let (edges, ranks, pending_edges) = timed("graph_build", || graph::build(&chunks, &overrides));
+    let (edges, ranks, pending_edges, graph_stats) =
+        timed("graph_build", || graph::build_with_stats(&chunks, &overrides));
     write_pending_edges(dir, &chunks, &pending_edges);
     apply_ranks(&mut chunks, &ranks);
     apply_tag_overrides(dir, &mut chunks);
@@ -621,12 +625,26 @@ fn incremental(
         "symbols": store.chunks.len(),
         "edges": store.edges.len(),
         "dim": dim,
+        "pending_edges": pending_edges.len(),
+        "pending_suppressed": suppression_json(&graph_stats),
     }))
 }
 
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
+
+/// References the graph deliberately kept out of `pending_edges.jsonl`, by
+/// reason. Reported on every index/update so a queue that shrinks by two
+/// thirds can account for it — an unexplained drop reads as a broken index.
+fn suppression_json(stats: &graph::BuildStats) -> Value {
+    json!({
+        "cross_lang": stats.cross_lang,
+        "external_receiver": stats.external_receiver,
+        "generic_name": stats.generic_name,
+        "resolved_by_lang": stats.resolved_by_lang,
+    })
+}
 
 fn apply_ranks(chunks: &mut [Chunk], ranks: &[f32]) {
     for (c, r) in chunks.iter_mut().zip(ranks) {
@@ -911,10 +929,17 @@ fn write_pending_edges(dir: &Path, chunks: &[Chunk], pending: &[graph::PendingEd
             "src_id": src.id,
             "src_file": src.file,
             "src_name": src.name,
+            "src_lang": src.lang,
             "name": p.name,
             "candidates": p.candidates.iter().map(|&i| {
                 let c = &chunks[i];
-                json!({ "id": c.id, "file": c.file, "kind": c.kind, "summary": c.summary })
+                json!({
+                    "id": c.id,
+                    "file": c.file,
+                    "kind": c.kind,
+                    "lang": c.lang,
+                    "summary": c.summary,
+                })
             }).collect::<Vec<_>>(),
         });
         lines.push_str(&record.to_string());
