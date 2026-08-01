@@ -20,12 +20,12 @@ import { findTraceFiles } from '../graph/indexGraph';
 import { openCallTree } from '../identification/callTreeView';
 import { openJourney } from '../views/journeyView';
 import { openFindings } from '../views/findingsView';
-import { analyzeDeadCodeSections, tryRunDeadSection } from '../harness/deadCodeRunner';
 import type { CallSiteContext } from '../identification/callSiteContext';
 import { entryPointLabel, loadEntryPoints } from '../identification/identification';
 import { registerDetectedTargets } from '../mcp/mcpRegistrar';
 import { openGraphExplorer } from '../views/graphExplorer';
 import { openAskVinv } from '../views/askVinv';
+import { openDeadCode } from '../views/deadCodeView';
 import { adjudicatePendingEdges } from '../graph/graphEnhancer';
 import {
 	offerEpisodeForBringupFailure,
@@ -266,43 +266,6 @@ export function registerCommands(
 			}
 			await openFindings(folder.uri.fsPath, arg?.service);
 		}),
-		// Ask the coding agent what the dead code does and what to do with it.
-		// `arg.sectionId` narrows to one section (the report tab's own button);
-		// without it every unanalysed section goes, batched.
-		vscode.commands.registerCommand(
-			'vinv-vs.analyzeDeadCode',
-			async (arg?: { sectionId?: string | null; all?: boolean }) => {
-				const folder = vscode.workspace.workspaceFolders?.[0];
-				if (!folder) {
-					void vscode.window.showErrorMessage('Open a workspace folder to analyse dead code.');
-					return;
-				}
-				await analyzeDeadCodeSections(folder.uri.fsPath, {
-					sectionId: arg?.sectionId ?? undefined,
-					reanalyseAll: arg?.all,
-				});
-			},
-		),
-		// "Try run this path": the harness writes a driver for one dead section,
-		// the driver runs under vinv tracing, and the fresh capture proves (or
-		// refutes) that the code can execute — reached symbols leave the dead list.
-		vscode.commands.registerCommand(
-			'vinv-vs.tryRunDeadCode',
-			async (arg?: { sectionId?: string | null }) => {
-				const folder = vscode.workspace.workspaceFolders?.[0];
-				if (!folder) {
-					void vscode.window.showErrorMessage('Open a workspace folder to run dead code.');
-					return;
-				}
-				if (!arg?.sectionId) {
-					void vscode.window.showWarningMessage(
-						'Vinv: open a dead-code section report and use its "Try run this path" button.',
-					);
-					return;
-				}
-				await tryRunDeadSection(folder.uri.fsPath, arg.sectionId);
-			},
-		),
 		// The values the exerciser could not derive. This panel used to open only
 		// as a side effect of an exercise pass, so closing the tab — or getting a
 		// credential wrong — meant re-running the whole pipeline to be asked again.
@@ -572,6 +535,10 @@ export function registerCommands(
 		// Open the Ask Vinv QnA panel. The graph explorer passes { seedRow } to
 		// pre-scope the question to one symbol; the call-tree view passes
 		// { callSite } to additionally scope it to one entry point's execution.
+		// The dead-code report, browsable. Opens even with no report on disk — the
+		// panel says the analysis has not run rather than showing an empty list,
+		// which would read as "there is no dead code".
+		vscode.commands.registerCommand('vinv-vs.openDeadCode', () => openDeadCode(context)),
 		vscode.commands.registerCommand(
 			'vinv-vs.askVinv',
 			(arg?: { seedRow?: number; callSite?: CallSiteContext }) => {

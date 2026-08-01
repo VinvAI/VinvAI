@@ -26,12 +26,14 @@ import {
 	runBringupStartViaHarness,
 } from '../harness/harnessRunner';
 import { ensureHarnessChosen } from '../harness/harnessPicker';
+import { runDeadCodeScan, type DeadCodeProgress } from './deadCodeScan';
 import { awaitEnginesTerminal } from '../engines/install';
 
 /** Combined outcome of a Discover Project run. */
 export interface DiscoveryResult {
 	indexOk: boolean;
 	handbookOk: boolean;
+	deadCodeOk: boolean;
 	bringupOk: boolean;
 }
 
@@ -39,6 +41,7 @@ export interface DiscoveryResult {
 export interface DiscoveryProgress {
 	onIndex?: (p: IndexProgress) => void;
 	onHandbook?: (p: HandbookProgress) => void;
+	onDeadCode?: (p: DeadCodeProgress) => void;
 	onBringup?: (p: BringupProgress) => void;
 }
 
@@ -127,9 +130,11 @@ function failureDetail(indexOk: boolean, handbookOk: boolean, bringupOk: boolean
 
 /**
  * Discovers a project in two phases:
- *   1. index build (.vinv/index) and handbook generation (.vinv/vinv.md) run in
- *      parallel — they share LLM credentials but are otherwise independent, so a
- *      failure in one does not block the other.
+ *   1. index build (.vinv/index), handbook generation (.vinv/vinv.md) and the
+ *      dead-code scan (.vinv/deadcode.md) run in parallel — independent of one
+ *      another, so a failure in one does not block the others. The dead-code
+ *      scan reads source rather than the index store, which is why it does not
+ *      have to wait for indexing to finish.
  *   2. Once *both* complete, bringup enumerates the stack into
  *      .vinv/services.json. bringup reads the handbook, so it runs only after the
  *      handbook exists (a freshly generated one, or a pre-existing file).
@@ -146,7 +151,7 @@ export async function runDiscovery(
 ): Promise<DiscoveryResult> {
 	if (activeCts) {
 		void vscode.window.showInformationMessage('Vinv: Discovery is already running.');
-		return { indexOk: false, handbookOk: false, bringupOk: false };
+		return { indexOk: false, handbookOk: false, deadCodeOk: false, bringupOk: false };
 	}
 
 	const cts = new vscode.CancellationTokenSource();
@@ -167,6 +172,10 @@ export async function runDiscovery(
 		setDiscoveryState({ phase: 'running', label: `Handbook — ${p.label}` });
 		progress.onHandbook?.(p);
 	};
+	const onDeadCode = (p: DeadCodeProgress): void => {
+		setDiscoveryState({ phase: 'running', label: `Dead code — ${p.label}` });
+		progress.onDeadCode?.(p);
+	};
 	const onBringup = (p: BringupProgress): void => {
 		setDiscoveryState({ phase: 'running', label: `Services — ${p.label}` });
 		progress.onBringup?.(p);
@@ -184,11 +193,14 @@ export async function runDiscovery(
 		// first-time picker: still index locally, but skip the LLM stages.
 		const harness = await ensureHarnessChosen();
 
-		const [indexOk, handbookOk] = await Promise.all([
+		const [indexOk, handbookOk, deadCodeOk] = await Promise.all([
 			runIndexing(context, workspaceRoot, onIndex, cts.token),
 			harness
 				? runHandbookViaHarness(context, harness, workspaceRoot, onHandbook, cts.token)
 				: Promise.resolve(false),
+			// Reads source rather than the store, so it does not wait on indexing —
+			// and needs no harness, so it runs even when the LLM stages are skipped.
+			runDeadCodeScan(context, workspaceRoot, onDeadCode, cts.token),
 		]);
 
 		// Bring-up needs the handbook on disk to enumerate services. Run it once
@@ -227,7 +239,10 @@ export async function runDiscovery(
 			});
 		}
 
-		return { indexOk, handbookOk, bringupOk };
+		// deadCodeOk is reported but deliberately absent from the completion
+		// condition above: the scan is a report, and losing it does not leave the
+		// project undiscovered the way a missing index or service inventory does.
+		return { indexOk, handbookOk, deadCodeOk, bringupOk };
 	} finally {
 		activeCts = undefined;
 		cts.dispose();
@@ -363,18 +378,17 @@ export function shouldRediscoverForUpdate(input: {
  * (returns silently) unless every precondition holds:
  *   • the auto-discover toggle is on (Settings tab / vinv.autoDiscover.enabled),
  *   • a folder is open, and
- *   • the project isn't already fully discovered (index + handbook + services),
- *     OR this build is not the one this workspace last ran a pass under.
+ *   • the project isn't already fully discovered (index + handbook + services).
  *
  * The already-discovered guard keeps reopening a workspace cheap: re-indexing and
- * the expensive handbook/bring-up agents do not run on every reload. The update
- * exception exists because an extension update also moves the engines to a new
- * pin, and the contracts between them are versioned (the index store format, the
- * MCP payload shapes, the recorded start commands) — so the artifacts on disk
- * were produced by engines this build no longer ships. Re-running discovery is
- * also what makes an update behave like an install end to end: Auto-Pilot's
- * auto-start hangs off discovery COMPLETING (see harness/autoPilot), so a
- * workspace that never re-discovers never gets the pipeline either.
+ * the expensive handbook/bring-up agents do not run on every reload. It is now
+ * ABSOLUTE — an install or update no longer overrides it. The update exception
+ * that used to live here (force-rebuild when this build is not the one the
+ * workspace last ran under) is commented out below, with the trade-off it gives
+ * up; "Re-discover Project (Force Rebuild)" is the user-driven equivalent.
+ *
+ * The stamp bookkeeping is kept regardless, so restoring the exception needs no
+ * migration: every workspace still records the build it was last seen under.
  *
  * It waits for a running engines terminal, and then runs WHATEVER that terminal
  * did. Those are two separate things and both are deliberate. Waiting matters
@@ -408,20 +422,40 @@ export async function maybeAutoDiscover(context: vscode.ExtensionContext): Promi
 	// engines this build no longer ships — so gap-filling would keep exactly what
 	// is stale. Only ever set on the re-discovery path; a first run has nothing
 	// to delete.
-	let force = false;
+	const force = false;
 
 	if (discovered) {
-		const seen = discoveredStamps(context)[root];
-		if (!shouldRediscoverForUpdate({ discovered, seen, stamp })) {
-			// Current: record what this workspace is on so the NEXT build is
-			// detectable, and leave the artifacts alone.
-			await rememberDiscoveredStamp(context, root, stamp);
-			return;
-		}
-		console.log(
-			`Vinv: this workspace last discovered under ${seen ?? 'an unrecorded build'}, this build is ${stamp} — force re-discovering`,
-		);
-		force = true;
+		// DISABLED: an install or update no longer force-rebuilds a workspace that
+		// is already discovered. The pass it fired is the full one — delete the
+		// artifacts, re-index, re-run the handbook and bring-up agents — and it ran
+		// unprompted on every version bump, on every workspace, with no way to
+		// decline it. An already-discovered workspace is now left exactly as it is.
+		//
+		// The trade-off this gives up is real and is the reason the behavior
+		// existed: the artifacts on disk were produced by the engines the PREVIOUS
+		// build pinned, and the contracts between them are versioned (index store
+		// format, MCP payload shapes, recorded start commands). A stale store can
+		// therefore surface as a v4/v5 refusal or an empty MCP result rather than
+		// as anything self-describing. Auto-Pilot also hangs off discovery
+		// COMPLETING, so a workspace that never re-discovers does not auto-start
+		// the pipeline after an update.
+		//
+		// Both are now the user's call: "Vinv: Re-discover Project (Force Rebuild)"
+		// does exactly what this block did, with a confirmation. To restore the
+		// automatic behavior, un-comment below and make `force` a `let` again.
+		//
+		// const seen = discoveredStamps(context)[root];
+		// if (shouldRediscoverForUpdate({ discovered, seen, stamp })) {
+		// 	console.log(
+		// 		`Vinv: this workspace last discovered under ${seen ?? 'an unrecorded build'}, this build is ${stamp} — force re-discovering`,
+		// 	);
+		// 	force = true;
+		// }
+
+		// Record what this workspace is on so the NEXT build is detectable, and
+		// leave the artifacts alone.
+		await rememberDiscoveredStamp(context, root, stamp);
+		return;
 	}
 
 	autoDiscovering = true;

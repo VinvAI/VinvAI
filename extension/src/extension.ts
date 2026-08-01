@@ -17,7 +17,6 @@ import { CallTreeEditorProvider } from './identification/callTreeView';
 import { GraphExplorerEditorProvider } from './views/graphExplorer';
 import { JourneyEditorProvider } from './views/journeyView';
 import { FindingsEditorProvider } from './views/findingsView';
-import { DeadSectionEditorProvider } from './views/deadCodeReportView';
 import { OptimizationReportEditorProvider } from './views/optimizationReportView';
 import { registerAutoTriggers } from './harness/autoTrigger';
 import { registerAutoPilotAutoStart } from './harness/autoPilot';
@@ -177,7 +176,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		GraphExplorerEditorProvider.register(context),
 		JourneyEditorProvider.register(context),
 		FindingsEditorProvider.register(context),
-		DeadSectionEditorProvider.register(context),
 		OptimizationReportEditorProvider.register(context),
 	);
 
@@ -217,8 +215,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Discover the workspace automatically on startup and whenever a folder is
 	// added, so the user doesn't have to click Discover Project manually. It is a
-	// no-op unless the toggle is on and the project is either undiscovered or last
-	// discovered under a different build — see maybeAutoDiscover, which also waits
+	// no-op unless the toggle is on and the project is UNDISCOVERED — an already
+	// discovered workspace is left alone, including across an install or update
+	// (that force-rebuild is commented out in maybeAutoDiscover). It also waits
 	// out any engines terminal the pass above starts.
 	void enginePass.then(() => maybeAutoDiscover(context));
 

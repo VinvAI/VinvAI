@@ -19,10 +19,10 @@
  */
 
 import * as assert from 'assert';
+import { getDeadCodeHtml } from '../views/deadCodeView';
 import { getJourneyHtml } from '../views/journeyView';
 import { getOptimizationReportHtml } from '../views/optimizationReportView';
 import { getFindingsHtml } from '../views/findingsView';
-import { getDeadSectionHtml } from '../views/deadCodeReportView';
 import { getTracesHtml } from '../views/tracesPanel';
 
 type Listener = (ev: unknown) => void;
@@ -39,6 +39,11 @@ interface ElStub {
 	listeners: Record<string, Listener>;
 	addEventListener: (name: string, fn: Listener) => void;
 	querySelectorAll: () => unknown[];
+	/** Classes the script toggles — modal open/close state is read from here. */
+	classes: Set<string>;
+	classList: { add: (c: string) => void; remove: (c: string) => void; toggle: (c: string, on?: boolean) => void };
+	/** Arbitrary data-* the script stashes on an element (button labels). */
+	dataset: Record<string, string>;
 }
 
 interface Sandbox {
@@ -68,6 +73,16 @@ function evalWebviewScript(html: string, expose: string[]): Sandbox {
 				el.listeners[name] = fn;
 			},
 			querySelectorAll: () => [],
+			classes: new Set<string>(),
+			classList: {
+				add: (c: string) => void el.classes.add(c),
+				remove: (c: string) => void el.classes.delete(c),
+				toggle: (c: string, on?: boolean) => {
+					const want = on ?? !el.classes.has(c);
+					if (want) { el.classes.add(c); } else { el.classes.delete(c); }
+				},
+			},
+			dataset: {},
 		};
 		return el;
 	};
@@ -360,7 +375,6 @@ suite('findings view: episode attempts render legibly', () => {
 		// half was the part you had to scroll for.
 		const html = rendered({
 			...mixedUnits,
-			deadCode: { hasTrace: true, sections: [], analysed: 0, traced: 3, considered: 9, bound: 'src/' },
 		});
 		const latency = html.indexOf('Latency profile');
 		const issues = html.indexOf('Issue clusters');
@@ -491,169 +505,6 @@ suite('findings view: episode attempts render legibly', () => {
 	});
 });
 
-suite('dead code section view: the try-run evidence is on the page', () => {
-	const section = {
-		id: 'sec-a',
-		title: 'app/legacy.py — helper_a',
-		reason: 'reachable-untested',
-		layer: 'service',
-		lines: 40,
-		files: ['app/legacy.py'],
-		liveCallers: ['handler (app/api.py:3)'],
-		tourOrder: [],
-		symbols: { items: [], lineage: [] },
-	};
-
-	function rendered(runs: unknown[]): string {
-		const { els, winListeners } = evalWebviewScript(getDeadSectionHtml(), ['render']);
-		winListeners.message({
-			data: {
-				type: 'section',
-				report: { section, stops: [], storeEpoch: 7, verdict: null, runs },
-				stale: false,
-			},
-		});
-		return els.content.innerHTML;
-	}
-
-	test('a section that was driven shows what the capture recorded, and how to open it', () => {
-		const html = rendered([
-			{
-				sectionId: 'sec-a',
-				title: section.title,
-				at: '2026-07-31T10:00:00.000Z',
-				outcome: 'revived',
-				detail: 'the driver executed 1 of 2 section symbol(s) under trace',
-				revived: ['helper_a'],
-				rows: [1, 2],
-				driverFile: '/w/.vinv/tmp/deadcode-driver-sec-a.py',
-				traceFile: '/w/.vinv/captures/deadcode-sec-a-1/trace.jsonl',
-				exitCode: 0,
-				timedOut: false,
-				notes: 'calls helper_a with a fake request',
-				outputTail: '',
-				trace: {
-					functions: 2,
-					calls: 3,
-					totalMs: 8,
-					errors: 1,
-					errorTypes: ['ValueError'],
-					top: [
-						{ component: 'app.legacy.helper_a', calls: 2, ms: 4, errors: 0 },
-						{ component: 'app.legacy2.helper_b', calls: 1, ms: 4, errors: 1 },
-					],
-				},
-			},
-		]);
-		assert.ok(html.includes('Try-runs'), 'the run has its own section, not a toast');
-		assert.ok(html.includes('symbols executed'), 'the outcome is a plain phrase');
-		assert.ok(html.includes('app.legacy.helper_a'), 'the traced functions are listed');
-		assert.ok(html.includes('functions traced'), 'the capture summary is on screen');
-		assert.ok(html.includes('ValueError'), 'what the run raised is named');
-		assert.ok(html.includes('data-open="/w/.vinv/captures/deadcode-sec-a-1/trace.jsonl"'),
-			'the trace itself is one click away');
-		assert.ok(html.includes('data-open="/w/.vinv/tmp/deadcode-driver-sec-a.py"'),
-			'so is the driver that produced it');
-		assert.ok(html.includes('calls helper_a with a fake request'), "the driver's own note is kept");
-	});
-
-	test('a run that produced no spans says so instead of showing zeros', () => {
-		const html = rendered([
-			{
-				sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
-				outcome: 'not-reached', detail: 'nothing executed', revived: [], rows: [1],
-				driverFile: null, traceFile: '/w/trace.jsonl', exitCode: 0, timedOut: false,
-				notes: '', outputTail: '', trace: null,
-			},
-		]);
-		assert.ok(html.includes('recorded no function exits'));
-		assert.ok(!html.includes('functions traced'), 'no fabricated measurement');
-	});
-
-	test('a section nobody has driven invites the run instead of showing an empty card', () => {
-		const html = rendered([]);
-		assert.ok(html.includes('No one has tried to run this section yet'));
-		assert.ok(html.includes('Run this Path'), 'the invitation names the button that does it');
-	});
-
-	test('each case shows what went in and what came back, its own trace beside it', () => {
-		// The counters say the tracer worked. What a developer came for is the
-		// behaviour: given an empty list it answered 0, given -1 it raised. One
-		// card per case, because one merged table cannot say which input produced
-		// which answer.
-		const html = rendered([
-			{
-				sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
-				outcome: 'revived', detail: 'ran', revived: ['helper_a'], rows: [1],
-				driverFile: null, traceFile: null, exitCode: 0, timedOut: false,
-				notes: '', outputTail: '',
-				trace: { functions: 1, calls: 2, totalMs: 2, errors: 1, errorTypes: ['ValueError'], top: [] },
-				cases: [
-					{
-						name: 'empty-list', why: 'the boundary',
-						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-0/trace.jsonl',
-						exitCode: 0, timedOut: false, outputTail: '',
-						trace: {
-							functions: 1, calls: 1, totalMs: 1, errors: 0, errorTypes: [],
-							top: [{
-								component: 'app.legacy.helper_a', calls: 1, ms: 1, errors: 0,
-								samples: [{ args: [{ name: 'items', render: '[int × 0]' }], result: '0', error: null, ms: 1 }],
-							}],
-						},
-					},
-					{
-						name: 'negative', why: 'the input that fails',
-						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-1/trace.jsonl',
-						exitCode: 1, timedOut: false, outputTail: '',
-						trace: {
-							functions: 1, calls: 1, totalMs: 1, errors: 1, errorTypes: ['ValueError'],
-							top: [{
-								component: 'app.legacy.helper_a', calls: 1, ms: 1, errors: 1,
-								samples: [{ args: [{ name: 'n', render: '-1' }], result: '', error: 'ValueError', ms: 1 }],
-							}],
-						},
-					},
-					{
-						name: 'needs-a-socket', why: 'the case that could not run',
-						traceFile: '/w/.vinv/captures/deadcode-sec-a-1-2/trace.jsonl',
-						exitCode: 2, timedOut: false, outputTail: 'ConnectionRefusedError', trace: null,
-					},
-				],
-			},
-		]);
-		assert.ok(html.includes('empty-list') && html.includes('negative'), 'cases are named');
-		assert.ok(html.includes('the boundary'), 'what a case is meant to show is on the page');
-		assert.ok(html.includes('items=[int × 0]'), 'the input is shown, not just the symbol');
-		assert.ok(html.includes('raised ValueError'), 'a raise is the answer, rendered as one');
-		assert.ok(
-			html.includes('data-open="/w/.vinv/captures/deadcode-sec-a-1-1/trace.jsonl"'),
-			'each case links its OWN capture, not the run’s first one',
-		);
-		assert.ok(html.includes('This case produced no trace (exit 2)'),
-			'a case that never ran says so rather than vanishing');
-		assert.ok(html.includes('ConnectionRefusedError'), 'and its output is the evidence why');
-	});
-
-	test('a refusal with no reason does not wear the verdict badge', () => {
-		// A decline leaves no driver and no trace, so the reason is the entire
-		// evidence — an unexplained one must not read as settled.
-		const bare = {
-			sectionId: 'sec-a', title: section.title, at: '2026-07-31T10:00:00.000Z',
-			outcome: 'declined', detail: 'no reason given', revived: [], rows: [1],
-			driverFile: null, traceFile: null, exitCode: null, timedOut: false,
-			notes: '', outputTail: '', trace: null,
-		};
-		const bareHtml = rendered([bare]);
-		assert.ok(bareHtml.includes('refused, no reason'));
-		assert.ok(!bareHtml.includes('not drivable'), 'an unexplained no is not a verdict');
-
-		const reasoned = rendered([{ ...bare, notes: 'it is a setuptools entry point' }]);
-		assert.ok(reasoned.includes('not drivable'));
-		assert.ok(reasoned.includes('Why it cannot be driven: it is a setuptools entry point'),
-			'the reason is labelled as the reason, not as driver notes');
-	});
-});
-
 suite('traces panel: non-HTTP entry points are first-class rows', () => {
 	function rendered(rows: unknown[]): string {
 		const { els, winListeners } = evalWebviewScript(getTracesHtml(), ['render']);
@@ -733,5 +584,293 @@ suite('traces panel: non-HTTP entry points are first-class rows', () => {
 		assert.ok(html.includes('bar-t mid'), 'coverage still renders as a bar');
 		assert.ok(!html.includes('0ms'), 'no latency is not zero latency');
 		assert.ok(html.includes('dash'), 'the empty cells are dashes');
+	});
+});
+
+suite('dead code panel: the report as a browsable surface', () => {
+	function sym(name: string, file: string, line: number, extra: Record<string, unknown> = {}) {
+		return { name, file, line, end: line + 4, kind: 'function', ambiguous: false, ...extra };
+	}
+	const scan = {
+		schemaVersion: 1,
+		generatedAt: '2026-08-02T09:00:00.000Z',
+		files: 134,
+		definitions: 1623,
+		unreachable: [sym('run_worker', 'exerciser/_worker.py', 78)],
+		testOnly: [sym('workdir_for', 'exerciser/envconfig.py', 300, { ambiguous: true })],
+		probable: 12,
+	};
+
+	function loaded(report: unknown): ReturnType<typeof evalWebviewScript> {
+		const sb = evalWebviewScript(getDeadCodeHtml(), []);
+		// The stub select has no value until one is chosen; the real element
+		// starts on its first option.
+		sb.els.bucket = sb.els.bucket ?? ({} as never);
+		sb.els.bucket.value = 'all';
+		sb.els.q.value = '';
+		sb.winListeners.message({ data: { type: 'report', scan: report, repo: 'vinv' } });
+		return sb;
+	}
+
+	test('no report on disk says the analysis has not run, not that nothing is dead', () => {
+		const { els } = loaded(null);
+		assert.ok(els.detail.innerHTML.includes('Dead code analysis not done yet'), els.detail.innerHTML);
+		// An empty list plus a zeroed tile row would read as a clean result.
+		assert.strictEqual(els.tiles.innerHTML, '');
+		assert.strictEqual(els.list.innerHTML, '');
+	});
+
+	test('the tiles count each bucket and the rows that need checking', () => {
+		const { els } = loaded(scan);
+		const h = els.tiles.innerHTML;
+		assert.ok(h.includes('Total dead code'), h);
+		assert.ok(/Bucket: unreachable[\s\S]*?1/.test(h), h);
+		assert.ok(/Bucket: test-only[\s\S]*?1/.test(h), h);
+		assert.ok(/Flagged ambiguous[\s\S]*?1/.test(h), h);
+	});
+
+	test('every symbol is listed with its bucket and location', () => {
+		const { els } = loaded(scan);
+		assert.ok(els.list.innerHTML.includes('run_worker'), els.list.innerHTML);
+		assert.ok(els.list.innerHTML.includes('UNREACHABLE'));
+		assert.ok(els.list.innerHTML.includes('TEST-ONLY'));
+		assert.ok(els.list.innerHTML.includes('exerciser/_worker.py:78'));
+		assert.ok(els.count.textContent.includes('2'), els.count.textContent);
+	});
+
+	test('the detail pane explains what the bucket means for deletion', () => {
+		const { els } = loaded(scan);
+		const d = els.detail.innerHTML;
+		assert.ok(d.includes('run_worker'), d);
+		// The caveat is the point of the pane: unreachable is safe-ish, test-only
+		// takes its tests with it.
+		assert.ok(d.includes('Nothing in the repository calls this'), d);
+	});
+
+	test('the bucket filter narrows the list', () => {
+		const { els } = loaded(scan);
+		els.bucket.value = 'testOnly';
+		els.bucket.listeners.change({} as never);
+		assert.ok(!els.list.innerHTML.includes('run_worker'), els.list.innerHTML);
+		assert.ok(els.list.innerHTML.includes('workdir_for'));
+	});
+
+	test('search matches symbol name and file path', () => {
+		const { els } = loaded(scan);
+		els.q.value = 'envconfig';
+		els.q.listeners.input({} as never);
+		assert.ok(els.list.innerHTML.includes('workdir_for'), els.list.innerHTML);
+		assert.ok(!els.list.innerHTML.includes('run_worker'));
+	});
+
+	test('an ambiguous symbol is marked in the list, not silently listed', () => {
+		const { els } = loaded(scan);
+		assert.ok(els.list.innerHTML.includes('name not unique'), els.list.innerHTML);
+	});
+});
+
+suite('dead code panel: the two agent actions', () => {
+	function sym(name: string, file: string, line: number) {
+		return { name, file, line, end: line + 4, kind: 'function', ambiguous: false };
+	}
+	const scan = {
+		schemaVersion: 1,
+		generatedAt: '2026-08-02T09:00:00.000Z',
+		files: 10,
+		definitions: 100,
+		unreachable: [sym('run_worker', 'exerciser/_worker.py', 78)],
+		testOnly: [],
+		probable: 0,
+	};
+	const key = 'exerciser/_worker.py:78:run_worker';
+
+	function loaded(history: unknown, findings: unknown = {}) {
+		const sb = evalWebviewScript(getDeadCodeHtml(), []);
+		sb.els.bucket.value = 'all';
+		sb.els.q.value = '';
+		sb.winListeners.message({ data: { type: 'report', scan, repo: 'vinv' } });
+		sb.winListeners.message({ data: { type: 'context', key, history, findings } });
+		return sb;
+	}
+	const lost = { reason: 'lost its calls', born: '2026-07-28', commits: 2, recent: [], ambiguous: false };
+	const never = { reason: 'never wired', born: '2026-07-28', commits: 1, recent: [], ambiguous: false };
+
+	test('verify is always offered', () => {
+		const { els } = loaded(never);
+		assert.ok(els.actions.innerHTML.includes('Verify with agent'), els.actions.innerHTML);
+	});
+
+	test('compare diff is offered only when the callers were removed', () => {
+		assert.ok(loaded(lost).els.actions.innerHTML.includes('Compare diff'));
+		// A symbol that never had a caller has no removal to explain, and asking
+		// invites an invented commit.
+		assert.ok(!loaded(never).els.actions.innerHTML.includes('Compare diff'));
+	});
+
+	test('an unreliable history is labelled rather than presented as fact', () => {
+		const { els } = loaded({ ...lost, ambiguous: true });
+		assert.ok(els.actions.innerHTML.includes('history may be another symbol'), els.actions.innerHTML);
+	});
+
+	test('clicking verify disables the button so a second agent is not queued', () => {
+		const { els } = loaded(never);
+		els['act-verify'].listeners.click({} as never);
+		assert.strictEqual(els['act-verify'].disabled, true);
+		assert.ok(els['act-verify'].textContent.includes('Asking the agent'), els['act-verify'].textContent);
+	});
+
+	test('a verdict opens the report and re-enables the button', () => {
+		const { els, winListeners } = loaded(never);
+		els['act-verify'].listeners.click({} as never);
+		winListeners.message({
+			data: {
+				type: 'verifyResult',
+				key,
+				result: { what: 'spawns a worker', verdict: 'confirmed-dead', why: 'no callers', risk: 'none', safeToDelete: true, confidence: 'high', checkedAt: 'now' },
+			},
+		});
+		assert.ok(els.overlay.classes.has('open'), 'the verdict modal opens');
+		assert.ok(els.mbody.innerHTML.includes('spawns a worker'), els.mbody.innerHTML);
+		assert.ok(els.mbody.innerHTML.includes('yes'), 'safe-to-delete is stated');
+		assert.strictEqual(els['act-verify'].disabled, false);
+	});
+
+	test('a removal report shows both flows side by side', () => {
+		const { els, winListeners } = loaded(lost);
+		els['act-removal'].listeners.click({} as never);
+		winListeners.message({
+			data: {
+				type: 'removalResult',
+				key,
+				result: { commit: '53da72c', why: 'moved to v2', replacement: 'run_v2', oldFlow: 'a -> run_worker', newFlow: 'a -> run_v2', checkedAt: 'now' },
+			},
+		});
+		const b = els.mbody.innerHTML;
+		assert.ok(b.includes('53da72c'), b);
+		assert.ok(b.includes('a -&gt; run_worker') && b.includes('a -&gt; run_v2'), b);
+	});
+
+	test('a harness that answers nothing says so instead of spinning', () => {
+		const { els, winListeners } = loaded(never);
+		els['act-verify'].listeners.click({} as never);
+		winListeners.message({ data: { type: 'verifyResult', key, result: null } });
+		assert.ok(els.mbody.innerHTML.includes('returned nothing usable'), els.mbody.innerHTML);
+		assert.strictEqual(els['act-verify'].disabled, false);
+	});
+
+	test('a stored finding is re-openable without asking again', () => {
+		const { els } = loaded(never, { verdict: { what: 'w', verdict: 'unclear', confidence: 'low', safeToDelete: false } });
+		assert.ok(els.actions.innerHTML.includes('View last verdict'), els.actions.innerHTML);
+	});
+});
+
+suite('dead code panel: regenerating the report', () => {
+	const scan = {
+		schemaVersion: 1,
+		generatedAt: '2026-08-02T09:15:30.000Z',
+		files: 10,
+		definitions: 100,
+		unreachable: [{ name: 'x', file: 'a.py', line: 1, end: 3, kind: 'function', ambiguous: false }],
+		testOnly: [],
+		probable: 0,
+	};
+
+	function loaded(report: unknown) {
+		const sb = evalWebviewScript(getDeadCodeHtml(), []);
+		sb.els.bucket.value = 'all';
+		sb.els.q.value = '';
+		sb.winListeners.message({ data: { type: 'report', scan: report, repo: 'vinv' } });
+		return sb;
+	}
+
+	test('the timestamp of the last scan is shown beside the button', () => {
+		const { els } = loaded(scan);
+		assert.ok(els.lastscan.textContent.includes('2026-08-02 09:15:30'), els.lastscan.textContent);
+	});
+
+	test('a workspace that has never been scanned says so', () => {
+		const { els } = loaded(null);
+		assert.strictEqual(els.lastscan.textContent, 'never scanned');
+	});
+
+	test('clicking regenerate disables the button so a second scan is not spawned', () => {
+		const { els } = loaded(scan);
+		els.regen.listeners.click({} as never);
+		assert.strictEqual(els.regen.disabled, true);
+		assert.ok(els.regen.textContent.includes('Scanning'), els.regen.textContent);
+	});
+
+	test('engine progress is surfaced on the button itself', () => {
+		const { els, winListeners } = loaded(scan);
+		els.regen.listeners.click({} as never);
+		winListeners.message({ data: { type: 'scanProgress', label: '17 unreachable, 34 test-only' } });
+		assert.ok(els.regen.textContent.includes('17 unreachable'), els.regen.textContent);
+	});
+
+	test('a fresh report re-enables the button and restamps the time', () => {
+		const { els, winListeners } = loaded(scan);
+		els.regen.listeners.click({} as never);
+		winListeners.message({
+			data: { type: 'report', scan: { ...scan, generatedAt: '2026-08-02T10:00:00.000Z' }, repo: 'vinv' },
+		});
+		assert.strictEqual(els.regen.disabled, false);
+		assert.strictEqual(els.regen.textContent, 'Regenerate report');
+		assert.ok(els.lastscan.textContent.includes('2026-08-02 10:00:00'), els.lastscan.textContent);
+	});
+
+	test('a failed scan says the previous report is untouched, and frees the button', () => {
+		const { els, winListeners } = loaded(scan);
+		els.regen.listeners.click({} as never);
+		winListeners.message({ data: { type: 'scanFailed' } });
+		assert.strictEqual(els.regen.disabled, false);
+		assert.ok(els.mbody.innerHTML.includes('untouched'), els.mbody.innerHTML);
+	});
+});
+
+suite('dead code panel: a chain is one finding, not several', () => {
+	function sym(name: string, line: number, deadCallers: string[] = []) {
+		return { name, file: 'gaia_scorer.py', line, end: line + 4, kind: 'function', ambiguous: false, deadCallers };
+	}
+	// question_scorer is the top; the other two are reached only from it.
+	const scan = {
+		schemaVersion: 1,
+		generatedAt: '2026-08-02T09:00:00.000Z',
+		files: 48,
+		definitions: 735,
+		unreachable: [
+			sym('question_scorer', 34),
+			sym('normalize_number_str', 6, ['gaia_scorer.py:34:question_scorer']),
+			sym('normalize_str', 104, ['gaia_scorer.py:34:question_scorer']),
+		],
+		testOnly: [],
+		probable: 0,
+	};
+
+	function loaded() {
+		const sb = evalWebviewScript(getDeadCodeHtml(), []);
+		sb.els.bucket.value = 'all';
+		sb.els.q.value = '';
+		sb.winListeners.message({ data: { type: 'report', scan, repo: 'smolagents' } });
+		return sb;
+	}
+
+	test('only the top of the chain is listed', () => {
+		const { els } = loaded();
+		assert.ok(els.list.innerHTML.includes('question_scorer'), els.list.innerHTML);
+		// These are not separate decisions — they go when their caller goes.
+		assert.ok(!els.list.innerHTML.includes('normalize_number_str'), els.list.innerHTML);
+		assert.ok(els.count.textContent.includes('1'), els.count.textContent);
+	});
+
+	test('the tile counts chains and says how many were folded in', () => {
+		const { els } = loaded();
+		assert.ok(els.tiles.innerHTML.includes('+2 folded in'), els.tiles.innerHTML);
+	});
+
+	test('the detail pane names what would be deleted alongside', () => {
+		const { els } = loaded();
+		const d = els.detail.innerHTML;
+		assert.ok(d.includes('Goes with it (2)'), d);
+		assert.ok(d.includes('normalize_number_str') && d.includes('normalize_str'), d);
 	});
 });

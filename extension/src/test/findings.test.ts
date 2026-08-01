@@ -151,8 +151,6 @@ suite('findings: message routing', () => {
 			refresh: async () => void log.push('refresh'),
 			dispatchFix: async (sig) => void log.push(`fix:${sig}`),
 			walk: async () => void log.push('walk'),
-			openDeadSection: async (id) => void log.push(`dead:${id}`),
-			analyzeDeadCode: async () => void log.push('analyze'),
 			runExercise: async () => void log.push('exercise'),
 			autoPilot: async () => void log.push('autopilot'),
 		};
@@ -165,17 +163,12 @@ suite('findings: message routing', () => {
 		// The walkthrough is reached FROM the report now — Journey has no entry
 		// point of its own outside the command palette, so this is the path.
 		await handleFindingsMessage({ type: 'walk' }, a);
-		await handleFindingsMessage({ type: 'openDeadSection', sectionId: 'aa11bb22cc33' }, a);
-		// Same rule as dispatchFix: a section message with no id names no section.
-		await handleFindingsMessage({ type: 'openDeadSection' }, a);
-		await handleFindingsMessage({ type: 'analyzeDeadCode' }, a);
 		// The empty state's two buttons. Without a route they render as controls
 		// that do nothing, which is worse than the text they replaced.
 		await handleFindingsMessage({ type: 'runExercise' }, a);
 		await handleFindingsMessage({ type: 'autoPilot' }, a);
 		assert.deepStrictEqual(log, [
-			'open:x.py:3', 'refresh', 'fix:abc123', 'walk', 'dead:aa11bb22cc33', 'analyze',
-			'exercise', 'autopilot',
+			'open:x.py:3', 'refresh', 'fix:abc123', 'walk', 'exercise', 'autopilot',
 		]);
 	});
 });
