@@ -17,6 +17,13 @@ export interface ServiceFact {
 	detail?: string;
 	/** .vinv/start_commands/<slug>.json when it exists on disk. */
 	startCommandPath?: string;
+	/**
+	 * True when this unit has more than one recorded way to be run, or arguments
+	 * to fill in — a CLI's subcommands, a library's entry points. It earns a
+	 * second control beside ▶ so choosing is possible without ▶ ever stopping
+	 * being one click.
+	 */
+	choosable?: boolean;
 }
 
 /** One report artifact under .vinv/reports. */
@@ -142,6 +149,12 @@ export interface FlowLink {
 	 * than displacing that.
 	 */
 	action?: { icon: 'play' | 'stop'; title: string; command: string; args?: unknown[] };
+	/**
+	 * Further controls beside `action`, in order. Separate from `action` because
+	 * the primary one must never move: ▶ is where the eye and the muscle memory
+	 * go, and a unit growing a second invocation must not shift it.
+	 */
+	extraActions?: { icon: 'gear'; title: string; command: string; args?: unknown[] }[];
 	/**
 	 * This row is past the stage's visible cap: the panel keeps it collapsed
 	 * behind the "…and N more" toggle rather than showing it inline.
@@ -392,6 +405,21 @@ function servicesStage(f: FlowFacts): FlowStage {
 				command: 'vinv-vs.serviceStart',
 				args: [s.name],
 			};
+			// A CLI with several subcommands, or a library with several entry
+			// points, needs a way to say WHICH — but ▶ has to stay one click and
+			// zero questions, because that is what every "just run it" reflex and
+			// the headless probe pass both depend on. So choosing gets its own
+			// control rather than displacing the default.
+			if (s.choosable) {
+				link.extraActions = [
+					{
+						icon: 'gear',
+						title: `Run ${s.name} with a chosen command and arguments`,
+						command: 'vinv-vs.serviceStartWithArgs',
+						args: [s.name],
+					},
+				];
+			}
 		} else if (s.state === 'running') {
 			link.action = {
 				icon: 'stop',

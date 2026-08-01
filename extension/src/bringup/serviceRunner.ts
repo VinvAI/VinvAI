@@ -9,6 +9,7 @@ import {
 	servicePort,
 	type StartCommand,
 } from './bringup';
+import { buildLaunchPlan } from './invocations';
 import { missingTargetPackage } from './targetPackages';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
 import { findFreePort, reclaimPort } from '../support/ports';
@@ -26,6 +27,15 @@ const DEBUG_TYPE = 'vinv-service';
 interface VinvDebugConfig extends vscode.DebugConfiguration {
 	service: string;
 	workspaceRoot: string;
+	/**
+	 * Which recorded invocation to run, for a unit that has several (a CLI's
+	 * subcommands, a library's entry points). Absent means the default one —
+	 * which is what every headless caller passes, because a prompt here would
+	 * hang a probe pass or an Auto-Pilot run that nobody is watching.
+	 */
+	invocation?: string;
+	/** Values for that invocation's parameters; missing ones take their default. */
+	args?: Record<string, string>;
 }
 
 /** Active service sessions, keyed by service name, for run-state queries. */
@@ -143,23 +153,31 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 	}
 
 	private async launch(): Promise<void> {
-		const commands = readStartCommands(this.config.workspaceRoot, this.config.service);
-		if (commands.length === 0) {
+		// Earlier entries are usually detached dependency starts (e.g. `docker
+		// compose up -d`) that return immediately; the final entry is the unit
+		// itself. buildLaunchPlan chains them in order — and, when the unit has
+		// several recorded invocations, substitutes the chosen one for that last
+		// entry with its arguments filled in.
+		const plan = buildLaunchPlan(this.config.workspaceRoot, this.config.service, {
+			invocation: this.config.invocation,
+			args: this.config.args,
+		});
+		if (!plan) {
 			this.output('No verified start command. Bring the service up first.\n', 'stderr');
 			this.event('terminated');
 			return;
 		}
-		// Earlier entries are usually detached dependency starts (e.g. `docker
-		// compose up -d`) that return immediately; the final entry is the
-		// long-running server. Chaining with `&&` in one shell preserves that order
-		// and leaves the server in the foreground so its exit ends the session.
-		const script = commands
-			.map((c) =>
-				c.working_directory
-					? `cd ${JSON.stringify(c.working_directory)} && ${c.command}`
-					: c.command,
-			)
-			.join(' && ');
+		if (plan.warning) {
+			this.output(`[vinv] ${plan.warning}\n`, 'stderr');
+		}
+		const script = plan.script;
+		if (plan.invocation) {
+			this.output(
+				`[vinv] ${this.config.service} · ${plan.invocation.id}` +
+					`${plan.invocation.purpose ? ` — ${plan.invocation.purpose}` : ''}\n`,
+				'console',
+			);
+		}
 
 		const bash = resolveBash();
 		if (!bash) {
@@ -193,7 +211,7 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 			outputTail = (outputTail + chunk).slice(-4000);
 		};
 		const child = spawn(bash, ['-lc', script], hiddenBackgroundOptions({
-			cwd: commands[0].working_directory ?? this.config.workspaceRoot,
+			cwd: plan.cwd ?? this.config.workspaceRoot,
 			env: process.env,
 		}));
 		this.child = child;
@@ -234,7 +252,14 @@ class VinvServiceDebugAdapter implements vscode.DebugAdapter {
 			// A run-to-completion unit finishing quickly is the contract, not the
 			// backgrounding smell this heuristic exists to catch — only a server
 			// can "exit instantly" in the sense that matters.
-			const completionExit = completionExitCode(this.config.workspaceRoot, this.config.service);
+			//
+			// The chosen invocation's own `expect_exit` outranks the file-level
+			// probe: with several invocations there is no longer ONE contracted
+			// exit code, and a repo whose `report` exits 0 while its `check` exits
+			// 1 would otherwise have a fix episode dispatched against a linter
+			// doing exactly what it documents.
+			const completionExit =
+				plan.expectExit ?? completionExitCode(this.config.workspaceRoot, this.config.service);
 			const instantExit =
 				completionExit === null && code === 0 && Date.now() - launchedAt < 5000;
 			if (instantExit) {
@@ -429,7 +454,21 @@ function warnOnStaleTargetPackage(
 	);
 }
 
-export function startService(workspaceRoot: string, service: string): boolean {
+/**
+ * Runs a service's recorded command as a debug session.
+ *
+ * **Never prompts.** probeRunner, Auto-Pilot and the replay gate all call this
+ * headlessly, so anything modal here would hang a pipeline nobody is watching.
+ * With no `opts` it takes the default invocation and every parameter's default —
+ * exactly what it did before invocations existed. Asking a human which
+ * invocation, and with which arguments, is the command layer's job; by the time
+ * it reaches here the choice is already made.
+ */
+export function startService(
+	workspaceRoot: string,
+	service: string,
+	opts?: { invocation?: string; args?: Record<string, string> },
+): boolean {
 	if (sessions.has(service)) {
 		// Already running — its session is in the toolbar; don't launch a duplicate.
 		return true;
@@ -449,10 +488,15 @@ export function startService(workspaceRoot: string, service: string): boolean {
 	warnOnStaleTargetPackage(workspaceRoot, service, commands);
 	const config: VinvDebugConfig = {
 		type: DEBUG_TYPE,
-		name: `Vinv: ${service}`,
+		// The invocation is in the session name so the debug toolbar's picker can
+		// tell two runs of the same CLI apart — which is the whole point of being
+		// able to choose one.
+		name: opts?.invocation ? `Vinv: ${service} · ${opts.invocation}` : `Vinv: ${service}`,
 		request: 'launch',
 		service,
 		workspaceRoot,
+		invocation: opts?.invocation,
+		args: opts?.args,
 	};
 	// suppressDebugView keeps the user on the Vinv sidebar instead of switching
 	// focus to the Run and Debug view; the floating debug toolbar (stop/restart)

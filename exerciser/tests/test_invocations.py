@@ -15,7 +15,12 @@ import textwrap
 from pathlib import Path
 
 from exerciser import store
-from exerciser.invocations import run_invocations, service_invocations
+from exerciser.invocations import (
+    expand_invocation,
+    resolved_command,
+    run_invocations,
+    service_invocations,
+)
 from exerciser.profile import build_profile
 from exerciser.scorecard import build_scorecard, render_scorecard_md
 
@@ -281,3 +286,207 @@ def test_a_library_falls_back_to_the_function_driver(tmp_path: Path) -> None:
     assert "functions" in entries[0]["command"]
     assert "acme-sdk" in entries[0]["command"]
     assert entries[0]["expect_exit"] == 0
+
+
+def test_a_librarys_entry_points_are_reachable_one_at_a_time(tmp_path: Path) -> None:
+    """The `{only}` slot is what makes a library's many entry points selectable.
+
+    A library used to be all-or-nothing: the driver ran every exported callable
+    or none. That is right for the exercise pass and useless at the Run button,
+    where the question is "run THIS function".
+    """
+    entry = service_invocations(
+        {"name": "acme-sdk", "kind": "python_library", "modules": ["acme"]}, tmp_path / "repo"
+    )[0]
+
+    # Blank (the default) keeps today's behaviour exactly: drive everything, with
+    # no stray flag left behind.
+    assert "--only-target" not in resolved_command(entry)
+    assert resolved_command(entry).rstrip().endswith("--service acme-sdk")
+    # Filled, it drives one callable — through the driver's real option, so the
+    # rendered string is a command that actually parses.
+    assert resolved_command(entry, {"only": "acme.tool:summarize"}).endswith(
+        "--only-target acme.tool:summarize"
+    )
+
+
+def test_the_library_slot_names_an_option_the_driver_really_has() -> None:
+    """The rendered flag must be one `vinv-exerciser functions` accepts.
+
+    A `render` template is just a string; nothing type-checks it against the CLI
+    it will be handed to. Getting it wrong produces a command that fails with "no
+    such option" only when a human finally clicks Run — long after the record was
+    written and marked verified.
+    """
+    from exerciser.cli import functions_cmd
+
+    options = {opt for param in functions_cmd.params for opt in getattr(param, "opts", [])}
+    assert "--only-target" in options
+
+
+def test_unit_ids_survive_an_invocation_being_inserted(tmp_path: Path) -> None:
+    """Ids key findings, coverage and history across runs — so never positional.
+
+    With `service#index`, adding an invocation at the front silently renamed
+    every later unit: the same command came back as a different unit, its history
+    orphaned and its findings re-reported as new.
+    """
+    before = service_invocations(
+        _cli_service(tmp_path / "repo", [
+            {"command": "acme-tool report --since 7d"},
+            {"command": "acme-tool check ./sample"},
+        ]),
+        tmp_path / "repo",
+    )
+    after = service_invocations(
+        _cli_service(tmp_path / "repo", [
+            {"command": "acme-tool migrate"},
+            {"command": "acme-tool report --since 7d"},
+            {"command": "acme-tool check ./sample"},
+        ]),
+        tmp_path / "repo",
+    )
+
+    assert [e["id"] for e in before] == ["report", "check"]
+    # `report` and `check` keep their identity despite moving down the list.
+    assert [e["id"] for e in after] == ["migrate", "report", "check"]
+
+
+def test_an_explicit_id_wins_and_collisions_are_disambiguated(tmp_path: Path) -> None:
+    entries = service_invocations(
+        _cli_service(tmp_path / "repo", [
+            {"id": "weekly", "command": "acme-tool report --since 7d"},
+            {"command": "acme-tool report --since 30d"},
+            {"command": "acme-tool report --since 90d"},
+        ]),
+        tmp_path / "repo",
+    )
+    assert [e["id"] for e in entries] == ["weekly", "report", "report-2"]
+
+
+def test_an_argument_edit_does_not_rename_the_unit(tmp_path: Path) -> None:
+    # The id comes from the subcommand precisely so that tuning an argument —
+    # the most common edit there is — keeps the unit's history intact.
+    def ids(since: str) -> list[str]:
+        return [
+            e["id"]
+            for e in service_invocations(
+                _cli_service(tmp_path / "repo", [{"command": f"acme-tool report --since {since}"}]),
+                tmp_path / "repo",
+            )
+        ]
+
+    assert ids("7d") == ids("90d") == ["report"]
+
+
+def test_variants_come_only_from_values_the_repo_enumerated() -> None:
+    """This oracle EXECUTES what it builds, so it never invents argv.
+
+    An invented HTTP body meets a running service's validation layer; an invented
+    argv meets the user's shell. `--force` and `--delete` are flags too, and
+    nothing in the schema distinguishes them from `--verbose`.
+    """
+    enumerated = expand_invocation({
+        "id": "report",
+        "command": "acme-tool report --format {format}",
+        "params": [
+            {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]}
+        ],
+    })
+    assert [v["input_class"] for v in enumerated] == ["declared", "generated"]
+    assert enumerated[0]["args"] == {"format": "json"}
+    assert enumerated[1]["args"] == {"format": "csv"}
+
+    # A free-form parameter with nothing enumerated yields the declared row only.
+    freeform = expand_invocation({
+        "id": "scan",
+        "command": "acme-tool scan {root}",
+        "params": [{"name": "root", "type": "path", "default": "."}],
+    })
+    assert len(freeform) == 1
+
+    # And a bare flag is never flipped on the oracle's own initiative.
+    flag = expand_invocation({
+        "id": "clean",
+        "command": "acme-tool clean {force}",
+        "params": [{"name": "force", "type": "flag", "default": "false"}],
+    })
+    assert len(flag) == 1
+
+
+def test_variants_change_one_parameter_at_a_time() -> None:
+    # Never a cartesian product: the count stays linear in the parameters, and a
+    # failing row names the one parameter that caused it.
+    variants = expand_invocation({
+        "id": "report",
+        "command": "acme-tool report --format {format} --scope {scope}",
+        "params": [
+            {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]},
+            {"name": "scope", "type": "enum", "default": "all", "choices": ["all", "recent"]},
+        ],
+    })
+    assert len(variants) == 3
+    assert variants[1]["args"] == {"format": "csv", "scope": "all"}
+    assert variants[2]["args"] == {"format": "json", "scope": "recent"}
+
+
+def test_a_parameterless_command_is_run_verbatim() -> None:
+    # A recorded command may legitimately contain a literal brace; only an
+    # invocation that DECLARES parameters opts into templating.
+    literal = {"id": "fmt", "command": "acme-tool fmt --template '{name}'"}
+    assert resolved_command(literal) == "acme-tool fmt --template '{name}'"
+
+
+def test_a_parameterized_invocation_runs_every_enumerated_value(tmp_path: Path) -> None:
+    repo = _repo(
+        tmp_path,
+        [
+            _cli_service(
+                tmp_path / "repo",
+                [
+                    {
+                        "id": "summarize",
+                        "command": f'"{_PY}" -m acme.tool {{rows}}',
+                        "params": [
+                            {"name": "rows", "type": "int", "default": "3", "examples": ["5"]}
+                        ],
+                    }
+                ],
+            )
+        ],
+    )
+
+    result = run_invocations(repo)
+
+    assert result["invocations"] == 2, "the enumerated example was not run"
+    assert [r["input_class"] for r in result["rows"]] == ["declared", "generated"]
+    # One unit, two inputs — exactly as many requests share one HTTP endpoint.
+    assert {r["unit_id"] for r in result["rows"]} == {"acme-tool#summarize"}
+    assert "rows=6" in result["rows"][0]["stdout_tail"]
+    assert "rows=10" in result["rows"][1]["stdout_tail"]
+    # Separate captures, so a variant's spans stay attributable to it.
+    assert len({r["trace_jsonl"] for r in result["rows"]}) == 2
+
+
+def test_a_template_that_cannot_be_filled_is_reported_not_run(tmp_path: Path) -> None:
+    # A malformed record is a defect in the inventory, not in the tool under
+    # test — so it is reported against the unit rather than shelling out to
+    # something nobody described.
+    repo = _repo(
+        tmp_path,
+        [
+            _cli_service(
+                tmp_path / "repo",
+                [{"id": "broken", "command": f'"{_PY}" -m acme.tool {{rows}}',
+                  "params": [{"name": "other", "default": "1"}]}],
+            )
+        ],
+    )
+
+    result = run_invocations(repo)
+
+    row = result["rows"][0]
+    assert row["status"] == "error"
+    assert row["error_type"] == "MalformedInvocation"
+    assert "no such parameter" in row["error"]
+    assert result["failures"] == 1

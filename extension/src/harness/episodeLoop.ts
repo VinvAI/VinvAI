@@ -155,7 +155,8 @@ import {
 } from '../views/askVinv';
 import { isIdeChatAvailable } from './ideChat';
 import { enqueueEpisodeRequest } from './requestQueue';
-import { readServices, readStartCommands, serviceSlug, servicePort } from '../bringup/bringup';
+import { readServices, serviceSlug, servicePort } from '../bringup/bringup';
+import { buildLaunchPlan } from '../bringup/invocations';
 import { describeHolders, findFreePort, portIsServing, reclaimPort } from '../support/ports';
 import { hiddenBackgroundOptions, killProcessTree, resolveBash } from '../proc';
 
@@ -278,8 +279,12 @@ export async function verifyServiceReplay(
 	token?: vscode.CancellationToken,
 	evidenceChars?: number,
 ): Promise<VerifyResult> {
-	const commands = readStartCommands(workspaceRoot, service);
-	if (commands.length === 0) {
+	// Built the same way the Run button builds it, through the one decision
+	// point — including which invocation a multi-invocation unit runs. Verifying
+	// a different command than the button launches would make this oracle attest
+	// to something the user never runs.
+	const plan = buildLaunchPlan(workspaceRoot, service);
+	if (!plan) {
 		// The oracle could not RUN (no recorded command) — this is not the
 		// oracle rejecting the fix, so it must not train the bandit as a
 		// composition failure. objective: false marks it infra-unavailable.
@@ -289,11 +294,7 @@ export async function verifyServiceReplay(
 			reason: `no verified start command recorded for ${service} (.vinv/start_commands/${service}.json must have verified: true)`,
 		};
 	}
-	const script = commands
-		.map((c) =>
-			c.working_directory ? `cd ${JSON.stringify(c.working_directory)} && ${c.command}` : c.command,
-		)
-		.join(' && ');
+	const script = plan.script;
 	const port = servicePort(workspaceRoot, service);
 	const policy = loadEpisodePolicy();
 	const rp = replayParams(policy);
@@ -351,7 +352,7 @@ export async function verifyServiceReplay(
 		}
 	}
 	const child = spawn(bash, ['-lc', script], hiddenBackgroundOptions({
-		cwd: commands[0].working_directory ?? workspaceRoot,
+		cwd: plan.cwd ?? workspaceRoot,
 		env: process.env,
 	}));
 	// The capture ring holds what the POLICY says an attempt's evidence is

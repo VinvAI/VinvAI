@@ -72,10 +72,20 @@ read `pyproject.toml`, `compose.yaml`, the package's own `__main__.py` / entrypo
   transport — omit it; their downstream check is `"probe": {{"type": "exit"}}`, the process
   running to completion with the expected exit code and a non-empty trace.
 - **`invocations`** — optional, and only for `python_cli` / `python_library`: the representative
-  ways this unit is driven, each a **complete runnable command** (not an argv fragment) with an
-  optional `purpose` and an `expect_exit` that defaults to `0`. Ground the subcommand and its argv
-  in what the repo declares — the CLI's own `--help`/command definitions, a README example, a CI
-  step, a Makefile target. Omit the field and `command` becomes the single invocation.
+  ways this unit is driven, each a **complete runnable command** (not an argv fragment) with a
+  short stable **`id`** (`report`, `check`), an optional `purpose` and an `expect_exit` that
+  defaults to `0`. The id is the unit identity downstream — findings and coverage key on
+  `<service>#<id>` — so give every entry one. Ground the subcommand and its argv in what the repo
+  declares — the CLI's own `--help`/command definitions, a README example, a CI step, a Makefile
+  target. Omit the field and `command` becomes the single invocation.
+- **`params`** — optional, per invocation: the arguments a human should be able to change at run
+  time. Write the command as a template with `{{name}}` placeholders and declare one entry per
+  placeholder — `{{"name": "since", "type": "string", "default": "7d", "help": "lookback window"}}`.
+  `type` is one of `string` (default), `int`, `float`, `enum` (needs `choices`), `path`, `flag`.
+  **The `default` is what actually runs** in every headless pass, so rendering the template with
+  the defaults must reproduce exactly the command you verified. Ground defaults and choices in the
+  CLI's own `--help` / `@click.option` / `argparse` definitions — never invent one. Parameterize
+  only what a person genuinely retypes (a path, a date range, an output format), not every flag.
 - **`command`** — the native start command (NEVER `docker compose up`), taken from what the repo
   **actually declares**: the handbook's `### Run on host` row, a `[project.scripts]` /
   `[tool.poetry.scripts]` console script, a verified `python -m <module>` target (only if that
@@ -134,9 +144,11 @@ no infra, no frontends:
       "port": null,
       "modules": ["acme_tool"],
       "invocations": [
-        {{"command": "acme-tool report --since 7d", "purpose": "the reporting path"}},
-        {{"command": "acme-tool check ./sample", "purpose": "the validation path",
-          "expect_exit": 1}}
+        {{"id": "report", "command": "acme-tool report --since {{since}}",
+          "purpose": "the reporting path",
+          "params": [{{"name": "since", "default": "7d", "help": "lookback window"}}]}},
+        {{"id": "check", "command": "acme-tool check ./sample",
+          "purpose": "the validation path", "expect_exit": 1}}
       ]
     }},
     {{
@@ -153,8 +165,9 @@ no infra, no frontends:
 (The names above are illustrative of the **shape** — note how the service `name` may carry a dash
 while `modules` carries the underscore import package, how the stdio server carries
 `transport: "stdio"` with `port: null`, how the CLI's `invocations` are each a full command with
-the second documenting a legitimate non-zero exit, and how the library entry carries **no
-`command` at all**. Use the actual names for this repo.) Emit
+its own stable `id`, how the first carries a `{{since}}` slot a human can change while the second
+documents a legitimate non-zero exit, and how the library entry carries **no `command` at all**.
+Use the actual names for this repo.) Emit
 **valid JSON only** (no trailing commas, no comments, no Markdown fences inside the file).
 
 ### Finish
@@ -166,5 +179,7 @@ be one of `python_web` / `python_worker` / `python_stdio` / `python_scheduler` /
 `python_library`, `python_web` entries must carry an integer `port`, `python_stdio` / `python_cli`
 / `python_library` entries must carry `port: null`, `transport` (when present) must match the
 kind, `invocations` (when present) may only appear on `python_cli` / `python_library` and each
-entry must carry a full `command`, every entry except `python_library` must carry a `command`, and
-commands must be runnable (no `-m module:attr`, no docker).
+entry must carry a full `command` and a unique `id`, every `params` entry must name a
+`{{placeholder}}` the command actually contains (and vice versa) and render with its defaults,
+every entry except `python_library` must carry a `command`, and commands must be runnable (no
+`-m module:attr`, no docker).

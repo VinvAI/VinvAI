@@ -11,6 +11,8 @@ import { openTracelensTerminal, openIndexTerminal } from '../tracelens/tracelens
 import { runDiscovery, stopDiscovery } from '../index/discovery';
 import { readServices, isServiceStarted, readStartCommands } from '../bringup/bringup';
 import { offerHintedRetry } from '../bringup/startHint';
+import { readInvocations, writeRunArgs } from '../bringup/invocations';
+import { askForRun } from '../bringup/runWithArgs';
 import { runBringupStartViaHarness } from '../harness/harnessRunner';
 import { pickHarness } from '../harness/harnessPicker';
 import { startService, stopService, isServiceRunning } from '../bringup/serviceRunner';
@@ -419,6 +421,57 @@ export function registerCommands(
 					}
 				}
 				startService(root, name);
+			},
+		),
+		// Run a service, choosing WHICH recorded invocation and with what
+		// arguments. Split from serviceStart deliberately: ▶ must stay one click
+		// (defaults, no questions), because that is what the probe pass, the
+		// debug toolbar and every "just run it" reflex depend on. Asking is a
+		// separate, opt-in affordance for the cases where the arguments are the
+		// whole point.
+		vscode.commands.registerCommand(
+			'vinv-vs.serviceStartWithArgs',
+			async (arg?: { id?: string } | string) => {
+				const folder = vscode.workspace.workspaceFolders?.[0];
+				if (!folder) {
+					void vscode.window.showWarningMessage('Vinv: Open a folder first.');
+					return;
+				}
+				const root = folder.uri.fsPath;
+				let name = serviceNameFrom(arg);
+				if (!name) {
+					const ready = readServices(root).filter((s) => isServiceStarted(root, s.name));
+					if (ready.length === 0) {
+						void vscode.window.showInformationMessage(
+							'Vinv: No services set up yet. Set one up from the Services view first.',
+						);
+						return;
+					}
+					name = await vscode.window.showQuickPick(
+						ready.map((s) => s.name),
+						{ placeHolder: 'Vinv: Run a service with arguments' },
+					);
+					if (!name) {
+						return;
+					}
+				}
+				const choice = await askForRun(root, name);
+				if (choice === undefined) {
+					return; // backed out — running the defaults is the one thing Escape did not mean
+				}
+				if (choice === null) {
+					// A server, or a unit recorded before invocations existed: there is
+					// exactly one way to run it, so say so rather than opening an empty
+					// form the operator cannot act on.
+					void vscode.window.showInformationMessage(
+						`Vinv: '${name}' has one recorded way to start, with no arguments to fill in. ` +
+							'Starting it.',
+					);
+					startService(root, name);
+					return;
+				}
+				writeRunArgs(root, name, choice.invocation, choice.args);
+				startService(root, name, choice);
 			},
 		),
 		// Stop a running service (ends its debug session).

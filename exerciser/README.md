@@ -39,6 +39,17 @@ records; a library has no entrypoint of its own, so the function driver is what
 runs it. The verdict for an invocation is the **expected** exit code, not
 "non-zero is bad" — a check command that exits 1 on findings is working.
 
+Each invocation is one **unit**, keyed `<service>#<id>` by its stable id rather
+than its position, so inserting one does not rename the rest and orphan their
+history. An invocation whose command carries `{name}` slots is run once with the
+declared defaults (`input_class: "declared"`) and once per value the inventory
+itself enumerated in `choices` or `examples` (`input_class: "generated"`),
+varying one parameter at a time. It stops there deliberately: this oracle
+**executes** what it builds, so unlike the HTTP generator — whose invented body
+meets a running service's validation layer — it never invents argv. `--force`
+and `--delete` are flags too, and nothing in the schema tells them from
+`--verbose`.
+
 Artifacts land under `<repo>/.vinv/exercise/`:
 
 | file | written by | contents |

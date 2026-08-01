@@ -23,6 +23,20 @@ from lens_contracts import SpanEvent, EventHeader, CodeVersion
 
 Every event embeds a shared header (schema version, service, timestamp), and every model ships a matching JSON Schema as package data. Additions are forward-compatible; readers skip unknown fields.
 
+## `// 02b · cross-language vectors`
+
+`vectors/` holds shared test data for behaviour that several engines implement
+separately and must implement identically. It is not importable package data —
+each suite reads the JSON directly.
+
+`vectors/invocation_render.json` pins how a parameterized invocation's command
+template is filled in. Three implementations do it: the extension's Run button
+(TypeScript), the exercise pass and bring-up's recorder (Python, one file
+duplicated verbatim). The whole value of a recorded invocation is that the
+command a human runs is the command the exercise pass measured and the command
+bring-up verified — nothing in any type system enforces that, so these vectors
+do. A change made on one side and not the others fails there.
+
 ## `// 03 · tests`
 
 ```bash

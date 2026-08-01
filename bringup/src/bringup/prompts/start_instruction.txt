@@ -610,23 +610,35 @@ to a service that STAYS UP. If `.vinv/services.json` records `{service}` as
 `kind: "python_cli"` or `"python_library"`, it does not stay up, and the correct
 protocol is the short one:
 
-> **Run-to-completion protocol.** Run each invocation, wrapped in `tracelens run`
+> **Run-to-completion protocol.** Run **every** invocation `.vinv/services.json`
+> records for `{service}` — not just the first — each wrapped in `tracelens run`
 > exactly as a server's start command is wrapped, in the **foreground**, and let
-> it **finish**. Then verify three things: the exit code matches (`0` unless the
-> command documents another), the trace file exists and is **non-empty**
-> (`wc -l < <trace.jsonl>` > 0), and the output looks like the work actually
-> happened rather than a usage error. Record `"probe": {{"type": "exit"}}` with
-> `"port": null`. There is no port to probe, no readiness window to wait out, no
-> process to kill and no port to free afterwards — skip steps 2, 3 and the whole
-> teardown section. An empty trace after a clean exit is the one failure that
-> matters here, and it almost always means `--target-package` named a
-> distribution (`acme-tool`) instead of an import package (`acme_tool`).
+> it **finish**. Then verify three things per invocation: the exit code matches
+> (`0` unless that invocation documents another in its `expect_exit`), the trace
+> file exists and is **non-empty** (`wc -l < <trace.jsonl>` > 0), and the output
+> looks like the work actually happened rather than a usage error. Record
+> `"probe": {{"type": "exit"}}` with `"port": null`. There is no port to probe, no
+> readiness window to wait out, no process to kill and no port to free afterwards
+> — skip steps 2, 3 and the whole teardown section. An empty trace after a clean
+> exit is the one failure that matters here, and it almost always means
+> `--target-package` named a distribution (`acme-tool`) instead of an import
+> package (`acme_tool`).
+>
+> **Then record them all** in the deliverable's `invocations` array — see
+> "Recording a multi-invocation unit" at the end of this prompt. A CLI with four
+> subcommands whose file records one has three subcommands nobody can run and
+> nobody is measuring: the Run button offers only what is in that array, and so
+> does the exercise pass. Give each a **stable `id`** and use each invocation's
+> own `expect_exit`; the harness replays every entry and the file passes only if
+> all of them do.
 >
 > For `kind: "python_library"` the invocation is the exerciser's function driver
-> (`vinv-exerciser functions <repo> --service {service}`) wrapped in the same
-> tracelens command — the library's own functions are what gets instrumented, so
-> `--target-package` still names the library's import package, never the
-> exerciser's.
+> (`vinv-exerciser functions <repo> --service {service} {{only}}`) wrapped in the
+> same tracelens command — the library's own functions are what gets
+> instrumented, so `--target-package` still names the library's import package,
+> never the exerciser's. Leave the `{{only}}` slot's default **empty** (it drives
+> every exported callable, which is what you are verifying) and declare it as a
+> parameter so a human can later run one entry point at a time.
 
 Concrete checklist for a long-running service — answer each one explicitly in
 your trajectory:
@@ -793,6 +805,95 @@ not placeholders:
 (If — and only if — `{service}` needs a separate service dependency, prepend one
 more entry of the same shape, e.g. `"command": "docker compose up -d <db>"`,
 before the `{service}` entry.)
+
+### Recording a multi-invocation unit (`python_cli` / `python_library` only)
+
+A server has ONE way to start. A CLI has one per subcommand, and a library one
+per entry point — and `commands` cannot express that, because it is a **sequence**
+(a dependency, then the unit) that every replayer joins with `&&`. Recording five
+subcommands there would run all five, in order, every time.
+
+So a run-to-completion unit records its alternatives in a **separate
+`invocations` array**, beside `commands`:
+
+```json
+{{
+  "service": "{service}",
+  "verified": true,
+  "commands": [
+    {{
+      "purpose": "run {service}",
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/report.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> report --since 7d",
+      "working_directory": "{_root_json}"
+    }}
+  ],
+  "invocations": [
+    {{
+      "id": "report",
+      "purpose": "the reporting path",
+      "default": true,
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/report.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> report --since {{since}}",
+      "expect_exit": 0,
+      "params": [
+        {{"name": "since", "type": "string", "default": "7d", "help": "lookback window"}}
+      ],
+      "working_directory": "{_root_json}",
+      "verification": {{
+        "exit_code": 0,
+        "trace_jsonl": "{_caps_base}/{_g0}{service}/report.trace.jsonl",
+        "trace_lines": <int>,
+        "rendered_command": "<the EXACT string you ran — see below>"
+      }}
+    }},
+    {{
+      "id": "check",
+      "purpose": "the validation path",
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/check.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> check ./sample",
+      "expect_exit": 1,
+      "working_directory": "{_root_json}",
+      "verification": {{"exit_code": 1, "trace_jsonl": "…", "trace_lines": <int>}}
+    }}
+  ]
+}}
+```
+
+Rules for that array — each one exists because breaking it produces a file that
+looks fine and behaves wrongly:
+
+- **Every entry must have RUN AND PASSED.** The harness replays all of them and
+  the file fails if any does. Do not record an invocation you did not execute.
+- **`id` is the unit identity downstream** — findings, coverage and history key
+  on `<service>#<id>`. Short, stable, from the subcommand (`report`, `check`),
+  never positional and never re-worded later.
+- **`expect_exit` is per invocation.** A `check` that exits 1 on findings is
+  working; a single file-level exit code cannot describe both it and `report`.
+- **Each invocation needs its OWN `--output` trace path.** Sharing one means the
+  last run overwrites the others and only one unit ever shows coverage.
+- **`default: true` marks the one that runs with no questions asked** — the ▶
+  button, the probe pass, Auto-Pilot and the replay gate all take it. Exactly
+  one entry, and it should be the cheapest representative run, never a
+  destructive one.
+- **`commands` still holds the DEFAULT invocation** (the same string), so
+  anything reading only that field keeps working.
+- **Parameters are optional and, when present, must round-trip.** Write the
+  command as a template with `{{name}}` placeholders, declare each in `params`
+  with the value you actually used as its `default`, and record the exact string
+  you ran as `verification.rendered_command`. **Rendering the defaults must
+  reproduce that string byte for byte** — the harness checks it, and a mismatch
+  is rejected, because otherwise `verified: true` would attest to a command
+  nobody ever ran. Only parameterize what a person genuinely retypes; a slot per
+  flag is noise. Omit `params` entirely and the command runs verbatim, which is
+  the right answer for most invocations.
+- **A `python_library`'s single invocation is the function driver** with an empty
+  `{{only}}` slot — the same fully-qualified shape as every other recorded
+  command (inline `PATH=`, `{_tracelens_cmd}`, `{_venv_python}`), ending in
+  `-m vinv_exerciser functions <repo> --service {service} {{only}}`, with
+  `"params": [{{"name": "only", "default": "", "render": "--only-target {{value}}", "choices_from": "entrypoints"}}]`.
+  Empty (what you verify) drives every exported callable; filled, it drives one,
+  which is how a human runs a single entry point later.
+
+Omit `invocations` entirely for a server, or for a CLI with exactly one real
+mode — `commands` then remains the whole story, exactly as before.
 
 **`verification.probe` tells every replayer (harness gate, extension Run
 button) which readiness oracle proves this service alive.** Record the one that

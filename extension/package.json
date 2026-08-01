@@ -361,6 +361,12 @@
 				"icon": "$(play)"
 			},
 			{
+				"command": "vinv-vs.serviceStartWithArgs",
+				"title": "Run Service with Arguments…",
+				"category": "Vinv",
+				"icon": "$(gear)"
+			},
+			{
 				"command": "vinv-vs.serviceStop",
 				"title": "Stop Service",
 				"category": "Vinv",

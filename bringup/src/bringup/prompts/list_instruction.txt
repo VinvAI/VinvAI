@@ -119,12 +119,47 @@ services up one at a time.
   For `python_library`, **omit `command`** and let the harness synthesize the driver.
 - **`invocations`** — optional, and only for `python_cli` / `python_library`: the representative
   ways this unit is driven, one entry per way. Each is a **complete runnable command**, not an
-  argv fragment: `{{"command": "acme-tool report --since 7d", "purpose": "weekly report",
-  "expect_exit": 0}}`. `expect_exit` defaults to `0` — set it only where the documented behavior
-  is a non-zero exit (a linter that reports findings, a check command). Omit the field entirely
-  and `command` becomes the single invocation, which is the right answer for a CLI with one real
-  mode. Prefer two or three invocations that exercise genuinely different code paths over ten
-  variations of the same flag; each one is a separate traced run.
+  argv fragment: `{{"id": "report", "command": "acme-tool report --since 7d",
+  "purpose": "weekly report", "expect_exit": 0}}`. `expect_exit` defaults to `0` — set it only
+  where the documented behavior is a non-zero exit (a linter that reports findings, a check
+  command). Omit the field entirely and `command` becomes the single invocation, which is the
+  right answer for a CLI with one real mode. Prefer two or three invocations that exercise
+  genuinely different code paths over ten variations of the same flag; each one is a separate
+  traced run.
+  - **`id`** — a short, stable slug naming this way of driving the unit (`report`, `check`,
+    `migrate`). It is the **unit identity everywhere downstream**: findings, coverage and history
+    all key on `<service>#<id>`. Give every invocation one. Without it the id is derived from the
+    subcommand, which is usually right and occasionally surprising; with it, nothing moves when
+    you reorder or re-word the list.
+- **`params`** — optional, per invocation: the arguments a human should be able to change at run
+  time, so the editor can offer a form instead of a frozen command line. Write the command as a
+  **template** with `{{name}}` placeholders and declare one entry per placeholder:
+
+  ```json
+  {{"id": "report",
+    "command": "acme-tool report --since {{since}} --format {{format}}",
+    "params": [
+      {{"name": "since", "type": "string", "default": "7d", "help": "lookback window"}},
+      {{"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]}}
+    ]}}
+  ```
+
+  - `type` is one of `string` (default), `int`, `float`, `enum`, `path`, `flag`. A `flag` renders
+    as `--<name>` when on and disappears when off; a `path` value is rewritten to the `/c/…`
+    spelling bash reads; an `enum` needs a `choices` list.
+  - **`default` is not a suggestion — it is what runs.** Every headless consumer (the exercise
+    pass, the replay gate, the Run button's one-click path) fills every parameter with its
+    default, so rendering the template with the defaults must produce **exactly the command you
+    verified**. If it does not, the file is rejected.
+  - **Ground the defaults and the choices in what the repo declares**, the same rule as `command`:
+    the CLI's own `--help` / `@click.option` / `argparse` definitions, a README example, a CI step.
+    Never invent a value to fill a slot — a fabricated default is worse than no parameter, because
+    it renders into a command that then claims to be verified.
+  - **Only parameterize what is genuinely worth changing.** A slot per flag is noise; the useful
+    ones are the inputs a person actually retypes (a path, a date range, an output format).
+  - `examples` (optional, a list) is how you offer extra values for the exercise pass to try. It
+    runs the declared defaults plus one variant per enumerated value, and **nothing else** — it
+    will never invent argv of its own, because `--force` and `--delete` are flags too.
 - **`working_directory`** — absolute path the command runs from (default the candidate's own path
   from the scan, else `{root}`).
 - **`port`** — the HTTP port it listens on (**required** for `python_web`); `null` for every other
@@ -198,9 +233,11 @@ The JSON must have exactly this shape (one entry per Python service, no infra, n
       "port": null,
       "modules": ["acme_tool"],
       "invocations": [
-        {{"command": "acme-tool report --since 7d", "purpose": "the reporting path"}},
-        {{"command": "acme-tool check ./sample", "purpose": "the validation path",
-          "expect_exit": 1}}
+        {{"id": "report", "command": "acme-tool report --since {{since}}",
+          "purpose": "the reporting path",
+          "params": [{{"name": "since", "default": "7d", "help": "lookback window"}}]}},
+        {{"id": "check", "command": "acme-tool check ./sample",
+          "purpose": "the validation path", "expect_exit": 1}}
       ]
     }},
     {{
@@ -217,8 +254,9 @@ The JSON must have exactly this shape (one entry per Python service, no infra, n
 (The names above are illustrative of the **shape** — note how the service `name` may carry a dash
 while `modules` carries the underscore import package, how the stdio server carries
 `transport: "stdio"` with `port: null`, how the CLI's `invocations` are each a full command with
-the second one documenting a legitimate non-zero exit, and how the library entry carries **no
-`command` at all**. Use the actual names for this repo.) Emit
+its own stable `id`, how the first carries a `{{since}}` slot a human can change while the second
+documents a legitimate non-zero exit, and how the library entry carries **no `command` at all**.
+Use the actual names for this repo.) Emit
 **valid JSON only** (no trailing commas, no comments in the actual file). Do **not** wrap it in
 Markdown fences inside the file. After `save_file` returns `status: success`, run
 `cat '{services_json}'` once via `send_terminal_command` to confirm it landed and parses, then end
@@ -245,6 +283,8 @@ an importable Python identifier, `kind` must be one of `python_web` / `python_wo
 carry an integer `port`, `python_stdio` / `python_cli` / `python_library` entries must carry
 `port: null`, `transport` (when present) must be `"http"` or `"stdio"` and match the kind,
 `invocations` (when present) may only appear on `python_cli` / `python_library` and each entry
-must carry a full `command`, every entry except `python_library` must carry a `command`, and
-commands must be runnable (no `-m module:attr`, no docker) — and re-opens this task with the exact
-violations if it fails. Get it right the first time.
+must carry a full `command` and a unique `id`, every `params` entry must name a `{{placeholder}}`
+the command actually contains (and vice versa) and render with its defaults, every entry except
+`python_library` must carry a `command`, and commands must be runnable (no `-m module:attr`, no
+docker) — and re-opens this task with the exact violations if it fails. Get it right the first
+time.

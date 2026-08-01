@@ -362,6 +362,122 @@ def test_validate_rejects_empty_invocations_list(tmp_path: Path) -> None:
     assert any("non-empty list" in i for i in issues)
 
 
+def test_validate_rejects_duplicate_invocation_ids(tmp_path: Path) -> None:
+    # The id IS the unit identity downstream — two invocations sharing one would
+    # merge two different commands into a single unit's findings and history.
+    svc = _cli_service(tmp_path) | {
+        "invocations": [
+            {"id": "report", "command": "acme-tool report --since 7d"},
+            {"id": "report", "command": "acme-tool report --since 30d"},
+        ]
+    }
+    issues = _validate_services_inventory([svc])
+    assert any("duplicate invocation `id`" in i and "report" in i for i in issues)
+
+
+def test_validate_pairs_every_param_with_its_placeholder(tmp_path: Path) -> None:
+    """A template and its parameters that disagree is unabsorbable downstream.
+
+    The editor would offer a form that renders nothing runnable, and the
+    exercise pass would report a defect against a tool that is working fine.
+    """
+    # A placeholder in a command that declares SOME parameters is a real
+    # mismatch: the record opted into templating and then left a slot unfilled.
+    undeclared = _cli_service(tmp_path) | {
+        "invocations": [
+            {
+                "id": "report",
+                "command": "acme-tool report --since {since} --format {format}",
+                "params": [{"name": "since", "default": "7d"}],
+            }
+        ]
+    }
+    assert any("no such parameter" in i for i in _validate_services_inventory([undeclared]))
+
+    orphan_param = _cli_service(tmp_path) | {
+        "invocations": [
+            {
+                "id": "report",
+                "command": "acme-tool report",
+                "params": [{"name": "since", "default": "7d"}],
+            }
+        ]
+    }
+    assert any("has no {since}" in i for i in _validate_services_inventory([orphan_param]))
+
+
+def test_a_brace_in_a_parameterless_command_is_left_alone(tmp_path: Path) -> None:
+    """Declaring no parameters opts OUT of templating, braces and all.
+
+    This is what protects a legitimate `--format '{json}'`: only an invocation
+    that declares `params` is treated as a template, so a recorded command
+    carrying a literal brace is neither rejected here nor rewritten later.
+    """
+    svc = _cli_service(tmp_path) | {
+        "invocations": [{"id": "fmt", "command": "acme-tool fmt --template '{name}'"}]
+    }
+    assert _validate_services_inventory([svc]) == []
+
+
+def test_validate_accepts_a_well_formed_parameterized_invocation(tmp_path: Path) -> None:
+    svc = _cli_service(tmp_path) | {
+        "invocations": [
+            {
+                "id": "report",
+                "command": "acme-tool report --since {since} --format {format}",
+                "params": [
+                    {"name": "since", "type": "string", "default": "7d"},
+                    {
+                        "name": "format",
+                        "type": "enum",
+                        "default": "json",
+                        "choices": ["json", "csv"],
+                    },
+                ],
+            }
+        ]
+    }
+    assert _validate_services_inventory([svc]) == []
+
+
+def test_validate_rejects_defaults_that_drift_from_the_verified_command(tmp_path: Path) -> None:
+    # `verified: true` attests to the command that was RUN. If rendering the
+    # defaults no longer reproduces it, the record attests to a command nobody
+    # ran — which is worse than no record at all.
+    svc = _cli_service(tmp_path) | {
+        "invocations": [
+            {
+                "id": "report",
+                "command": "acme-tool report --since {since}",
+                "params": [{"name": "since", "default": "30d"}],
+                "verification": {"rendered_command": "acme-tool report --since 7d"},
+            }
+        ]
+    }
+    issues = _validate_services_inventory([svc])
+    assert any("attests to a command" in i for i in issues)
+
+
+def test_validate_rejects_a_meaningless_param_spec(tmp_path: Path) -> None:
+    svc = _cli_service(tmp_path) | {
+        "invocations": [
+            {
+                "id": "report",
+                "command": "acme-tool report --format {format} --limit {limit}",
+                "params": [
+                    # enum with nothing to choose from
+                    {"name": "format", "type": "enum", "default": "json"},
+                    # required with no default leaves a headless run nothing to use
+                    {"name": "limit", "required": True},
+                ],
+            }
+        ]
+    }
+    issues = _validate_services_inventory([svc])
+    assert any("non-empty `choices`" in i for i in issues)
+    assert any("`required` with no `default`" in i for i in issues)
+
+
 def test_service_invocations_normalizes_all_three_spellings(tmp_path: Path) -> None:
     # Explicit list wins; a bare command becomes the single invocation; a library
     # with no command gets the synthesized exerciser driver.

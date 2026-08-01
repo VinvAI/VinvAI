@@ -35,6 +35,41 @@ the repo declares); a `python_library` entry carries **no `command`** — the
 harness supplies the exerciser's function driver rather than let one be
 fabricated.
 
+### Many ways to run one unit
+
+A server has one way to start. A CLI has one per subcommand, a library one per
+entry point — and `commands` in the recorded start file cannot express that,
+because it is a **sequence** (a dependency, then the unit) that every replayer
+joins with `&&`. Alternatives live in a separate `invocations` array, each with
+a stable `id`, its own `expect_exit` and its own trace path:
+
+```json
+"invocations": [
+  {"id": "report", "default": true, "expect_exit": 0,
+   "command": "… -- python -m acme_tool report --since {since}",
+   "params": [{"name": "since", "type": "string", "default": "7d"}],
+   "verification": {"exit_code": 0, "trace_lines": 812,
+                    "rendered_command": "… report --since 7d"}},
+  {"id": "check", "expect_exit": 1,
+   "command": "… -- python -m acme_tool check ./sample"}
+]
+```
+
+Three consumers read that array and behave differently on purpose: the Run
+button asks a human (prefilled with defaults, remembered per invocation in
+`.vinv/run_args/`), the exercise pass decides for itself and never prompts, and
+the replay gate takes the `default` one silently. **Bring-up replays every entry
+and the file passes only if they all do** — recording five ways to drive a unit
+and proving one verifies whichever happened to be first.
+
+`params` turns a command into a template. The rule that keeps `verified: true`
+honest is that rendering an invocation with all of its defaults must reproduce
+`verification.rendered_command` byte for byte; the validator rejects the file
+otherwise, since a drifted default means the record attests to a command nobody
+ran. An invocation that declares no `params` is run verbatim, braces and all, so
+a legitimate `--format '{json}'` is never mangled. The rendering rules are pinned
+for all three implementations by `contracts/vectors/invocation_render.json`.
+
 ## `// 01 · install`
 
 ```bash

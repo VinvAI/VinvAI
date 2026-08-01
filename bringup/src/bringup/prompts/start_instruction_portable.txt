@@ -238,15 +238,83 @@ documented non-zero one recorded as `"expect_exit": <code>` inside the probe) AN
 wrote is non-empty; staying alive past the deadline FAILS, because a CLI that never returns is
 hung or waiting on stdin. Set port/http_status/endpoint_checked to null.
 
-**For a run-to-completion unit, skip the whole server protocol above.** Run each invocation wrapped
-in `tracelens run` in the FOREGROUND, let it finish, then check three things: the exit code matches,
-the trace file is non-empty (`wc -l < <trace.jsonl>` > 0), and the output looks like the work
-happened rather than a usage error. There is no port to probe, no readiness window, no process to
-kill and no port to free afterwards. An empty trace after a clean exit is the failure that matters:
-it almost always means `--target-package` named a distribution (`acme-tool`) instead of an import
-package (`acme_tool`). For `python_library` the invocation is the exerciser's function driver
-(`vinv-exerciser functions <repo> --service <name>`) under the same tracelens wrap — the library's
-own package is what `--target-package` names, never the exerciser's.
+**For a run-to-completion unit, skip the whole server protocol above.** Run **every** invocation
+`.vinv/services.json` records — not just the first — each wrapped in `tracelens run` in the
+FOREGROUND, let it finish, then check three things per invocation: the exit code matches that
+invocation's own `expect_exit`, the trace file is non-empty (`wc -l < <trace.jsonl>` > 0), and the
+output looks like the work happened rather than a usage error. There is no port to probe, no
+readiness window, no process to kill and no port to free afterwards. An empty trace after a clean
+exit is the failure that matters: it almost always means `--target-package` named a distribution
+(`acme-tool`) instead of an import package (`acme_tool`). For `python_library` the invocation is the
+exerciser's function driver (`vinv-exerciser functions <repo> --service <name> {{only}}`) under the
+same tracelens wrap — the library's own package is what `--target-package` names, never the
+exerciser's; leave the `{{only}}` slot empty (it drives every exported callable) and declare it as a
+parameter so a human can run one entry point later.
+
+**Then record them ALL in an `invocations` array beside `commands`.** `commands` is a SEQUENCE (a
+dependency, then the unit) that every replayer joins with `&&` — recording five subcommands there
+would run all five, every time. Alternatives go in `invocations`, one entry per way you verified:
+
+```json
+{{
+  "service": "{service}",
+  "verified": true,
+  "verification": {{"port": null, "probe": {{"type": "exit"}}}},
+  "commands": [
+    {{
+      "purpose": "run {service}",
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/report.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> report --since 7d",
+      "working_directory": "{_root_json}"
+    }}
+  ],
+  "invocations": [
+    {{
+      "id": "report",
+      "purpose": "the reporting path",
+      "default": true,
+      "expect_exit": 0,
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/report.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> report --since {{since}}",
+      "params": [{{"name": "since", "type": "string", "default": "7d", "help": "lookback window"}}],
+      "working_directory": "{_root_json}",
+      "verification": {{
+        "exit_code": 0,
+        "trace_jsonl": "{_caps_base}/{_g0}{service}/report.trace.jsonl",
+        "trace_lines": <int>,
+        "rendered_command": "<the EXACT string you ran — the line above with 7d in the slot>"
+      }}
+    }},
+    {{
+      "id": "check",
+      "purpose": "the validation path",
+      "expect_exit": 1,
+      "command": "PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd} run --target-package <pkg> --output {_caps_base}/{_g0}{service}/check.trace.jsonl --sample-rate 1.0 -- {_venv_python} -m <module> check ./sample",
+      "working_directory": "{_root_json}",
+      "verification": {{
+        "exit_code": 1,
+        "trace_jsonl": "{_caps_base}/{_g0}{service}/check.trace.jsonl",
+        "trace_lines": <int>
+      }}
+    }}
+  ]
+}}
+```
+
+- **Every entry must have RUN AND PASSED** — the harness replays all of them and the file fails if
+  any does. A CLI with four subcommands whose file records one has three nobody can run.
+- **`id` is the unit identity downstream** (findings and coverage key on `<service>#<id>`): short,
+  stable, from the subcommand — never positional.
+- **`expect_exit` is per invocation**; a `check` that exits 1 on findings is working.
+- **Each needs its OWN `--output` path**, or the last run overwrites the rest.
+- **`default: true`** marks the one the ▶ button, the probe pass and the replay gate run with no
+  questions asked — the cheapest representative run, never a destructive one. `commands` keeps
+  holding that same string so anything reading only that field still works.
+- **`params` are optional and must round-trip:** template the command with `{{name}}` slots, put the
+  value you actually used in each `default`, and record the exact string you ran as
+  `verification.rendered_command`. Rendering the defaults must reproduce it byte for byte — the
+  harness checks, and a mismatch is rejected, because otherwise `verified: true` would attest to a
+  command nobody ran. Omit `params` and the command runs verbatim.
+
+Omit `invocations` entirely for a server, or a CLI with one real mode.
 
 **SELF-CONTAINED — the recorded command is replayed in a DIFFERENT environment from yours.** A bare
 `tracelens` resolves for you only because of your shell's `PATH` or an activated venv. Nothing that

@@ -31,6 +31,13 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from bringup.invocation_render import (
+    InvocationRenderError,
+    default_args,
+    invocation_slug,
+    render_invocation,
+)
+
 logger = logging.getLogger(__name__)
 
 # Bring-up task templates ship as plaintext package data (``bringup/prompts/``)
@@ -1352,6 +1359,9 @@ _INVENTORY_KINDS: tuple[str, ...] = (
 # Kinds that run to completion. These have no port, no readiness window and no
 # process to kill afterwards — the process exiting IS the successful outcome.
 _RUN_TO_COMPLETION_KINDS: frozenset[str] = frozenset({"python_cli", "python_library"})
+# Value kinds an invocation parameter may declare. `flag` is a presence toggle;
+# `path` is rewritten to the `/c/…` spelling bash reads before it is quoted.
+_PARAM_TYPES: tuple[str, ...] = ("string", "int", "float", "enum", "path", "flag")
 # Optional additive `transport` field: how the service is spoken to.
 _INVENTORY_TRANSPORTS: tuple[str, ...] = ("http", "stdio")
 
@@ -1567,6 +1577,91 @@ def _validate_invocations(invocations: Any, kind: Any, label: str) -> list[str]:
                 f"{ilabel}: `expect_exit` must be an integer exit code or null "
                 f"(got {expect_exit!r})"
             )
+        issues.extend(_validate_invocation_params(inv, ilabel))
+
+    ids = [
+        inv["id"] for inv in invocations
+        if isinstance(inv, dict) and isinstance(inv.get("id"), str) and inv["id"].strip()
+    ]
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
+    if duplicates:
+        # The id IS the unit identity downstream — findings, coverage and history
+        # all key on it. Two invocations sharing one would silently merge two
+        # different commands into a single unit's history.
+        issues.append(
+            f"{label}: duplicate invocation `id` values {duplicates} — each id names a "
+            "distinct unit downstream, so they must be unique within a service"
+        )
+    return issues
+
+
+def _validate_invocation_params(inv: dict[str, Any], ilabel: str) -> list[str]:
+    """Validate an invocation's optional `params` against its command template.
+
+    A parameter and a template that disagree is the one malformation nothing
+    downstream can absorb: the extension would offer a form that renders nothing
+    runnable, and the exercise pass would report a MalformedInvocation against a
+    tool that is working fine. Catching it here means the agent fixes it while it
+    still has the repo in front of it.
+    """
+    params = inv.get("params")
+    if params is None:
+        return []
+    command = inv.get("command")
+    if not isinstance(command, str):
+        return []  # already reported by the caller
+    if not isinstance(params, list) or not params:
+        return [f"{ilabel}: `params` must be a non-empty list when present (got {params!r})"]
+
+    issues: list[str] = []
+    seen: set[str] = set()
+    for k, p in enumerate(params):
+        plabel = f"{ilabel}.params[{k}]"
+        if not isinstance(p, dict):
+            issues.append(f"{plabel}: entry is not a JSON object")
+            continue
+        name = p.get("name")
+        if not isinstance(name, str) or not name.isidentifier():
+            issues.append(
+                f"{plabel}: `name` must be an identifier matching a {{placeholder}} in the "
+                f"command (got {name!r})"
+            )
+            continue
+        if name in seen:
+            issues.append(f"{plabel}: duplicate parameter name {name!r}")
+        seen.add(name)
+        ptype = p.get("type")
+        if ptype is not None and ptype not in _PARAM_TYPES:
+            issues.append(
+                f"{plabel}: `type` must be one of {', '.join(_PARAM_TYPES)} (got {ptype!r})"
+            )
+        if ptype == "enum" and not (isinstance(p.get("choices"), list) and p["choices"]):
+            if p.get("choices_from") != "entrypoints":
+                issues.append(
+                    f"{plabel}: type=enum needs a non-empty `choices` list, or "
+                    '`"choices_from": "entrypoints"` to resolve them at prompt time'
+                )
+        if p.get("required") and not str(p.get("default") or "").strip():
+            issues.append(
+                f"{plabel}: `required` with no `default` leaves nothing for a headless run "
+                "to use — give it the value you verified, or drop `required`"
+            )
+
+    # The real check: the template and the parameters must actually fit together,
+    # and the defaults must reproduce the command that was verified.
+    try:
+        rendered = render_invocation(inv, default_args(inv))
+    except InvocationRenderError as exc:
+        return [*issues, f"{ilabel}: {exc}"]
+    verification = inv.get("verification")
+    recorded = verification.get("rendered_command") if isinstance(verification, dict) else None
+    if isinstance(recorded, str) and recorded and rendered != recorded:
+        issues.append(
+            f"{ilabel}: rendering the defaults gives {rendered!r}, but "
+            f"`verification.rendered_command` says the command you ran was {recorded!r}. "
+            "Those must be identical — otherwise `verified: true` attests to a command "
+            "nobody ran. Fix the defaults to match what you verified."
+        )
     return issues
 
 
@@ -1584,8 +1679,48 @@ def library_driver_command(project_root: Path, service_name: str) -> str:
     inventory is grounded in something the repo declares, and a library declares
     nothing. A fabricated command is the one failure mode this stage cannot
     absorb, so the harness supplies the only correct answer itself.
+
+    The ``{only}`` slot is what makes a library's many entry points reachable one
+    at a time: empty (the default) drives every exported callable, exactly as
+    before; filled, it drives one. Same mechanism a CLI's subcommands use — an
+    entry point IS an invocation, so neither surface needs a second vocabulary.
+    Mirrored by ``exerciser.invocations.library_driver_command``.
     """
-    return f"vinv-exerciser functions {project_root.resolve()} --service {service_name}"
+    return (
+        f"vinv-exerciser functions {project_root.resolve()} --service {service_name} {{only}}"
+    )
+
+
+#: The `{only}` slot's parameter. Choices resolve at prompt time from the
+#: entrypoints inventory rather than being frozen here — a library's exported
+#: callables change with every index build.
+_LIBRARY_PARAMS: list[dict[str, Any]] = [
+    {
+        "name": "only",
+        "default": "",
+        "render": "--only-target {value}",
+        "choices_from": "entrypoints",
+        "help": "one callable as module:qualname, or blank for every exported callable",
+    }
+]
+
+
+def _derived_invocation_id(command: str, index: int) -> str:
+    """A stable id for an invocation whose entry declares none.
+
+    Derived from the SUBCOMMAND rather than the position or the purpose text,
+    because those are the two things that move: inserting an invocation renames
+    every later unit, and editing a purpose would too. Mirrored by
+    ``exerciser.invocations._derived_id``.
+    """
+    tokens = command.split()
+    if "--" in tokens:
+        tokens = tokens[len(tokens) - 1 - tokens[::-1].index("--") + 1 :]
+    for token in tokens[1:]:
+        if token.startswith("-") or "=" in token:
+            continue
+        return invocation_slug(token.strip("\"'").lower())
+    return f"run-{index + 1}"
 
 
 def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -> list[dict[str, Any]]:
@@ -1594,7 +1729,8 @@ def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -
     Collapses the three legal spellings into one shape for Stage 2b and the
     exerciser: an explicit `invocations` list, a bare `command` (the single
     invocation), or a library's absent command (the synthesized driver). Each
-    entry carries `command`, `expect_exit` (default 0) and an optional `purpose`.
+    entry carries `command`, `expect_exit` (default 0), a stable `id` and an
+    optional `purpose`.
     """
     kind = svc.get("kind")
     name = svc.get("name") or "service"
@@ -1609,11 +1745,29 @@ def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -
         if not isinstance(command, str) or not command.strip():
             if kind != "python_library" or project_root is None:
                 return []
-            command = library_driver_command(project_root, str(name))
-        entries = [{"command": command}]
-    for entry in entries:
+            entries = [
+                {
+                    "command": library_driver_command(project_root, str(name)),
+                    "params": [dict(p) for p in _LIBRARY_PARAMS],
+                }
+            ]
+        else:
+            entries = [{"command": command}]
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
         expect = entry.get("expect_exit")
         entry["expect_exit"] = 0 if not isinstance(expect, int) or isinstance(expect, bool) else expect
+        declared = entry.get("id")
+        base = (
+            invocation_slug(declared.strip())
+            if isinstance(declared, str) and declared.strip()
+            else _derived_invocation_id(str(entry["command"]), index)
+        )
+        candidate, n = base, 2
+        while candidate in seen:
+            candidate, n = f"{base}-{n}", n + 1
+        seen.add(candidate)
+        entry["id"] = candidate
     return entries
 
 
@@ -1913,6 +2067,39 @@ def _replay_script(commands: list[dict[str, Any]]) -> str:
         wd = c.get("working_directory")
         parts.append(f'cd "{wd}" && {cmd}' if wd else cmd)
     return " && ".join(parts)
+
+
+def _recorded_invocations(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """The `invocations` a start-commands file records, with stable ids filled in.
+
+    Returns [] for a record that has none — a server, or a unit written before
+    parameters existed — so the caller falls back to the single-chain path and
+    every file recorded to date keeps verifying exactly as it did.
+    """
+    raw = data.get("invocations")
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, inv in enumerate(raw):
+        if not isinstance(inv, dict) or not isinstance(inv.get("command"), str):
+            continue
+        if not inv["command"].strip():
+            continue
+        entry = dict(inv)
+        declared = entry.get("id")
+        base = (
+            invocation_slug(declared.strip())
+            if isinstance(declared, str) and declared.strip()
+            else _derived_invocation_id(entry["command"], index)
+        )
+        candidate, n = base, 2
+        while candidate in seen:
+            candidate, n = f"{base}-{n}", n + 1
+        seen.add(candidate)
+        entry["id"] = candidate
+        entries.append(entry)
+    return entries
 
 
 def _port_is_serving(port: int) -> bool:
@@ -2343,7 +2530,14 @@ def verify_replay(
     service: str,
     data: dict[str, Any],
 ) -> dict[str, Any]:
-    """Replay the saved start-commands file exactly as the extension will.
+    """Replay a recorded start-commands file exactly as the extension will.
+
+    When the record carries an ``invocations`` list — a CLI's subcommands, a
+    library's entry points — **every one of them is replayed**, and the file only
+    passes if they all do. Recording five ways to drive a unit and proving one is
+    not a verification of the file; it is a verification of whichever entry
+    happened to be first. See :func:`_verify_one_replay` for the single-command
+    machinery each one goes through.
 
     Runs the composed script via ``bash -lc`` in a fresh process group and
     decides success on *evidence*, not fixed timing:
@@ -2385,6 +2579,87 @@ def verify_replay(
     orphan is left holding the port. Returns a result dict; never raises for a
     failed replay — the caller feeds failures back into the agent loop.
     """
+    invocations = _recorded_invocations(data)
+    if not invocations:
+        return _verify_one_replay(project_root, service, data)
+
+    commands = [c for c in data.get("commands", []) if isinstance(c, dict)]
+    # `commands` is a SEQUENCE (a dependency, then the unit); `invocations` are
+    # ALTERNATIVES for that last entry. So every dependency entry is kept and
+    # only the unit is swapped — the same substitution the extension's
+    # buildLaunchPlan makes, because this gate exists to prove what it will run.
+    dependencies = commands[:-1]
+    tail_wd = commands[-1].get("working_directory") if commands else None
+    file_verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
+
+    verified: list[str] = []
+    for inv in invocations:
+        inv_id = inv["id"]
+        try:
+            rendered = (
+                render_invocation(inv, default_args(inv))
+                if inv.get("params")
+                else str(inv["command"])
+            )
+        except InvocationRenderError as exc:
+            return {
+                "ok": False,
+                "invocation": inv_id,
+                "reason": (
+                    f"invocation {inv_id!r} could not be rendered from its own defaults: {exc}. "
+                    "A recorded invocation must be runnable with no arguments supplied — that "
+                    "is what every headless replay and the Run button's default use."
+                ),
+                "output_tail": "",
+            }
+        inv_verification = inv.get("verification") if isinstance(inv.get("verification"), dict) else {}
+        sub = {
+            **data,
+            "commands": [
+                *dependencies,
+                {
+                    "command": rendered,
+                    "working_directory": inv.get("working_directory") or tail_wd,
+                },
+            ],
+            "verification": {
+                **file_verification,
+                # Run-to-completion by definition, and with THIS invocation's own
+                # contracted exit code — a repo whose `report` exits 0 while its
+                # `check` exits 1 has no single file-level answer.
+                "port": None,
+                "probe": {"type": "exit", "expect_exit": inv.get("expect_exit", 0)},
+                "trace_jsonl": (
+                    inv_verification.get("trace_jsonl") or file_verification.get("trace_jsonl")
+                ),
+            },
+        }
+        result = _verify_one_replay(project_root, f"{service}_{invocation_slug(inv_id)}", sub)
+        if not result.get("ok"):
+            return {
+                **result,
+                "invocation": inv_id,
+                "verified_invocations": verified,
+                "reason": f"invocation {inv_id!r}: {result.get('reason', 'failed')}",
+            }
+        verified.append(inv_id)
+
+    return {
+        "ok": True,
+        "probe": "exit",
+        "port": None,
+        "ran_to_completion": True,
+        "verified_invocations": verified,
+    }
+
+
+def _verify_one_replay(
+    project_root: Path,
+    service: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Replay ONE composed command chain. See :func:`verify_replay` for the
+    contract and the oracle table; this is the machinery behind it."""
     commands = [c for c in data.get("commands", []) if isinstance(c, dict)]
     if not commands:
         return {"ok": False, "reason": "no commands recorded", "output_tail": ""}

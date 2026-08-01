@@ -433,23 +433,27 @@ function getFlowHtml(cspSource: string): string {
 			} else {
 				b.disabled = true;
 			}
-			if (!link.action) { return b; }
-			// The action is a SIBLING, not a child: link rows are <button>, and a
+			const actions = (link.action ? [link.action] : []).concat(link.extraActions || []);
+			if (!actions.length) { return b; }
+			// The actions are SIBLINGS, not children: link rows are <button>, and a
 			// nested button is invalid HTML that browsers reparent.
 			const row = el('div', 'lnk-row');
 			row.appendChild(b);
-			const act = el('button', 'act');
-			act.type = 'button';
-			act.title = link.action.title;
-			act.textContent = link.action.icon === 'play' ? '▶' : '■';
-			act.addEventListener('click', (e) => {
-				e.stopPropagation(); // never also trigger the row behind it
-				vscode.postMessage({
-					type: 'link',
-					link: { label: link.label, command: link.action.command, args: link.action.args },
+			const glyph = { play: '▶', stop: '■', gear: '⚙' };
+			actions.forEach(function (action) {
+				const act = el('button', 'act');
+				act.type = 'button';
+				act.title = action.title;
+				act.textContent = glyph[action.icon] || '▶';
+				act.addEventListener('click', (e) => {
+					e.stopPropagation(); // never also trigger the row behind it
+					vscode.postMessage({
+						type: 'link',
+						link: { label: link.label, command: action.command, args: action.args },
+					});
 				});
+				row.appendChild(act);
 			});
-			row.appendChild(act);
 			return row;
 		}
 

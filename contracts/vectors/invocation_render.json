@@ -1,0 +1,234 @@
+{
+  "about": [
+    "Shared rendering vectors for parameterized invocations.",
+    "",
+    "Three implementations fill the same command templates: the extension's Run",
+    "button (extension/src/bringup/invocations.ts), the exercise pass",
+    "(exerciser/src/exerciser/invocation_render.py) and bring-up's own recorder",
+    "(bringup/src/bringup/invocation_render.py). They must agree exactly — the",
+    "whole point of the record is that the command a human runs is the command",
+    "the exercise pass measured and the command bring-up verified. Nothing in the",
+    "type system links them, so this file does: every suite reads these vectors,",
+    "and a change made on one side and not the others fails there rather than",
+    "quietly producing a different command in each surface.",
+    "",
+    "`render` cases give an expected string; `error` cases give a substring the",
+    "raised message must contain."
+  ],
+  "render": [
+    {
+      "name": "a template with no parameters is its own rendering",
+      "invocation": { "id": "plain", "command": "acme-tool report --since 7d" },
+      "args": {},
+      "expected": "acme-tool report --since 7d"
+    },
+    {
+      "name": "defaults fill every slot when no arguments are supplied",
+      "invocation": {
+        "id": "report",
+        "command": "acme-tool report --since {since} --format {format}",
+        "params": [
+          { "name": "since", "default": "7d" },
+          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+        ]
+      },
+      "args": {},
+      "expected": "acme-tool report --since 7d --format json"
+    },
+    {
+      "name": "supplied arguments win over defaults",
+      "invocation": {
+        "id": "report",
+        "command": "acme-tool report --since {since} --format {format}",
+        "params": [
+          { "name": "since", "default": "7d" },
+          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+        ]
+      },
+      "args": { "since": "30d", "format": "csv" },
+      "expected": "acme-tool report --since 30d --format csv"
+    },
+    {
+      "name": "a value with a space is single-quoted, not passed as two words",
+      "invocation": {
+        "id": "report",
+        "command": "acme-tool report --since {since}",
+        "params": [{ "name": "since", "default": "7d" }]
+      },
+      "args": { "since": "7 days ago" },
+      "expected": "acme-tool report --since '7 days ago'"
+    },
+    {
+      "name": "an embedded single quote is escaped rather than ending the quoting",
+      "invocation": {
+        "id": "note",
+        "command": "acme-tool note --text {text}",
+        "params": [{ "name": "text", "default": "hi" }]
+      },
+      "args": { "text": "it's fine" },
+      "expected": "acme-tool note --text 'it'\\''s fine'"
+    },
+    {
+      "name": "an empty optional value takes its own separating space with it",
+      "invocation": {
+        "id": "functions",
+        "command": "vinv-exerciser functions /repo --service acme-sdk {only}",
+        "params": [{ "name": "only", "default": "", "render": "--target {value}" }]
+      },
+      "args": {},
+      "expected": "vinv-exerciser functions /repo --service acme-sdk"
+    },
+    {
+      "name": "the same slot renders the flag when a value is supplied",
+      "invocation": {
+        "id": "functions",
+        "command": "vinv-exerciser functions /repo --service acme-sdk {only}",
+        "params": [{ "name": "only", "default": "", "render": "--target {value}" }]
+      },
+      "args": { "only": "acme_sdk.client:fetch" },
+      "expected": "vinv-exerciser functions /repo --service acme-sdk --target acme_sdk.client:fetch"
+    },
+    {
+      "name": "an omitted slot mid-command does not leave a double space",
+      "invocation": {
+        "id": "check",
+        "command": "acme-tool check {strict} ./sample",
+        "params": [{ "name": "strict", "type": "flag", "default": "false" }]
+      },
+      "args": {},
+      "expected": "acme-tool check ./sample"
+    },
+    {
+      "name": "a flag renders as --name when on and nothing when off",
+      "invocation": {
+        "id": "check",
+        "command": "acme-tool check {strict} ./sample",
+        "params": [{ "name": "strict", "type": "flag", "default": "false" }]
+      },
+      "args": { "strict": "true" },
+      "expected": "acme-tool check --strict ./sample"
+    },
+    {
+      "name": "a flag with its own render spelling wins over --name",
+      "invocation": {
+        "id": "check",
+        "command": "acme-tool check {strict} ./sample",
+        "params": [
+          { "name": "strict", "type": "flag", "default": "false", "render": "--fail-fast" }
+        ]
+      },
+      "args": { "strict": "yes" },
+      "expected": "acme-tool check --fail-fast ./sample"
+    },
+    {
+      "name": "a Windows path value is rewritten to the /c/ spelling bash reads",
+      "invocation": {
+        "id": "scan",
+        "command": "acme-tool scan {root}",
+        "params": [{ "name": "root", "type": "path", "default": "." }]
+      },
+      "args": { "root": "C:\\Users\\dev\\repo" },
+      "expected": "acme-tool scan /c/Users/dev/repo"
+    },
+    {
+      "name": "a drive path already written with forward slashes converts too",
+      "invocation": {
+        "id": "scan",
+        "command": "acme-tool scan {root}",
+        "params": [{ "name": "root", "type": "path", "default": "." }]
+      },
+      "args": { "root": "D:/work/repo" },
+      "expected": "acme-tool scan /d/work/repo"
+    },
+    {
+      "name": "a path with a space is converted and then quoted",
+      "invocation": {
+        "id": "scan",
+        "command": "acme-tool scan {root}",
+        "params": [{ "name": "root", "type": "path", "default": "." }]
+      },
+      "args": { "root": "C:\\Program Files\\repo" },
+      "expected": "acme-tool scan '/c/Program Files/repo'"
+    },
+    {
+      "name": "doubled braces are literal braces, not placeholders",
+      "invocation": {
+        "id": "fmt",
+        "command": "acme-tool fmt --template '{{name}}' --out {out}",
+        "params": [{ "name": "out", "default": "-" }]
+      },
+      "args": {},
+      "expected": "acme-tool fmt --template '{name}' --out -"
+    },
+    {
+      "name": "the tracelens wrapper around a template survives rendering intact",
+      "invocation": {
+        "id": "report",
+        "command": "PATH=\"/c/repo/.venv/Scripts:$PATH\" tracelens run --target-package acme_tool --output /c/repo/.vinv/captures/s/acme-tool/trace.jsonl -- /c/repo/.venv/Scripts/python.exe -m acme_tool report --since {since}",
+        "params": [{ "name": "since", "default": "7d" }]
+      },
+      "args": {},
+      "expected": "PATH=\"/c/repo/.venv/Scripts:$PATH\" tracelens run --target-package acme_tool --output /c/repo/.vinv/captures/s/acme-tool/trace.jsonl -- /c/repo/.venv/Scripts/python.exe -m acme_tool report --since 7d"
+    },
+    {
+      "name": "an int parameter renders unquoted",
+      "invocation": {
+        "id": "top",
+        "command": "acme-tool top --limit {limit}",
+        "params": [{ "name": "limit", "type": "int", "default": "10" }]
+      },
+      "args": { "limit": "-5" },
+      "expected": "acme-tool top --limit -5"
+    }
+  ],
+  "error": [
+    {
+      "name": "a placeholder with no declared parameter is refused",
+      "invocation": { "id": "bad", "command": "acme-tool report --since {since}" },
+      "args": {},
+      "message": "no such parameter"
+    },
+    {
+      "name": "a declared parameter the command never uses is refused",
+      "invocation": {
+        "id": "bad",
+        "command": "acme-tool report",
+        "params": [{ "name": "since", "default": "7d" }]
+      },
+      "args": {},
+      "message": "has no {since}"
+    },
+    {
+      "name": "a required parameter left empty is refused, not rendered away",
+      "invocation": {
+        "id": "scan",
+        "command": "acme-tool scan {root}",
+        "params": [{ "name": "root", "required": true, "default": "" }]
+      },
+      "args": {},
+      "message": "required"
+    },
+    {
+      "name": "a value outside an enum's choices is refused",
+      "invocation": {
+        "id": "report",
+        "command": "acme-tool report --format {format}",
+        "params": [
+          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+        ]
+      },
+      "args": { "format": "xml" },
+      "message": "must be one of"
+    },
+    {
+      "name": "a non-numeric value for an int parameter is refused",
+      "invocation": {
+        "id": "top",
+        "command": "acme-tool top --limit {limit}",
+        "params": [{ "name": "limit", "type": "int", "default": "10" }]
+      },
+      "args": { "limit": "ten" },
+      "message": "whole number"
+    }
+  ]
+}

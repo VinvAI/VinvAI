@@ -16,6 +16,12 @@ non-zero on bad input is working; the inventory records the expected code per
 invocation, and only a mismatch is a defect. Everything else this oracle
 observes — how long it took, what it wrote, which functions ran — is evidence,
 not a verdict.
+
+**This oracle never asks anybody anything.** It runs headless, so where the Run
+button opens a form prefilled with each parameter's default, this decides for
+itself: the declared defaults, plus one variant per value the repo itself
+enumerated. See :func:`expand_invocation` for why it will not invent argv beyond
+that.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store, tracing
+from .invocation_render import invocation_slug, render_invocation
 from .issues import build_clusters
 from .redact import redact_text
 
@@ -72,12 +79,64 @@ def read_services(repo: Path) -> list[dict[str, Any]]:
     ]
 
 
+def library_driver_command(project_root: Path, service_name: str) -> str:
+    """The parameterized command that drives a ``python_library`` entry.
+
+    Mirrors ``bringup.runner.library_driver_command`` exactly. The ``{only}``
+    slot is what makes a library's many entry points reachable one at a time:
+    empty (the default) drives every exported callable, as it always has; filled,
+    it drives one. That is the same mechanism a CLI's subcommands use, which is
+    the point — an entry point IS an invocation, so neither surface needs a
+    second vocabulary for "which part of this unit do I run".
+    """
+    return f"vinv-exerciser functions {project_root.resolve()} --service {service_name} {{only}}"
+
+
+#: The `{only}` slot above. Choices are resolved at prompt time from the
+#: entrypoints inventory rather than frozen here — the exported callables change
+#: with every index build, and a pinned list would offer functions that no longer
+#: exist.
+_LIBRARY_PARAMS: list[dict[str, Any]] = [
+    {
+        "name": "only",
+        "default": "",
+        "render": "--only-target {value}",
+        "choices_from": "entrypoints",
+        "help": "one callable as module:qualname, or blank for every exported callable",
+    }
+]
+
+
+def _derived_id(command: str, index: int) -> str:
+    """A stable id for an invocation whose inventory entry declares none.
+
+    Derived from the SUBCOMMAND rather than the position or the purpose text,
+    because those are the two things that move: inserting an invocation renames
+    every later unit, and editing a purpose string would too. The subcommand
+    survives both, and survives an argument edit — which is the whole reason this
+    id exists, since it keys findings, coverage and history across runs.
+    """
+    tokens = command.split()
+    # A tracelens-wrapped command carries the real invocation after the last
+    # standalone `--`; everything before it is the wrapper's own flags.
+    if "--" in tokens:
+        tokens = tokens[len(tokens) - 1 - tokens[::-1].index("--") + 1 :]
+    for token in tokens[1:]:
+        if token.startswith("-") or "=" in token:
+            continue
+        return invocation_slug(token.strip("\"'").lower())
+    return f"run-{index + 1}"
+
+
 def service_invocations(service: dict[str, Any], repo: Path) -> list[dict[str, Any]]:
     """Every command that drives ``service``, normalized to full entries.
 
     Mirrors ``bringup.runner.service_invocations``: an explicit ``invocations``
     list, else the bare ``command`` as the single invocation, else — for a
     library, which has no command by definition — the function driver.
+
+    Every entry comes back with a stable ``id``: the unit identity downstream, so
+    it must never be positional.
     """
     raw = service.get("invocations")
     entries: list[dict[str, Any]] = []
@@ -93,16 +152,95 @@ def service_invocations(service: dict[str, Any], repo: Path) -> list[dict[str, A
             name = str(service.get("name") or "repo")
             entries = [
                 {
-                    "command": f"vinv-exerciser functions {repo.resolve()} --service {name}",
+                    "command": library_driver_command(repo, name),
                     "purpose": "drive the library's exported callables",
+                    "params": [dict(p) for p in _LIBRARY_PARAMS],
                 }
             ]
-    for entry in entries:
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
         expect = entry.get("expect_exit")
         entry["expect_exit"] = (
             0 if not isinstance(expect, int) or isinstance(expect, bool) else expect
         )
+        declared = entry.get("id")
+        base = (
+            invocation_slug(declared.strip())
+            if isinstance(declared, str) and declared.strip()
+            else _derived_id(entry["command"], index)
+        )
+        candidate, n = base, 2
+        while candidate in seen:
+            candidate, n = f"{base}-{n}", n + 1
+        seen.add(candidate)
+        entry["id"] = candidate
     return entries
+
+
+def resolved_command(invocation: dict[str, Any], args: dict[str, str] | None = None) -> str:
+    """The command to actually run, with any parameters filled in.
+
+    A parameterless invocation is returned VERBATIM rather than rendered. That is
+    not an optimization: a recorded command may legitimately contain a literal
+    brace (``--format '{json}'``), and rendering it would raise on a placeholder
+    nobody meant to write. Only an invocation that declares parameters opts into
+    templating.
+    """
+    if not invocation.get("params"):
+        return str(invocation["command"])
+    return render_invocation(invocation, args)
+
+
+def expand_invocation(
+    invocation: dict[str, Any], *, max_variants: int = 4
+) -> list[dict[str, Any]]:
+    """The argument sets to run this invocation with, declared one first.
+
+    **Bounded by what the repo enumerated, on purpose.** This oracle EXECUTES the
+    commands it builds, which makes it categorically different from the HTTP
+    generator: an invented request body reaches a running service's validation
+    layer, an invented argv reaches the user's shell. So a variant is only ever
+    produced from a value the inventory itself listed — an ``enum``'s ``choices``
+    or a parameter's explicit ``examples`` — never from a type. Nothing here
+    flips a boolean flag it was not handed a value for; ``--force`` and
+    ``--delete`` are flags too, and the difference between them and ``--verbose``
+    is not visible from the schema.
+
+    Variants change ONE parameter from the defaults at a time (never a cartesian
+    product), so a failing row names the parameter that caused it, and the count
+    stays linear in the parameters rather than exponential.
+    """
+    params = invocation.get("params")
+    defaults = {
+        str(p["name"]): str(p.get("default") or "")
+        for p in (params if isinstance(params, list) else [])
+        if isinstance(p, dict) and isinstance(p.get("name"), str)
+    }
+    variants: list[dict[str, Any]] = [
+        {"variant": "declared", "input_class": "declared", "args": dict(defaults)}
+    ]
+    if not isinstance(params, list):
+        return variants
+    for p in params:
+        if not isinstance(p, dict) or not isinstance(p.get("name"), str):
+            continue
+        name = p["name"]
+        pool: list[str] = []
+        for source in ("choices", "examples"):
+            values = p.get(source)
+            if isinstance(values, list):
+                pool.extend(str(v) for v in values if isinstance(v, (str, int, float)))
+        for value in pool:
+            if value == defaults.get(name) or len(variants) > max_variants:
+                continue
+            variants.append(
+                {
+                    "variant": f"{invocation_slug(name)}={invocation_slug(value) or 'blank'}",
+                    "input_class": "generated",
+                    "args": {**defaults, name: value},
+                }
+            )
+    return variants
 
 
 def _target_packages(service: dict[str, Any]) -> list[str]:
@@ -157,11 +295,47 @@ def run_invocations(
         packages = _target_packages(svc)
         cwd = svc.get("working_directory")
         cwd_path = Path(cwd) if isinstance(cwd, str) and Path(cwd).is_dir() else repo
-        for index, inv in enumerate(service_invocations(svc, repo)):
-            command = inv["command"]
+        pairs = [
+            (inv, variant)
+            for inv in service_invocations(svc, repo)
+            for variant in expand_invocation(inv)
+        ]
+        for inv, variant in pairs:
             expect_exit = inv["expect_exit"]
-            unit_id = f"{name}#{index}"
-            capture = tracing.capture_path(repo, name, "invocations", f"{index}")
+            # The unit is the INVOCATION; a parameter variant is a different
+            # input to it, exactly as many requests share one HTTP endpoint. So
+            # variants share a unit_id and are told apart by `input_class` —
+            # giving each its own would inflate the unit count and split one
+            # command's coverage across rows that are the same code path.
+            unit_id = f"{name}#{inv['id']}"
+            try:
+                command = resolved_command(inv, variant["args"])
+            except ValueError as exc:
+                # A template that cannot be filled is a malformed record, not a
+                # defect in the tool under test — report it against the unit
+                # rather than running something nobody described.
+                rows.append({
+                    "unit_kind": "cli_invocation",
+                    "unit_id": unit_id,
+                    "service": name,
+                    "method": METHOD,
+                    "path": str(inv.get("command")),
+                    "purpose": inv.get("purpose"),
+                    "expect_exit": expect_exit,
+                    "invocation_id": inv["id"],
+                    "variant": variant["variant"],
+                    "input_class": variant["input_class"],
+                    "status": "error",
+                    "error_type": "MalformedInvocation",
+                    "error": str(exc),
+                    "duration_s": 0.0,
+                    "latency_ms": 0.0,
+                })
+                lg.warning("invocation_malformed unit=%s error=%s", unit_id, exc)
+                continue
+            capture = tracing.capture_path(
+                repo, name, "invocations", f"{inv['id']}-{variant['variant']}"
+            )
             script = command
             if trace and packages:
                 script = tracing.tracelens_wrap_command(
@@ -182,18 +356,25 @@ def run_invocations(
                 "unit_id": unit_id,
                 "service": name,
                 "method": METHOD,
-                # The label half of the unit: what was actually run.
-                "path": command,
+                # The label half of the unit — the TEMPLATE, not the rendering.
+                # Every variant of an invocation is the same unit, so they must
+                # agree on this string or the profile would label one unit
+                # differently depending on which variant it read last.
+                "path": str(inv["command"]),
                 "purpose": inv.get("purpose"),
                 "expect_exit": expect_exit,
                 "command": command,
                 "working_directory": str(cwd_path),
+                "invocation_id": inv["id"],
+                "variant": variant["variant"],
+                "args": variant["args"],
                 # The profile groups by `input_class` and reads `latency_ms`;
                 # carrying both here is what lets one profiler serve a CLI unit
-                # and an HTTP endpoint without a second code path. "declared"
-                # because the argv came from the repo's inventory, not from a
-                # generator — the distinction the other oracles draw too.
-                "input_class": "declared",
+                # and an HTTP endpoint without a second code path. "declared" is
+                # the argv the repo's inventory itself recorded; "generated" is a
+                # variant built from a value it enumerated — the same distinction
+                # the other oracles draw.
+                "input_class": variant["input_class"],
             }
             started = time.monotonic()
             try:
@@ -275,7 +456,10 @@ def run_invocations(
         describe=lambda r, _k: f"{r.get('error_type', 'error')}: {r.get('error', '')}",
         target_of=lambda r: str(r.get("unit_id", "?")),
         method=METHOD,
-        strategy=lambda r, _k: "invocation/declared",
+        # Which argv produced the failure: the inventory's own, or a variant
+        # built from a value it enumerated. A fixing agent reads this to know
+        # whether the recorded command is broken or only one of its inputs.
+        strategy=lambda r, _k: f"invocation/{r.get('input_class', 'declared')}",
         expected=lambda r, _k: f"exit {r.get('expect_exit', 0)}",
         exemplar_extra=lambda r: {
             "command": r.get("command"),
@@ -299,8 +483,10 @@ def run_invocations(
             "traced": bool(rows) and len(untraced) < len(rows),
             "spans": sum(int(r.get("trace_lines") or 0) for r in rows),
             # Named, not counted: an invocation that ran without producing spans
-            # is the failure mode this oracle exists to make visible.
-            "untraced_units": [r["unit_id"] for r in untraced],
+            # is the failure mode this oracle exists to make visible. Deduped,
+            # because a unit with several parameter variants would otherwise be
+            # named once per variant and read as several broken units.
+            "untraced_units": sorted({r["unit_id"] for r in untraced}),
         },
         "rows": rows,
     }

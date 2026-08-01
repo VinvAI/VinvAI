@@ -117,6 +117,32 @@ suite('flowModel: rail stages', () => {
 		assert.deepStrictEqual(f.links[0].args, ['api']);
 	});
 
+	test('a unit with several ways to run gets a chooser WITHOUT displacing ▶', () => {
+		// ▶ has to stay one click and zero questions — the probe pass, the debug
+		// toolbar and every "just run it" reflex depend on it. So a CLI growing a
+		// second subcommand adds a control beside it rather than moving it.
+		const model = computeFlowModel(
+			facts({
+				discovered: true,
+				services: [
+					{ name: 'api', state: 'ready' },
+					{ name: 'acme-tool', state: 'ready', choosable: true },
+				],
+			}),
+		);
+		const s = stage(model, 'services');
+		const plain = s.links.find((l) => l.label === 'api')!;
+		assert.strictEqual(plain.action?.command, 'vinv-vs.serviceStart');
+		assert.strictEqual(plain.extraActions, undefined, 'nothing to choose, no extra control');
+
+		const cli = s.links.find((l) => l.label === 'acme-tool')!;
+		assert.strictEqual(cli.action?.command, 'vinv-vs.serviceStart', '▶ must not move');
+		assert.deepStrictEqual(cli.extraActions?.map((a) => a.command), [
+			'vinv-vs.serviceStartWithArgs',
+		]);
+		assert.deepStrictEqual(cli.extraActions?.[0].args, ['acme-tool']);
+	});
+
 	test('a long service list keeps its tail, marked for the panel to collapse', () => {
 		const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
 		const model = computeFlowModel(

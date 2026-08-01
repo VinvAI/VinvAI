@@ -266,6 +266,18 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
         "drives every target; it just records nothing."
     ),
 )
+@click.option(
+    "--only-target",
+    "only_targets",
+    multiple=True,
+    help=(
+        "Drive ONE exported callable as module:qualname instead of sweeping the "
+        "library (repeatable). A library's entry points are its units of work, "
+        "and this is how one of them is run on its own — the editor's "
+        "'Run Service with Arguments…' fills this slot from the entrypoints "
+        "inventory. Omit it and every discovered target runs, as before."
+    ),
+)
 @click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
 def functions_cmd(
     repo_path,
@@ -281,6 +293,7 @@ def functions_cmd(
     services,
     seed_rows,
     trace,
+    only_targets,
     verbose,
 ):
     _configure_logging(verbose)
@@ -307,6 +320,10 @@ def functions_cmd(
             sandbox=sandbox,
             sandbox_policy=policy,
             trace=trace,
+            # None, not [], when unset: `only_targets=[]` filters every target
+            # away and reports a clean zero, which is indistinguishable from a
+            # library with nothing to drive.
+            only_targets=list(only_targets) or None,
             logger=logging.getLogger("exerciser.functions"),
         )
     except Exception as exc:

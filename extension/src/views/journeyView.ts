@@ -448,7 +448,7 @@ function getHtml(): string {
 				'</form>' +
 				'<div class="empty">Saved with this endpoint\\'s planned inputs — the next <b>exerciser run</b> executes it (logging in first if this endpoint\\'s recorded flow needs it) and it becomes a permanent regression check.</div>';
 		} else if (s.unitKind === 'cli_invocation') {
-			html += '<div class="empty">This is a <b>CLI invocation</b>. Its arguments come from the <code>invocations</code> recorded for this service in <code>.vinv/services.json</code> — edit them there and re-run <b>exerciser invocations</b>.</div>';
+			html += '<div class="empty">This is a <b>CLI invocation</b>. To run it yourself with different arguments, use <b>Run Service with Arguments…</b> on this service — it lists every recorded invocation and prefills each parameter\\'s default. The exercise pass drives the declared defaults plus any <code>examples</code> the inventory enumerates; to change what it runs, edit this service\\'s <code>invocations</code> in <code>.vinv/services.json</code> and re-run <b>exerciser invocations</b>.</div>';
 		} else {
 			html += '<div class="empty">This is a <b>driven call</b>. Its arguments are generated from the function\\'s type hints by <b>exerciser functions</b>, not authored by hand.</div>';
 		}

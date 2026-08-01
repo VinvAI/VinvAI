@@ -25,6 +25,7 @@ import {
 	onDiscoveryStateChange,
 } from '../index/discovery';
 import { readServices, readBringupOutcome, isServiceStarted, serviceSlug } from '../bringup/bringup';
+import { readInvocations } from '../bringup/invocations';
 import { isServiceRunning, onServiceExit } from '../bringup/serviceRunner';
 import { getAutoPilotStatus, onAutoPilotStateChange } from '../harness/autoPilot';
 import {
@@ -102,11 +103,16 @@ function serviceFacts(root: string): ServiceFact[] {
 						? 'failed'
 						: 'unattempted';
 		const startCommandPath = path.join(root, '.vinv', 'start_commands', `${serviceSlug(s.name)}.json`);
+		// Worth offering the chooser only when there is genuinely something to
+		// choose: several recorded invocations, or one that takes arguments.
+		const invocations = readInvocations(root, s.name);
 		return {
 			name: s.name,
 			state,
 			detail: 'symptom' in outcome ? outcome.symptom : undefined,
 			startCommandPath: fs.existsSync(startCommandPath) ? startCommandPath : undefined,
+			choosable:
+				invocations.length > 1 || (invocations[0]?.params?.length ?? 0) > 0,
 		};
 	});
 }
