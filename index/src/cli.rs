@@ -37,6 +37,25 @@ pub enum Command {
         summarize: bool,
     },
 
+    /// Report Python code nothing references (source-only; ignores the index).
+    Deadcode {
+        /// Path to the repository to analyse.
+        path: String,
+        /// Only report definitions under this path prefix (e.g. `src/`).
+        #[arg(long)]
+        include: Option<String>,
+        /// Also list methods that may be overrides or duck-typed.
+        #[arg(long = "show-probable")]
+        show_probable: bool,
+        /// Date each symbol from git and say whether it was never wired or
+        /// lost its callers.
+        #[arg(long)]
+        reasons: bool,
+        /// Emit JSON instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Search the index with a natural-language query.
     Query {
         /// The natural-language query.

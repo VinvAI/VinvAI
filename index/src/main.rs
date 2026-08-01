@@ -8,6 +8,7 @@
 mod bm25;
 mod cli;
 mod config;
+mod deadcode;
 mod constants;
 mod embed;
 mod graph;

@@ -62,6 +62,9 @@ pub fn run(cmd: Command) -> i32 {
         Command::Index { path, store_dir, languages, force, summarize } => {
             cmd_index(&path, store_dir.as_deref(), languages, force, !summarize)
         }
+        Command::Deadcode { path, include, show_probable, reasons, json } => {
+            crate::deadcode::run(&path, include.as_deref(), show_probable, reasons, json)
+        }
         Command::Query { text, repo_path, store_dir, top_k, context_symbols, explain } => {
             cmd_query(&text, repo_path.as_deref(), store_dir.as_deref(), top_k, context_symbols.as_deref(), explain)
         }
@@ -71,6 +74,9 @@ pub fn run(cmd: Command) -> i32 {
     };
 
     match result {
+        // A command that already wrote its own report returns Null rather than
+        // a document; printing `null` after it is noise.
+        Ok(Value::Null) => 0,
         Ok(v) => {
             util::print_json(&v);
             0
