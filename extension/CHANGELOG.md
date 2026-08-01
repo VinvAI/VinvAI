@@ -5,6 +5,81 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] — 2026-08-02
+
+### ✨ Added
+
+- **Dead code is found from your source, not from a run.** The old surface asked
+  which symbols a capture never executed, so every finding was really a
+  statement about how well the repo had been exercised — a report existed only
+  after something had been driven, and anything nothing drove looked dead.
+  Reachability is now recomputed from the AST on every scan: definitions
+  nothing references, in two buckets (unreachable anywhere, and reached only
+  from the test suite). It runs during Discovery alongside indexing and the
+  handbook, needs no harness and no traffic, and lands as a report before you
+  have run a single thing. Everything a framework dispatches — dunders,
+  decorated handlers, entry points, `__all__`, pytest cases, methods answering
+  an external contract — is a live root *before* reachability runs, not a
+  filter applied to the results afterwards.
+
+- **A dead-code panel of its own, with two agent actions.** *Verify with agent*
+  asks your coding agent whether the symbol is really dead, what it does, and
+  whether deleting it is safe; *Compare diff* is offered only when history says
+  the callers were removed, because a symbol that never had one has no removal
+  to explain. Verdicts are read conservatively — "safe to delete" is opt-in, an
+  unrecognized answer becomes "unclear", and an unusable reply records nothing,
+  since a fabricated "probably safe" is worse than silence when the output
+  drives a deletion.
+
+- **A CLI gets a Run button for every one of its commands.** A service has one
+  way to start; a CLI has one per subcommand and a library one per entry point.
+  The recorded start command could not express that, so a CLI with five
+  subcommands got a single Run button that always ran the same one, with its
+  arguments frozen at whatever bring-up happened to verify. Alternatives are now
+  named, separately verified invocations, and the ones that take arguments open
+  a fillable form — prefilled with what you used last, remembered per
+  invocation. The ▶ button still runs one click with no questions; choosing gets
+  its own control beside it.
+
+- **A library can be driven one entry point at a time.** The same mechanism
+  covers exported callables: drive everything, exactly as before, or pick one.
+
+### 🔧 Changed
+
+- **A dead chain is one finding, not one per symbol.** A symbol reached only
+  from other dead code was reported on its own — in one repo that turned a
+  single dead module into seven entries. Those now fold under the top of their
+  chain, which says how many it carries. This also fixes what the report
+  *claimed*: "nothing references this" was plainly false for a symbol with two
+  dead callers, and an agent asked to verify it rightly found one and answered
+  "still used".
+
+- **The index queue is trimmed by measurement, not by a list of boring names.**
+  An unresolved reference is withheld from adjudication on facts measured in
+  your repository — no candidate shares the caller's language, the receiver is
+  not an identifier the repo defines, the name has more definitions than the
+  candidate cap. The old denylist suppressed most of a Python/JS queue, nothing
+  at all in a Go or Java tree, and missed `JSON.parse`. New knobs:
+  `INDEX_MAX_CANDIDATES` (8) and `INDEX_LIBRARY_METHOD_REFS` (25).
+
+- **Graph adjudication works from shard files instead of one agent process per
+  reference.** The agent gets a path and appends its decisions, so it can open
+  the caller it is judging — import reachability is the first rule it is asked
+  to apply, and the old inlined prompt never sent any imports. Work is durable
+  per decision rather than per run.
+
+### 🐛 Fixed
+
+- **Adding a way to run a unit no longer orphans its history.** Unit ids were
+  positional, so inserting an invocation renamed every later unit and cut it off
+  from its findings, coverage and history. Ids now derive from the subcommand,
+  which survives the two edits that actually happen: reordering the list and
+  tuning an argument.
+
+- **Recording five ways to drive a unit no longer verifies one.** The replay
+  gate proved a single command and passed the whole record; it now replays every
+  recorded invocation and fails if any of them does.
+
 ## [0.2.2] — 2026-07-31
 
 ### ✨ Added
