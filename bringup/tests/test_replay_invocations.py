@@ -36,10 +36,12 @@ def _record(invocations: list[dict], *, dependency: str | None = None) -> dict:
 
 
 def test_every_recorded_invocation_is_replayed(tmp_path: Path) -> None:
-    data = _record([
-        {"id": "report", "command": f"{_PY} -c \"print('report')\"", "default": True},
-        {"id": "check", "command": f"{_PY} -c \"print('check')\""},
-    ])
+    data = _record(
+        [
+            {"id": "report", "command": f"{_PY} -c \"print('report')\"", "default": True},
+            {"id": "check", "command": f"{_PY} -c \"print('check')\""},
+        ]
+    )
 
     result = verify_replay(tmp_path, "acme-tool", data)
 
@@ -50,10 +52,12 @@ def test_every_recorded_invocation_is_replayed(tmp_path: Path) -> None:
 def test_one_failing_invocation_fails_the_whole_file(tmp_path: Path) -> None:
     # The second entry exits 2 where 0 was expected. Passing the file because
     # the FIRST entry worked is exactly the hole this closes.
-    data = _record([
-        {"id": "report", "command": f"{_PY} -c \"print('report')\""},
-        {"id": "broken", "command": f"{_PY} -c \"raise SystemExit(2)\""},
-    ])
+    data = _record(
+        [
+            {"id": "report", "command": f"{_PY} -c \"print('report')\""},
+            {"id": "broken", "command": f'{_PY} -c "raise SystemExit(2)"'},
+        ]
+    )
 
     result = verify_replay(tmp_path, "acme-tool", data)
 
@@ -71,10 +75,12 @@ def test_each_invocation_is_judged_by_its_own_expected_exit(tmp_path: Path) -> N
     `report` that exits 0 — reading one for both would dispatch a fix episode
     against a linter doing exactly what it documents.
     """
-    data = _record([
-        {"id": "report", "command": f"{_PY} -c \"print('ok')\"", "expect_exit": 0},
-        {"id": "check", "command": f"{_PY} -c \"raise SystemExit(1)\"", "expect_exit": 1},
-    ])
+    data = _record(
+        [
+            {"id": "report", "command": f"{_PY} -c \"print('ok')\"", "expect_exit": 0},
+            {"id": "check", "command": f'{_PY} -c "raise SystemExit(1)"', "expect_exit": 1},
+        ]
+    )
 
     result = verify_replay(tmp_path, "acme-tool", data)
 
@@ -85,25 +91,31 @@ def test_each_invocation_is_judged_by_its_own_expected_exit(tmp_path: Path) -> N
 def test_parameters_are_filled_from_their_defaults(tmp_path: Path) -> None:
     # Headless replay uses the declared defaults — the same argv the Run
     # button's one-click path uses, which is what makes this gate mean anything.
-    data = _record([
-        {
-            "id": "report",
-            "command": f"{_PY} -c \"import sys; sys.exit(0 if sys.argv[1]=='7d' else 9)\" {{since}}",
-            "params": [{"name": "since", "default": "7d"}],
-        }
-    ])
+    data = _record(
+        [
+            {
+                "id": "report",
+                "command": (
+                    f"{_PY} -c \"import sys; sys.exit(0 if sys.argv[1]=='7d' else 9)\"" " {since}"
+                ),
+                "params": [{"name": "since", "default": "7d"}],
+            }
+        ]
+    )
 
     assert verify_replay(tmp_path, "acme-tool", data)["ok"] is True
 
 
 def test_defaults_that_cannot_render_are_refused_before_anything_runs(tmp_path: Path) -> None:
-    data = _record([
-        {
-            "id": "report",
-            "command": f"{_PY} -c \"print(1)\" {{since}}",
-            "params": [{"name": "other", "default": "x"}],
-        }
-    ])
+    data = _record(
+        [
+            {
+                "id": "report",
+                "command": f'{_PY} -c "print(1)" {{since}}',
+                "params": [{"name": "other", "default": "x"}],
+            }
+        ]
+    )
 
     result = verify_replay(tmp_path, "acme-tool", data)
 

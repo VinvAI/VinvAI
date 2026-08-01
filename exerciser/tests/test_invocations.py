@@ -219,7 +219,7 @@ def test_profile_still_reports_when_nothing_has_been_exercised(tmp_path: Path) -
 
 
 def test_the_scorecard_counts_units_by_kind_and_names_them(tmp_path: Path) -> None:
-    """"14 endpoints" on a repo with none is wrong about the noun, not the number."""
+    """ "14 endpoints" on a repo with none is wrong about the noun, not the number."""
     repo = _repo(tmp_path, [_cli_service(tmp_path / "repo")])
     run_invocations(repo)
     build_profile(repo)
@@ -254,16 +254,34 @@ def test_a_mixed_repo_gets_the_neutral_noun_and_a_breakdown() -> None:
         "issues": [],
         "endpoints": [
             {
-                "endpoint": "GET /a", "unit_kind": "http_endpoint", "coverage": "1/1",
-                "pct": 100, "p50_ms": 1, "p95_ms": 2, "invariants": 0, "statuses": {},
+                "endpoint": "GET /a",
+                "unit_kind": "http_endpoint",
+                "coverage": "1/1",
+                "pct": 100,
+                "p50_ms": 1,
+                "p95_ms": 2,
+                "invariants": 0,
+                "statuses": {},
             },
             {
-                "endpoint": "GET /b", "unit_kind": "http_endpoint", "coverage": "1/1",
-                "pct": 100, "p50_ms": 1, "p95_ms": 2, "invariants": 0, "statuses": {},
+                "endpoint": "GET /b",
+                "unit_kind": "http_endpoint",
+                "coverage": "1/1",
+                "pct": 100,
+                "p50_ms": 1,
+                "p95_ms": 2,
+                "invariants": 0,
+                "statuses": {},
             },
             {
-                "endpoint": "RUN acme-tool", "unit_kind": "cli_invocation", "coverage": "0/1",
-                "pct": 0, "p50_ms": 9, "p95_ms": 9, "invariants": 0, "statuses": {},
+                "endpoint": "RUN acme-tool",
+                "unit_kind": "cli_invocation",
+                "coverage": "0/1",
+                "pct": 0,
+                "p50_ms": 9,
+                "p95_ms": 9,
+                "invariants": 0,
+                "statuses": {},
             },
         ],
     }
@@ -332,18 +350,24 @@ def test_unit_ids_survive_an_invocation_being_inserted(tmp_path: Path) -> None:
     orphaned and its findings re-reported as new.
     """
     before = service_invocations(
-        _cli_service(tmp_path / "repo", [
-            {"command": "acme-tool report --since 7d"},
-            {"command": "acme-tool check ./sample"},
-        ]),
+        _cli_service(
+            tmp_path / "repo",
+            [
+                {"command": "acme-tool report --since 7d"},
+                {"command": "acme-tool check ./sample"},
+            ],
+        ),
         tmp_path / "repo",
     )
     after = service_invocations(
-        _cli_service(tmp_path / "repo", [
-            {"command": "acme-tool migrate"},
-            {"command": "acme-tool report --since 7d"},
-            {"command": "acme-tool check ./sample"},
-        ]),
+        _cli_service(
+            tmp_path / "repo",
+            [
+                {"command": "acme-tool migrate"},
+                {"command": "acme-tool report --since 7d"},
+                {"command": "acme-tool check ./sample"},
+            ],
+        ),
         tmp_path / "repo",
     )
 
@@ -354,11 +378,14 @@ def test_unit_ids_survive_an_invocation_being_inserted(tmp_path: Path) -> None:
 
 def test_an_explicit_id_wins_and_collisions_are_disambiguated(tmp_path: Path) -> None:
     entries = service_invocations(
-        _cli_service(tmp_path / "repo", [
-            {"id": "weekly", "command": "acme-tool report --since 7d"},
-            {"command": "acme-tool report --since 30d"},
-            {"command": "acme-tool report --since 90d"},
-        ]),
+        _cli_service(
+            tmp_path / "repo",
+            [
+                {"id": "weekly", "command": "acme-tool report --since 7d"},
+                {"command": "acme-tool report --since 30d"},
+                {"command": "acme-tool report --since 90d"},
+            ],
+        ),
         tmp_path / "repo",
     )
     assert [e["id"] for e in entries] == ["weekly", "report", "report-2"]
@@ -386,45 +413,53 @@ def test_variants_come_only_from_values_the_repo_enumerated() -> None:
     argv meets the user's shell. `--force` and `--delete` are flags too, and
     nothing in the schema distinguishes them from `--verbose`.
     """
-    enumerated = expand_invocation({
-        "id": "report",
-        "command": "acme-tool report --format {format}",
-        "params": [
-            {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]}
-        ],
-    })
+    enumerated = expand_invocation(
+        {
+            "id": "report",
+            "command": "acme-tool report --format {format}",
+            "params": [
+                {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]}
+            ],
+        }
+    )
     assert [v["input_class"] for v in enumerated] == ["declared", "generated"]
     assert enumerated[0]["args"] == {"format": "json"}
     assert enumerated[1]["args"] == {"format": "csv"}
 
     # A free-form parameter with nothing enumerated yields the declared row only.
-    freeform = expand_invocation({
-        "id": "scan",
-        "command": "acme-tool scan {root}",
-        "params": [{"name": "root", "type": "path", "default": "."}],
-    })
+    freeform = expand_invocation(
+        {
+            "id": "scan",
+            "command": "acme-tool scan {root}",
+            "params": [{"name": "root", "type": "path", "default": "."}],
+        }
+    )
     assert len(freeform) == 1
 
     # And a bare flag is never flipped on the oracle's own initiative.
-    flag = expand_invocation({
-        "id": "clean",
-        "command": "acme-tool clean {force}",
-        "params": [{"name": "force", "type": "flag", "default": "false"}],
-    })
+    flag = expand_invocation(
+        {
+            "id": "clean",
+            "command": "acme-tool clean {force}",
+            "params": [{"name": "force", "type": "flag", "default": "false"}],
+        }
+    )
     assert len(flag) == 1
 
 
 def test_variants_change_one_parameter_at_a_time() -> None:
     # Never a cartesian product: the count stays linear in the parameters, and a
     # failing row names the one parameter that caused it.
-    variants = expand_invocation({
-        "id": "report",
-        "command": "acme-tool report --format {format} --scope {scope}",
-        "params": [
-            {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]},
-            {"name": "scope", "type": "enum", "default": "all", "choices": ["all", "recent"]},
-        ],
-    })
+    variants = expand_invocation(
+        {
+            "id": "report",
+            "command": "acme-tool report --format {format} --scope {scope}",
+            "params": [
+                {"name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"]},
+                {"name": "scope", "type": "enum", "default": "all", "choices": ["all", "recent"]},
+            ],
+        }
+    )
     assert len(variants) == 3
     assert variants[1]["args"] == {"format": "csv", "scope": "all"}
     assert variants[2]["args"] == {"format": "json", "scope": "recent"}
@@ -477,8 +512,13 @@ def test_a_template_that_cannot_be_filled_is_reported_not_run(tmp_path: Path) ->
         [
             _cli_service(
                 tmp_path / "repo",
-                [{"id": "broken", "command": f'"{_PY}" -m acme.tool {{rows}}',
-                  "params": [{"name": "other", "default": "1"}]}],
+                [
+                    {
+                        "id": "broken",
+                        "command": f'"{_PY}" -m acme.tool {{rows}}',
+                        "params": [{"name": "other", "default": "1"}],
+                    }
+                ],
             )
         ],
     )

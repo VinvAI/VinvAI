@@ -48,6 +48,7 @@ _PROMPTS_DIR = Path(__file__).with_name("prompts")
 def _prompt(name: str) -> str:
     return (_PROMPTS_DIR / f"{name}.txt").read_text(encoding="utf-8")
 
+
 HANDBOOK_REL = Path(".vinv") / "vinv.md"
 
 # Stage 2a (list) writes the service inventory here; Stage 2b (start) reads it
@@ -70,6 +71,7 @@ START_HINTS_DIR_REL = Path(".vinv") / "start_hints"
 
 # ── Capture root (kept in sync with sessions/paths.captures_root) ──
 
+
 def _captures_root() -> Path:
     override = os.environ.get("VINV_CAPTURES_DIR")
     if override:
@@ -89,6 +91,7 @@ def _captures_root() -> Path:
 # `pip install -e <PATH>` instead.  Override with
 # `VINV_TRACELENS_PACKAGE_PATH` for packaged builds where the
 # autodetected path doesn't exist.
+
 
 def _tracelens_package_path() -> Path | None:
     """Resolve the local `tracelens` package path or return ``None``.
@@ -180,8 +183,11 @@ def _render_otel_pin_block() -> str:
     # unconstrained PyYAML and a junk `=6.0.1,` file appears in the cwd.
     otel_pin_lines_uv = " \\\n  ".join(shlex.quote(s) for s in _OTEL_PIN_SPECS)
     otel_pin_lines_pip = otel_pin_lines_uv
-    return (
-        _prompt("otel_pin_block").format(otel_pin_lines_uv=otel_pin_lines_uv, otel_pin_lines_pip=otel_pin_lines_pip, _OTEL_CORE_VERSION=_OTEL_CORE_VERSION, _OTEL_INSTRUMENTATION_VERSION=_OTEL_INSTRUMENTATION_VERSION)
+    return _prompt("otel_pin_block").format(
+        otel_pin_lines_uv=otel_pin_lines_uv,
+        otel_pin_lines_pip=otel_pin_lines_pip,
+        _OTEL_CORE_VERSION=_OTEL_CORE_VERSION,
+        _OTEL_INSTRUMENTATION_VERSION=_OTEL_INSTRUMENTATION_VERSION,
     )
 
 
@@ -207,12 +213,14 @@ def _render_tracelens_install_block(tl_pkg: Path | None) -> str:
         # the prompt is human-readable; the agent runs the block as
         # one shell command.
         otel_pin_lines = " \\\n  ".join(_OTEL_PIN_SPECS)
-        return (
-            _prompt("tracelens_install_editable").format(pypi_warning=pypi_warning, tl_pkg=tl_pkg, otel_pin_lines=otel_pin_lines, _OTEL_CORE_VERSION=_OTEL_CORE_VERSION, _OTEL_INSTRUMENTATION_VERSION=_OTEL_INSTRUMENTATION_VERSION)
+        return _prompt("tracelens_install_editable").format(
+            pypi_warning=pypi_warning,
+            tl_pkg=tl_pkg,
+            otel_pin_lines=otel_pin_lines,
+            _OTEL_CORE_VERSION=_OTEL_CORE_VERSION,
+            _OTEL_INSTRUMENTATION_VERSION=_OTEL_INSTRUMENTATION_VERSION,
         )
-    return (
-        _prompt("tracelens_install_missing").format(pypi_warning=pypi_warning)
-    )
+    return _prompt("tracelens_install_missing").format(pypi_warning=pypi_warning)
 
 
 # ── Auto-discovery of Python distributions / traceable packages ─────
@@ -231,35 +239,74 @@ def _render_tracelens_install_block(tl_pkg: Path | None) -> str:
 # directory names like `payment` or `vinv-electron` are useless there) from
 # the declared metadata first and layout conventions second.
 
-_TRACELENS_SKIP_DIRS: frozenset[str] = frozenset({
-    # Virtual environments
-    ".venv", "venv", ".venv312", "venv312", ".env", "env",
-    # JS / build artefacts
-    "node_modules", "dist", "build", "out", ".next",
-    # VCS / tooling
-    ".git", ".hg", ".svn",
-    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".eggs",
-    "__pycache__", "htmlcov",
-    # Clearly not application code
-    "docs", "data", "static", "assets", "media",
-    "test_screenshots", "fixtures",
-    "benchmarks", "benchmark_results",
-    # Frontend / non-Python runtimes
-    "frontend", "ui", "typescript", "javascript",
-    # Packaging metadata
-    "packaging", "deploy",
-    # Test code — never instrument (would pollute traces with test helpers)
-    "tests", "test", "spec",
-    # Plain scripts / one-off tools — not importable library code
-    "scripts", "tools", "bin",
-    # DB migration artefacts
-    "migrations", "alembic",
-    # Vendored third-party code — ships its own pyproject.toml (e.g. a
-    # vendored litellm stub with `name = "litellm"`) that must never be
-    # enumerated as one of THIS repo's services.
-    "vendor", "vendored", "vendors", "third_party", "thirdparty",
-    "site-packages", "extern", "externals",
-})
+_TRACELENS_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        # Virtual environments
+        ".venv",
+        "venv",
+        ".venv312",
+        "venv312",
+        ".env",
+        "env",
+        # JS / build artefacts
+        "node_modules",
+        "dist",
+        "build",
+        "out",
+        ".next",
+        # VCS / tooling
+        ".git",
+        ".hg",
+        ".svn",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".eggs",
+        "__pycache__",
+        "htmlcov",
+        # Clearly not application code
+        "docs",
+        "data",
+        "static",
+        "assets",
+        "media",
+        "test_screenshots",
+        "fixtures",
+        "benchmarks",
+        "benchmark_results",
+        # Frontend / non-Python runtimes
+        "frontend",
+        "ui",
+        "typescript",
+        "javascript",
+        # Packaging metadata
+        "packaging",
+        "deploy",
+        # Test code — never instrument (would pollute traces with test helpers)
+        "tests",
+        "test",
+        "spec",
+        # Plain scripts / one-off tools — not importable library code
+        "scripts",
+        "tools",
+        "bin",
+        # DB migration artefacts
+        "migrations",
+        "alembic",
+        # Vendored third-party code — ships its own pyproject.toml (e.g. a
+        # vendored litellm stub with `name = "litellm"`) that must never be
+        # enumerated as one of THIS repo's services.
+        "vendor",
+        "vendored",
+        "vendors",
+        "third_party",
+        "thirdparty",
+        "site-packages",
+        "extern",
+        "externals",
+    }
+)
 
 _TRACELENS_SKIP_PREFIXES: tuple[str, ...] = (".", "_", "test_")
 
@@ -512,7 +559,8 @@ def _flat_scan_fallback(project_root: Path) -> list[str]:
         if any(name.startswith(p) for p in _TRACELENS_SKIP_PREFIXES):
             continue
         py_files = [
-            f for f in entry.rglob("*.py")
+            f
+            for f in entry.rglob("*.py")
             if not any(part in _TRACELENS_SKIP_DIRS for part in f.parts)
         ]
         if not py_files:
@@ -554,30 +602,85 @@ def _discover_traceable_packages(project_root: Path) -> list[str]:
 # _TRACELENS_SKIP_DIRS: that list drops `frontend`/`ui`/`scripts`/`bin` because
 # they are not *instrumentable Python*, but a frontend dev server or a script
 # entry is exactly the kind of runnable this pass exists to surface.
-_MANIFEST_SCAN_SKIP: frozenset[str] = frozenset({
-    ".git", ".hg", ".svn", "node_modules", "dist", "build", "out", ".next",
-    ".venv", "venv", ".venv312", "venv312", ".env", "env",
-    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox",
-    ".eggs", "htmlcov", "site-packages",
-    "vendor", "vendored", "vendors", "third_party", "thirdparty",
-    # Test fixtures declare runnables too (mini-monorepo fixtures, demo
-    # Procfiles) — they are not THIS repo's services.
-    "tests", "test", "spec", "fixtures", "fixture", "testdata",
-})
+_MANIFEST_SCAN_SKIP: frozenset[str] = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "dist",
+        "build",
+        "out",
+        ".next",
+        ".venv",
+        "venv",
+        ".venv312",
+        "venv312",
+        ".env",
+        "env",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".eggs",
+        "htmlcov",
+        "site-packages",
+        "vendor",
+        "vendored",
+        "vendors",
+        "third_party",
+        "thirdparty",
+        # Test fixtures declare runnables too (mini-monorepo fixtures, demo
+        # Procfiles) — they are not THIS repo's services.
+        "tests",
+        "test",
+        "spec",
+        "fixtures",
+        "fixture",
+        "testdata",
+    }
+)
 
 # Compose images that are stateful infrastructure we never instrument (they
 # run in Docker; everything else is an app candidate that runs on the host).
 _INFRA_IMAGE_TOKENS: tuple[str, ...] = (
-    "postgres", "mysql", "mariadb", "redis", "valkey", "memcached", "kafka",
-    "zookeeper", "rabbitmq", "nats", "mongo", "elasticsearch", "opensearch",
-    "clickhouse", "cassandra", "neo4j", "minio", "jaeger", "grafana",
-    "prometheus", "otel", "opentelemetry", "collector", "localstack",
+    "postgres",
+    "mysql",
+    "mariadb",
+    "redis",
+    "valkey",
+    "memcached",
+    "kafka",
+    "zookeeper",
+    "rabbitmq",
+    "nats",
+    "mongo",
+    "elasticsearch",
+    "opensearch",
+    "clickhouse",
+    "cassandra",
+    "neo4j",
+    "minio",
+    "jaeger",
+    "grafana",
+    "prometheus",
+    "otel",
+    "opentelemetry",
+    "collector",
+    "localstack",
 )
 
 # package.json script names that launch something (vs build/test/lint chores).
-_RUNNABLE_SCRIPT_NAMES: frozenset[str] = frozenset({
-    "dev", "start", "serve", "preview", "watch",
-})
+_RUNNABLE_SCRIPT_NAMES: frozenset[str] = frozenset(
+    {
+        "dev",
+        "start",
+        "serve",
+        "preview",
+        "watch",
+    }
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -618,17 +721,33 @@ def _classify_run_command(command: str) -> str:
     if any(
         t in c
         for t in (
-            "vite", "next dev", "next start", "webpack serve",
-            "react-scripts start", "astro dev", "nuxt dev", "ng serve",
+            "vite",
+            "next dev",
+            "next start",
+            "webpack serve",
+            "react-scripts start",
+            "astro dev",
+            "nuxt dev",
+            "ng serve",
         )
     ):
         return "frontend-dev-server"
     if any(
         t in c
         for t in (
-            "uvicorn", "gunicorn", "hypercorn", "waitress", "daphne",
-            "runserver", "flask run", "flask --app", "http.server",
-            "fastapi run", "fastapi dev", "node server", "sanic",
+            "uvicorn",
+            "gunicorn",
+            "hypercorn",
+            "waitress",
+            "daphne",
+            "runserver",
+            "flask run",
+            "flask --app",
+            "http.server",
+            "fastapi run",
+            "fastapi dev",
+            "node server",
+            "sanic",
         )
     ):
         return "http-service"
@@ -720,20 +839,28 @@ def _mine_compose(path: Path, rel: str) -> list[DeclaredRunnable]:
         image = str(p.get("image", ""))
         image_leaf = image.split("/")[-1].split(":")[0].lower()
         if image and any(tok in image_leaf for tok in _INFRA_IMAGE_TOKENS):
-            out.append(DeclaredRunnable(
-                name=name, kind="infra", command=f"docker compose up -d {name}", source=rel,
-            ))
+            out.append(
+                DeclaredRunnable(
+                    name=name,
+                    kind="infra",
+                    command=f"docker compose up -d {name}",
+                    source=rel,
+                )
+            )
             continue
         command = str(p.get("command", ""))
         if command:
             kind = _classify_run_command(command)
         else:
             kind = "http-service" if p.get("ports") else "worker"
-        out.append(DeclaredRunnable(
-            name=name, kind=kind,
-            command=command or "(compose service — derive native command from its Dockerfile)",
-            source=rel,
-        ))
+        out.append(
+            DeclaredRunnable(
+                name=name,
+                kind=kind,
+                command=command or "(compose service — derive native command from its Dockerfile)",
+                source=rel,
+            )
+        )
     return out
 
 
@@ -752,12 +879,14 @@ def _mine_package_json(path: Path, rel: str) -> list[DeclaredRunnable]:
         for script, command in sorted(scripts.items()):
             if script not in _RUNNABLE_SCRIPT_NAMES or not isinstance(command, str):
                 continue
-            out.append(DeclaredRunnable(
-                name=f"{pkg}:{script}",
-                kind=_classify_run_command(command),
-                command=command,
-                source=f"{rel}:scripts.{script}",
-            ))
+            out.append(
+                DeclaredRunnable(
+                    name=f"{pkg}:{script}",
+                    kind=_classify_run_command(command),
+                    command=command,
+                    source=f"{rel}:scripts.{script}",
+                )
+            )
     return out
 
 
@@ -773,17 +902,23 @@ def _mine_pyproject_scripts(path: Path, rel: str) -> list[DeclaredRunnable]:
     project = meta.get("project") if isinstance(meta.get("project"), dict) else {}
     tool = meta.get("tool") if isinstance(meta.get("tool"), dict) else {}
     poetry = tool.get("poetry") if isinstance(tool.get("poetry"), dict) else {}
-    for table, label in ((project.get("scripts"), "project.scripts"),
-                         (poetry.get("scripts"), "tool.poetry.scripts")):
+    for table, label in (
+        (project.get("scripts"), "project.scripts"),
+        (poetry.get("scripts"), "tool.poetry.scripts"),
+    ):
         if not isinstance(table, dict):
             continue
         for script, target in sorted(table.items()):
             if not isinstance(target, str):
                 continue
-            out.append(DeclaredRunnable(
-                name=str(script), kind="cli", command=str(script),
-                source=f"{rel}:[{label}] → {target}",
-            ))
+            out.append(
+                DeclaredRunnable(
+                    name=str(script),
+                    kind="cli",
+                    command=str(script),
+                    source=f"{rel}:[{label}] → {target}",
+                )
+            )
     return out
 
 
@@ -798,15 +933,27 @@ def _mine_cargo_bins(path: Path, rel: str) -> list[DeclaredRunnable]:
     bins = meta.get("bin") if isinstance(meta.get("bin"), list) else []
     for b in bins:
         if isinstance(b, dict) and isinstance(b.get("name"), str):
-            out.append(DeclaredRunnable(
-                name=b["name"], kind="cli",
-                command=f"cargo run --bin {b['name']}", source=f"{rel}:[[bin]]",
-            ))
-    if not bins and isinstance(pkg.get("name"), str) and (path.parent / "src" / "main.rs").is_file():
-        out.append(DeclaredRunnable(
-            name=str(pkg["name"]), kind="cli",
-            command="cargo run", source=f"{rel} (src/main.rs)",
-        ))
+            out.append(
+                DeclaredRunnable(
+                    name=b["name"],
+                    kind="cli",
+                    command=f"cargo run --bin {b['name']}",
+                    source=f"{rel}:[[bin]]",
+                )
+            )
+    if (
+        not bins
+        and isinstance(pkg.get("name"), str)
+        and (path.parent / "src" / "main.rs").is_file()
+    ):
+        out.append(
+            DeclaredRunnable(
+                name=str(pkg["name"]),
+                kind="cli",
+                command="cargo run",
+                source=f"{rel} (src/main.rs)",
+            )
+        )
     return out
 
 
@@ -838,14 +985,22 @@ def _mine_make_just(path: Path, rel: str) -> list[DeclaredRunnable]:
                 recipe = nxt.strip()
                 break
         kind = _classify_run_command(recipe) if recipe else "cli"
-        out.append(DeclaredRunnable(
-            name=target, kind=kind, command=f"{runner} {target}", source=rel,
-        ))
+        out.append(
+            DeclaredRunnable(
+                name=target,
+                kind=kind,
+                command=f"{runner} {target}",
+                source=rel,
+            )
+        )
     return out
 
 
 _COMPOSE_NAMES: tuple[str, ...] = (
-    "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yml",
+    "compose.yaml",
 )
 
 
@@ -933,7 +1088,8 @@ def _declared_runnables_note(project_root: Path, *, cap: int = 60) -> str:
     ]
     more = (
         f"\n…and {len(runnables) - cap} more (re-run the same manifest walk yourself if needed)."
-        if len(runnables) > cap else ""
+        if len(runnables) > cap
+        else ""
     )
     return (
         "\n\nThe framework also mined every runnable the repo's manifests DECLARE "
@@ -998,7 +1154,8 @@ def list_instruction(project_root: Path, *, portable: bool = False) -> str:
                 "(unresolved — derive from its own pyproject/src layout)"
             )
             _dist_lines.append(
-                f"- `{d.name}` — path: `{d.path.resolve()}`, import package(s) for `modules`: {mods}"
+                f"- `{d.name}` — path: `{d.path.resolve()}`, "
+                f"import package(s) for `modules`: {mods}"
             )
         _pkgs_note = (
             "The Vinv framework scanned the repo for Python distributions "
@@ -1032,7 +1189,11 @@ def list_instruction(project_root: Path, *, portable: bool = False) -> str:
     # Python-distribution scan.
     _pkgs_note += _declared_runnables_note(project_root)
     key = "list_instruction_portable" if portable else "list_instruction"
-    return _prompt(key).format(_pkgs_note=_pkgs_note, vinv_md=vinv_md, root=root, services_json=services_json).strip()
+    return (
+        _prompt(key)
+        .format(_pkgs_note=_pkgs_note, vinv_md=vinv_md, root=root, services_json=services_json)
+        .strip()
+    )
 
 
 def start_instruction(
@@ -1126,7 +1287,7 @@ def start_instruction(
         "fixes the *inner* process's environment — so prepend it inline on the "
         "tracelens command itself:\n"
         "```bash\n"
-        f"PATH=\"{_venv_bin}:$PATH\" {_tracelens_cmd}"
+        f'PATH="{_venv_bin}:$PATH" {_tracelens_cmd}'
         f" run … -- {_venv_python} -m <module> <args>\n"
         "```"
     )
@@ -1161,17 +1322,41 @@ def start_instruction(
         _discovered_pkgs = _discover_traceable_packages(project_root)
         _target_pkg_flags = _render_target_package_flags(_discovered_pkgs)
         _target_pkg_note = (
-            f"No modules were passed for `{service}`; the Vinv framework scanned "
-            f"`{project_root}` and found these top-level Python packages: "
-            f"**{', '.join(f'`{p}`' for p in _discovered_pkgs) or '(none detected)'}**. "
-            "Use them **verbatim** in the `--target-package` flags below."
-        ) if _discovered_pkgs else (
-            "No modules were passed and no Python packages were auto-detected. "
-            "Inspect the repo structure and choose the correct `--target-package` "
-            "value manually."
+            (
+                f"No modules were passed for `{service}`; the Vinv framework scanned "
+                f"`{project_root}` and found these top-level Python packages: "
+                f"**{', '.join(f'`{p}`' for p in _discovered_pkgs) or '(none detected)'}**. "
+                "Use them **verbatim** in the `--target-package` flags below."
+            )
+            if _discovered_pkgs
+            else (
+                "No modules were passed and no Python packages were auto-detected. "
+                "Inspect the repo structure and choose the correct `--target-package` "
+                "value manually."
+            )
         )
     key = "start_instruction_portable" if portable else "start_instruction"
-    return _prompt(key).format(service=service, vinv_md=vinv_md, tracelens_install_block=tracelens_install_block, _caps_base=_caps_base, _tracelens_cmd=_tracelens_cmd, _venv_bin=_venv_bin, _venv_python=_venv_python, _target_pkg_note=_target_pkg_note, _target_pkg_flags=_target_pkg_flags, tracelens_subdir=tracelens_subdir, _tracelens_path_note=_tracelens_path_note, _g0=tracelens_subdir or '<session-id>/', root=root, _root_json=_root_json, start_commands_json=start_commands_json).strip()
+    return (
+        _prompt(key)
+        .format(
+            service=service,
+            vinv_md=vinv_md,
+            tracelens_install_block=tracelens_install_block,
+            _caps_base=_caps_base,
+            _tracelens_cmd=_tracelens_cmd,
+            _venv_bin=_venv_bin,
+            _venv_python=_venv_python,
+            _target_pkg_note=_target_pkg_note,
+            _target_pkg_flags=_target_pkg_flags,
+            tracelens_subdir=tracelens_subdir,
+            _tracelens_path_note=_tracelens_path_note,
+            _g0=tracelens_subdir or "<session-id>/",
+            root=root,
+            _root_json=_root_json,
+            start_commands_json=start_commands_json,
+        )
+        .strip()
+    )
 
 
 # ── Prompt rendering for --print-prompt (no agent, no LLM) ────────
@@ -1252,8 +1437,10 @@ def render_start_prompt(
     project_root = project_root.resolve()
     modules = _default_modules(project_root, service, modules)
     prompt = start_instruction(project_root, service, modules, session_id, portable=portable)
-    hint = start_hint if (start_hint and start_hint.strip()) else _read_start_hint(
-        project_root, service
+    hint = (
+        start_hint
+        if (start_hint and start_hint.strip())
+        else _read_start_hint(project_root, service)
     )
     start_commands_json = str(_start_commands_path(project_root, service))
     if hint:
@@ -1275,6 +1462,7 @@ def render_start_prompt(
 
 
 # ── Handbook location / validation ───────────────────────────────
+
 
 def _handbook_path(project_root: Path) -> Path:
     return (project_root / HANDBOOK_REL).resolve()
@@ -1302,6 +1490,7 @@ def expect_vinv_handbook(project_root: Path) -> Path:
 
 
 # ── Services inventory location / parsing ────────────────────────
+
 
 def _services_path(project_root: Path) -> Path:
     return (project_root / SERVICES_REL).resolve()
@@ -1353,8 +1542,12 @@ _MODULE_COLON_RE = re.compile(r"-m\s+[A-Za-z_][\w.]*:\S+")
 #     driver is the process that calls into it.
 # Both are verified by exit code + a non-empty trace, never by a port probe.
 _INVENTORY_KINDS: tuple[str, ...] = (
-    "python_web", "python_worker", "python_stdio", "python_scheduler",
-    "python_cli", "python_library",
+    "python_web",
+    "python_worker",
+    "python_stdio",
+    "python_scheduler",
+    "python_cli",
+    "python_library",
 )
 # Kinds that run to completion. These have no port, no readiness window and no
 # process to kill afterwards — the process exiting IS the successful outcome.
@@ -1456,7 +1649,8 @@ def _validate_services_inventory(
                         if hint
                         else (
                             " Valid import packages discovered in this repo: "
-                            + ", ".join(f"`{p}`" for p in sorted(known_packages)) + "."
+                            + ", ".join(f"`{p}`" for p in sorted(known_packages))
+                            + "."
                         )
                     )
                     issues.append(
@@ -1491,9 +1685,10 @@ def _validate_services_inventory(
         else:
             if _MODULE_COLON_RE.search(command):
                 issues.append(
-                    f"{label}: command {command!r} uses `-m <module>:<attr>` — `-m` takes a module, "
-                    "the `module:attr` form is an app-factory reference. Use the project's console "
-                    "script, or `python -m uvicorn <module>:<attr> --host … --port …` for ASGI apps."
+                    f"{label}: command {command!r} uses `-m <module>:<attr>` — `-m` takes a "
+                    "module, the `module:attr` form is an app-factory reference. Use the "
+                    "project's console script, or `python -m uvicorn <module>:<attr> "
+                    "--host … --port …` for ASGI apps."
                 )
             if command.lstrip().startswith(("docker", "docker-compose")):
                 issues.append(
@@ -1508,7 +1703,9 @@ def _validate_services_inventory(
         port = svc.get("port")
         port_ok = isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536
         if kind == "python_web" and not port_ok:
-            issues.append(f"{label}: kind=python_web requires an integer `port` 1-65535 (got {port!r})")
+            issues.append(
+                f"{label}: kind=python_web requires an integer `port` 1-65535 (got {port!r})"
+            )
         elif kind == "python_stdio" and port is not None:
             issues.append(
                 f"{label}: kind=python_stdio serves over stdin/stdout, not a socket — "
@@ -1580,7 +1777,8 @@ def _validate_invocations(invocations: Any, kind: Any, label: str) -> list[str]:
         issues.extend(_validate_invocation_params(inv, ilabel))
 
     ids = [
-        inv["id"] for inv in invocations
+        inv["id"]
+        for inv in invocations
         if isinstance(inv, dict) and isinstance(inv.get("id"), str) and inv["id"].strip()
     ]
     duplicates = sorted({i for i in ids if ids.count(i) > 1})
@@ -1686,9 +1884,7 @@ def library_driver_command(project_root: Path, service_name: str) -> str:
     entry point IS an invocation, so neither surface needs a second vocabulary.
     Mirrored by ``exerciser.invocations.library_driver_command``.
     """
-    return (
-        f"vinv-exerciser functions {project_root.resolve()} --service {service_name} {{only}}"
-    )
+    return f"vinv-exerciser functions {project_root.resolve()} --service {service_name} {{only}}"
 
 
 #: The `{only}` slot's parameter. Choices resolve at prompt time from the
@@ -1723,7 +1919,9 @@ def _derived_invocation_id(command: str, index: int) -> str:
     return f"run-{index + 1}"
 
 
-def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -> list[dict[str, Any]]:
+def service_invocations(
+    svc: dict[str, Any], project_root: Path | None = None
+) -> list[dict[str, Any]]:
     """Every command that drives ``svc``, normalized to full runnable entries.
 
     Collapses the three legal spellings into one shape for Stage 2b and the
@@ -1756,7 +1954,9 @@ def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -
     seen: set[str] = set()
     for index, entry in enumerate(entries):
         expect = entry.get("expect_exit")
-        entry["expect_exit"] = 0 if not isinstance(expect, int) or isinstance(expect, bool) else expect
+        entry["expect_exit"] = (
+            0 if not isinstance(expect, int) or isinstance(expect, bool) else expect
+        )
         declared = entry.get("id")
         base = (
             invocation_slug(declared.strip())
@@ -1771,9 +1971,7 @@ def service_invocations(svc: dict[str, Any], project_root: Path | None = None) -
     return entries
 
 
-def _list_feedback_instruction(
-    base_instruction: str, services_json: str, issues: list[str]
-) -> str:
+def _list_feedback_instruction(base_instruction: str, services_json: str, issues: list[str]) -> str:
     """Extend the list instruction with the concrete validation failures.
 
     Mirrors the replay-gate feedback pattern of Stage 2b: the agent gets the
@@ -1852,7 +2050,7 @@ def _entrypoint_root_package(command: str) -> str | None:
             if not target:
                 return None
             if target in _APP_SPEC_RUNNERS:
-                mod = _app_spec_module(tokens[i + 2:])
+                mod = _app_spec_module(tokens[i + 2 :])
             elif all(p.isidentifier() for p in target.split(".")) and target:
                 mod = target
             else:
@@ -1862,7 +2060,7 @@ def _entrypoint_root_package(command: str) -> str | None:
         if base.endswith(".exe"):
             base = base[:-4]
         if base in _APP_SPEC_RUNNERS:
-            mod = _app_spec_module(tokens[i + 1:])
+            mod = _app_spec_module(tokens[i + 1 :])
             return mod.split(".")[0] if mod else None
         if tok.endswith(".py"):
             mod = _module_from_script(tok)
@@ -1892,8 +2090,7 @@ def _default_modules(project_root: Path, service: str, modules: list[str] | None
             if isinstance(svc, dict) and svc.get("name") == service:
                 if not resolved:
                     resolved = [
-                        m for m in svc.get("modules", [])
-                        if isinstance(m, str) and m.isidentifier()
+                        m for m in svc.get("modules", []) if isinstance(m, str) and m.isidentifier()
                     ]
                 command = svc.get("command")
                 if isinstance(command, str):
@@ -2054,6 +2251,7 @@ def _read_start_commands(project_root: Path, service: str) -> dict[str, Any]:
 # verification can catch that, so the harness replays the saved file exactly
 # like the extension will, and feeds a failure back into the ReAct loop.
 
+
 def _replay_script(commands: list[dict[str, Any]]) -> str:
     """Build the exact `bash -lc` script the VS Code serviceRunner builds.
 
@@ -2120,8 +2318,7 @@ def _resolve_bash() -> str | None:
     before PATH.
     """
     if os.name != "nt":
-        for cand in ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash",
-                     "/opt/homebrew/bin/bash"):
+        for cand in ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/opt/homebrew/bin/bash"):
             if os.path.exists(cand):
                 return cand
         return shutil.which("bash")
@@ -2179,7 +2376,9 @@ def _listening_pids(port: int) -> set[str]:
     try:
         out = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         ).stdout
         pids = {ln.strip() for ln in out.splitlines() if ln.strip().isdigit()}
         if pids:
@@ -2187,9 +2386,7 @@ def _listening_pids(port: int) -> set[str]:
     except Exception:
         logger.info("bringup_lsof_unavailable port=%s", port, exc_info=True)
     try:
-        out = subprocess.run(
-            ["ss", "-ltnp"], capture_output=True, text=True, timeout=15
-        ).stdout
+        out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True, timeout=15).stdout
     except Exception:
         logger.warning("bringup_listeners_unreadable port=%s", port, exc_info=True)
         return set()
@@ -2206,7 +2403,9 @@ def _describe_pid(pid: str) -> str:
         if os.name == "nt":
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             ).stdout
             for line in out.splitlines():
                 if line.strip().startswith('"'):
@@ -2214,7 +2413,9 @@ def _describe_pid(pid: str) -> str:
             return ""
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         ).stdout
         return out.strip().splitlines()[0] if out.strip() else ""
     except Exception:
@@ -2224,9 +2425,7 @@ def _describe_pid(pid: str) -> str:
 def _kill_pid(pid: str) -> None:
     """Kill ``pid`` and everything under it, best effort, on either platform."""
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False
-        )
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
         return
     try:
         os.kill(int(pid), signal.SIGTERM)
@@ -2313,8 +2512,11 @@ def _process_start_time(pid: int) -> float | None:
     try:
         created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
         if not k32.GetProcessTimes(
-            handle, ctypes.byref(created), ctypes.byref(exited),
-            ctypes.byref(kernel), ctypes.byref(user),
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
         ):
             return None
         # FILETIME counts 100-nanosecond intervals since 1601-01-01 UTC.
@@ -2350,15 +2552,14 @@ def _reap_windows_port_orphan(
             for pid in _listening_pids(port):
                 started = _process_start_time(int(pid)) if pid.isdigit() else None
                 if started is None:
-                    logger.warning(
-                        "bringup_reap_start_time_unreadable port=%s pid=%s", port, pid
-                    )
+                    logger.warning("bringup_reap_start_time_unreadable port=%s pid=%s", port, pid)
                     continue
                 if started >= replay_wall_started - 2.0:
                     logger.info("bringup_reap_orphan port=%s pid=%s", port, pid)
                     subprocess.run(
                         ["taskkill", "/PID", pid, "/T", "/F"],
-                        capture_output=True, check=False,
+                        capture_output=True,
+                        check=False,
                     )
                     reaped = True
             # Done as soon as the squatter is gone; only an empty port has to
@@ -2380,7 +2581,8 @@ def _terminate_process_group(proc: subprocess.Popen[bytes]) -> None:
     if os.name == "nt":
         subprocess.run(
             ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-            capture_output=True, check=False,
+            capture_output=True,
+            check=False,
         )
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
@@ -2440,9 +2642,7 @@ def _verify_stdio_replay(
     log = tempfile.NamedTemporaryFile(
         mode="w+b", prefix=f"vinv_replay_{service}_stdio_", suffix=".log", delete=False
     )
-    popen_kwargs: dict[str, Any] = (
-        {} if os.name == "nt" else {"start_new_session": True}
-    )
+    popen_kwargs: dict[str, Any] = {} if os.name == "nt" else {"start_new_session": True}
     started = time.monotonic()
     proc = subprocess.Popen(
         [bash, "-lc", script],
@@ -2590,7 +2790,9 @@ def verify_replay(
     # buildLaunchPlan makes, because this gate exists to prove what it will run.
     dependencies = commands[:-1]
     tail_wd = commands[-1].get("working_directory") if commands else None
-    file_verification = data.get("verification") if isinstance(data.get("verification"), dict) else {}
+    file_verification = (
+        data.get("verification") if isinstance(data.get("verification"), dict) else {}
+    )
 
     verified: list[str] = []
     for inv in invocations:
@@ -2612,7 +2814,9 @@ def verify_replay(
                 ),
                 "output_tail": "",
             }
-        inv_verification = inv.get("verification") if isinstance(inv.get("verification"), dict) else {}
+        inv_verification = (
+            inv.get("verification") if isinstance(inv.get("verification"), dict) else {}
+        )
         sub = {
             **data,
             "commands": [
@@ -2667,7 +2871,7 @@ def _verify_one_replay(
     script = _replay_script(commands)
     verification = data.get("verification") or {}
     port = verification.get("port") if isinstance(verification, dict) else None
-    port = int(port) if isinstance(port, (int, float)) and int(port) > 0 else None
+    port = int(port) if isinstance(port, int | float) and int(port) > 0 else None
 
     probe = verification.get("probe") if isinstance(verification, dict) else None
     probe = probe if isinstance(probe, dict) else None
@@ -2683,7 +2887,7 @@ def _verify_one_replay(
         }
     if probe_type == "port" and port is None:
         p = probe.get("port") if probe else None
-        port = int(p) if isinstance(p, (int, float)) and int(p) > 0 else None
+        port = int(p) if isinstance(p, int | float) and int(p) > 0 else None
         if port is None:
             return {
                 "ok": False,
@@ -2724,11 +2928,10 @@ def _verify_one_replay(
     if probe_type == "stdio-jsonrpc":
         logger.info(
             "bringup_replay_start service=%s probe=stdio-jsonrpc script=%s",
-            service, script[:300],
+            service,
+            script[:300],
         )
-        return _verify_stdio_replay(
-            project_root, service, script, probe or {}, bash, deadline_s
-        )
+        return _verify_stdio_replay(project_root, service, script, probe or {}, bash, deadline_s)
 
     # The port has to be OURS before the replay starts, for two reasons that
     # pull in the same direction: a squatter makes the command fail to bind
@@ -2759,8 +2962,11 @@ def _verify_one_replay(
     )
     logger.info(
         "bringup_replay_start service=%s port=%s probe=%s script=%s log=%s",
-        service, port, probe_type or ("port" if port is not None else "process"),
-        script[:300], log.name,
+        service,
+        port,
+        probe_type or ("port" if port is not None else "process"),
+        script[:300],
+        log.name,
     )
     popen_kwargs: dict[str, Any] = (
         {} if os.name == "nt" else {"start_new_session": True}  # own group: teardown reaps children
@@ -2854,10 +3060,7 @@ def _verify_one_replay(
                         "seconds": round(elapsed, 1),
                         "output_tail": _tail(),
                     }
-                if (
-                    port is None and code == 0
-                    and not explicit_process and _trace_refreshed()
-                ):
+                if port is None and code == 0 and not explicit_process and _trace_refreshed():
                     return {
                         "ok": True,
                         "seconds": round(elapsed, 1),
@@ -2873,10 +3076,12 @@ def _verify_one_replay(
                         + (
                             "; probe type 'process' declares a long-runner, so exiting "
                             "before the grace window fails even with exit code 0"
-                            if explicit_process else (
+                            if explicit_process
+                            else (
                                 "; a portless worker may exit 0 but must refresh its "
                                 "recorded trace output when it does"
-                                if port is None else ""
+                                if port is None
+                                else ""
                             )
                         )
                     ),
@@ -2911,8 +3116,14 @@ def _verify_one_replay(
                     looks_broken = any(
                         marker in tail_text
                         for marker in (
-                            "error", "exception", "traceback", "refused",
-                            "cannot", "failed", "fatal", "denied",
+                            "error",
+                            "exception",
+                            "traceback",
+                            "refused",
+                            "cannot",
+                            "failed",
+                            "fatal",
+                            "denied",
                         )
                     )
                     if not survivors and not looks_broken:
@@ -2922,7 +3133,7 @@ def _verify_one_replay(
                             "processes, clean output) — this is a run-to-completion CLI, "
                             "not a long-running service. It is still a unit of work worth "
                             "tracing: reclassify the inventory entry as kind=python_cli "
-                            "and record `\"probe\": {\"type\": \"exit\"}`, which accepts "
+                            'and record `"probe": {"type": "exit"}`, which accepts '
                             "exactly this outcome instead of failing on it."
                         )
                 return result
@@ -2986,7 +3197,11 @@ def _write_replay_script_file(project_root: Path, service: str, data: dict[str, 
     """
     path = _start_commands_path(project_root, service).with_suffix(".sh")
     commands = [c for c in data.get("commands", []) if isinstance(c, dict)]
-    lines = ["#!/bin/bash", f"# Verified start command(s) for {service!r} — generated by bringup.", ""]
+    lines = [
+        "#!/bin/bash",
+        f"# Verified start command(s) for {service!r} — generated by bringup.",
+        "",
+    ]
     for c in commands:
         wd = c.get("working_directory")
         if wd:
@@ -3018,7 +3233,7 @@ def _user_hint_instruction(
         "### ✅ THE OPERATOR TOLD US HOW THEY START THIS SERVICE — start from this command\n\n"
         f"The human who owns this repo says they start `{service}` with:\n\n"
         f"```bash\n{hint.strip()}\n```\n\n"
-        "**Treat this as the authoritative answer to \"what starts this service\".** It "
+        '**Treat this as the authoritative answer to "what starts this service".** It '
         "beats the handbook, the Dockerfile `CMD`, and any command you would have "
         "inferred — it is what actually works on this machine. It was recorded because "
         "a previous bring-up FAILED to work it out, so do not re-derive it and do not "
@@ -3032,8 +3247,8 @@ def _user_hint_instruction(
         "assumptions are the thing to diagnose (missing `.env`, a dependency they "
         "already had running, wrong directory) — fix that rather than abandoning their "
         "command for one of your own.\n"
-        "2. **Then convert it to the tracelens-wrapped form** per \"How to start a Python "
-        "service under tracelens\" above — unwrap it down to the real `python -m <module> "
+        '2. **Then convert it to the tracelens-wrapped form** per "How to start a Python '
+        'service under tracelens" above — unwrap it down to the real `python -m <module> '
         "<args>` invocation (read the Makefile/justfile/script/`package.json` if it is a "
         "wrapper), drop `--reload`, and wrap THAT with the exact `--target-package` flags "
         "and the session-scoped `--output` path. Keep the operator's env vars, working "
@@ -3090,8 +3305,8 @@ def _discovered_command_instruction(
         "missing `.env` is a fix to make, not a reason to invent a different command. "
         "Only derive your own if this one is genuinely not the way this service starts, "
         "and say so in your notes.\n"
-        "3. **Then convert it to the tracelens-wrapped form** per \"How to start a Python "
-        "service under tracelens\" above — unwrap it to the real `python -m <module> "
+        '3. **Then convert it to the tracelens-wrapped form** per "How to start a Python '
+        'service under tracelens" above — unwrap it to the real `python -m <module> '
         "<args>` invocation, drop `--reload`, and wrap THAT with the exact "
         "`--target-package` flags and the session-scoped `--output` path. Keep its env "
         "vars, working directory, port and arguments intact.\n"

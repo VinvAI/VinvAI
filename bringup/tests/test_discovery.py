@@ -14,8 +14,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 _BRINGUP_ROOT = Path(__file__).resolve().parents[1]
 
 sys.path.insert(0, str(_BRINGUP_ROOT / "src"))
@@ -29,7 +27,6 @@ from bringup.runner import (  # noqa: E402
     list_instruction,
     service_invocations,
 )
-
 
 # ── Layout builders ───────────────────────────────────────────────
 
@@ -54,7 +51,9 @@ def test_src_layout_resolves_import_package(tmp_path: Path) -> None:
 
 def test_flat_self_package_with_own_manifest(tmp_path: Path) -> None:
     # vinv-electron/vinv_engine style: the manifest dir IS the package.
-    _write(tmp_path / "engine" / "vinv_engine" / "pyproject.toml", '[project]\nname = "vinv-engine"\n')
+    _write(
+        tmp_path / "engine" / "vinv_engine" / "pyproject.toml", '[project]\nname = "vinv-engine"\n'
+    )
     _write(tmp_path / "engine" / "vinv_engine" / "__init__.py")
     assert _dist_map(tmp_path) == {"vinv-engine": ("vinv_engine",)}
 
@@ -92,7 +91,10 @@ def test_vendored_manifest_is_never_a_service(tmp_path: Path) -> None:
     # not be enumerated as one of this repo's services.
     _write(tmp_path / "core" / "pyproject.toml", '[project]\nname = "core"\n')
     _write(tmp_path / "core" / "src" / "core" / "__init__.py")
-    _write(tmp_path / "core" / "vendor" / "litellm_stub" / "pyproject.toml", '[project]\nname = "litellm"\n')
+    _write(
+        tmp_path / "core" / "vendor" / "litellm_stub" / "pyproject.toml",
+        '[project]\nname = "litellm"\n',
+    )
     _write(tmp_path / "core" / "vendor" / "litellm_stub" / "litellm" / "__init__.py")
     assert _dist_map(tmp_path) == {"core": ("core",)}
 
@@ -281,7 +283,7 @@ def test_validate_rejects_stdio_with_port_or_http_transport(tmp_path: Path) -> N
 def test_validate_rejects_unknown_kind_and_transport(tmp_path: Path) -> None:
     svc = _valid_service(tmp_path) | {"kind": "python_magic", "transport": "carrier-pigeon"}
     issues = _validate_services_inventory([svc])
-    assert any("python_stdio" in i for i in issues)      # allowed kinds are named
+    assert any("python_stdio" in i for i in issues)  # allowed kinds are named
     assert any("carrier-pigeon" in i for i in issues)
 
 
@@ -482,15 +484,12 @@ def test_service_invocations_normalizes_all_three_spellings(tmp_path: Path) -> N
     # Explicit list wins; a bare command becomes the single invocation; a library
     # with no command gets the synthesized exerciser driver.
     explicit = service_invocations(
-        _cli_service(tmp_path)
-        | {"invocations": [{"command": "acme-tool check", "expect_exit": 1}]}
+        _cli_service(tmp_path) | {"invocations": [{"command": "acme-tool check", "expect_exit": 1}]}
     )
     assert [(e["command"], e["expect_exit"]) for e in explicit] == [("acme-tool check", 1)]
 
     bare = service_invocations(_cli_service(tmp_path))
-    assert [(e["command"], e["expect_exit"]) for e in bare] == [
-        ("acme-tool report --since 7d", 0)
-    ]
+    assert [(e["command"], e["expect_exit"]) for e in bare] == [("acme-tool report --since 7d", 0)]
 
     library = service_invocations(
         {"name": "acme-sdk", "kind": "python_library", "modules": ["acme_sdk"]},

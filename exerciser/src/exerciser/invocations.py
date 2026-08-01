@@ -73,9 +73,7 @@ def read_services(repo: Path) -> list[dict[str, Any]]:
     if not isinstance(services, list):
         return []
     return [
-        s
-        for s in services
-        if isinstance(s, dict) and s.get("kind") in _RUN_TO_COMPLETION_KINDS
+        s for s in services if isinstance(s, dict) and s.get("kind") in _RUN_TO_COMPLETION_KINDS
     ]
 
 
@@ -142,7 +140,11 @@ def service_invocations(service: dict[str, Any], repo: Path) -> list[dict[str, A
     entries: list[dict[str, Any]] = []
     if isinstance(raw, list):
         for inv in raw:
-            if isinstance(inv, dict) and isinstance(inv.get("command"), str) and inv["command"].strip():
+            if (
+                isinstance(inv, dict)
+                and isinstance(inv.get("command"), str)
+                and inv["command"].strip()
+            ):
                 entries.append(dict(inv))
     if not entries:
         command = service.get("command")
@@ -191,9 +193,7 @@ def resolved_command(invocation: dict[str, Any], args: dict[str, str] | None = N
     return render_invocation(invocation, args)
 
 
-def expand_invocation(
-    invocation: dict[str, Any], *, max_variants: int = 4
-) -> list[dict[str, Any]]:
+def expand_invocation(invocation: dict[str, Any], *, max_variants: int = 4) -> list[dict[str, Any]]:
     """The argument sets to run this invocation with, declared one first.
 
     **Bounded by what the repo enumerated, on purpose.** This oracle EXECUTES the
@@ -229,7 +229,7 @@ def expand_invocation(
         for source in ("choices", "examples"):
             values = p.get(source)
             if isinstance(values, list):
-                pool.extend(str(v) for v in values if isinstance(v, (str, int, float)))
+                pool.extend(str(v) for v in values if isinstance(v, str | int | float))
         for value in pool:
             if value == defaults.get(name) or len(variants) > max_variants:
                 continue
@@ -276,8 +276,7 @@ def run_invocations(
             "invocations": 0,
             "diagnostics": [
                 (
-                    f"no run-to-completion service named {service!r} in "
-                    ".vinv/services.json"
+                    f"no run-to-completion service named {service!r} in " ".vinv/services.json"
                     if service
                     else (
                         "no `python_cli` or `python_library` service in "
@@ -314,23 +313,25 @@ def run_invocations(
                 # A template that cannot be filled is a malformed record, not a
                 # defect in the tool under test — report it against the unit
                 # rather than running something nobody described.
-                rows.append({
-                    "unit_kind": "cli_invocation",
-                    "unit_id": unit_id,
-                    "service": name,
-                    "method": METHOD,
-                    "path": str(inv.get("command")),
-                    "purpose": inv.get("purpose"),
-                    "expect_exit": expect_exit,
-                    "invocation_id": inv["id"],
-                    "variant": variant["variant"],
-                    "input_class": variant["input_class"],
-                    "status": "error",
-                    "error_type": "MalformedInvocation",
-                    "error": str(exc),
-                    "duration_s": 0.0,
-                    "latency_ms": 0.0,
-                })
+                rows.append(
+                    {
+                        "unit_kind": "cli_invocation",
+                        "unit_id": unit_id,
+                        "service": name,
+                        "method": METHOD,
+                        "path": str(inv.get("command")),
+                        "purpose": inv.get("purpose"),
+                        "expect_exit": expect_exit,
+                        "invocation_id": inv["id"],
+                        "variant": variant["variant"],
+                        "input_class": variant["input_class"],
+                        "status": "error",
+                        "error_type": "MalformedInvocation",
+                        "error": str(exc),
+                        "duration_s": 0.0,
+                        "latency_ms": 0.0,
+                    }
+                )
                 lg.warning("invocation_malformed unit=%s error=%s", unit_id, exc)
                 continue
             capture = tracing.capture_path(
@@ -429,13 +430,15 @@ def run_invocations(
             )
             if not ok:
                 row["error_type"] = "UnexpectedExit"
-                row["error"] = (
-                    f"exited {proc.returncode}, expected {expect_exit}"
-                )
+                row["error"] = f"exited {proc.returncode}, expected {expect_exit}"
             rows.append(row)
             lg.info(
                 "invocation unit=%s exit=%s expected=%s spans=%d %.2fs",
-                unit_id, proc.returncode, expect_exit, traced_lines, duration,
+                unit_id,
+                proc.returncode,
+                expect_exit,
+                traced_lines,
+                duration,
             )
 
     clusters = build_clusters(
@@ -449,8 +452,10 @@ def run_invocations(
         # here would point a fixing agent at the HTTP oracle's file, which on a
         # CLI-only repo is empty — read as "no evidence exists".
         verdict=lambda r: (
-            "invocation-timeout" if r.get("status") == "timeout"
-            else "invocation-failure" if r.get("status") == "error"
+            "invocation-timeout"
+            if r.get("status") == "timeout"
+            else "invocation-failure"
+            if r.get("status") == "error"
             else None
         ),
         describe=lambda r, _k: f"{r.get('error_type', 'error')}: {r.get('error', '')}",
@@ -494,7 +499,10 @@ def run_invocations(
     store.write_json(store.exercise_dir(repo) / "invocations.json", result)
     lg.info(
         "invocations: %d run across %d service(s), %d failing, %d clusters",
-        len(rows), len(services), result["failures"], len(clusters),
+        len(rows),
+        len(services),
+        result["failures"],
+        len(clusters),
     )
     return result
 

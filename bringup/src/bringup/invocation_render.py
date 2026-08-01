@@ -98,9 +98,7 @@ def _substitute(param: dict[str, Any], raw: str) -> str:
     return render.replace("{value}", quoted) if isinstance(render, str) else quoted
 
 
-def render_invocation(
-    invocation: dict[str, Any], args: dict[str, str] | None = None
-) -> str:
+def render_invocation(invocation: dict[str, Any], args: dict[str, str] | None = None) -> str:
     """Fill ``invocation``'s template, falling back to each parameter's default.
 
     Raises rather than guessing: an unknown placeholder, or a declared parameter
