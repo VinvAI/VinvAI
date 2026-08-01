@@ -137,7 +137,10 @@ fn main() {
     let query_vector = embed::embed_one(&cfg, query).expect("query embedding");
     gateway.join().expect("fake gateway thread");
 
-    let (edges, ranks, _pending) = graph::build(&chunks, &[]);
+    // `build_with_stats`, not `build`: the plain-tuple wrapper is `#[cfg(test)]`
+    // (see graph.rs), and this harness is a bin crate that compiles the module
+    // without that cfg — so the convenience form is not there to call.
+    let (edges, ranks, _pending, _stats) = graph::build_with_stats(&chunks, &[]);
     for (chunk, rank) in chunks.iter_mut().zip(ranks) {
         chunk.rank = rank;
     }
