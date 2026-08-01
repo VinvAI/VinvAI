@@ -369,24 +369,18 @@ suite('findings view: episode attempts render legibly', () => {
 		assert.ok(html.includes('suite ✗'), 'behavior-suite failure visible');
 	});
 
-	test('what ran leads the page and dead code closes it', () => {
+	test('what ran leads the page, not what went wrong', () => {
 		// The page used to open on dead code — a list of what did NOT run — with
 		// the latency profile six sections below it. After a run, the successful
-		// half was the part you had to scroll for.
+		// half was the part you had to scroll for. Dead code has since moved to a
+		// panel of its own; the ordering rule it forced is what survives here.
 		const html = rendered({
 			...mixedUnits,
 		});
 		const latency = html.indexOf('Latency profile');
 		const issues = html.indexOf('Issue clusters');
-		const dead = html.indexOf('Dead code');
-		assert.ok(latency > -1 && issues > -1 && dead > -1, 'all three sections render');
+		assert.ok(latency > -1 && issues > -1, 'both sections render');
 		assert.ok(latency < issues, 'what ran comes before what went wrong');
-		assert.ok(dead > issues, 'dead code no longer sits under the failures');
-		assert.strictEqual(
-			dead,
-			Math.max(latency, issues, dead),
-			'dead code is the last section on the page',
-		);
 	});
 
 	test('empty state names the real trigger: optimize.jsonl episodes from panel or exerciser', () => {

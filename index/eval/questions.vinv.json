@@ -114,9 +114,9 @@
     "category": "doc"
   },
   {
-    "q": "How do users install the Vinv editor extension?",
+    "q": "What should a user try first after installing the Vinv extension?",
     "file": "extension/README.md",
-    "symbol": "Getting Started",
+    "symbol": "After install: the things to try",
     "category": "doc"
   },
   {

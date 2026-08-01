@@ -24,10 +24,46 @@ function write(root: string, rel: string, data: unknown): void {
 	);
 }
 
+/**
+ * A capture holding one enter/exit pair per span.
+ *
+ * The findings latency profile is built from these, not from the scorecard —
+ * see unitProfile in findingsModel. A fixture that seeds only an exerciser's
+ * report produces an empty `endpoints` list, so the evidence has to be written
+ * the same way the product produces it.
+ */
+function writeCapture(root: string, service: string, spans: [string, number][]): void {
+	const lines: string[] = [];
+	for (const [component, ms] of spans) {
+		lines.push(JSON.stringify({ event: 'enter', component, depth: 0, request_id: 'r1' }));
+		lines.push(
+			JSON.stringify({
+				event: 'exit',
+				component,
+				duration_ms: ms,
+				status: 'ok',
+				error_type: null,
+				request_id: 'r1',
+			}),
+		);
+	}
+	write(root, `.vinv/captures/vinv-bringup/${service}/trace.jsonl`, lines.join('\n') + '\n');
+}
+
 function seed(root: string): void {
 	write(root, '.vinv/services.json', {
 		services: [{ name: 'app', kind: 'python_web', port: 8000, command: 'fastapi run' }],
 	});
+	write(root, '.vinv/identification/apis.json', {
+		status: 'ok',
+		entrypoints: [
+			{
+				kind: 'http_api', id: 'GET_items', trigger: 'GET /api/v1/items/',
+				handler: 'read_items', file: 'app/api/items.py', line: 1, framework: 'fastapi',
+			},
+		],
+	});
+	writeCapture(root, 'app', [['app.api.items.read_items', 288]]);
 	write(root, '.vinv/exercise/plan.json', {
 		endpoints: [
 			{ api_id: 'GET_items', method: 'GET', path: '/api/v1/items/', handler: 'read_items' },
@@ -93,12 +129,11 @@ suite('report mirrors: background, change-gated production', () => {
 		seed(root);
 		const first = writeReportMirrors(root, EMPTY);
 
-		// The exerciser updates the scorecard: p95 improved after an optimization.
-		const scorecard = JSON.parse(
-			fs.readFileSync(path.join(root, '.vinv', 'exercise', 'scorecard.json'), 'utf8'),
-		);
-		scorecard.endpoints[0].p95_ms = 40;
-		write(root, '.vinv/exercise/scorecard.json', scorecard);
+		// A fresh capture arrives: the handler got faster after an optimization.
+		// The capture is the artifact that moves the number — replacing it, not
+		// appending to it, because a percentile over both runs would still be the
+		// slow one.
+		writeCapture(root, 'app', [['app.api.items.read_items', 40]]);
 
 		const second = writeReportMirrors(root, first.memo);
 		assert.strictEqual(second.wroteFindings, true);

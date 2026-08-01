@@ -1,8 +1,8 @@
 [
   {
-    "q": "How is project filesystem authority isolated between concurrent agent tasks?",
-    "file": "core/src/core/components/project_context.py",
-    "symbol": "bind_project_root",
+    "q": "How is a sandbox mechanism chosen for the platform a run executes on?",
+    "file": "exerciser/src/exerciser/containment.py",
+    "symbol": "detect_containment",
     "category": "behavior",
     "split": "holdout"
   },
@@ -21,9 +21,9 @@
     "split": "holdout"
   },
   {
-    "q": "How does the agent locate the packaged index binary before searching the PATH?",
-    "file": "core/src/core/index.py",
-    "symbol": "discover_index_binary",
+    "q": "How are the rows a run created torn down once it finishes?",
+    "file": "exerciser/src/exerciser/state.py",
+    "symbol": "attempt_teardown",
     "category": "behavior",
     "split": "holdout"
   },
@@ -63,9 +63,9 @@
     "split": "holdout"
   },
   {
-    "q": "Find the exception raised when an index CLI invocation exits non-zero.",
-    "file": "core/src/core/index.py",
-    "symbol": "IndexCommandError",
+    "q": "Find the Beta-posterior arm the exerciser's bandit samples from.",
+    "file": "exerciser/src/exerciser/bandit.py",
+    "symbol": "BetaArm",
     "category": "identifier",
     "split": "holdout"
   },
@@ -84,9 +84,9 @@
     "split": "holdout"
   },
   {
-    "q": "How does an embedder use the shared Vinv agent core?",
-    "file": "core/README.md",
-    "symbol": "`// 01 \u00b7 embed the agent runtime (optional)`",
+    "q": "What does the exerciser keep between runs, and what expires?",
+    "file": "exerciser/README.md",
+    "symbol": "What persists across runs (and what expires)",
     "category": "doc",
     "split": "holdout"
   },
@@ -133,16 +133,16 @@
     "split": "holdout"
   },
   {
-    "q": "Which core helper runs a natural-language query against the packaged index for agent tools?",
-    "file": "core/src/core/index.py",
-    "symbol": "retrieve_code",
+    "q": "Which routine groups failing executions into the clusters the findings list renders?",
+    "file": "exerciser/src/exerciser/issues.py",
+    "symbol": "cluster_failures",
     "category": "graph",
     "split": "holdout"
   },
   {
-    "q": "Which agent tool searches project code with ripgrep and a Python fallback?",
-    "file": "core/src/core/components/tools/code/editor.py",
-    "symbol": "grep_code",
+    "q": "Which routine renders the prompt that turns a repository goal into a plan?",
+    "file": "goal/src/goal/runner.py",
+    "symbol": "render_goal_prompt",
     "category": "graph",
     "split": "holdout"
   },
