@@ -75,6 +75,13 @@ struct Def {
     bases: Vec<String>,
     parent: Scope,
     ambiguous: bool,
+    /// Dead symbols that reference this one, as `file:line:name`.
+    ///
+    /// A symbol with an empty list is the TOP of its chain: nothing at all
+    /// points at it. A non-empty list means it is dead only because its callers
+    /// are — "nothing references this" would be false, and saying it invites an
+    /// agent to find the caller and rightly answer "still used".
+    dead_callers: Vec<String>,
 }
 
 impl Def {
@@ -326,6 +333,7 @@ impl<'a> Walker<'a> {
             bases,
             parent,
             ambiguous: false,
+            dead_callers: Vec::new(),
         });
 
         // Decorator expressions and base lists are evaluated in the ENCLOSING
@@ -816,7 +824,7 @@ fn analyze(
     // for ties.
     let mut excluded_order: Vec<String> = Vec::new();
     let mut excluded_counts: HashMap<String, usize> = HashMap::new();
-    let mut bump = |why: &str,
+    let bump = |why: &str,
                     order: &mut Vec<String>,
                     counts: &mut HashMap<String, usize>| {
         if !counts.contains_key(why) {
@@ -906,6 +914,38 @@ fn analyze(
         }
     }
 
+    // Which dead symbols reference which other dead symbols. Computed after the
+    // worklist because it is only meaningful over the final dead set: a caller
+    // that turned out to be live took its callees with it.
+    let dead_at: HashMap<(String, usize), usize> = dead
+        .values()
+        .map(|&i| ((defs[i].file.clone(), defs[i].line), i))
+        .collect();
+    let mut callers_of: HashMap<usize, Vec<String>> = HashMap::new();
+    for &i in dead.values() {
+        let d = &defs[i];
+        for (owner, names) in &refs {
+            if !names.contains(&d.name) || inside(owner, d) {
+                continue;
+            }
+            let pos = match owner {
+                Scope::Def(f, l) | Scope::ClassBody(f, l) => Some((f.clone(), *l)),
+                Scope::Module(_) => None,
+            };
+            if let Some(pos) = pos {
+                if let Some(&j) = dead_at.get(&pos) {
+                    if j != i {
+                        let c = &defs[j];
+                        callers_of
+                            .entry(i)
+                            .or_default()
+                            .push(format!("{}:{}:{}", c.file, c.line, c.name));
+                    }
+                }
+            }
+        }
+    }
+
     let method_names: HashMap<&str, usize> = {
         let mut m: HashMap<&str, usize> = HashMap::new();
         for d in defs.iter().filter(|d| d.kind == "method") {
@@ -925,6 +965,9 @@ fn analyze(
         }
         let mut d = d.clone();
         d.ambiguous = by_name.get(&d.name).map(|v| v.len()).unwrap_or(0) > 1;
+        d.dead_callers = callers_of.get(&i).cloned().unwrap_or_default();
+        d.dead_callers.sort();
+        d.dead_callers.dedup();
         let poly = method_names.get(d.name.as_str()).copied().unwrap_or(0) > 1;
         if d.kind == "method" && (poly || matches!(d.parent, Scope::ClassBody(_, _))) {
             probable.push(d);
@@ -1057,6 +1100,7 @@ pub fn run(path: &str, include: Option<&str>, show_probable: bool, reasons: bool
                     let mut o = json!({
                         "file": d.file, "line": d.line, "end": d.end, "kind": d.kind,
                         "name": d.name, "ambiguous": d.ambiguous,
+                        "dead_callers": d.dead_callers,
                     });
                     if reasons {
                         let (reason, born, commits) = reason_for(&root, d);
@@ -1082,9 +1126,18 @@ pub fn run(path: &str, include: Option<&str>, show_probable: bool, reasons: bool
         println!("  excluded - {why}: {n}");
     }
     let show = |title: &str, note: &str, rows: &[Def]| {
-        println!("\n===== {title}: {} =====", rows.len());
+        // Only the TOP of each chain is listed. A symbol reached solely from
+        // another dead one is not a separate decision — it goes when its caller
+        // goes — and listing it apart reads as several findings where there is one.
+        let roots: Vec<&Def> = rows.iter().filter(|d| d.dead_callers.is_empty()).collect();
+        let folded = rows.len() - roots.len();
+        println!("
+===== {title}: {} =====", roots.len());
         println!("  {note}");
-        for d in rows {
+        if folded > 0 {
+            println!("  (+{folded} reached only from these, folded in)");
+        }
+        for d in roots {
             let flag = if d.ambiguous { "  [name not unique]" } else { "" };
             let deco = d
                 .decorators

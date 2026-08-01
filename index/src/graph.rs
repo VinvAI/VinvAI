@@ -44,10 +44,14 @@ pub struct BuildStats {
     pub resolved_by_lang: usize,
 }
 
-/// Build the edge list and the PageRank vector for a set of chunks.
-/// `overrides` carries adjudicated edges (from the agent layer) that the
-/// name-based resolver could not decide on its own; they participate in
-/// PageRank like any other edge. Also returns the still-unresolved references.
+/// `build_with_stats` without the stats — the plain tuple the tests read.
+///
+/// `#[cfg(test)]` because that is the whole truth about it: every production
+/// caller wants the stats, and the fifteen call sites left are all in this
+/// file's own test module. Without the attribute a release build reports it as
+/// dead code, which is how it came to be deleted once; the tests then failed to
+/// compile, because `cargo build` never sees them.
+#[cfg(test)]
 pub fn build(
     chunks: &[Chunk],
     overrides: &[Edge],
@@ -56,8 +60,12 @@ pub fn build(
     (edges, ranks, pending)
 }
 
-/// `build`, plus the tally of references deliberately kept out of the pending
-/// queue. Separate entry point so the common callers keep the plain tuple.
+/// Build the edge list and the PageRank vector for a set of chunks, plus the
+/// tally of references deliberately kept out of the pending queue.
+///
+/// `overrides` carries adjudicated edges (from the agent layer) that the
+/// name-based resolver could not decide on its own; they participate in
+/// PageRank like any other edge. Also returns the still-unresolved references.
 pub fn build_with_stats(
     chunks: &[Chunk],
     overrides: &[Edge],
