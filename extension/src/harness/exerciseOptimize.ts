@@ -461,6 +461,17 @@ export interface OptimizeRunOptions {
 	maxAttempts?: number;
 	/** Paired probes required for a statistical verdict (below → fallback). */
 	minPairedProbes?: number;
+	/**
+	 * Named stage, for a progress surface. Everything before the dispatch —
+	 * freezing probes, replaying the baseline, snapshotting — is real work that
+	 * can take tens of seconds, and it used to run with NO user-visible signal
+	 * at all: a click on Optimize looked like nothing had happened until the
+	 * dispatch toast finally appeared. Reporting is optional so the engine stays
+	 * usable headless (tests, chat-request sweeps).
+	 */
+	onStage?: (stage: string) => void;
+	/** Aborts between stages. A long baseline must be escapable. */
+	isCancelled?: () => boolean;
 }
 
 export interface OptimizeRunResult {
@@ -536,8 +547,23 @@ export async function runVerifiedOptimization(
 	const maxAttempts = opts.maxAttempts ?? 3;
 	const signature = opportunitySignature(opts.opportunity);
 
+	const stage = opts.onStage ?? ((): void => undefined);
+	const cancelled = (): boolean => opts.isCancelled?.() === true;
+
+	stage('freezing the probe set');
 	const frozen = await deps.freezeProbes();
+	if (cancelled()) {
+		return { mode: 'declined' };
+	}
+	stage(
+		frozen
+			? `measuring the baseline (${frozen.ids.length} probe(s))`
+			: 'measuring the baseline',
+	);
 	const before = frozen ? await deps.measure(frozen) : null;
+	if (cancelled()) {
+		return { mode: 'declined' };
+	}
 	// Measurable = enough paired latency samples to make the CI meaningful.
 	const beforePairs = before
 		? [...before.values()].filter((m) => m.latencies.length > 0).length
@@ -549,12 +575,36 @@ export async function runVerifiedOptimization(
 	// per-call samples from a traced driver run on the ORIGINAL code, so the
 	// fallback branch can judge from the before/after traces instead of orphaning
 	// the row to the watcher. Best-effort — a null keeps today's behavior exactly.
+	if (!measurable && deps.measureTraceDiff) {
+		stage('no replayable probes — capturing a traced baseline');
+	}
 	const tdBefore =
 		!measurable && deps.measureTraceDiff
 			? await deps.measureTraceDiff('before').catch(() => null)
 			: null;
+	if (cancelled()) {
+		return { mode: 'declined' };
+	}
 
-	await deps.snapshot();
+	/**
+	 * The pre-episode snapshot, taken ON ACCEPTANCE rather than up front.
+	 *
+	 * It must exist before the agent's first edit, which is what makes the
+	 * revert real — but it does NOT have to exist before the user has been
+	 * asked. Taking it eagerly meant a `git add -A` over the whole tree plus a
+	 * snapshot ref for a dispatch the user then declined, on top of a baseline
+	 * they were already waiting on. Hooked into onAccept below, it still lands
+	 * before `runEpisode`, so the ordering guarantee is unchanged.
+	 */
+	let snapshotTaken = false;
+	const ensureSnapshot = async (): Promise<void> => {
+		if (snapshotTaken) {
+			return;
+		}
+		snapshotTaken = true;
+		stage('snapshotting the workspace');
+		await deps.snapshot();
+	};
 
 	// Doom-loop guard: what earlier episodes (possibly before a restart)
 	// already tried on this exact opportunity, threaded into every dispatch.
@@ -595,8 +645,17 @@ export async function runVerifiedOptimization(
 	};
 
 	for (let attempt = 1; attempt <= budget; attempt += 1) {
+		if (cancelled()) {
+			return attempts.length === 0 ? { mode: 'declined' } : { mode: 'fallback', attempts };
+		}
+		stage(budget > 1 ? `dispatching (attempt ${attempt}/${budget})` : 'dispatching');
 		const dispatched = await dispatch({
-			onAccept: () => deps.markDispatched(),
+			onAccept: async () => {
+				// Snapshot FIRST: the revert has to be able to reach the tree as it
+				// was before this agent touched it.
+				await ensureSnapshot();
+				deps.markDispatched();
+			},
 			priorLearning: seed(),
 		});
 		if (!dispatched) {

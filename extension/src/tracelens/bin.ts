@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ensureExecutableOnce } from '../support/executableBit';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -103,12 +104,7 @@ export function openBinTerminal(
 		return;
 	}
 
-	// Ensure the binary is executable (git/copy may not preserve the bit).
-	try {
-		fs.chmodSync(binPath, 0o755);
-	} catch {
-		// Non-fatal: surface any real failure when the command actually runs.
-	}
+	ensureExecutableOnce(binPath);
 
 	const binDir = path.dirname(binPath);
 	let terminal = terminals.get(name);

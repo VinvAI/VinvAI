@@ -204,6 +204,9 @@ export async function openRun(
 		origin_pid: process.pid,
 		started_at: new Date().toISOString(),
 	});
+	if (run.isolated) {
+		openRuns.set(id, run);
+	}
 	return run;
 }
 
@@ -243,6 +246,13 @@ export function recordStep(
 }
 
 /**
+ * Every isolated run this window has open, so a window that closes mid-episode
+ * can still release its checkouts (see releaseOpenRuns). Keyed by id because a
+ * run may be closed by either path.
+ */
+const openRuns = new Map<string, TriggerRun>();
+
+/**
  * Releases the worktree, keeping the branch.
  *
  * The checkout is the expensive part and is pure scratch once the run ends;
@@ -252,19 +262,100 @@ export function recordStep(
  * gigabytes per run.
  */
 export async function releaseRun(workspaceRoot: string, run: TriggerRun): Promise<void> {
+	openRuns.delete(run.id);
 	if (!run.isolated) {
 		return;
 	}
 	try {
 		await git(workspaceRoot, ['worktree', 'remove', '--force', run.tree]);
+		return;
 	} catch {
-		// Already gone, or the user is sitting in it — prune will collect it.
+		// Fall through to the manual teardown below.
+	}
+	// `worktree remove` failed — most often on Windows, where a still-dying
+	// child of the agent holds a handle inside the tree. `prune` ALONE cannot
+	// finish the job: it only drops administrative entries whose directory is
+	// already gone, so on its own it left the checkout on disk forever. That is
+	// how run trees accumulated — tens of thousands of files inside .vinv,
+	// watched by this extension and by VS Code, and enough extra repositories
+	// for the git extension to poll that the whole window slowed down.
+	try {
+		fs.rmSync(run.tree, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+	} catch {
+		// Still locked. The next activation sweep retries.
+	}
+	try {
+		await git(workspaceRoot, ['worktree', 'prune']);
+	} catch {
+		// Nothing more to try; the stale entry is cosmetic.
+	}
+}
+
+/**
+ * Releases every run this window still has open. Called from deactivate: the
+ * per-run `finally` covers an episode that ends normally, but a window closed
+ * mid-episode never reaches it, and that orphaned checkout was permanent.
+ *
+ * Deliberately fire-and-forget — `deactivate` is not awaited by VS Code on
+ * shutdown, so this is a best-effort head start; anything it misses is
+ * collected by the next activation's sweep.
+ */
+export function releaseOpenRuns(workspaceRoot: string): void {
+	for (const run of [...openRuns.values()]) {
+		void releaseRun(workspaceRoot, run);
+	}
+}
+
+/**
+ * Removes run checkouts left behind by a previous window (a crash, a close
+ * mid-episode, or a `worktree remove` that lost to a file lock).
+ *
+ * Only the `tree/` checkout is removed — the run directory keeps meta.json,
+ * trajectory.jsonl and reward.json, which are the audit record, and the
+ * `vinv/run/<id>` branch stays as the reviewable deliverable. Runs still open
+ * in THIS window are skipped.
+ *
+ * Never throws: a workspace with no git, no runs dir, or a locked tree simply
+ * gets fewer bytes back.
+ */
+export async function sweepStaleRunTrees(workspaceRoot: string): Promise<number> {
+	let names: string[];
+	try {
+		names = fs.readdirSync(runsDir(workspaceRoot));
+	} catch {
+		return 0; // no runs yet
+	}
+	let removed = 0;
+	for (const name of names) {
+		if (openRuns.has(name)) {
+			continue; // live in this window
+		}
+		const tree = path.join(runsDir(workspaceRoot), name, 'tree');
+		if (!fs.existsSync(tree)) {
+			continue;
+		}
+		try {
+			await git(workspaceRoot, ['worktree', 'remove', '--force', tree]);
+			removed += 1;
+			continue;
+		} catch {
+			// Not a registered worktree any more, or locked — try the directory.
+		}
+		try {
+			fs.rmSync(tree, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+			removed += 1;
+		} catch {
+			// Still locked by something; leave it for the next window.
+		}
+	}
+	if (removed > 0) {
 		try {
 			await git(workspaceRoot, ['worktree', 'prune']);
 		} catch {
-			// Nothing more to try; the stale entry is cosmetic.
+			// Stale administrative entries are cosmetic.
 		}
 	}
+	return removed;
 }
 
 /** Every run directory currently on disk, newest first. */

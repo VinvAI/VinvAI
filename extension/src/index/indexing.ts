@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { cachedParse } from '../support/parseCache';
+import { ensureExecutableOnce } from '../support/executableBit';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
@@ -26,6 +28,17 @@ export function isProjectIndexed(workspaceRoot: string): boolean {
 	);
 }
 
+/** Non-empty line count of a JSONL artifact (the store's row count). */
+function countNonEmptyLines(file: string): number {
+	let n = 0;
+	for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+		if (line.trim()) {
+			n += 1;
+		}
+	}
+	return n;
+}
+
 /**
  * A store can pass isProjectIndexed (both files exist) and still be torn: an
  * interrupted save can leave chunks.jsonl one generation ahead of vectors.f32,
@@ -43,13 +56,12 @@ export function isStoreConsistent(storeDir: string): boolean {
 		if (!meta.dim || meta.dim <= 0) {
 			return false;
 		}
-		const chunkText = fs.readFileSync(path.join(storeDir, 'chunks.jsonl'), 'utf8');
-		let chunks = 0;
-		for (const line of chunkText.split('\n')) {
-			if (line.trim()) {
-				chunks++;
-			}
-		}
+		// Counted through the shared cache: this reads the whole (multi-MB) chunk
+		// store purely to count its rows, and the consistency check runs on the
+		// discovery path where the same file has usually just been parsed anyway.
+		// Semantics are unchanged - non-empty lines, exactly as before, because the
+		// torn-store repair depends on this count matching the writer's.
+		const chunks = cachedParse(path.join(storeDir, 'chunks.jsonl'), countNonEmptyLines);
 		const expectedBytes = chunks * meta.dim * 4;
 		return ['vectors.f32', 'vectors.tmp'].some((name) => {
 			const p = path.join(storeDir, name);
@@ -118,11 +130,7 @@ export function runIndexing(
 	}
 
 	const binPath = getBinPath(context, 'index');
-	try {
-		fs.chmodSync(binPath, 0o755);
-	} catch {
-		// Non-fatal.
-	}
+	ensureExecutableOnce(binPath);
 
 	const storeDir = getIndexStoreDir(workspaceRoot);
 	const MAX_ATTEMPTS = 3;

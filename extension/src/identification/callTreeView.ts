@@ -155,7 +155,18 @@ export class CallTreeEditorProvider implements vscode.CustomReadonlyEditorProvid
 			return;
 		}
 		const wiring = wireCallTree(this.context, workspaceRoot, apiId, label, webviewPanel.webview);
-		webviewPanel.onDidDispose(() => wiring.dispose());
+		// Poll only while the tab is actually on screen. Each tick spawns the
+		// identification binary, so a handful of call-tree tabs left open in the
+		// background were several processes per second, forever, for a view
+		// nobody was looking at.
+		wiring.setVisible(webviewPanel.visible);
+		const visibility = webviewPanel.onDidChangeViewState(() =>
+			wiring.setVisible(webviewPanel.visible),
+		);
+		webviewPanel.onDidDispose(() => {
+			visibility.dispose();
+			wiring.dispose();
+		});
 	}
 }
 
@@ -165,13 +176,18 @@ export class CallTreeEditorProvider implements vscode.CustomReadonlyEditorProvid
  * file so the referenceable snapshot stays current. Handles source-open and
  * run-smoke-report messages. Returns a disposable that stops the polling.
  */
+interface CallTreeWiring extends vscode.Disposable {
+	/** Starts/stops the tracemap poll with the tab's on-screen visibility. */
+	setVisible(visible: boolean): void;
+}
+
 function wireCallTree(
 	context: vscode.ExtensionContext,
 	workspaceRoot: string,
 	apiId: string,
 	label: string,
 	webview: vscode.Webview,
-): vscode.Disposable {
+): CallTreeWiring {
 	webview.options = { enableScripts: true };
 	webview.html = getHtml(label);
 
@@ -291,13 +307,29 @@ function wireCallTree(
 			polling = false;
 		}
 	};
-	void tick();
-	const timer = setInterval(() => void tick(), TRACEMAP_POLL_MS);
+	let timer: ReturnType<typeof setInterval> | undefined;
+	const setVisible = (visible: boolean): void => {
+		if (disposed || !visible) {
+			if (timer) {
+				clearInterval(timer);
+				timer = undefined;
+			}
+			return;
+		}
+		if (timer) {
+			return;
+		}
+		// One immediate tick on becoming visible, so a tab returning to the
+		// foreground is current straight away rather than up to a second stale.
+		void tick();
+		timer = setInterval(() => void tick(), TRACEMAP_POLL_MS);
+	};
 
 	return {
+		setVisible,
 		dispose(): void {
 			disposed = true;
-			clearInterval(timer);
+			setVisible(false);
 			msgSub.dispose();
 		},
 	};

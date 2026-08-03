@@ -635,14 +635,52 @@ export function freezeReadyProbeSpecs(workspaceRoot: string): FrozenProbeTarget 
  * recompute) — this is the measurement half of the paired comparison, so it
  * must do nothing but replay the frozen requests.
  */
+/**
+ * Wall-clock ceiling for one baseline replay, across ALL passes.
+ *
+ * The replay is what a user waits through after clicking Optimize, and it is
+ * strictly sequential by design (paired samples must come from the same
+ * conditions). Without a ceiling its worst case is passes × specs × per-probe
+ * timeout — with the flat 10s no-history prior that is minutes of a silent UI.
+ * A budget turns "unbounded" into "at most this, with fewer passes", and fewer
+ * passes only widens the confidence interval; it never invalidates it.
+ */
+const REPLAY_BUDGET_MS = 45_000;
+
+/**
+ * Replays a frozen probe set `passes` times and collects paired samples.
+ *
+ * Two bounds, both about the wait rather than the statistics:
+ *
+ * 1. A spec that ERRORS (timeout, connection refused, unroutable) is dropped
+ *    from subsequent passes. It contributes no latency sample by definition, and
+ *    a probe that just burned its full deadline will burn it again on every
+ *    remaining pass — that multiplication is what made a single unreachable
+ *    endpoint cost 5× its timeout.
+ * 2. An overall budget stops the loop between passes.
+ *
+ * Pass 1 always runs to completion, so the caller always gets whatever the set
+ * can actually produce; `minPairedProbes` upstream still decides whether that
+ * is enough to judge on.
+ */
 export async function replayProbeSpecs(
 	port: number,
 	specs: ProbeSpec[],
 	passes: number,
+	budgetMs = REPLAY_BUDGET_MS,
 ): Promise<Map<string, ProbeMeasurement>> {
 	const out = new Map<string, ProbeMeasurement>();
+	const started = Date.now();
+	let live = [...specs];
 	for (let pass = 0; pass < passes; pass += 1) {
-		for (const spec of specs) {
+		// Checked BETWEEN passes only: a half-finished pass would pair some
+		// probes more often than others, which is exactly the imbalance the
+		// paired comparison assumes away.
+		if (pass > 0 && (live.length === 0 || Date.now() - started >= budgetMs)) {
+			break;
+		}
+		const stillLive: ProbeSpec[] = [];
+		for (const spec of live) {
 			const res = await httpProbe(port, spec);
 			const m = out.get(spec.id) ?? {
 				latencies: [],
@@ -652,11 +690,13 @@ export async function replayProbeSpecs(
 			};
 			if (!res.error) {
 				m.latencies.push(res.latencyMs);
+				stillLive.push(spec);
 			}
 			m.statuses.push(res.status);
 			m.shapes.push(res.shapeHash);
 			out.set(spec.id, m);
 		}
+		live = stillLive;
 	}
 	return out;
 }

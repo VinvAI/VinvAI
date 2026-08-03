@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { ensureExecutableOnce } from '../support/executableBit';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { getBinPath, isBinAvailable } from '../tracelens/bin';
@@ -144,11 +145,7 @@ function runIdentification<T extends IdentificationResult>(
 	args: string[],
 ): Promise<T> {
 	const binPath = getBinPath(context, 'identification');
-	try {
-		fs.chmodSync(binPath, 0o755);
-	} catch {
-		// Non-fatal: a real failure surfaces when the command runs.
-	}
+	ensureExecutableOnce(binPath);
 
 	return new Promise<T>((resolve, reject) => {
 		// The result JSON is printed to stdout; any logging goes to stderr.

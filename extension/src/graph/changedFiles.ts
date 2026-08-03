@@ -132,7 +132,7 @@ export function gitChangedFiles(root: string): Set<string> | null {
 }
 
 /**
- * Detection costs three `git` spawns (~0.5s on a mid-size repo), and
+ * Detection costs three `git` spawns (~300ms on a mid-size repo), and
  * buildGraphSnapshot — which every view, the QnA pipeline and the episode loop
  * call — would otherwise pay that on each build, sometimes several times inside
  * one refresh. A 2s memo collapses those bursts while staying far below the
@@ -140,6 +140,8 @@ export function gitChangedFiles(root: string): Set<string> | null {
  */
 const MEMO_TTL_MS = 2_000;
 const memo = new Map<string, { at: number; value: ChangedFileSet }>();
+/** Roots with an async revalidation already in flight (never two at once). */
+const revalidating = new Set<string>();
 
 /**
  * The changed-file set for diff impact: git's uncommitted working set when the
@@ -147,26 +149,68 @@ const memo = new Map<string, { at: number; value: ChangedFileSet }>();
  * index knows about. Only `indexedFiles` are ever stat'ed, so the fallback
  * costs one stat per indexed file and never walks the tree. Never throws.
  *
- * Passing `nowMs` explicitly bypasses the memo (deterministic tests).
+ * STALE-WHILE-REVALIDATE. The first call for a root computes synchronously,
+ * because a caller with no answer at all would render the whole map as
+ * unchanged. Every later call returns the memo immediately and, once it is past
+ * the TTL, refreshes it in the background.
+ *
+ * The reason is that `git` is spawned with `execFileSync`, which blocks Node's
+ * event loop — and in the extension host that loop is shared with every other
+ * extension in the window. Diff impact is a cosmetic overlay (which symbols to
+ * tint as "changed"), so being one refresh behind costs nothing a user can
+ * perceive, while a 300ms stall on a hot path is immediately felt.
+ *
+ * Passing `nowMs` explicitly bypasses the memo entirely and computes inline
+ * (deterministic tests).
  */
 export function detectChangedFiles(
 	root: string,
 	indexedFiles: Iterable<string>,
 	nowMs?: number,
 ): ChangedFileSet {
-	const live = nowMs === undefined;
-	const now = nowMs ?? Date.now();
-	if (live) {
-		const hit = memo.get(root);
-		if (hit && now - hit.at < MEMO_TTL_MS) {
-			return hit.value;
-		}
+	if (nowMs !== undefined) {
+		return computeChangedFiles(root, indexedFiles, nowMs);
 	}
-	const value = computeChangedFiles(root, indexedFiles, now);
-	if (live) {
+	const now = Date.now();
+	const hit = memo.get(root);
+	if (!hit) {
+		// Cold: no previous answer to serve, so this one call pays for it.
+		const value = computeChangedFiles(root, indexedFiles, now);
 		memo.set(root, { at: now, value });
+		return value;
 	}
-	return value;
+	if (now - hit.at >= MEMO_TTL_MS) {
+		revalidate(root, [...indexedFiles]);
+	}
+	return hit.value;
+}
+
+/**
+ * Refreshes a root's memo off the hot path. Snapshotting `indexedFiles` at the
+ * call site matters: the caller's iterable is derived from a node array the
+ * next reindex replaces, and the fallback branch would otherwise walk a set
+ * that no longer describes the store.
+ */
+function revalidate(root: string, indexedFiles: string[]): void {
+	if (revalidating.has(root)) {
+		return;
+	}
+	revalidating.add(root);
+	// Mark it fresh NOW, not on completion: otherwise every call arriving during
+	// the refresh sees a stale timestamp and queues another one behind it.
+	const entry = memo.get(root);
+	if (entry) {
+		entry.at = Date.now();
+	}
+	setImmediate(() => {
+		try {
+			memo.set(root, { at: Date.now(), value: computeChangedFiles(root, indexedFiles, Date.now()) });
+		} catch {
+			// Keep the previous answer; the next call past the TTL retries.
+		} finally {
+			revalidating.delete(root);
+		}
+	});
 }
 
 function computeChangedFiles(

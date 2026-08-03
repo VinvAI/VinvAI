@@ -55,6 +55,17 @@ import {
 
 const DEBOUNCE_MS = 800;
 
+/**
+ * A ranking pass's result plus the evidence it loaded to produce it, so the
+ * reconcile step that follows in the same tick does not re-read the store.
+ */
+interface RankedCandidates extends Bounded<OptimizationCandidate> {
+	evidence: {
+		timings: Map<number, SymbolSessionTiming[]>;
+		overlay: Record<number, RuntimeOverlay>;
+	};
+}
+
 /** What the view renders and the mirror serializes. */
 export interface OptimizationModel {
 	updatedAt: string;
@@ -435,16 +446,20 @@ export class OptimizationSource implements vscode.Disposable {
 				return;
 			}
 			const sig = overlaySignature(root);
+			// Evidence the ranking pass loaded, reused by the reconcile below
+			// rather than loaded a second time in the same tick.
+			let evidence: { timings: Map<number, SymbolSessionTiming[]>; overlay: Record<number, RuntimeOverlay> } | undefined;
 			if (sig !== this.memoSig) {
 				const computed = this.computeCandidates(root);
 				this.memoCandidates = computed.items;
 				this.memoSelection = computed.lineage;
 				this.memoSig = sig;
+				evidence = computed.evidence;
 				// Fresh evidence: record which persisted attempt keys are still
 				// alive in this capture session (the doom-loop store's expiry clock).
 				this.recordAttemptSightings(root, this.memoCandidates);
 			}
-			this.rebuildModelFrom(this.memoCandidates, root);
+			this.rebuildModelFrom(this.memoCandidates, root, evidence);
 		} catch {
 			// Never let a state read take the view down; the next event retries.
 		} finally {
@@ -457,7 +472,7 @@ export class OptimizationSource implements vscode.Disposable {
 	}
 
 	/** The expensive pass: load evidence and rank candidates. */
-	private computeCandidates(root: string): Bounded<OptimizationCandidate> {
+	private computeCandidates(root: string): RankedCandidates {
 		const storeDir = indexStoreDir(root);
 		const nodes: GraphNode[] = loadNodes(storeDir);
 		const edges = loadEdges(storeDir, nodes.length);
@@ -473,7 +488,7 @@ export class OptimizationSource implements vscode.Disposable {
 		// Memory dimension: cross-session leak suspects (bytes). alloc-churn is
 		// derived inside the analyzer from timings' alloc_bytes.
 		const memoryLeaks = collectMemoryTrends(root, nodes);
-		return computeOptimizationCandidates({
+		const ranked = computeOptimizationCandidates({
 			nodes,
 			edges,
 			timings,
@@ -485,6 +500,9 @@ export class OptimizationSource implements vscode.Disposable {
 			// differently, so the lifetime gate is applied identically here.
 			lifetimeRows: new Set(lifetimeFrames(root, nodes).keys()),
 		});
+		// Hand the reconcile pass what this pass already loaded — same tick, same
+		// evidence, no reason for it to read the store again.
+		return { ...ranked, evidence: { timings, overlay: loadRuntimeOverlay(root, nodes) } };
 	}
 
 	/**
@@ -519,20 +537,33 @@ export class OptimizationSource implements vscode.Disposable {
 	/**
 	 * Merges tracked (dispatched/resolved) candidates over the freshly ranked
 	 * ones, reconciling any dispatched candidate against the newest capture, and
-	 * publishes. Cheap enough to run on every event even when the ranking memo
-	 * is unchanged (a dispatched fix's after-run must be picked up promptly).
+	 * publishes. Runs on every event even when the ranking memo is unchanged —
+	 * a dispatched fix's after-run must be picked up promptly.
+	 *
+	 * The evidence is now handed in by the caller whenever the ranking pass just
+	 * built it, and otherwise comes from the shared parse cache. Both matter: it
+	 * used to reload the node store and re-derive every session timing here on
+	 * EVERY event, which on a mid-size workspace was a second of blocking work
+	 * per capture write, directly behind the ranking pass that had just done the
+	 * same reads.
 	 */
-	private rebuildModelFrom(fresh: OptimizationCandidate[], root: string | undefined): void {
+	private rebuildModelFrom(
+		fresh: OptimizationCandidate[],
+		root: string | undefined,
+		evidence?: { timings: Map<number, SymbolSessionTiming[]>; overlay: Record<number, RuntimeOverlay> },
+	): void {
 		if (!root) {
 			this.publish({ updatedAt: new Date().toISOString(), hasTrace: false, candidates: [] }, root);
 			return;
 		}
-		let timings = new Map<number, SymbolSessionTiming[]>();
-		let overlay: Record<number, RuntimeOverlay> = {};
+		let timings = evidence?.timings ?? new Map<number, SymbolSessionTiming[]>();
+		let overlay: Record<number, RuntimeOverlay> = evidence?.overlay ?? {};
 		try {
-			const nodes = loadNodes(indexStoreDir(root));
-			timings = collectSymbolTimings(root, nodes);
-			overlay = loadRuntimeOverlay(root, nodes);
+			if (!evidence) {
+				const nodes = loadNodes(indexStoreDir(root));
+				timings = collectSymbolTimings(root, nodes);
+				overlay = loadRuntimeOverlay(root, nodes);
+			}
 		} catch {
 			// Store unreadable mid-reindex: reconcile with what we have (nothing),
 			// which simply leaves dispatched candidates waiting another cycle.
@@ -549,9 +580,21 @@ export class OptimizationSource implements vscode.Disposable {
 		// network-I/O symbol fakes a huge win for a change that never happened. The
 		// dispatch-diff signature catches fixes in callee files too, not just the
 		// symbol's own. Unknown sig → fall back to prior behavior, never over-dismiss.
-		const currentSig = this.workingTreeDiffSig(root);
+		// LAZY: two `git` spawns, ~170ms of blocked event loop, and this runs on
+		// every capture write. Only a dispatched, non-bridge candidate ever reads
+		// it, and most refreshes have none — so pay for it on first use, once.
+		let sigComputed = false;
+		let sigValue: string | null = null;
+		const currentDiffSig = (): string | null => {
+			if (!sigComputed) {
+				sigValue = this.workingTreeDiffSig(root);
+				sigComputed = true;
+			}
+			return sigValue;
+		};
 		for (const [row, tracked] of this.tracked) {
 			if (tracked.status === 'dispatched' && tracked.outcome?.engine !== 'bridge') {
+				const currentSig = currentDiffSig();
 				const dispatchSig = tracked.outcome?.dispatch_diff_sig;
 				const codeChanged =
 					currentSig === null || !dispatchSig ? true : currentSig !== dispatchSig;

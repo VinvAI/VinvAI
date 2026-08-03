@@ -54,9 +54,10 @@ import {
 	loadRuntimeOverlay,
 	loadStoreEpoch,
 } from '../graph/indexGraph';
-import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
+import { openPendingEdgeCount } from '../graph/graphEnhancer';
 import { getHandbookPath, isHandbookGenerated } from '../handbook/handbook';
 import { computeNextStep } from './nextStep';
+import { isModelRelevantArtifact } from './artifactWatch';
 import { readConfigRequests } from './configRequestPanel';
 import {
 	computeFlowModel,
@@ -206,8 +207,11 @@ export class FlowStateSource implements vscode.Disposable {
 
 		const watcher = vscode.workspace.createFileSystemWatcher('**/.vinv/**');
 		const onFs = (uri: vscode.Uri): void => {
-			// Our own mirror write must not re-trigger a recompute.
-			if (path.basename(uri.fsPath) !== 'flow_state.json') {
+			// Not every .vinv write is evidence. Run checkouts, agent logs and
+			// scratch contribute nothing to this model, and the other background
+			// source's mirror writes are its output, not new facts — rebuilding on
+			// either was pure cost. See views/artifactWatch.
+			if (isModelRelevantArtifact(uri.fsPath)) {
 				this.refreshSoon();
 			}
 		};
@@ -310,11 +314,7 @@ export class FlowStateSource implements vscode.Disposable {
 		facts.pipelinePhase = getPipelinePhase();
 		facts.configRequests = readConfigRequests(root).length;
 		try {
-			const storeDir = indexStoreDir(root);
-			const done = readAdjudicated(storeDir);
-			facts.pendingEdges = readPendingEdges(storeDir).filter(
-				(r) => !done.has(`${r.src_id}\u0000${r.name}`),
-			).length;
+			facts.pendingEdges = openPendingEdgeCount(indexStoreDir(root));
 		} catch {
 			facts.pendingEdges = 0;
 		}

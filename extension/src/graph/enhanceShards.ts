@@ -34,6 +34,7 @@
  * Everything above the IO layer is pure and unit-tested (enhanceShards.test.ts).
  */
 import * as fs from 'fs';
+import { cachedParse } from '../support/parseCache';
 import * as path from 'path';
 import { indexStoreDir } from './indexGraph';
 import type { PendingEdge } from './graphEnhancer';
@@ -78,9 +79,16 @@ export function decisionKey(srcId: string, name: string): string {
  * different strategy for that case instead of silently ordering by nothing.
  */
 export function readRanks(storeDir: string): Map<string, number> | null {
+	// Memoized per (file, size, mtime): this parses the whole chunk store for a
+	// rank map, the same read graphEnhancer's own ordering does, and an enhance
+	// run reaches both. See support/parseCache.
+	return cachedParse(path.join(storeDir, 'chunks.jsonl'), parseRanks);
+}
+
+function parseRanks(file: string): Map<string, number> | null {
 	let content: string;
 	try {
-		content = fs.readFileSync(path.join(storeDir, 'chunks.jsonl'), 'utf8');
+		content = fs.readFileSync(file, 'utf8');
 	} catch {
 		return null;
 	}

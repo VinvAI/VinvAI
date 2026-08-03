@@ -28,6 +28,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
+import { cachedParse } from '../support/parseCache';
 import { getBinPath, isBinAvailable } from '../tracelens/bin';
 import { ensureEmbedder } from '../engines/install';
 import { getIndexEnv, getHarnessId } from '../config/settings';
@@ -162,55 +163,93 @@ export async function adjudicateOne(
 	return null;
 }
 
-/** Reads pending edges, highest-impact callers first (rank from chunks). */
+/** Symbol id → PageRank, for ordering pending edges by caller impact. */
+function ranksById(storeDir: string): Map<string, number> {
+	return cachedParse(path.join(storeDir, 'chunks.jsonl'), (file) => {
+		const ranks = new Map<string, number>();
+		try {
+			for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+				if (!line.trim()) {
+					continue;
+				}
+				const c = JSON.parse(line) as { id?: string; rank?: number };
+				if (c.id) {
+					ranks.set(c.id, c.rank ?? 0);
+				}
+			}
+		} catch {
+			// No ranks — order stays as published.
+		}
+		return ranks;
+	});
+}
+
+/**
+ * Reads pending edges, highest-impact callers first (rank from chunks).
+ *
+ * Both reads are memoized per (file, size, mtime). This is called from the Flow
+ * rail's fact collection AND from the compass ladder inside the same recompute,
+ * and the rank map alone meant parsing the whole multi-MB chunk store twice per
+ * pass. The returned array is freshly built, so callers may reorder or filter it.
+ */
 export function readPendingEdges(storeDir: string): PendingEdge[] {
-	let content: string;
-	try {
-		content = fs.readFileSync(path.join(storeDir, 'pending_edges.jsonl'), 'utf8');
-	} catch {
-		return [];
-	}
-	const rankById = new Map<string, number>();
-	try {
-		for (const line of fs.readFileSync(path.join(storeDir, 'chunks.jsonl'), 'utf8').split('\n')) {
+	const parsed = cachedParse(path.join(storeDir, 'pending_edges.jsonl'), (file) => {
+		let content: string;
+		try {
+			content = fs.readFileSync(file, 'utf8');
+		} catch {
+			return [] as PendingEdge[];
+		}
+		const rows: PendingEdge[] = [];
+		for (const line of content.split('\n')) {
 			if (!line.trim()) {
 				continue;
 			}
-			const c = JSON.parse(line) as { id?: string; rank?: number };
-			if (c.id) {
-				rankById.set(c.id, c.rank ?? 0);
+			try {
+				const value = JSON.parse(line) as PendingEdge;
+				if (value.src_id && value.name && Array.isArray(value.candidates)) {
+					rows.push(value);
+				}
+			} catch {
+				// Skip unreadable lines.
 			}
 		}
-	} catch {
-		// No ranks — order stays as published.
-	}
-	const records: PendingEdge[] = [];
-	for (const line of content.split('\n')) {
-		if (!line.trim()) {
-			continue;
-		}
-		try {
-			const value = JSON.parse(line) as PendingEdge;
-			if (value.src_id && value.name && Array.isArray(value.candidates)) {
-				records.push(value);
-			}
-		} catch {
-			// Skip unreadable lines.
-		}
-	}
-	records.sort((a, b) => (rankById.get(b.src_id) ?? 0) - (rankById.get(a.src_id) ?? 0));
-	return records;
+		return rows;
+	});
+	const ranks = ranksById(storeDir);
+	// Copy before sorting: the cached array is shared with every other caller.
+	return [...parsed].sort((a, b) => (ranks.get(b.src_id) ?? 0) - (ranks.get(a.src_id) ?? 0));
+}
+
+/**
+ * The key shape readAdjudicated stores and callers probe with. The NUL
+ * separator is load-bearing: it cannot occur in an id or a symbol name, so no
+ * (src_id, name) pair can collide with another.
+ */
+export function adjudicatedKey(srcId: string, name: string): string {
+	return `${srcId}\u0000${name}`;
+}
+
+/**
+ * How many pending edges are still unadjudicated — the one definition the Flow
+ * rail and the compass ladder share. Both derived it inline before, so a single
+ * Flow recompute ran the whole (pending × overrides × chunk-rank) read twice.
+ */
+export function openPendingEdgeCount(storeDir: string): number {
+	const done = readAdjudicated(storeDir);
+	return readPendingEdges(storeDir).filter((r) => !done.has(adjudicatedKey(r.src_id, r.name)))
+		.length;
 }
 
 /** (src_id, name) pairs already adjudicated in edge_overrides.jsonl. */
 export function readAdjudicated(storeDir: string): Set<string> {
+	return cachedParse(path.join(storeDir, 'edge_overrides.jsonl'), parseAdjudicated);
+}
+
+function parseAdjudicated(file: string): Set<string> {
 	const done = new Set<string>();
 	try {
-		for (
-			const line of fs
-				.readFileSync(path.join(storeDir, 'edge_overrides.jsonl'), 'utf8')
-				.split('\n')
-		) {
+		for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
 			if (!line.trim()) {
 				continue;
 			}

@@ -47,6 +47,7 @@ import {
 	indexStoreDir,
 	loadEdges,
 	loadNodes,
+	loadStoreEpoch,
 	type GraphNode,
 } from '../graph/indexGraph';
 import {
@@ -761,11 +762,32 @@ export function reconcileOpportunityBoard(
  * signature would churn the board's whole surface for a value only the
  * rendering path wants. Read it immediately after the call or not at all.
  */
-let lastRankedSelection: SelectionStats[] | null = null;
 
-/** Every bound that shaped the last ranking, or null if it has not run. */
-export function lastRankedSelectionStats(): SelectionStats[] | null {
-	return lastRankedSelection;
+/**
+ * Last ranking, keyed by the evidence it was derived from.
+ *
+ * The board and the Optimize panel deliberately run the SAME collectors over
+ * the same artifacts — they must never rank identical evidence differently, so
+ * neither may borrow the other's result. The reads underneath are memoized by
+ * (file, size, mtime), which is what removed the real cost; this memo removes
+ * the remaining aggregation when the board re-syncs against evidence it has
+ * already ranked (an expiry sweep, a resolve pass, a second trigger in the same
+ * capture session).
+ */
+let rankMemo: { sig: string; items: OptimizationCandidate[]; lineage: SelectionStats[] } | undefined;
+
+/** (epoch, trace path:size:mtime…) — identical inputs, identical ranking. */
+function evidenceSignature(workspaceRoot: string): string {
+	const parts: string[] = [String(loadStoreEpoch(indexStoreDir(workspaceRoot)))];
+	for (const f of findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'))) {
+		try {
+			const st = fs.statSync(f);
+			parts.push(`${f}:${st.size}:${st.mtimeMs}`);
+		} catch {
+			parts.push(`${f}:missing`);
+		}
+	}
+	return parts.join('|');
 }
 
 export function rankedOpportunityCandidates(workspaceRoot: string): OptimizationCandidate[] {
@@ -774,6 +796,10 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 		// "the evidence shows nothing" — and expiry would count absences against
 		// entries that are merely unreadable. Unknown must stay unknown.
 		throw new Error(`no Vinv index store under ${workspaceRoot}`);
+	}
+	const sig = evidenceSignature(workspaceRoot);
+	if (rankMemo?.sig === sig) {
+		return rankMemo.items;
 	}
 	const storeDir = indexStoreDir(workspaceRoot);
 	const nodes: GraphNode[] = loadNodes(storeDir);
@@ -809,7 +835,7 @@ export function rankedOpportunityCandidates(workspaceRoot: string): Optimization
 	// drops never reached the ranking, so keeping only the last stage would
 	// report a survivor count as the population. Latency chain only — see
 	// computeOptimizationCandidates for why memory is not folded in.
-	lastRankedSelection = lineage;
+	rankMemo = { sig, items, lineage };
 	return items;
 }
 

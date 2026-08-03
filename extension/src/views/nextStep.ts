@@ -14,7 +14,7 @@ import * as path from 'path';
 import { enginesReady } from '../engines/install';
 import { isProjectIndexed } from '../index/indexing';
 import { readServices, isServiceStarted } from '../bringup/bringup';
-import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
+import { openPendingEdgeCount } from '../graph/graphEnhancer';
 import { readEnhanceRecord, shouldAutoEnhance } from '../index/enhanceRunner';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { getAutoPilotStatus } from '../harness/autoPilot';
@@ -45,10 +45,7 @@ function hasCaptures(workspaceRoot: string): boolean {
 
 /** Unresolved ambiguous references awaiting the adjudication agent. */
 function openPendingEdges(workspaceRoot: string): number {
-	const storeDir = indexStoreDir(workspaceRoot);
-	const done = readAdjudicated(storeDir);
-	return readPendingEdges(storeDir).filter((r) => !done.has(`${r.src_id}\u0000${r.name}`))
-		.length;
+	return openPendingEdgeCount(indexStoreDir(workspaceRoot));
 }
 
 /**

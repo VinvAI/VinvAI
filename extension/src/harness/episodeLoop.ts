@@ -94,7 +94,7 @@ import {
 import { breakStall, evidenceSimilarity } from './stallBreaker';
 import { reconcile } from './reconciliation';
 import { captureWorkspaceSnapshot, revertToSnapshot } from './workspaceSnapshot';
-import { openRun, closeRun, releaseRun } from './runIsolation';
+import { openRun, closeRun, recordStep, releaseRun } from './runIsolation';
 import {
 	acceptanceDir,
 	auditWorkspaceDiff,
@@ -582,10 +582,6 @@ interface ParkedJudgment {
 let parked: ParkedJudgment | undefined;
 let parkedItem: vscode.StatusBarItem | undefined;
 
-/** True when an episode is suspended waiting for the operator. */
-export function hasParkedJudgment(): boolean {
-	return parked !== undefined;
-}
 
 function clearParked(): void {
 	parked = undefined;
@@ -1568,6 +1564,22 @@ export async function runEpisode(
 				outer: for (;;) {
 				while (attempts < attemptBudget && !token.isCancellationRequested) {
 					attempts += 1;
+					// The per-run trajectory record. runIsolation documents
+					// `.vinv/runs/<id>/trajectory.jsonl` as part of every run's audit
+					// trail, and the writer existed but was never called — so the file
+					// the module header describes has never been written, and the
+					// sweep that preserves run directories was preserving an artifact
+					// that did not exist. One row per attempt, mirrored to the root
+					// aggregate every learning pass already reads.
+					recordStep(workspaceRoot, triggerRun, {
+						step: 'attempt',
+						attempt: attempts,
+						attempt_budget: attemptBudget,
+						kind: task.kind,
+						trigger: task.trigger,
+						service: task.service ?? null,
+						harness: chosenHarness,
+					});
 					progress.report({ message: `attempt ${attempts}/${attemptBudget}: composing context pack…` });
 					postEpisodeUpdate({
 						kind: 'note',

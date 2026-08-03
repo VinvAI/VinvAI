@@ -231,8 +231,32 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 		}
 	});
 
-	const timer = setInterval(() => void pollOnce(), TRACE_POLL_MS);
-	panel.onDidDispose(() => clearInterval(timer));
+	// Poll only while the panel is on screen. Each tick spawns the identification
+	// binary; a panel left open behind other tabs was one process per second for
+	// a view nobody could see.
+	let timer: ReturnType<typeof setInterval> | undefined;
+	const setPolling = (on: boolean): void => {
+		if (!on) {
+			if (timer) {
+				clearInterval(timer);
+				timer = undefined;
+			}
+			return;
+		}
+		if (timer || disposed) {
+			return;
+		}
+		// Immediate tick on becoming visible: a returning tab should be current,
+		// not up to a second stale.
+		void pollOnce();
+		timer = setInterval(() => void pollOnce(), TRACE_POLL_MS);
+	};
+	setPolling(panel.visible);
+	const visibility = panel.onDidChangeViewState(() => setPolling(panel?.visible === true));
+	panel.onDidDispose(() => {
+		setPolling(false);
+		visibility.dispose();
+	});
 
 	// Unguarded, this rejection escaped the command: the first post() never ran
 	// and the webview kept its "Loading…" placeholder for the life of the tab,

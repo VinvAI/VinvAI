@@ -349,49 +349,6 @@ export async function maybeOfferEmbedderWarmup(context: vscode.ExtensionContext)
 	terminal.sendText(quoted);
 }
 
-/**
- * Ensures the Rust `index` binary exists, offering a from-source build in a
- * terminal when it does not. Returns the resolved path, or null when the
- * build has not happened yet (callers surface their own "not ready" state).
- */
-export async function ensureIndexBinary(context: vscode.ExtensionContext): Promise<string | null> {
-	const existing = resolveIndexBinary({
-		override: enginesPathSetting(),
-		extensionDir: context.extensionPath,
-	});
-	if (existing) {
-		return existing;
-	}
-	const root = resolveEnginesRoot(context);
-	if (!root) {
-		void vscode.window.showWarningMessage(
-			'Vinv: engines checkout not found — run "Vinv: Install Engines" first.',
-		);
-		return null;
-	}
-	const cargo = cargoPath();
-	if (!cargo) {
-		installPrerequisite('rust', 'Rust');
-		return null;
-	}
-	const choice = await vscode.window.showInformationMessage(
-		'Vinv: the index engine has not been built yet. Build it now? (cargo build --release, one-time)',
-		'Build Now',
-		'Later',
-	);
-	if (choice === 'Build Now') {
-		const isWin = process.platform === 'win32';
-		const terminal = vscode.window.createTerminal(
-			isWin ? { name: 'Vinv Index Build', shellPath: 'powershell.exe' } : { name: 'Vinv Index Build' },
-		);
-		terminal.show();
-		// Put cargo's dir on PATH (see withPathPrefix) so a bare `cargo` resolves.
-		terminal.sendText(
-			withPathPrefix([path.dirname(cargo)], cargoBuildCommand(root), isWin ? 'powershell' : 'posix'),
-		);
-	}
-	return null;
-}
 
 /** Registers the engines commands. */
 export function registerEnginesCommands(context: vscode.ExtensionContext): void {

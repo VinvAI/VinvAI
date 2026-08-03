@@ -47,7 +47,30 @@ const REFRESH_MS = 15_000;
  * failing-symbol count only when this changes keeps the 15s refresh free —
  * parsing multi-MB traces on every tick would not be.
  */
+/**
+ * The signature is itself a recursive walk of .vinv/captures plus a stat per
+ * trace and report artifact. Cheap next to parsing the traces, but not free —
+ * and it ran on every 15s tick and every window focus change whether or not
+ * anything had been written. A capture/report watcher invalidates it instead,
+ * so the steady state costs nothing.
+ */
+let signatureMemo: { root: string; value: string } | undefined;
+
+/** Invalidates the cached signature — wired to the capture/report watcher. */
+function invalidateOverlaySignature(): void {
+	signatureMemo = undefined;
+}
+
 function overlaySignature(workspaceRoot: string): string {
+	if (signatureMemo?.root === workspaceRoot) {
+		return signatureMemo.value;
+	}
+	const value = computeOverlaySignature(workspaceRoot);
+	signatureMemo = { root: workspaceRoot, value };
+	return value;
+}
+
+function computeOverlaySignature(workspaceRoot: string): string {
 	const parts: string[] = [String(loadStoreEpoch(indexStoreDir(workspaceRoot)))];
 	const stat = (f: string): void => {
 		try {
@@ -82,6 +105,15 @@ interface FailMemo {
 	count: number;
 }
 
+/**
+ * How long after activation the first failing-symbol derivation runs.
+ *
+ * Long enough that the window is interactive and the other extensions have
+ * finished activating, short enough that the count appears before anyone reads
+ * the bar. See `scheduleFailingCount`.
+ */
+const FIRST_DERIVATION_DELAY_MS = 1_500;
+
 export function initStatusBar(context: vscode.ExtensionContext): void {
 	const item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10_000);
 	item.command = 'vinv-vs.openGraphExplorer';
@@ -89,22 +121,57 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(item);
 
 	let failMemo: FailMemo = { sig: '', count: 0 };
+	let derivationTimer: ReturnType<typeof setTimeout> | undefined;
+	let disposed = false;
+
+	/**
+	 * The failing-symbol count, NEVER derived on the caller's thread.
+	 *
+	 * Deriving it means loading the whole node store and building the runtime
+	 * overlay over every capture — 2.6s on a mid-size workspace the first time,
+	 * and `initStatusBar` is called from `activate()`, so that cost was paid
+	 * before VS Code considered the extension activated. That is what put the
+	 * window on "Activating extensions…": nothing here is urgent enough to hold
+	 * up activation, and the bar reads perfectly well without the count for a
+	 * moment.
+	 *
+	 * So: serve the last known count immediately, and schedule the real
+	 * derivation. When it lands it repaints. A stale-by-one-tick count on a
+	 * status bar is invisible; a frozen window is not.
+	 */
 	const currentFailingCount = (root: string): number => {
 		const sig = overlaySignature(root);
-		if (sig === failMemo.sig) {
-			return failMemo.count;
+		if (sig !== failMemo.sig) {
+			scheduleFailingCount(root, sig);
 		}
-		let count = 0;
-		try {
-			const nodes = loadNodes(indexStoreDir(root));
-			const overlay = loadRuntimeOverlay(root, nodes);
-			count = collectRuntimeErrorClusters(nodes, overlay).clusters.length;
-		} catch {
-			// Unreadable store mid-reindex: report calm, retry next tick.
-		}
-		failMemo = { sig, count };
-		return count;
+		return failMemo.count;
 	};
+
+	function scheduleFailingCount(root: string, sig: string): void {
+		if (derivationTimer || disposed) {
+			return; // one derivation in flight is enough; it re-checks on completion
+		}
+		derivationTimer = setTimeout(() => {
+			derivationTimer = undefined;
+			if (disposed) {
+				return;
+			}
+			let count = 0;
+			try {
+				const nodes = loadNodes(indexStoreDir(root));
+				const overlay = loadRuntimeOverlay(root, nodes);
+				count = collectRuntimeErrorClusters(nodes, overlay).clusters.length;
+			} catch {
+				// Unreadable store mid-reindex: report calm, retry next tick.
+				return;
+			}
+			const changed = failMemo.count !== count;
+			failMemo = { sig, count };
+			if (changed) {
+				update();
+			}
+		}, FIRST_DERIVATION_DELAY_MS);
+	}
 
 	const update = (): void => {
 		const folder = vscode.workspace.workspaceFolders?.[0];
@@ -201,8 +268,30 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 
 	update();
 	const timer = setInterval(update, REFRESH_MS);
+	context.subscriptions.push({
+		dispose: () => {
+			disposed = true;
+			if (derivationTimer) {
+				clearTimeout(derivationTimer);
+			}
+		},
+	});
+	// The evidence the failing-symbol count derives from. Watching it lets the
+	// signature be recomputed only when something actually landed, instead of
+	// re-walking the capture tree on every tick.
+	const evidenceWatcher = vscode.workspace.createFileSystemWatcher(
+		'**/.vinv/{captures,identification,reports,index}/**',
+	);
+	const onEvidence = (): void => {
+		invalidateOverlaySignature();
+		update();
+	};
 	context.subscriptions.push(
 		{ dispose: () => clearInterval(timer) },
+		evidenceWatcher,
+		evidenceWatcher.onDidCreate(onEvidence),
+		evidenceWatcher.onDidChange(onEvidence),
+		evidenceWatcher.onDidDelete(onEvidence),
 		// A 15s poll is fine for epoch and failing counts, which change slowly.
 		// It is not fine for the running indicator: a service that stops would
 		// keep spinning for up to fifteen seconds, which is precisely the kind
@@ -215,9 +304,15 @@ export function initStatusBar(context: vscode.ExtensionContext): void {
 		// may have reindexed while the user was away).
 		vscode.window.onDidChangeWindowState((s) => {
 			if (s.focused) {
+				// The watcher does not fire for writes made while this window was
+				// unfocused in some setups, so re-derive rather than trust the memo.
+				invalidateOverlaySignature();
 				update();
 			}
 		}),
-		vscode.workspace.onDidChangeWorkspaceFolders(update),
+		vscode.workspace.onDidChangeWorkspaceFolders(() => {
+			invalidateOverlaySignature();
+			update();
+		}),
 	);
 }

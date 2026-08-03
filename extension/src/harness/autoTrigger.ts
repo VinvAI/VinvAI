@@ -1104,15 +1104,25 @@ export async function runVerifiedHotspotEpisode(
 	 * Absent for panel clicks, which are not queued requests.
 	 */
 	requestId?: string,
+	/**
+	 * Progress surface for the pre-dispatch work. Supplied by the panel/command
+	 * paths (a click deserves visible feedback); absent for chat-request sweeps,
+	 * which have no window to report into.
+	 */
+	ui?: OptimizeProgressUi,
 ): Promise<void> {
 	let prep: OptimizationPrep;
 	try {
+		ui?.stage('reading the evidence');
 		prep =
 			row !== undefined
 				? prepareRowOptimization(workspaceRoot, row)
 				: prepareOptimizationSweep(workspaceRoot, 'hotspots');
 	} catch {
 		prep = NO_PLAN;
+	}
+	if (ui?.isCancelled()) {
+		return;
 	}
 	const plan = prep.plan;
 	if (!plan) {
@@ -1136,12 +1146,49 @@ export async function runVerifiedHotspotEpisode(
 			: 'duration';
 	const deps = buildWorkspaceDeps(workspaceRoot, { row, metric });
 	const result = await runVerifiedOptimization(
-		{ label: plan.label, opportunity: plan.opportunity },
+		{
+			label: plan.label,
+			opportunity: plan.opportunity,
+			onStage: ui ? (text) => ui.stage(text) : undefined,
+			isCancelled: ui ? () => ui.isCancelled() : undefined,
+		},
 		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks, deps.episodeId),
 		deps,
 	);
 	announceVerdict(result, plan.label);
 	await autoMeasureAfterUnproven(result);
+}
+
+/**
+ * The progress surface an optimize dispatch reports into.
+ *
+ * Everything between the click and the dispatch — reading the ranked evidence,
+ * freezing the probe set, replaying the baseline, snapshotting — is real work
+ * measured in tens of seconds, and it used to run behind a completely silent
+ * UI. The engine stays free of `vscode`; the command supplies this.
+ */
+export interface OptimizeProgressUi {
+	stage: (text: string) => void;
+	isCancelled: () => boolean;
+}
+
+/**
+ * Runs `body` under a cancellable progress notification, reporting each stage.
+ * The shared wrapper for every user-initiated optimize dispatch.
+ */
+export async function withOptimizeProgress(
+	title: string,
+	body: (ui: OptimizeProgressUi) => Promise<void>,
+): Promise<void> {
+	await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title, cancellable: true },
+		async (progress, token) => {
+			await body({
+				stage: (text) => progress.report({ message: text }),
+				isCancelled: () => token.isCancellationRequested,
+			});
+		},
+	);
 }
 
 /** Cache sweep through the same verdict engine (see runVerifiedHotspotEpisode). */
@@ -1155,12 +1202,18 @@ export async function runVerifiedCacheSweep(
 	 * Absent for panel clicks, which are not queued requests.
 	 */
 	requestId?: string,
+	/** See runVerifiedHotspotEpisode — absent for chat-request sweeps. */
+	ui?: OptimizeProgressUi,
 ): Promise<void> {
 	let prep: OptimizationPrep;
 	try {
+		ui?.stage('reading the evidence');
 		prep = prepareOptimizationSweep(workspaceRoot, 'cache_candidates');
 	} catch {
 		prep = NO_PLAN;
+	}
+	if (ui?.isCancelled()) {
+		return;
 	}
 	const plan = prep.plan;
 	if (!plan) {
@@ -1178,7 +1231,12 @@ export async function runVerifiedCacheSweep(
 	}
 	const deps = buildWorkspaceDeps(workspaceRoot, {});
 	const result = await runVerifiedOptimization(
-		{ label: plan.label, opportunity: plan.opportunity },
+		{
+			label: plan.label,
+			opportunity: plan.opportunity,
+			onStage: ui ? (text) => ui.stage(text) : undefined,
+			isCancelled: ui ? () => ui.isCancelled() : undefined,
+		},
 		(hooks) => offerPreparedOptimization(context, workspaceRoot, plan, hooks, deps.episodeId),
 		deps,
 	);

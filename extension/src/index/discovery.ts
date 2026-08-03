@@ -20,6 +20,7 @@ import {
 	type BringupProgress,
 } from '../bringup/bringup';
 import { getHarnessId, isAutoDiscoverEnabled, isAutoPilotEnabled } from '../config/settings';
+import { claimHeavyPass, releaseHeavyPass } from '../harness/heavyPass';
 import {
 	runHandbookViaHarness,
 	runBringupListViaHarness,
@@ -153,6 +154,14 @@ export async function runDiscovery(
 		void vscode.window.showInformationMessage('Vinv: Discovery is already running.');
 		return { indexOk: false, handbookOk: false, deadCodeOk: false, bringupOk: false };
 	}
+	// Discovery holds the workspace harder than any other pass — it rewrites the
+	// index store, the handbook and the service list, and everything downstream
+	// reads all three. Claiming the shared slot is what stops a probe, exercise
+	// or enhance pass from running against artifacts that are being replaced
+	// underneath it. See harness/heavyPass.
+	if (!claimHeavyPass('discovery', 'Discovery')) {
+		return { indexOk: false, handbookOk: false, deadCodeOk: false, bringupOk: false };
+	}
 
 	const cts = new vscode.CancellationTokenSource();
 	activeCts = cts;
@@ -245,6 +254,7 @@ export async function runDiscovery(
 		return { indexOk, handbookOk, deadCodeOk, bringupOk };
 	} finally {
 		activeCts = undefined;
+		releaseHeavyPass('discovery');
 		cts.dispose();
 		void vscode.commands.executeCommand('setContext', 'vinv.discovering', false);
 	}

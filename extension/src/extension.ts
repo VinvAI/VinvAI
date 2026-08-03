@@ -28,6 +28,8 @@ import {
 	registerWalkthroughStepContexts,
 } from './views/nextStep';
 import { ensureVinvGitignored } from './config/gitignore';
+import { excludeVinvFromWatcher } from './config/watcherExclude';
+import { releaseOpenRuns, sweepStaleRunTrees } from './harness/runIsolation';
 import { registerDetectedTargets, registerNativeVsCodeProvider } from './mcp/mcpRegistrar';
 import { isMcpEnabled } from './config/settings';
 import {
@@ -39,7 +41,27 @@ import { maybeUpdateEngines, registerEngineUpdate } from './engines/update';
 import { maybeShowNotices } from './notices/notices';
 import { stopEmbedderIfStarted } from './embedder/sidecar';
 
+/**
+ * How long `activate` took, for the diagnostics export.
+ *
+ * VS Code holds the window on "Activating extensions…" until this function's
+ * promise settles, and everything in it runs on the host's single thread — so
+ * any blocking work here is felt by every extension in the window, not just
+ * this one. Recording the number is what makes a regression here visible
+ * instead of anecdotal.
+ */
+let activationMs = 0;
+
+/** Milliseconds `activate` spent before VS Code considered the extension live. */
+export function activationDurationMs(): number {
+	return activationMs;
+}
+
+/** Above this, activation is slow enough to be worth naming in the log. */
+const SLOW_ACTIVATION_MS = 1_000;
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	const activationStart = Date.now();
 	// On activation (install / window reload), reveal the Vinv sidebar so users
 	// land on it rather than the default Explorer.
 	void vscode.commands.executeCommand('workbench.view.extension.vinv');
@@ -125,6 +147,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// Keep Vinv's local artifacts (.vinv/) out of source control, like .claude/.
 	ensureVinvGitignored();
+
+	// Keep .vinv out of the FILE WATCHER too. It holds the index store (tens of
+	// MB), every capture, and one full git checkout per isolated run — none of
+	// which any editor feature needs to observe. .gitignore already keeps it out
+	// of search; the watcher does not read .gitignore, so without this VS Code
+	// natively watches thousands of files that only Vinv writes. Vinv's own
+	// watchers are unaffected: an explicit createFileSystemWatcher still fires.
+	void excludeVinvFromWatcher();
+
+	// Collect run checkouts a previous window left behind (a crash, or a close
+	// mid-episode). Each is a full worktree inside .vinv/runs, so a few stale
+	// ones are thousands of watched files and extra repositories for VS Code's
+	// git extension to poll. Fire-and-forget: nothing waits on it.
+	const sweepRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (sweepRoot) {
+		void sweepStaleRunTrees(sweepRoot).then((n) => {
+			if (n > 0) {
+				console.log(`Vinv: released ${n} stale run worktree(s)`);
+			}
+		});
+	}
 
 	// Kept as data sources, not as sidebar trees: Flow already shows services
 	// and Findings already shows sessions, so a second copy of each in the rail
@@ -234,6 +277,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 	);
 
+	activationMs = Date.now() - activationStart;
+	if (activationMs > SLOW_ACTIVATION_MS) {
+		// Nothing in activate() should be slow enough to reach here: the heavy
+		// derivations (the failing-symbol count, the Flow model, the optimization
+		// ranking) are all scheduled, not awaited. If this fires, something has
+		// been put back on the blocking path.
+		console.warn(
+			`Vinv: activation took ${activationMs}ms — heavy work has moved onto the activation path`,
+		);
+	}
+
 	/** Registers Vinv's MCP servers into detected agent tools when the toggle is on. */
 	function syncMcpRegistration(): void {
 		if (!isMcpEnabled()) {
@@ -257,4 +311,14 @@ export function deactivate(): void {
 	// Tear down an in-flight exercise step. Without this, closing the window leaves
 	// the engine driving the user's service with no parent and no UI to stop it.
 	abortExerciseEngine();
+	// Release any run worktree still open. The episode loop's own `finally`
+	// covers a normal end; a window closed mid-episode never reaches it, and the
+	// orphaned checkout was permanent — thousands of files left inside .vinv for
+	// this extension, VS Code's watcher and its git extension to keep observing.
+	// Best-effort: deactivate is not awaited, so the activation sweep is the
+	// backstop for whatever this does not finish.
+	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (root) {
+		releaseOpenRuns(root);
+	}
 }

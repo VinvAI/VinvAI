@@ -6,6 +6,11 @@ import { vinvHomeDir } from '../vinvHome';
 import { getHarnessId, isMcpEnabled } from '../config/settings';
 import { ENGINE_NAMES, getBinPath, enginesRoot } from '../tracelens/bin';
 import { resolveBash } from '../proc';
+import { lastEmbedderStderr } from '../embedder/sidecar';
+import { listRuns } from '../harness/runIsolation';
+import { parseCacheStats } from './parseCache';
+import { currentHeavyPass } from '../harness/heavyPass';
+import { activationDurationMs } from '../extension';
 import { detectTargets } from '../mcp/mcpRegistrar';
 
 /**
@@ -90,6 +95,12 @@ function buildReport(context: vscode.ExtensionContext, workspaceRoot: string | u
 					`session_id:        ${vscode.env.sessionId}`,
 					`bash:              ${resolveBash() ?? 'NOT FOUND'}`,
 					`workspace_open:    ${workspaceRoot ? 'yes' : 'no'}`,
+					// Host-load posture: how much parsed artifact this window is
+					// reusing instead of re-reading. A near-empty cache alongside a
+					// slowness report says the invalidation is thrashing.
+					`parse_cache:       ${parseCacheStats().entries} entries, ${Math.round(parseCacheStats().bytes / 1048576)} MB source`,
+					`heavy_pass:        ${currentHeavyPass()?.label ?? 'idle'}`,
+					`activation_ms:     ${activationDurationMs()}`,
 				].join('\n'),
 			),
 		),
@@ -114,6 +125,34 @@ function buildReport(context: vscode.ExtensionContext, workspaceRoot: string | u
 		return `${name} — ${fs.existsSync(p) ? p : 'MISSING'}`;
 	});
 	lines.push(section('Engines', fence(bins.join('\n'))));
+
+	// The embedder's last failure output. It was captured on every failed spawn
+	// and read by nothing - yet "the index build stalled" almost always resolves
+	// to something this string already said (model still downloading, port held,
+	// a torch import error). The diagnostics report is where it belongs.
+	const embedderErr = lastEmbedderStderr();
+	if (embedderErr) {
+		lines.push(section('Embedder - last stderr', fence(embedderErr)));
+	}
+
+	// Isolated harness runs. Each is a git worktree under .vinv/runs; a run whose
+	// tree still exists after its episode ended is a leak, and that leak is
+	// expensive enough (thousands of watched files, an extra repository for the
+	// git extension to poll) to be worth naming in a slowness report.
+	if (workspaceRoot) {
+		const runRows = listRuns(workspaceRoot)
+			.slice(0, 20)
+			.map((r) => {
+				const tree = path.join(workspaceRoot, '.vinv', 'runs', String(r.id), 'tree');
+				const live = fs.existsSync(tree);
+				return `${String(r.started_at ?? '?')}  ${String(r.kind ?? '?').padEnd(12)} ${String(
+					r.id,
+				).slice(0, 8)}  tree:${live ? 'PRESENT (not released)' : 'released'}`;
+			});
+		if (runRows.length > 0) {
+			lines.push(section('Harness runs (newest first)', fence(runRows.join('\n'))));
+		}
+	}
 
 	let mcpTargets: string[] = [];
 	try {

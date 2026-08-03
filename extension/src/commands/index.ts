@@ -32,6 +32,7 @@ import {
 	offerEpisodeForMemoryTrends,
 	runVerifiedCacheSweep,
 	runVerifiedHotspotEpisode,
+	withOptimizeProgress,
 } from '../harness/autoTrigger';
 import { openOptimizationReport } from '../views/optimizationReportView';
 import {
@@ -53,6 +54,12 @@ import { registerPipelineRunners } from '../harness/pipelineRunners';
 import { runInsightPass } from '../harness/insightRunner';
 import { runProbePass } from '../harness/probeRunner';
 import { registerTracesPanel } from '../views/tracesPanel';
+import { claimHeavyPass, detectRunningPass, releaseHeavyPass } from '../harness/heavyPass';
+import { isProbeRunning } from '../harness/probeRunner';
+import { isInsightRunning } from '../harness/insightRunner';
+import { isExerciseRunning } from '../harness/exerciseRunner';
+import { isEnhanceRunning } from '../index/enhanceRunner';
+import { harnessRunsInFlight } from '../harness/harnessRunner';
 import { writeEnhanceRecord, stateFromRecord } from '../index/enhanceRunner';
 import { publishEnhanceState } from '../harness/pipelineState';
 import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
@@ -86,6 +93,35 @@ function parseDuration(v: string): number | undefined {
 	return n * mult;
 }
 
+/**
+ * The long-running passes, each reporting its own module-level state.
+ *
+ * These accessors all existed and none was read — the arbitration gap that let
+ * discovery, probes, exercise and enhance run at once. `claimBusy` is the one
+ * place they are consulted: it refuses a manual start when EITHER the shared
+ * slot is held or a pass is running unclaimed (Auto-Pilot drives the runners
+ * directly and never claims).
+ */
+const RUNNING_PROBES = [
+	{ running: isProbeRunning, label: 'A probe pass' },
+	{ running: isInsightRunning, label: 'An insight pass' },
+	{ running: isExerciseRunning, label: 'An exercise pass' },
+	{ running: isEnhanceRunning, label: 'Graph enhancement' },
+	{ running: () => harnessRunsInFlight() > 0, label: 'A harness run' },
+];
+
+/** Claims the shared slot, refusing when anything heavy is already in flight. */
+function claimBusy(id: string, label: string): boolean {
+	const running = detectRunningPass(RUNNING_PROBES);
+	if (running) {
+		void vscode.window.showInformationMessage(
+			`Vinv: ${running} is already running — wait for it to finish, then try ${label} again.`,
+		);
+		return false;
+	}
+	return claimHeavyPass(id, label);
+}
+
 export function registerCommands(
 	context: vscode.ExtensionContext,
 	sessionsProvider: SessionsProvider,
@@ -104,7 +140,21 @@ export function registerCommands(
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			const result = await runInsightPass(context, folder.uri.fsPath);
+			if (!claimBusy('insights', 'The insight pass')) {
+				return;
+			}
+			let result;
+			try {
+				// Both this and the probe pass publish into the pipeline hub, which
+				// the Flow rail renders — but a palette invocation with the rail
+				// closed had no surface at all. Same treatment as the exercise pass.
+				result = await vscode.window.withProgress(
+					{ location: vscode.ProgressLocation.Notification, title: 'Vinv: building insights…' },
+					() => runInsightPass(context, folder.uri.fsPath),
+				);
+			} finally {
+				releaseHeavyPass('insights');
+			}
 			void vscode.window.showInformationMessage(
 				result.outcome === 'done'
 					? `Vinv: Insights built for ${result.endpoints} endpoint(s); ${result.issues} issue(s) identified.`
@@ -117,7 +167,18 @@ export function registerCommands(
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			const result = await runProbePass(context, folder.uri.fsPath);
+			if (!claimBusy('probes', 'The probe pass')) {
+				return;
+			}
+			let result;
+			try {
+				result = await vscode.window.withProgress(
+					{ location: vscode.ProgressLocation.Notification, title: 'Vinv: running probes…' },
+					() => runProbePass(context, folder.uri.fsPath),
+				);
+			} finally {
+				releaseHeavyPass('probes');
+			}
 			void vscode.window.showInformationMessage(
 				result.outcome === 'done'
 					? `Vinv: Probes ran — ${result.total - result.failed}/${result.total} passed.`
@@ -133,10 +194,18 @@ export function registerCommands(
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			const result = await vscode.window.withProgress(
-				{ location: vscode.ProgressLocation.Notification, title: 'Vinv: exercising every endpoint…' },
-				() => runExercisePass(context, folder.uri.fsPath),
-			);
+			if (!claimBusy('exercise', 'The exercise pass')) {
+				return;
+			}
+			let result;
+			try {
+				result = await vscode.window.withProgress(
+					{ location: vscode.ProgressLocation.Notification, title: 'Vinv: exercising every endpoint…' },
+					() => runExercisePass(context, folder.uri.fsPath),
+				);
+			} finally {
+				releaseHeavyPass('exercise');
+			}
 			if (result.outcome === 'done') {
 				void vscode.window.showInformationMessage(
 					`Vinv: exercised ${result.endpointsCovered}/${result.total} endpoints — ` +
@@ -278,7 +347,25 @@ export function registerCommands(
 			const root = folder.uri.fsPath;
 			const panel = openConfigRequestPanel(root, {
 				save: (answers) => writeAnswers(root, answers),
-				rerun: async () => void (await runExercisePass(context, root)),
+				// Same arbitration and progress as the rail's Test button: this hook
+				// starts a full exercise pass, and it used to do so silently and
+				// without consulting whether one was already running.
+				rerun: async () => {
+					if (!claimBusy('exercise', 'The exercise pass')) {
+						return;
+					}
+					try {
+						await vscode.window.withProgress(
+							{
+								location: vscode.ProgressLocation.Notification,
+								title: 'Vinv: exercising every endpoint…',
+							},
+							() => runExercisePass(context, root),
+						);
+					} finally {
+						releaseHeavyPass('exercise');
+					}
+				},
 				showError: (message) => void vscode.window.showErrorMessage(message),
 				notify: (message) => void vscode.window.showInformationMessage(`Vinv: ${message}`),
 			});
@@ -555,7 +642,16 @@ export function registerCommands(
 				return;
 			}
 			const root = folder.uri.fsPath;
-			await vscode.window.withProgress(
+			// The only long-running command that had no re-entrancy guard, and the
+			// costliest one to double-start: it opens a worker pool of adjudication
+			// agents (VINV_ENHANCER_WORKERS, default 4) and finishes with an index
+			// rewrite, so a second run doubles the agent fan-out and races the first
+			// one's `edge_overrides.jsonl` append.
+			if (!claimBusy('enhance-graph', 'Graph enhancement')) {
+				return;
+			}
+			try {
+				await vscode.window.withProgress(
 				{
 					location: vscode.ProgressLocation.Notification,
 					title: 'Vinv: Resolving ambiguous references…',
@@ -595,7 +691,10 @@ export function registerCommands(
 							(outcome.applied ? '; index updated.' : '.'),
 					);
 				},
-			);
+				);
+			} finally {
+				releaseHeavyPass('enhance-graph');
+			}
 		}),
 		// Start a closed-loop harness episode. Invoked from the graph explorer
 		// ("Send to harness" with a node row), the QnA panel (dispatch), the
@@ -712,7 +811,9 @@ export function registerCommands(
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			void runVerifiedHotspotEpisode(context, folder.uri.fsPath);
+			void withOptimizeProgress('Vinv: optimizing hotspots…', (ui) =>
+				runVerifiedHotspotEpisode(context, folder.uri.fsPath, undefined, undefined, ui),
+			);
 		}),
 		// Scoped optimization: one symbol (the row clicked in the Optimization
 		// panel), through the same verdict engine. The panel row flips to
@@ -733,10 +834,18 @@ export function registerCommands(
 				);
 				return;
 			}
-			void runVerifiedHotspotEpisode(
-				context,
-				folder.uri.fsPath,
-				typeof row === 'number' ? row : undefined,
+			// A click must show something IMMEDIATELY. Freezing the probe set,
+			// replaying the baseline and snapshotting run before the dispatch and
+			// take tens of seconds; without this the button looked dead until the
+			// dispatch toast appeared, which is what made Optimize feel broken.
+			void withOptimizeProgress('Vinv: preparing the optimization…', (ui) =>
+				runVerifiedHotspotEpisode(
+					context,
+					folder.uri.fsPath,
+					typeof row === 'number' ? row : undefined,
+					undefined,
+					ui,
+				),
 			);
 		}),
 		// Opens the full-page Optimization report (the evidence surface: ranked
@@ -858,7 +967,9 @@ export function registerCommands(
 				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
-			void runVerifiedCacheSweep(context, folder.uri.fsPath);
+			void withOptimizeProgress('Vinv: analyzing cache opportunities…', (ui) =>
+				runVerifiedCacheSweep(context, folder.uri.fsPath, undefined, ui),
+			);
 		}),
 		// Brings back an escalation the operator closed without deciding — the
 		// episode is suspended, not aborted, until they answer.

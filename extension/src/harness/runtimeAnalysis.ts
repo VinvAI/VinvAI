@@ -34,6 +34,7 @@ import {
 	type GraphNode,
 	type RuntimeOverlay,
 } from '../graph/indexGraph';
+import { cachedParse, parseCacheGeneration } from '../support/parseCache';
 
 /** One symbol observed raising errors in the trace, with its evidence line. */
 export interface ErrorCluster {
@@ -606,23 +607,45 @@ interface ExitEvent {
 	parent_component?: string;
 }
 
-function* eventsOf(file: string): Generator<ExitEvent> {
+/**
+ * Every event in one capture, reusing the previous parse while the file's
+ * (size, mtime) are unchanged — see support/parseCache.
+ *
+ * This used to be a generator that re-read and re-parsed the whole trace on
+ * every call, and SIX collectors below call it independently over every session
+ * (collectSymbolTimings, collectCacheCandidates, collectRequestSpans,
+ * collectMemoryTrends, lifetimeFrames, collectGcPressure). One
+ * OptimizationSource refresh therefore paid the full parse five times over —
+ * ~800 ms each on a mid-size capture set, all on the extension host's only
+ * thread. The generator shape was what hid it: each `for (const ev of
+ * eventsOf(f))` reads like a cheap iteration.
+ *
+ * The array is SHARED across callers for a given file version, so callers must
+ * not mutate the events. All six only read fields off them.
+ */
+function eventsOf(file: string): readonly ExitEvent[] {
+	return cachedParse(file, parseEvents);
+}
+
+function parseEvents(file: string): ExitEvent[] {
 	let text: string;
 	try {
 		text = fs.readFileSync(file, 'utf8');
 	} catch {
-		return;
+		return [];
 	}
+	const out: ExitEvent[] = [];
 	for (const line of text.split('\n')) {
 		if (!line.trim()) {
 			continue;
 		}
 		try {
-			yield JSON.parse(line) as ExitEvent;
+			out.push(JSON.parse(line) as ExitEvent);
 		} catch {
 			// Torn tail line — skip.
 		}
 	}
+	return out;
 }
 
 /**
@@ -742,7 +765,41 @@ function importedModules(source: string): string[] {
  * prompt that still touches them (a bcrypt hotspot is real — the fix just must
  * not weaken it).
  */
+/**
+ * Last guard map, valid while no file the parse cache covers has changed.
+ *
+ * The per-file import scan is memoized, but the AGGREGATION is not cheap on its
+ * own: it walks every indexed file's module list against every directly-guarded
+ * file to propagate the one-hop inheritance. That ran on every ranking pass —
+ * i.e. on every capture write — over sources that had not moved. Keying on the
+ * parse-cache generation is conservative (any cached file changing invalidates
+ * it) and cannot go stale.
+ */
+let guardMemo: { root: string; nodeCount: number; generation: number; value: Map<number, string> } | undefined;
+
 export function securityGuardReasons(
+	workspaceRoot: string,
+	nodes: GraphNode[],
+): Map<number, string> {
+	if (
+		guardMemo &&
+		guardMemo.root === workspaceRoot &&
+		guardMemo.nodeCount === nodes.length &&
+		guardMemo.generation === parseCacheGeneration()
+	) {
+		return guardMemo.value;
+	}
+	const computed = computeSecurityGuardReasons(workspaceRoot, nodes);
+	guardMemo = {
+		root: workspaceRoot,
+		nodeCount: nodes.length,
+		generation: parseCacheGeneration(),
+		value: computed,
+	};
+	return computed;
+}
+
+function computeSecurityGuardReasons(
 	workspaceRoot: string,
 	nodes: GraphNode[],
 ): Map<number, string> {
@@ -755,10 +812,20 @@ export function securityGuardReasons(
 			files.set(f, list);
 		}
 	}
+	// Per-file, memoized on (path, size, mtime). This reads and regex-scans EVERY
+	// indexed source file, and it runs inside collectCacheCandidates — i.e. on
+	// every ranking pass, which the capture watcher drives. On a repo of a few
+	// hundred files that was the better part of a second of blocking work per
+	// pass, re-derived from sources that had not changed. Editing one file now
+	// re-scans one file.
 	const importsOf = new Map<string, string[]>();
 	for (const f of files.keys()) {
+		const full = path.join(workspaceRoot, f);
 		try {
-			importsOf.set(f, importedModules(fs.readFileSync(path.join(workspaceRoot, f), 'utf8')));
+			importsOf.set(
+				f,
+				cachedParse(full, (file) => importedModules(fs.readFileSync(file, 'utf8'))),
+			);
 		} catch {
 			importsOf.set(f, []);
 		}

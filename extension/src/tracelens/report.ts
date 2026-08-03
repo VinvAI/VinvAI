@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ensureExecutableOnce } from '../support/executableBit';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
@@ -46,11 +47,7 @@ export function generateSmokeReport(
 	}
 
 	const binPath = getBinPath(context, 'tracelens');
-	try {
-		fs.chmodSync(binPath, 0o755);
-	} catch {
-		// Non-fatal: a real failure surfaces when the command runs.
-	}
+	ensureExecutableOnce(binPath);
 
 	// The api id is sanitised so it's safe as a filename regardless of how the
 	// endpoint id is shaped.

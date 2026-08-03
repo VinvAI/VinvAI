@@ -18,12 +18,10 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { buildFindings } from './findingsModel';
+import { isModelRelevantArtifact } from './artifactWatch';
 import { buildJourney } from './journeyModel';
 
 const DEBOUNCE_MS = 800;
-
-/** Basenames under .vinv/reports this source writes — never watch-triggers. */
-const SELF_OUTPUTS = new Set(['findings.json', 'journey.json']);
 
 /** Last-written content per mirror, for the change gate. */
 export interface ReportMirrorMemo {
@@ -81,8 +79,9 @@ export class ReportMirrorSource implements vscode.Disposable {
 				new vscode.RelativePattern(folder.uri.fsPath, '.vinv/**'),
 			);
 			const onFs = (uri: vscode.Uri): void => {
-				// Our own mirror writes must never re-trigger a recompute.
-				if (!SELF_OUTPUTS.has(path.basename(uri.fsPath))) {
+				// Neither our own mirror writes nor the other background source's,
+				// and none of the per-run scratch either. See views/artifactWatch.
+				if (isModelRelevantArtifact(uri.fsPath)) {
 					this.refreshSoon();
 				}
 			};

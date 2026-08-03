@@ -19,6 +19,7 @@ import {
 	type SessionMark,
 } from '../runtime/traceStore';
 import { detectChangedFiles, type ChangeSource } from './changedFiles';
+import { cachedParse } from '../support/parseCache';
 
 /** One symbol chunk as stored in .vinv/index/chunks.jsonl (text omitted). */
 export interface GraphNode {
@@ -290,7 +291,19 @@ interface RawChunk {
 	parent?: string | null;
 }
 
+/**
+ * Parses one JSONL artifact, reusing the previous parse while the file's
+ * (size, mtime) are unchanged — see support/parseCache.
+ *
+ * The returned array is SHARED with every other caller for that file version,
+ * so it must be treated as read-only. Both callers here comply: loadNodes maps
+ * into fresh objects, loadEdges filters into a new array.
+ */
 function readJsonl<T>(file: string): T[] {
+	return cachedParse(file, parseJsonl<T>);
+}
+
+function parseJsonl<T>(file: string): T[] {
 	const out: T[] = [];
 	let raw: string;
 	try {
@@ -633,7 +646,10 @@ export function loadRuntimeOverlay(
 	}
 	for (const source of sources) {
 		try {
-			const doc = JSON.parse(fs.readFileSync(source, 'utf8')) as { tree?: TraceMapNode };
+			const doc = cachedParse(
+				source,
+				(f) => JSON.parse(fs.readFileSync(f, 'utf8')) as { tree?: TraceMapNode },
+			);
 			if (doc.tree) {
 				absorb(doc.tree);
 			}
@@ -800,6 +816,51 @@ function recordArgExemplar(
 	}
 }
 
+/** One enter/exit row of a raw tracelens capture. */
+interface RawTraceRow {
+	event?: string;
+	request_id?: string;
+	thread_id?: number;
+	component?: string;
+	parent_component?: string | null;
+	duration_ms?: number | string;
+	status?: string;
+	error_type?: string | null;
+	error_message?: string | null;
+	error_stack?: string | null;
+	args_schema?: string;
+	args_summary?: Record<string, unknown>;
+}
+
+/**
+ * Enter/exit rows of one capture. Hoisted out of absorbRawCaptures so the parse
+ * can be memoized per (file, size, mtime) — the rows are read-only to every
+ * caller, and re-parsing a multi-MB capture per overlay build was the single
+ * most repeated piece of work on the extension host.
+ */
+function parseRawTraceRows(traceFile: string): RawTraceRow[] {
+	let text: string;
+	try {
+		text = fs.readFileSync(traceFile, 'utf8');
+	} catch {
+		return [];
+	}
+	const rows: RawTraceRow[] = [];
+	for (const line of text.split('\n')) {
+		// Cheap pre-filter before the parse: a capture also carries session,
+		// memory and side-effect rows this overlay has no use for.
+		if (!line.includes('"enter"') && !line.includes('"exit"')) {
+			continue;
+		}
+		try {
+			rows.push(JSON.parse(line) as RawTraceRow);
+		} catch {
+			// Torn tail line — skip.
+		}
+	}
+	return rows;
+}
+
 function absorbRawCaptures(
 	workspaceRoot: string,
 	nodes: GraphNode[],
@@ -818,20 +879,6 @@ function absorbRawCaptures(
 		const rows = rowsFor(component);
 		return rows.length === 1 ? rows[0] : null;
 	};
-	interface RawTraceRow {
-		event?: string;
-		request_id?: string;
-		thread_id?: number;
-		component?: string;
-		parent_component?: string | null;
-		duration_ms?: number | string;
-		status?: string;
-		error_type?: string | null;
-		error_message?: string | null;
-		error_stack?: string | null;
-		args_schema?: string;
-		args_summary?: Record<string, unknown>;
-	}
 	// Observation ordering: every capture session (one trace.jsonl) is ordered
 	// by (index epoch, capture time, path) — the SHARED lifecycle order, so
 	// this overlay and the MCP coverage_of tool pick the same latest session.
@@ -847,12 +894,10 @@ function absorbRawCaptures(
 	// Per (row, failure key): when the failure was last observed.
 	const failLastSeen = new Map<string, SessionMark>();
 	for (const traceFile of findTraceFiles(path.join(workspaceRoot, '.vinv', 'captures'))) {
-		let text: string;
-		try {
-			text = fs.readFileSync(traceFile, 'utf8');
-		} catch {
-			continue;
-		}
+		// Enter/exit rows only, parsed once per (file, size, mtime) and shared
+		// with every other overlay build in this window — a raw capture is
+		// multi-MB and this function is reached from ten call sites.
+		const rows = cachedParse(traceFile, parseRawTraceRows);
 		const mark = sessionOf(traceFile);
 		// This session's per-row facts, folded into rowLatest after the file.
 		const sessionRows = new Map<number, { errors: number; failKeys: Set<string> }>();
@@ -897,16 +942,7 @@ function absorbRawCaptures(
 			// that failed), not whatever enter happens to be last in the file.
 			args: { schema: string | null; summary: Record<string, unknown> | null } | null;
 		}> = [];
-		for (const line of text.split('\n')) {
-			if (!line.includes('"enter"') && !line.includes('"exit"')) {
-				continue;
-			}
-			let ev: RawTraceRow;
-			try {
-				ev = JSON.parse(line) as RawTraceRow;
-			} catch {
-				continue;
-			}
+		for (const ev of rows) {
 			if (!ev.component) {
 				continue;
 			}
