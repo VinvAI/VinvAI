@@ -338,9 +338,9 @@ repair it** — this file lives outside the repo, so a fix episode's diff can ne
   (the drive-letter colon would be parsed as a `PATH` separator) — and join `PATH` entries with `:`;
 - **never write a single backslash in any path in this file.** `\U` / `\A` are not valid JSON escapes,
   so the file would not parse — and inside the `command` string `bash` eats backslashes as escapes, so
-  `C:\Users\SERVER\.tracelens` arrives as `C:UsersSERVER.tracelens`: a relative path, meaning the trace
+  `C:\Users\you\.tracelens` arrives as `C:Usersyou.tracelens`: a relative path, meaning the trace
   silently lands where nothing reads it and the baseline comes back empty. Use forward slashes
-  (`C:/Users/SERVER/…`), which are valid JSON **and** a valid Windows path.
+  (`C:/Users/you/…`), which are valid JSON **and** a valid Windows path.
 
 Then prove it: run the exact string you are about to record in a **fresh shell that has not activated
 anything**, and confirm the service still comes up and `trace.jsonl` still grows. If it only works in

@@ -7,4 +7,11 @@ type: software
 authors:
   - name: VinvAI
 repository-code: 'https://github.com/VinvAI/VinvAI'
+url: 'https://vinv.ai'
+abstract: >-
+  Vinv traces what a program actually does at runtime and joins those traces
+  back to the exact symbol and line, so findings about correctness and
+  performance carry evidence instead of inference.
 license: Apache-2.0
+version: 0.2.4
+date-released: '2026-08-02'

@@ -749,9 +749,9 @@ colon would be parsed as a `PATH` separator — and join `PATH` entries with `:`
 **Never write a single backslash in any path in this file.** It breaks twice:
 `\U` / `\A` are not valid JSON escapes, so the file you just wrote does not
 parse; and inside the `command` string `bash` eats backslashes as escapes, so
-`C:\Users\SERVER\.tracelens` arrives as `C:UsersSERVER.tracelens` — a relative
+`C:\Users\you\.tracelens` arrives as `C:Usersyou.tracelens` — a relative
 path, so the trace silently lands where nothing reads it and the baseline comes
-back empty. Use forward slashes (`C:/Users/SERVER/…`): valid JSON, and a valid
+back empty. Use forward slashes (`C:/Users/you/…`): valid JSON, and a valid
 Windows path.
 
 Then prove it: run the exact string you are about to record in a **fresh shell

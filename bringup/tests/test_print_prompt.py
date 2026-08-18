@@ -130,19 +130,19 @@ def test_deliverable_json_example_actually_parses(key: str) -> None:
     """The JSON block the agent copies must BE valid JSON once rendered.
 
     It previously wasn't on Windows: ``root``/``_caps_base`` were interpolated as
-    native paths, so the example read ``"working_directory": "C:\\Anshul\\proj"``
-    with single backslashes — ``\\A`` is not a valid JSON escape, in a section that
+    native paths, so the example read ``"working_directory": "C:\\work\\proj"``
+    with single backslashes — ``\\w`` is not a valid JSON escape, in a section that
     simultaneously demands "valid JSON only". The same backslashes inside the
-    ``command`` string are eaten by ``bash -lc`` (``C:\\Users\\S`` →
-    ``C:UsersS``), pointing ``--output`` at a relative path so the baseline reads
+    ``command`` string are eaten by ``bash -lc`` (``C:\\Users\\y`` →
+    ``C:Usersy``), pointing ``--output`` at a relative path so the baseline reads
     empty. Renders with Windows-shaped paths and parses the result.
     """
     kw = {
         **_START_KW,
-        "root": "C:\\Anshul\\project\\demo",
-        "_root_json": "C:/Anshul/project/demo",
-        "_caps_base": "C:/Users/SERVER/.tracelens/baselines",
-        "start_commands_json": "C:\\Anshul\\project\\demo\\.vinv\\start_commands\\svc.json",
+        "root": "C:\\work\\project\\demo",
+        "_root_json": "C:/work/project/demo",
+        "_caps_base": "C:/Users/you/.tracelens/baselines",
+        "start_commands_json": "C:\\work\\project\\demo\\.vinv\\start_commands\\svc.json",
     }
     out = _template(key).format(**kw)
     blocks = re.findall(r"```json\n(.*?)```", out, re.DOTALL)

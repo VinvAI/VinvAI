@@ -53,6 +53,12 @@ Or straight from your editor's CLI:
 git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
 ```
 
+<sub>Windows (PowerShell):</sub>
+
+```powershell
+git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
+```
+
 ## Context beats model size
 
 Receipts first — then how the loop produces them.
@@ -343,7 +349,7 @@ The full learning walk — reward, propensity, gating math, with `file:line` for
 
 <details><summary><b>Deeper: the context graph, Auto-Pilot, and repo layout</b></summary>
 
-Vinv indexes **the code** and generates — from your own run — **the traces** and **the metrics derived from them**, then ties all three to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → exercise → fix → re-verify, until green or budget. Layout: [`extension/`](extension/) (editor UI + MCP servers), [`index/`](index/) (Rust semantic index), [`embedder/`](embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](tracelens/) (zero-edit tracer), [`exerciser/`](exerciser/) (the oracle swarm + campaign bandit), [`identification/`](identification/) (trace↔source join), [`handbook/`](handbook/) · [`bringup/`](bringup/) · [`goal/`](goal/) (discovery & episodes), [`tests/e2e/`](https://github.com/VinvAI/VinvAI/blob/main/tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
+Vinv indexes **the code** and generates — from your own run — **the traces** and **the metrics derived from them**, then ties all three to the exact function that handled each request. The artefacts are commodities; **the join is not.** Auto-Pilot drives the whole loop unaided: discover services → set up via your agent → start under tracing → exercise → fix → re-verify, until green or budget. Layout: [`extension/`](https://github.com/VinvAI/VinvAI/blob/main/extension/) (editor UI + MCP servers), [`index/`](https://github.com/VinvAI/VinvAI/blob/main/index/) (Rust semantic index), [`embedder/`](https://github.com/VinvAI/VinvAI/blob/main/embedder/) (local [CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed) sidecar), [`tracelens/`](https://github.com/VinvAI/VinvAI/blob/main/tracelens/) (zero-edit tracer), [`exerciser/`](https://github.com/VinvAI/VinvAI/blob/main/exerciser/) (the oracle swarm + campaign bandit), [`identification/`](https://github.com/VinvAI/VinvAI/blob/main/identification/) (trace↔source join), [`handbook/`](https://github.com/VinvAI/VinvAI/blob/main/handbook/) · [`bringup/`](https://github.com/VinvAI/VinvAI/blob/main/bringup/) · [`goal/`](https://github.com/VinvAI/VinvAI/blob/main/goal/) (discovery & episodes), [`tests/e2e/`](https://github.com/VinvAI/VinvAI/blob/main/tests/e2e/) (planted-bug golden test). Python engines are one [uv](https://docs.astral.sh/uv/) workspace.
 </details>
 
 ## After install: the things to try

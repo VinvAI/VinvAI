@@ -1,0 +1,64 @@
+# Dependency updates across the three toolchains this monorepo ships.
+#
+# One entry per ecosystem AND per manifest location — Dependabot does not
+# recurse, so `directory` must name the directory holding the manifest:
+# uv.lock at the root, index/Cargo.toml, extension/package.json.
+#
+# Grouped so a week's updates arrive as one PR per ecosystem rather than one
+# per dependency: this repo pins broadly (ruff, pytest, hypothesis, OTel
+# contrib) and ungrouped updates would swamp the queue.
+version: 2
+updates:
+  # Python engines — the uv workspace. Covers every member's pyproject.toml
+  # through the root lockfile.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-dev-tooling:
+        patterns:
+          - "ruff"
+          - "pytest*"
+          - "hypothesis*"
+      python-runtime:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "ruff"
+          - "pytest*"
+          - "hypothesis*"
+
+  # Rust semantic index.
+  - package-ecosystem: "cargo"
+    directory: "/index"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
+  # Editor extension.
+  - package-ecosystem: "npm"
+    directory: "/extension"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      npm-dev:
+        dependency-type: "development"
+      npm-prod:
+        dependency-type: "production"
+
+  # The workflows themselves — actions/checkout, astral-sh/setup-uv, etc.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns:
+          - "*"

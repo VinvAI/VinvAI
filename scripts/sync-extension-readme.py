@@ -42,17 +42,32 @@ _PILL_BLOCK = re.compile(
 )
 
 # Paths that must be absolute on Open VSX (relative to repo root).
+#
+# The alternation is DERIVED from the repo root rather than hand-listed. The
+# hand-listed version named only LICENSE, the three community files, docs/,
+# extension/ and tests/ — so every engine directory (index/, tracelens/,
+# exerciser/, bringup/, …) fell through and shipped as a RELATIVE link on the
+# marketplace listing, which `vsce package --no-rewrite-relative-links` leaves
+# untouched: nine dead links on open-vsx.org. Deriving the set means a new
+# top-level directory can never reintroduce that.
+#
+# Longest-first so a name that prefixes another cannot shadow it.
+_ROOT_NAMES = sorted(
+    (entry.name for entry in ROOT.iterdir() if not entry.name.startswith(".")),
+    key=len,
+    reverse=True,
+)
+_ROOT_ALT = "|".join(re.escape(name) for name in _ROOT_NAMES)
+
 _REL_LINK = re.compile(
     r"(?P<prefix>\[[^\]]*\]\()(?P<path>"
-    r"(?:LICENSE|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|SECURITY\.md|"
-    r"docs/[^)#]+|extension/[^)#]+|tests/[^)#]+)"
+    rf"(?:{_ROOT_ALT})(?:/[^)#]*)?"
     r")(?P<suffix>(?:#[^)]*)?\))"
 )
 
 _REL_HREF = re.compile(
     r'(?P<prefix>href=")(?P<path>'
-    r"(?:LICENSE|CONTRIBUTING\.md|CODE_OF_CONDUCT\.md|SECURITY\.md|"
-    r"docs/[^\"#]+)"
+    rf"(?:{_ROOT_ALT})(?:/[^\"#]*)?"
     r')(?P<suffix>(?:#[^"]*)?")'
 )
 

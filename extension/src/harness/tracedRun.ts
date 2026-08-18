@@ -60,8 +60,8 @@ export function splitEnvPrefix(command: string): { env: Record<string, string>; 
 }
 
 /**
- * Rewrites an MSYS/Git-Bash absolute path (`/c/Anshul/…`) as a native Windows
- * one (`C:\Anshul\…`). Identity everywhere else, and on anything that is not a
+ * Rewrites an MSYS/Git-Bash absolute path (`/c/work/…`) as a native Windows
+ * one (`C:\work\…`). Identity everywhere else, and on anything that is not a
  * single-letter drive root — a genuine POSIX path must survive untouched.
  *
  * Same root cause as the env prefix: bring-up drives Git Bash on Windows, so

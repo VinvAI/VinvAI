@@ -53,6 +53,12 @@ Or straight from your editor's CLI:
 git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
 ```
 
+<sub>Windows (PowerShell):</sub>
+
+```powershell
+git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
+```
+
 ## Context beats model size
 
 Receipts first — then how the loop produces them.

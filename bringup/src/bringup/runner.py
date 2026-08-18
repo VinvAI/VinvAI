@@ -1236,10 +1236,10 @@ def start_instruction(
     # inside a shell command (`--output …`, `wc -l …`) that the recorded entry
     # carries into `bash -lc`, and a Windows path written with single backslashes
     # loses them twice over:
-    #   * bash eats them as escapes — `C:\Users\SERVER\.tracelens` arrives as
-    #     `C:UsersSERVER.tracelens`, a relative path, so the trace lands
+    #   * bash eats them as escapes — `C:\Users\you\.tracelens` arrives as
+    #     `C:Usersyou.tracelens`, a relative path, so the trace lands
     #     somewhere the backend reader never scans and the baseline reads empty;
-    #   * `\U` / `\S` are not valid JSON escapes, so the deliverable this prompt
+    #   * `\U` / `\y` are not valid JSON escapes, so the deliverable this prompt
     #     asks for would not even parse — while the same section demands "valid
     #     JSON only".
     # Forward slashes dodge both (no escape to eat, nothing to escape) and are
