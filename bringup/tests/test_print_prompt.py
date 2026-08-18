@@ -65,10 +65,15 @@ def _template(key: str) -> str:
 
 
 def test_all_template_files_present() -> None:
-    for key in ("list_instruction", "list_instruction_portable",
-                "start_instruction", "start_instruction_portable",
-                "otel_pin_block", "tracelens_install_editable",
-                "tracelens_install_missing"):
+    for key in (
+        "list_instruction",
+        "list_instruction_portable",
+        "start_instruction",
+        "start_instruction_portable",
+        "otel_pin_block",
+        "tracelens_install_editable",
+        "tracelens_install_missing",
+    ):
         assert (_PROMPTS_DIR / f"{key}.txt").is_file(), f"{key}.txt missing from prompts dir"
 
 
@@ -97,10 +102,10 @@ def test_portable_has_no_harness_tool_tokens(key: str) -> None:
 
 def test_portable_start_keeps_deliverable_contract() -> None:
     out = _template("start_instruction_portable").format(**_START_KW)
-    assert "--target-package svc" in out            # instrumentation targets
-    assert "trace.jsonl" in out                      # tracelens output path
-    assert _START_KW["start_commands_json"] in out   # where to write the deliverable
-    assert '"verified"' in out                       # the verified-command JSON schema
+    assert "--target-package svc" in out  # instrumentation targets
+    assert "trace.jsonl" in out  # tracelens output path
+    assert _START_KW["start_commands_json"] in out  # where to write the deliverable
+    assert '"verified"' in out  # the verified-command JSON schema
 
 
 @pytest.mark.parametrize("key", ["start_instruction", "start_instruction_portable"])
@@ -167,7 +172,7 @@ def test_start_templates_carry_replay_contracts(key: str) -> None:
     alone protects nobody in practice.
     """
     out = _template(key).format(**_START_KW)
-    assert "SELF-CONTAINED" in out            # recorded ≠ what your shell can resolve
-    assert "exit 127" in out                  # the concrete failure it prevents
-    assert "REPLAY CONTRACT" in out           # foreground-only, no `&` / nohup / redirect
-    assert "bash -lc" in out                  # how the replayer actually runs it
+    assert "SELF-CONTAINED" in out  # recorded ≠ what your shell can resolve
+    assert "exit 127" in out  # the concrete failure it prevents
+    assert "REPLAY CONTRACT" in out  # foreground-only, no `&` / nohup / redirect
+    assert "bash -lc" in out  # how the replayer actually runs it

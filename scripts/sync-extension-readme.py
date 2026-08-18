@@ -71,9 +71,7 @@ _REL_HREF = re.compile(
     r')(?P<suffix>(?:#[^"]*)?")'
 )
 
-_REL_IMG = re.compile(
-    r"(?P<prefix>src=\")(?P<path>docs/media/[^\"#]+)(?P<suffix>\")"
-)
+_REL_IMG = re.compile(r"(?P<prefix>src=\")(?P<path>docs/media/[^\"#]+)(?P<suffix>\")")
 
 
 def _absolutize(text: str) -> str:
@@ -99,8 +97,16 @@ def _absolutize(text: str) -> str:
 def render(root_readme: str) -> str:
     match = _PILL_BLOCK.search(root_readme)
     if not match:
-        raise SystemExit("sync-extension-readme: no shields.io pill block found in README.md")
-    body = root_readme[: match.start()] + "\n" + VSX_PILLS + "\n" + root_readme[match.end() :]
+        raise SystemExit(
+            "sync-extension-readme: no shields.io pill block found in README.md"
+        )
+    body = (
+        root_readme[: match.start()]
+        + "\n"
+        + VSX_PILLS
+        + "\n"
+        + root_readme[match.end() :]
+    )
     # Drop a leading newline introduced when the pill block started mid-file.
     if body.startswith("\n"):
         body = body[1:]
@@ -109,7 +115,9 @@ def render(root_readme: str) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="fail if extension/README.md is stale")
+    parser.add_argument(
+        "--check", action="store_true", help="fail if extension/README.md is stale"
+    )
     args = parser.parse_args()
 
     expected = render(SRC.read_text(encoding="utf-8"))
