@@ -11,7 +11,7 @@ candidate invariants and keeps only those that HOLD across enough evidence:
 * ``size_relation``— ``len(output) <= len(input)`` held on every observation.
 * ``id_monotonic`` — an id-like field strictly increased across calls.
 
-Discipline (matches ``testflow.md`` Phase-7 / the mission spec):
+Discipline:
 
 * an invariant is KEPT only with **support ≥ 5** observations and **0
   counterexamples**;

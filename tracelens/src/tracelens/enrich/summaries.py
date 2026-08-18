@@ -1,4 +1,4 @@
-"""Bounded value summaries (spec §4.4).
+"""Bounded value summaries.
 
 T4.5 — ``byte_cap`` defaults to ``$TRACELENS_SUMMARY_BYTE_CAP`` if set, else 256.
 """

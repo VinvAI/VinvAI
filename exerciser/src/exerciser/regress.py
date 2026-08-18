@@ -1,8 +1,7 @@
 """Regression replay — the accumulated behavior suite, diffed against baselines.
 
 Every distinct ``(endpoint, input) → expected status + shape`` recorded by ``run``
-becomes a permanent regression case (testflow's "every discovered behavior
-becomes a permanent regression test"). ``regress`` replays them against the live
+becomes a permanent regression case. ``regress`` replays them against the live
 service and reports behaviour / perf / contract diffs, routing each verdict
 through the SAME degraded/same/improved semantics ``probeBaseline.ts`` uses
 (``baseline.py`` port).

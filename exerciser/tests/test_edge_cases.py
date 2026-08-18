@@ -1,4 +1,4 @@
-"""Edge cases the mission's verification bar calls out explicitly."""
+"""Edge cases the verification bar calls out explicitly."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""ExternalCallEvent: DB / HTTP / cache / queue / LLM external boundary calls (doc 01 §3.4)."""
+"""ExternalCallEvent: DB / HTTP / cache / queue / LLM external boundary calls."""
 
 from __future__ import annotations
 

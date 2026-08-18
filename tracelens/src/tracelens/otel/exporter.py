@@ -1,4 +1,4 @@
-"""Export OTel spans as two JSONL lines per span (enter + exit), spec §4 / §5.9."""
+"""Export OTel spans as two JSONL lines per span (enter + exit)."""
 
 from __future__ import annotations
 

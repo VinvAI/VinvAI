@@ -7,7 +7,7 @@ Produces a parquet keyed by ``request_id`` with one row per request:
     duration_ms
 
 This is the artifact ``lens-contracts.ReplayCorpusRow`` describes. We don't yet have
-``ExternalCallEvent`` rows in the JSONL (that's a Phase 1.4 deliverable), so the column
+``ExternalCallEvent`` rows in the JSONL, so the column
 ``n_external_calls`` is currently always 0; the column is in place so downstream code can
 evolve without a schema change.
 """

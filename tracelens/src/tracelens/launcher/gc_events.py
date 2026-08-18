@@ -1,4 +1,4 @@
-"""GC-as-latency-source capture (spec §20).
+"""GC-as-latency-source capture.
 
 Registers a ``gc.callbacks`` observer at the launcher's bootstrap point — the
 same wiring style as the calibration bootstrap (``launcher.calibration``) —

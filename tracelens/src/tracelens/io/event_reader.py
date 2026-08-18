@@ -1,11 +1,11 @@
 """EventReader — single source of validated event dicts for offline analyze stages.
 
 Today: only ``JSONLEventReader`` ships, reading the JSONL file produced by
-``JSONLFileSpanExporter``. Phase 0 of IMPLEMENTATION_ROADMAP.md adds a SQLite-backed reader
-behind the same interface; analyze stages will not need to change.
+``JSONLFileSpanExporter``. A SQLite-backed reader can be added behind the same
+interface; analyze stages will not need to change.
 
-Schema validation lives here so every consumer gets the same skip-count semantics
-(spec §4.5). The schema is generated from ``lens_contracts.SpanEvent``; Tracelens
+Schema validation lives here so every consumer gets the same skip-count semantics.
+The schema is generated from ``lens_contracts.SpanEvent``; Tracelens
 does not keep a second handwritten copy. For v0.1 the reader returns SpanEvent rows only.
 """
 
@@ -27,7 +27,7 @@ class EventReader(Protocol):
     """Source-agnostic stream of validated event dicts.
 
     Implementations must report the count of skipped (invalid) lines/rows so callers
-    can surface the number to the user (spec §4.5). The expected usage is::
+    can surface the number to the user. The expected usage is::
 
         with open_reader(path) as r:
             for row in r:

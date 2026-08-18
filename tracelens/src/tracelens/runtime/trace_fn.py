@@ -1,4 +1,4 @@
-"""Per-call span enrichment: args/result hashes and external invariants (spec §5.7).
+"""Per-call span enrichment: args/result hashes and external invariants.
 
 Three per-call cost signals are captured, all bracketing the exact
 ``impl(*args, **kwargs)`` invocation the span wraps and all *inclusive* of nested

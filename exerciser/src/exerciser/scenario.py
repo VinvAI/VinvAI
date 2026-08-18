@@ -1,9 +1,8 @@
 """Stateful sequential scenarios — ordered steps with variable capture/substitution.
 
-testflow.md's "stateful workflow exploration" and the mission's coverage matrix
-call for ordered flows where state flows between steps: signup → login →
-create-item → get → delete, with the token and created ids captured from one
-step's response and substituted into the next step's inputs.
+Ordered flows where state flows between steps: signup → login → create-item →
+get → delete, with the token and created ids captured from one step's response
+and substituted into the next step's inputs.
 
 A scenario is a list of STEPS, each ``{endpoint, method, path, inputs, capture,
 expect}``. ``capture`` maps a variable name → a JSON pointer into the step's

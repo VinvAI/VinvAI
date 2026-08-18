@@ -1,4 +1,4 @@
-"""HTML report: run offline stages and render a self-contained dashboard (spec §13 / M12).
+"""HTML report: run offline stages and render a self-contained dashboard.
 
 The report is a single static HTML file with inline CSS/JS/SVG — no external/CDN
 dependencies, so it renders offline. It runs every offline stage (spans, depgraph,
@@ -401,7 +401,8 @@ color:var(--muted)}
 margin:7px 0}
 .bar-label{font-family:var(--mono);font-size:11px;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
-.bar-track{background:var(--bg);border:1px solid var(--line);border-radius:0;height:16px;overflow:hidden}
+.bar-track{background:var(--bg);border:1px solid var(--line);border-radius:0;
+height:16px;overflow:hidden}
 .bar-fill{height:100%;background:var(--ink-soft);border-radius:0}
 .bar-fill.amber{background:var(--warn)}
 .bar-fill.red{background:var(--bad)}

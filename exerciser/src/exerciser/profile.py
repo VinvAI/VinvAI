@@ -1,4 +1,4 @@
-"""The behavioral profile — testflow Phase-10 for every endpoint.
+"""The behavioral profile — one per endpoint.
 
 From ``results.jsonl`` (every execution) and the freshest coverage join, build,
 per endpoint:
@@ -10,8 +10,8 @@ per endpoint:
 * side-effect signals mined from the trace spans;
 * learned invariants (Daikon-lite, ``invariants.py``).
 
-Writes ``profile.json`` (machine) + ``profile.md`` (a human report shaped like
-testflow.md's Phase-10 example) + ``invariants.json``.
+Writes ``profile.json`` (machine) + ``profile.md`` (the human report rendered by
+``render_profile_md``) + ``invariants.json``.
 """
 
 from __future__ import annotations
@@ -287,7 +287,10 @@ def build_profile(
 
 
 def render_profile_md(profile: dict[str, Any]) -> str:
-    """Render the human report, shaped like testflow.md's Phase-10 example."""
+    """Render the human report: a run-wide summary line, then one section per
+    endpoint carrying inputs explored by class, the status distribution, symbol
+    coverage with the uncovered names, P50/P95 latency, and any side effects and
+    learned invariants."""
     lines: list[str] = ["# Behavioral profile", ""]
     lines.append(
         f"{profile['endpoint_count']} endpoints exercised · "

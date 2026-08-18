@@ -1,4 +1,4 @@
-"""Stage F — DoWhy GCM anomaly attribution (spec §11, optional ``tracelens[rca]``)."""
+"""Stage F — DoWhy GCM anomaly attribution (optional ``tracelens[rca]``)."""
 
 from __future__ import annotations
 

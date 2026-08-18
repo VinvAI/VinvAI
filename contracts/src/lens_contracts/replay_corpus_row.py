@@ -1,4 +1,4 @@
-"""ReplayCorpusRow: per-request entry that the equivalence verifier replays (doc 01 §3.5)."""
+"""ReplayCorpusRow: per-request entry that the equivalence verifier replays."""
 
 from __future__ import annotations
 

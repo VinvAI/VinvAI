@@ -1,4 +1,4 @@
-"""icontract-based invariant helper (spec §12.1)."""
+"""icontract-based invariant helper."""
 
 from __future__ import annotations
 

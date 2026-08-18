@@ -1,4 +1,4 @@
-"""Stage E — CIRCA-style residual shift (spec §10).
+"""Stage E — CIRCA-style residual shift.
 
 Primary path: sklearn ``LinearRegression`` + ``scipy.stats.ks_2samp`` on residuals per
 depgraph node with parents (plan §10 fallback). PyRCA may be wired later as an optional

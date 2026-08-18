@@ -1,7 +1,7 @@
 """OSS generator adapters — install-safe, optional, deterministic.
 
-testflow.md calls for property-based generation (Hypothesis) and OpenAPI-native
-fuzzing. This module ADOPTS the real OSS tools where they compose with the
+Property-based generation (Hypothesis) and OpenAPI-native fuzzing. This module
+ADOPTS the real OSS tools where they compose with the
 coverage-guided urllib driver, and falls back to the in-tree deterministic
 generator (``schema.py``) otherwise — so `uv sync` never breaks when an optional
 dependency is absent.

@@ -1,8 +1,7 @@
 """Stage A — span reconstruction (single-pass stack).
 
 Reads via :class:`tracelens.io.EventReader` so the source can later be swapped
-from a JSONL file to a SQL/columnar store without touching this module. See
-``docs/pitch/IMPLEMENTATION_ROADMAP.md`` phase 0.
+from a JSONL file to a SQL/columnar store without touching this module.
 """
 
 from __future__ import annotations

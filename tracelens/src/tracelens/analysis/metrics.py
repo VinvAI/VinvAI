@@ -1,4 +1,4 @@
-"""Stage D — metrics parquet (spec §9)."""
+"""Stage D — metrics parquet."""
 
 from __future__ import annotations
 

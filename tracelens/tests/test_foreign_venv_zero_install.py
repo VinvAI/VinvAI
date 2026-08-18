@@ -1,4 +1,4 @@
-"""Foreign-venv zero-install capture (spec §5.2, launcher handoff).
+"""Foreign-venv zero-install capture (launcher handoff).
 
 Tracing a service that lives in ITS OWN venv must require ZERO installs into that
 venv — not tracelens, not opentelemetry, not PyYAML. The launcher achieves this by

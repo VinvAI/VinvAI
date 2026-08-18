@@ -1,4 +1,4 @@
-"""Deterministic BLAKE2b hash for args/results (spec §5.7)."""
+"""Deterministic BLAKE2b hash for args/results."""
 
 from __future__ import annotations
 

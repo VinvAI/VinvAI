@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke: demo app + tracelens analyze (spec §14). Run from repo: bash examples/demo_run.sh
+# Smoke: demo app + tracelens analyze. Run from repo: bash examples/demo_run.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -36,7 +36,7 @@ for i in $(seq 1 30); do
   sleep 0.2
 done
 
-# Volume: spec §14 suggests O(100+) calls per endpoint for stable lift/metrics; override with DEMO_ENDPOINT_LOOPS.
+# Volume: O(100+) calls per endpoint gives stable lift/metrics; override with DEMO_ENDPOINT_LOOPS.
 N="${DEMO_ENDPOINT_LOOPS:-60}"
 curl -sf "http://${HOST}:${PORT}/healthy" >/dev/null
 for _ in $(seq 1 "$N"); do curl -sf "http://${HOST}:${PORT}/healthy" >/dev/null || true; done

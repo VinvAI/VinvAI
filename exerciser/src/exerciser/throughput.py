@@ -1,6 +1,6 @@
 """Bounded throughput driver — req/s and latency percentiles under load.
 
-testflow.md Phase-6 wants throughput/concurrency numbers. Locust does not embed
+Throughput and concurrency numbers under load. Locust does not embed
 cleanly as a library call for a short, capped, local burst (it is a full runner
 with its own event loop, web UI, and process model), so — decided by real
 integration cost — this uses a bounded thread-pool driver: fire a fixed number of

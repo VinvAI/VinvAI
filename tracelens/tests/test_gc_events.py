@@ -1,4 +1,4 @@
-"""GC-as-latency-source capture (spec §20): gc.callbacks → gc_pause trace lines.
+"""GC-as-latency-source capture: gc.callbacks → gc_pause trace lines.
 
 * forced ``gc.collect()`` under the observer produces well-formed gc_pause
   lines (duration_ms float, generation int, iso ts);

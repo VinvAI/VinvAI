@@ -1,4 +1,4 @@
-"""Statistical band for ParentBased(TraceIdRatioBased) at 0.5 vs 1.0 (spec §5.12)."""
+"""Statistical band for ParentBased(TraceIdRatioBased) at 0.5 vs 1.0."""
 
 from __future__ import annotations
 

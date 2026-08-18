@@ -7,8 +7,8 @@ keyed by the OTel-current ``request_id`` baggage entry.
 What's NOT captured in v1 (documented limitations):
   - ``datetime.now()`` (replaceable, but datetime is patched by some apps already; deferred)
   - DB / HTTP / LLM / cache responses (these come from the contrib instrumenters' span
-    events; producer-side capture is wired in a follow-up Phase 1.4 pass)
-  - Native-code clocks / RNGs (gettimeofday, arc4random) — see pitch §6.4
+    events; producer-side capture is wired in a follow-up pass)
+  - Native-code clocks / RNGs (gettimeofday, arc4random)
   - GPU non-determinism — same
 
 Records are streamed to ``<output>.determinism.jsonl`` next to the trace JSONL. Off by

@@ -1,4 +1,4 @@
-"""Click CLI (spec §13)."""
+"""Click CLI."""
 
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def run_cmd(args: tuple[str, ...]) -> None:
       * Run `tracelens analyze --help` and `tracelens report --help` for downstream stages.
       * Run `tracelens summarize <log>` to (re)produce summary.json post-hoc.
     """
-    # Click strips `--` from UNPROCESSED; recover from raw argv (spec §5.1).
+    # Click strips `--` from UNPROCESSED; recover from raw argv.
     #
     # The subcommand may surface as either `run` (Click ≥ 8.2 — drops the `_cmd`
     # suffix derived from the function name) or `run-cmd` (Click ≤ 8.1 — only

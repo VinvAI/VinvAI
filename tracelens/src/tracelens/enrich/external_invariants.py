@@ -1,4 +1,4 @@
-"""External post-conditions keyed by qualified name (spec §12 / M6, no target source edits)."""
+"""External post-conditions keyed by qualified name (no target source edits)."""
 
 from __future__ import annotations
 

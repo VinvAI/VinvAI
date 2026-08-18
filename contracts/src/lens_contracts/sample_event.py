@@ -1,4 +1,4 @@
-"""SampleEvent: profiler / sampler events (doc 01 §3.3)."""
+"""SampleEvent: profiler / sampler events."""
 
 from __future__ import annotations
 

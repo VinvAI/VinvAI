@@ -1,4 +1,4 @@
-"""`tracelens run` orchestrator (spec §5.2).
+"""`tracelens run` orchestrator.
 
 T1.4 / T4.2 / T4.4 / T4.5 — tracks the dispatch decision, OTel-instrumenter load status,
 coverage scan, rewrite status; on shutdown writes ``<output>.summary.json``. Default output

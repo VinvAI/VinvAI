@@ -1,7 +1,7 @@
 """DeterminismBoundaryRecord: everything needed to replay a request bit-deterministically.
 
-Doc 01 §3.6 / doc 09 §6. Captured by the launcher's determinism-boundary hooks (Phase 1.6 of
-the roadmap). The verifier injects these on replay to detect divergence.
+Captured by the launcher's determinism-boundary hooks. The verifier injects these on
+replay to detect divergence.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class DeterminismBoundaryRecord(BaseModel):
     external_responses: list[ExternalResponseRecord] = Field(default_factory=list)
     threading_events: list[ThreadingEvent] = Field(default_factory=list)
 
-    # things we know we cannot capture (doc 09 §6.4)
+    # things we know we cannot capture
     capture_gaps: list[str] = Field(
         default_factory=list,
         description="documented limitations: native_clock | gpu | lock_order | retry_jitter | ...",

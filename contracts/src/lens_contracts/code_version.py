@@ -1,4 +1,4 @@
-"""CodeVersion: resolution chain for the running code identifier (doc 01 §3.1)."""
+"""CodeVersion: resolution chain for the running code identifier."""
 
 from __future__ import annotations
 

@@ -59,7 +59,7 @@ Artifacts land under `<repo>/.vinv/exercise/`:
 | `results.jsonl` | `run` | every execution: endpoint, input, strategy, status, latency, shape-hash, error |
 | `invocations.json` / `invocation_results.jsonl` | `invocations` | one row per CLI run: command, exit code vs expected, duration, stdout/stderr tails, spans captured |
 | `bandit.json` | `run` | Thompson posteriors per (endpoint, strategy) |
-| `profile.json` / `profile.md` | `profile` | behavioral profile + human report (testflow Phase-10 shape) |
+| `profile.json` / `profile.md` | `profile` | behavioral profile + human report |
 | `invariants.json` | `profile` | learned invariants with Laplace confidence |
 | `issues.json` | `run`/`profile` | failure clusters by normalized signature (extension → episodes) |
 | `baselines/*.json` | `run`/`regress` | earned golden behavior baselines (degraded/same/improved) |

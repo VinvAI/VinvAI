@@ -1,4 +1,4 @@
-"""The execution sandbox — testflow Phase 5, driven for real.
+"""The execution sandbox, driven for real.
 
 The purity guard refuses to call anything that touches the world, which is
 correct and, on its own, a coverage CEILING: the interesting functions in any

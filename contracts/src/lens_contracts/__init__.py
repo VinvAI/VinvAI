@@ -1,7 +1,6 @@
 """Canonical data contract for the lens system.
 
 Re-exports the five entities, the shared header, and the CodeVersion model.
-Doc 01 of `docs/pitch/components/`.
 """
 
 from __future__ import annotations

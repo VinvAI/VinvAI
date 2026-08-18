@@ -1,4 +1,4 @@
-"""Stage C — outcomes / lift / clustering (spec §8)."""
+"""Stage C — outcomes / lift / clustering."""
 
 from __future__ import annotations
 

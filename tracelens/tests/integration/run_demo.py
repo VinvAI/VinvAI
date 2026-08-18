@@ -1,4 +1,4 @@
-"""Launch demo FastAPI app under tracelens runpy (spec §14 — avoids execvp-only uvicorn)."""
+"""Launch demo FastAPI app under tracelens runpy (avoids execvp-only uvicorn)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""EventHeader: common fields on every event (doc 01 §3.1)."""
+"""EventHeader: common fields on every event."""
 
 from __future__ import annotations
 

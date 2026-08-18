@@ -1,4 +1,4 @@
-"""The EXECUTION SANDBOX — testflow Phase 5, and the answer to a permanent refusal.
+"""The EXECUTION SANDBOX — the answer to a permanent refusal.
 
 ``functions.discover_targets`` refuses to call anything whose body touches the
 filesystem, the network, a subprocess or a database, and records why. That guard

@@ -1,4 +1,4 @@
-"""demo_app tree must stay read-only (spec §14 / §22)."""
+"""demo_app tree must stay read-only."""
 
 from __future__ import annotations
 
