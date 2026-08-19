@@ -47,8 +47,10 @@ reward = -1                     if aborted
 
 ## 2. Propensity logging and the composition bandit
 
-Context-pack composition is a factored 2^3 arm grid (slice depth ×
-runtime-evidence inclusion × snippet budget, `episodeTelemetry.ts:40-92`).
+Context-pack composition is a factored 2^2 arm grid (slice depth ×
+runtime-evidence inclusion, `EPISODE_FEATURES`, `episodeTelemetry.ts:59`; the
+former `snippet budget` third feature was removed — it was inert on this path,
+see `episodeTelemetry.ts:41-57`).
 Selection is **Thompson sampling over per-arm Beta posteriors with an ε-floor
 mixture** (`selectEpisodeArm`, `episodeTelemetry.ts:607-629`):
 
@@ -70,9 +72,12 @@ P(play a) = ε/|A| + (1−ε)·P_TS(a)
   `episodePolicyUpdater.ts:84-92`). Retractions from a reproducing human
   counterexample re-label the episode `verified=false, objective=true,
   reward=−1` (`episodePolicyUpdater.ts:168-179`).
-- Attribution is **exact Shapley** over the 2^|F| grid of posterior means
-  (`shapleyAttribution`, `episodePolicyUpdater.ts:244-276`) — "did runtime
-  evidence help" is a computed number.
+- Attribution is a **COMA-style counterfactual** per feature over the 2^|F|
+  grid of posterior means (`counterfactualAttribution`,
+  `episodePolicyUpdater.ts:349`; applied on the live path at
+  `episodePolicyUpdater.ts:435`) — "did runtime evidence help" is a computed
+  number. (An exact-Shapley variant, `shapleyAttribution:285`, is retained for
+  tests but is not the shipped attribution.)
 - The attempt budget is the learned `attempt_quantile` of attempts-to-success
   plus one margin (`episodePolicyUpdater.ts:339-346`).
 - Per-test pool events (raw, not baked weights) are appended for a future
@@ -94,7 +99,8 @@ audit, replay-budget, retraction, and F2P-against-a-real-interpreter suites
 
 ## 3. The retrieval config walk and its OPE gate
 
-Retrieval serving (top-k) is a *separate* contextual bandit with its own
+Retrieval serving (top-k) is a *separate* ε-greedy bandit over the discrete
+top-k action set (`selectRetrievalAction`, `retrievalTelemetry.ts:164`) with its own
 ledger (`~/.vinv/telemetry/retrieval.jsonl`, written by
 `extension/src/mcp/indexServer.ts` and `retrievalTelemetry.ts`). A candidate
 configuration is **never** promoted on a hunch; the walk is:
