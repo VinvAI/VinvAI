@@ -53,6 +53,16 @@ It watches a real run of your Python services and hands your coding agent the ac
 
 <sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. Everything runs on your machine.</sub>
 
+## The problem
+
+84% of developers now use or plan to use AI coding tools. More of them **actively distrust** the output (46%) than trust it (33%) — and distrust nearly doubled in a year ([Stack Overflow 2025, 49k developers](https://survey.stackoverflow.co/2025/ai/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
+
+Or it gets stuck — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
+
+Both failures have one root cause: **the agent has never watched your code run.** It argues from static text.
+
+The industry automated *writing* and left *proving* entirely manual. Vinv automates the proving — and only then the finding and the fixing.
+
 ## Context beats model size
 
 Receipts first — then how the loop produces them.
@@ -110,16 +120,6 @@ git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines
 ```powershell
 git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
 ```
-
-## The problem
-
-84% of developers now use or plan to use AI coding tools. More of them **actively distrust** the output (46%) than trust it (33%) — and distrust nearly doubled in a year ([Stack Overflow 2025, 49k developers](https://survey.stackoverflow.co/2025/ai/)). You know why: the agent edits the wrong handler, invents return shapes, then grades its own homework while the server won't even start.
-
-Or it gets stuck — test fails, agent edits the same function, test fails the same way, agent edits it again, burning your context window on "let me verify." Anthropic's own research documents agents "stuck in loops, repeating the same failed approach" when they lack codebase context.
-
-Both failures have one root cause: **the agent has never watched your code run.** It argues from static text.
-
-The industry automated *writing* and left *proving* entirely manual. Vinv automates the proving — and only then the finding and the fixing.
 
 ## Under the hood: the oracle roster
 
