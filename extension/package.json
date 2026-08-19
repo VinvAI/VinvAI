@@ -2,7 +2,7 @@
 	"name": "VinvAI",
 	"displayName": "VinvAI",
 	"description": "Vinv automatically discovers, tests, and observes your services — with zero code changes.",
-	"version": "0.2.4",
+	"version": "0.2.5",
 	"publisher": "VinvAI",
 	"license": "Apache-2.0",
 	"repository": {
