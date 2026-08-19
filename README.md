@@ -3,12 +3,12 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — automatically discovers, tests, and observes your services with zero code changes, then helps your AI agent fix what breaks and proves it." width="880">
+  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — runs, tests, and finds issues in your services with zero code changes, then helps your AI agent fix what breaks and proves it." width="880">
 </picture>
 
 <br><br>
 
-**Vinv automatically discovers, tests, and observes your services — with zero code changes.**
+**Vinv runs, tests, and finds issues in your services — with zero code changes.**
 
 It watches a real run of your Python services and hands your coding agent the actual execution evidence — traces, argument values, the failing frame — instead of leaving it to guess from static text. Then it won't let a fix land until that fix passes acceptance tests written *before* it, that the agent never sees. All local, through the agent you already pay for.
 
@@ -16,7 +16,7 @@ It watches a real run of your Python services and hands your coding agent the ac
 
 <br><br>
 
-<a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><img src="docs/media/vinv-demo-poster.jpg" alt="Watch the 2-minute Vinv demo — discover, test, and observe your services with zero code changes" width="820"></a>
+<a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><img src="docs/media/vinv-demo-poster.jpg" alt="Watch the 2-minute Vinv demo — run, test, and find issues in your services with zero code changes" width="820"></a>
 
 <sub><a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><b>▶ Watch the 2-minute demo</b></a> — from a cold repo to a proven fix</sub>
 
@@ -44,11 +44,11 @@ It watches a real run of your Python services and hands your coding agent the ac
 
 ## What you get, in one loop
 
-**Discover · Test · Observe — then Prove.** Point Vinv at a Python repo; it does the rest — no code changes, no API keys.
+**Run · Test · Find — then Prove.** Point Vinv at a Python repo; it does the rest — no code changes, no API keys.
 
-- **🔍 Discover** — finds every service and endpoint in your repo automatically, and works out how each one starts.
-- **🧪 Test** — drives real requests through them (valid, boundary, negative, authenticated), traps crashes and slow paths, and banks every response as a regression case.
-- **👁️ Observe** — traces the real run with zero edits to your code: timings, arguments, return values, call trees — each joined to the exact source line that produced it.
+- **🏃 Run** — brings every service in your repo up under tracing with zero edits, capturing timings, arguments, return values and call trees from the real run.
+- **🧪 Test** — drives real requests through every endpoint (valid, boundary, negative, authenticated) and banks each response as a regression case.
+- **🔎 Find** — surfaces what actually broke or slowed down — server errors, crashes, latency hotspots and dead code — each tied to the exact source line.
 - **✅ Prove** — hands that evidence to the agent you already use (Claude Code, Cursor, Copilot…), then verifies its fix against acceptance tests written *before* the fix that it never sees. A "faster" change that alters any output is auto-reverted.
 
 <sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. Everything runs on your machine.</sub>
