@@ -98,6 +98,8 @@ That is *how come after it*: oracles find the waste, your agent proposes the edi
 
 ## Install
 
+**Use it from your IDE, your CLI, or any MCP-compatible agent.** Vinv isn't another coding agent — it's the runtime-evidence layer *underneath* the one you already use, exposed as MCP servers (`vinv-index`, `vinv-runtime`, `vinv-exercise`) that Claude Code, Cursor, Codex, Copilot and Windsurf pick up automatically.
+
 One click from the marketplace — [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) — or straight from your editor's CLI:
 
 | Editor | Command |
