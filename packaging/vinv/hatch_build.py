@@ -6,9 +6,10 @@ onto PATH next to the Python engine console scripts, so `index index`, semantic
 search, and every engine that reads the index store work with **no Rust
 toolchain on the user's machine**.
 
-In CI (cibuildwheel) the binary is compiled once per platform in `before-all`
-and reused across Python versions via the `VINV_INDEX_BIN` env var, so Rust is
-built once — not once per wheel.
+The binary path is always computed from the repo root (two levels up from this
+package), so it is correct regardless of the build's working directory. In CI
+(cibuildwheel) `cargo`'s `target/` dir persists across the per-Python wheel
+builds on a platform, so Rust is compiled once and reused.
 """
 
 from __future__ import annotations
@@ -27,13 +28,17 @@ class CustomBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict) -> None:
         # packaging/vinv/ → the repo root is two levels up.
         repo = Path(self.root).resolve().parents[1]
-        manifest = repo / "index" / "Cargo.toml"
         exe = "index.exe" if os.name == "nt" else "index"
+        built = repo / "index" / "target" / "release" / exe
 
-        prebuilt = os.environ.get("VINV_INDEX_BIN", "").strip()
-        if prebuilt:
-            built = Path(prebuilt).resolve()
-        else:
+        # Optional override (absolute, or relative to the repo root).
+        override = os.environ.get("VINV_INDEX_BIN", "").strip()
+        if override:
+            o = Path(override)
+            built = (o if o.is_absolute() else repo / o).resolve()
+
+        if not built.exists():
+            manifest = repo / "index" / "Cargo.toml"
             if not manifest.exists():
                 raise RuntimeError(f"index/Cargo.toml not found at {manifest}")
             print(
@@ -44,7 +49,6 @@ class CustomBuildHook(BuildHookInterface):
                 ["cargo", "build", "--release", "--manifest-path", str(manifest)],
                 check=True,
             )
-            built = repo / "index" / "target" / "release" / exe
 
         if not built.exists():
             raise RuntimeError(f"index binary not found after build: {built}")

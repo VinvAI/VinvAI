@@ -93,21 +93,15 @@ packages = ["vinv"]
 path = "hatch_build.py"
 
 # ── cibuildwheel: one platform wheel per (python, OS) in CI ────────────────
+# The build hook compiles + bundles the `index` binary itself, resolving its
+# path from the repo root. cargo's target/ persists across the per-Python wheel
+# builds on a platform, so Rust is compiled once and reused.
 [tool.cibuildwheel]
 build = "cp312-* cp313-*"
 skip = "*-musllinux* *_i686 *-win32 pp*"
-# Compile the Rust binary ONCE per platform; the per-Python wheel builds reuse
-# it via VINV_INDEX_BIN instead of recompiling Rust each time.
-before-all = "cargo build --release --manifest-path index/Cargo.toml"
 
 [tool.cibuildwheel.linux]
-# manylinux images have no Rust — install a minimal toolchain first.
-before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && source $HOME/.cargo/env && cargo build --release --manifest-path index/Cargo.toml"
-environment = { PATH = "$HOME/.cargo/bin:$PATH", VINV_INDEX_BIN = "/project/index/target/release/index" }
-
-[tool.cibuildwheel.macos]
-environment = { VINV_INDEX_BIN = "$PWD/index/target/release/index" }
-
-[tool.cibuildwheel.windows]
-before-all = "cargo build --release --manifest-path index/Cargo.toml"
-environment = { VINV_INDEX_BIN = "index/target/release/index.exe" }
+# manylinux images have no Rust — install a minimal toolchain and put it on PATH
+# so the build hook's `cargo build` (run inside the container) can find it.
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
