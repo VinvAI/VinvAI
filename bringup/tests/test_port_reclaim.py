@@ -99,8 +99,16 @@ def test_replay_evicts_a_squatter_instead_of_failing_to_bind() -> None:
     squatter = subprocess.Popen([sys.executable, "-c", _SQUATTER.format(port=port)])
     try:
         assert _await_serving(port), "the fixture squatter never bound its port"
+        # SO_REUSEADDR, like the squatter above and every real recorded start
+        # command (uvicorn, flask, gunicorn…): the eviction kills the squatter's
+        # LISTENER, but the probe connections it accepted-and-closed leave
+        # TIME_WAIT sockets on the port, and a plain bind over those raises
+        # EADDRINUSE on Linux. This still tests the eviction — SO_REUSEADDR does
+        # not let a bind win against an *active* listener, so without the kill
+        # the command cannot bind at all.
         server = (
             "import socket,time; s=socket.socket(); "
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
             f"s.bind(('127.0.0.1',{port})); s.listen(5); time.sleep(60)"
         )
         result = verify_replay(
