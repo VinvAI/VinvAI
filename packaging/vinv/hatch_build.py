@@ -36,7 +36,10 @@ class CustomBuildHook(BuildHookInterface):
         else:
             if not manifest.exists():
                 raise RuntimeError(f"index/Cargo.toml not found at {manifest}")
-            print(f"[vinv] compiling the Rust index: cargo build --release ({manifest})", file=sys.stderr)
+            print(
+                f"[vinv] compiling the Rust index: cargo build --release ({manifest})",
+                file=sys.stderr,
+            )
             subprocess.run(
                 ["cargo", "build", "--release", "--manifest-path", str(manifest)],
                 check=True,
