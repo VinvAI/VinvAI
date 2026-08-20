@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -53,8 +54,15 @@ class CustomBuildHook(BuildHookInterface):
         if not built.exists():
             raise RuntimeError(f"index binary not found after build: {built}")
 
-        # Ship it as a script → installed onto the venv's bin/Scripts dir (PATH).
-        build_data["shared_scripts"][str(built)] = exe
-        # The wheel now carries a native binary: tag it for THIS platform.
+        # Ship the binary inside the package (vinv/_bin/) so the `index` console
+        # entry point (vinv._index:main) can exec it — this is what makes `index`
+        # available under pip/pipx/uvx/uv-tool, not just a bare `pip install`.
+        build_data["force_include"][str(built)] = f"vinv/_bin/{exe}"
+
+        # No Python C-extension here (pure Python + a standalone binary), so the
+        # wheel is Python-AGNOSTIC but platform-specific: one `py3-none-<platform>`
+        # wheel per OS installs on any supported Python 3.x — not just the version
+        # it was built with.
+        plat = sysconfig.get_platform().replace("-", "_").replace(".", "_")
         build_data["pure_python"] = False
-        build_data["infer_tag"] = True
+        build_data["tag"] = f"py3-none-{plat}"
