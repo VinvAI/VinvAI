@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "Vinv runs, tests, and finds issues in your services — with zero code changes."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
-license = "Apache-2.0"
+license = { text = "Apache-2.0" }
 authors = [{ name = "VinvAI", email = "support@vinv.ai" }]
 keywords = [
     "ai", "testing", "runtime-tracing", "observability", "mcp",
