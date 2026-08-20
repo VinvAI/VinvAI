@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vinv"
-version = "0.0.1"
+version = "0.0.2"
 description = "Vinv runs, tests, and finds issues in your services — with zero code changes."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -57,8 +57,11 @@ Repository = "https://github.com/VinvAI/VinvAI"
 Issues = "https://github.com/VinvAI/VinvAI/issues"
 Changelog = "https://github.com/VinvAI/VinvAI/blob/main/extension/CHANGELOG.md"
 
-# Every engine's console script, on the one package.
+# Every engine's console script, on the one package. `index` is a shim that
+# execs the bundled Rust binary (vinv/_index.py), so it is a first-class command
+# under pip/pipx/uvx/uv-tool like the rest.
 [project.scripts]
+index = "vinv._index:main"
 vinv-exerciser = "exerciser.cli:main"
 exerciser = "exerciser.cli:main"
 tracelens = "tracelens.cli:main"
@@ -97,7 +100,7 @@ path = "hatch_build.py"
 # path from the repo root. cargo's target/ persists across the per-Python wheel
 # builds on a platform, so Rust is compiled once and reused.
 [tool.cibuildwheel]
-build = "cp312-* cp313-*"
+build = "cp312-*"
 skip = "*-musllinux* *_i686 *-win32 pp*"
 
 [tool.cibuildwheel.linux]
