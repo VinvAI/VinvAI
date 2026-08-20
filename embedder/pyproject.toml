@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vinv-embedder"
-version = "0.1.0"
+version = "0.0.1"
 description = "Local embedding sidecar: OpenAI-compatible /v1/embeddings server for the Vinv index engine (default model: nomic-ai/CodeRankEmbed)"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"

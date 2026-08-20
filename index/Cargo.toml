@@ -1,6 +1,6 @@
 [package]
 name = "vinv-index"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 description = "index — semantic code-index CLI (index / query / update)"
 readme = "README.md"

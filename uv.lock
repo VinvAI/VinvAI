@@ -97,7 +97,7 @@ wheels = [
 
 [[package]]
 name = "bringup"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "bringup" }
 dependencies = [
     { name = "click" },
@@ -720,7 +720,7 @@ wheels = [
 
 [[package]]
 name = "exerciser"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "exerciser" }
 dependencies = [
     { name = "click" },
@@ -837,7 +837,7 @@ wheels = [
 
 [[package]]
 name = "goal"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "goal" }
 dependencies = [
     { name = "click" },
@@ -969,7 +969,7 @@ wheels = [
 
 [[package]]
 name = "handbook"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "handbook" }
 dependencies = [
     { name = "click" },
@@ -1215,7 +1215,7 @@ wheels = [
 
 [[package]]
 name = "identification"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "identification" }
 dependencies = [
     { name = "click" },
@@ -1416,7 +1416,7 @@ wheels = [
 
 [[package]]
 name = "lens-contracts"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "contracts" }
 dependencies = [
     { name = "jsonschema" },
@@ -3622,7 +3622,7 @@ wheels = [
 
 [[package]]
 name = "tracelens"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "tracelens" }
 dependencies = [
     { name = "click" },
@@ -3942,7 +3942,7 @@ wheels = [
 
 [[package]]
 name = "vinv-embedder"
-version = "0.1.0"
+version = "0.0.1"
 source = { editable = "embedder" }
 dependencies = [
     { name = "einops" },
