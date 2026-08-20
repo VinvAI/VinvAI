@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vinv"
+version = "0.0.0"
+description = "Vinv — runs, tests, and finds issues in your services with zero code changes. Name reserved; the packaged engines ship soon."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "VinvAI", email = "support@vinv.ai" }]
+keywords = ["ai", "testing", "runtime-tracing", "mcp", "python"]
+
+[project.urls]
+Homepage = "https://vinv.ai"
+Repository = "https://github.com/VinvAI/VinvAI"
+
+# NOTE: this is the release-assembly package for PyPI. Today it is a 0.0.0
+# name-reservation placeholder; Phase 1 turns it into the single `vinv`
+# distribution that bundles every engine module + the Rust `index` binary.
+[tool.hatch.build.targets.wheel]
+packages = ["vinv"]

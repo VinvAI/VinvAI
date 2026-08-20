@@ -1,0 +1,38 @@
+name: publish
+
+# Publishes the `vinv` distribution to PyPI via Trusted Publishing (OIDC) —
+# no API tokens. Configure the matching trusted publisher on PyPI with:
+#   project: vinv · owner: VinvAI · repo: VinvAI · workflow: publish.yml · environment: pypi
+#
+# Triggers:
+#   - a `pypi-v*` tag (release) — kept distinct from the extension's `v*` tags
+#   - manual "Run workflow" (workflow_dispatch) — used for the first name claim
+on:
+  push:
+    tags:
+      - 'pypi-v*'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    name: build + publish vinv to PyPI
+    runs-on: ubuntu-latest
+    environment: pypi          # gated: requires approval + restricted refs
+    permissions:
+      id-token: write          # OIDC token PyPI trusts — no stored secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build the vinv distribution
+        working-directory: packaging/vinv
+        run: uv build --out-dir dist
+
+      - name: Publish to PyPI (Trusted Publishing / OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packaging/vinv/dist
