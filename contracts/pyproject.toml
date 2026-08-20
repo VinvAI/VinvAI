@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lens-contracts"
-version = "0.1.0"
+version = "0.0.1"
 description = "Canonical data contract for the lens system: SpanEvent, SampleEvent, ExternalCallEvent, ReplayCorpusRow, DeterminismBoundaryRecord."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"

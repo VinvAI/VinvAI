@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "handbook"
-version = "0.1.0"
+version = "0.0.1"
 description = "handbook — standalone discovery-handbook prompt renderer (prints the harness prompt that writes .vinv/vinv.md)"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

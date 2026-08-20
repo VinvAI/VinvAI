@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exerciser"
-version = "0.1.0"
+version = "0.0.1"
 description = "Universal behavioral testing engine: exercise every discovered endpoint, profile outputs, learn invariants, close the coverage loop"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"

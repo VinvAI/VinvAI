@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "goal"
-version = "0.1.0"
+version = "0.0.1"
 description = "goal — standalone goal-authoring prompt renderer (distills a working context into one actionable goal via the caller's coding-agent harness)"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
