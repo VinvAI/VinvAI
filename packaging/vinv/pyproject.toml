@@ -86,3 +86,28 @@ packages = ["vinv"]
 "../../goal/src/goal" = "goal"
 "../../embedder/src/vinv_embedder" = "vinv_embedder"
 "../../exerciser/src/exerciser" = "exerciser"
+
+# Compile + bundle the Rust `index` binary into the wheel (wheel target only,
+# so the sdist stays pure). Makes the wheel platform-specific.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+# ── cibuildwheel: one platform wheel per (python, OS) in CI ────────────────
+[tool.cibuildwheel]
+build = "cp312-* cp313-*"
+skip = "*-musllinux* *_i686 *-win32 pp*"
+# Compile the Rust binary ONCE per platform; the per-Python wheel builds reuse
+# it via VINV_INDEX_BIN instead of recompiling Rust each time.
+before-all = "cargo build --release --manifest-path index/Cargo.toml"
+
+[tool.cibuildwheel.linux]
+# manylinux images have no Rust — install a minimal toolchain first.
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && source $HOME/.cargo/env && cargo build --release --manifest-path index/Cargo.toml"
+environment = { PATH = "$HOME/.cargo/bin:$PATH", VINV_INDEX_BIN = "/project/index/target/release/index" }
+
+[tool.cibuildwheel.macos]
+environment = { VINV_INDEX_BIN = "$PWD/index/target/release/index" }
+
+[tool.cibuildwheel.windows]
+before-all = "cargo build --release --manifest-path index/Cargo.toml"
+environment = { VINV_INDEX_BIN = "index/target/release/index.exe" }

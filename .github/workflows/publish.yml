@@ -1,12 +1,15 @@
 name: publish
 
-# Publishes the `vinv` distribution to PyPI via Trusted Publishing (OIDC) —
-# no API tokens. Configure the matching trusted publisher on PyPI with:
-#   project: vinv · owner: VinvAI · repo: VinvAI · workflow: publish.yml · environment: pypi
+# Builds the single `vinv` distribution as platform wheels (each bundling the
+# compiled Rust `index` binary) via cibuildwheel, then publishes to PyPI with
+# Trusted Publishing (OIDC) — no API tokens.
+#
+# Trusted publisher on PyPI: project vinv · owner VinvAI · repo VinvAI ·
+#   workflow publish.yml · environment pypi
 #
 # Triggers:
-#   - a `pypi-v*` tag (release) — kept distinct from the extension's `v*` tags
-#   - manual "Run workflow" (workflow_dispatch) — used for the first name claim
+#   - a `pypi-v*` tag  → version is taken from the tag (pypi-v1.2.3 → 1.2.3)
+#   - manual dispatch  → builds the pyproject's current version (for dry runs)
 on:
   push:
     tags:
@@ -16,23 +19,57 @@ on:
 permissions: {}
 
 jobs:
-  publish:
-    name: build + publish vinv to PyPI
-    runs-on: ubuntu-latest
-    environment: pypi          # gated: requires approval + restricted refs
-    permissions:
-      id-token: write          # OIDC token PyPI trusts — no stored secret
+  wheels:
+    name: wheels · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+      - name: Set version from the tag
+        if: startsWith(github.ref, 'refs/tags/pypi-v')
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          export VINV_VER="${REF#refs/tags/pypi-v}"
+          python - <<'PY'
+          import os, re, pathlib
+          ver = os.environ["VINV_VER"]
+          p = pathlib.Path("packaging/vinv/pyproject.toml")
+          s = p.read_text()
+          s = re.sub(r'(?m)^version = ".*"$', f'version = "{ver}"', s, count=1)
+          p.write_text(s)
+          print(f"building vinv {ver}")
+          PY
 
-      - name: Build the vinv distribution
-        working-directory: packaging/vinv
-        run: uv build --out-dir dist
+      - name: Build wheels (compiles + bundles the Rust index)
+        uses: pypa/cibuildwheel@v2.21
+        with:
+          package-dir: packaging/vinv
+          output-dir: wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish:
+    name: publish to PyPI
+    needs: wheels
+    runs-on: ubuntu-latest
+    environment: pypi          # gated: required reviewer + `pypi-v*` tags only
+    permissions:
+      id-token: write          # OIDC — no stored secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: wheels-*
+          merge-multiple: true
 
       - name: Publish to PyPI (Trusted Publishing / OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: packaging/vinv/dist
