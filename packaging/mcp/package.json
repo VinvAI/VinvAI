@@ -1,6 +1,6 @@
 {
   "name": "vinv-mcp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Vinv MCP server — runtime evidence, semantic code search, and fault localization for any MCP client. Pairs with `pip install vinv`.",
   "mcpName": "io.github.VinvAI/vinv",
   "bin": {

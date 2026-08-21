@@ -6,12 +6,12 @@
     "url": "https://github.com/VinvAI/VinvAI",
     "source": "github"
   },
-  "version": "0.0.1",
+  "version": "0.0.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "vinv-mcp",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "transport": {
         "type": "stdio"
       },
