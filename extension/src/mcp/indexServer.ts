@@ -142,6 +142,122 @@ async function runQuery(query: string, topK: number): Promise<{ output: string; 
 	});
 }
 
+// ── Background index build ────────────────────────────────────────────────
+// Building the index is minutes of work (plus a one-time embedding-model
+// download), so it must never run inside a tools/call — the agent would block
+// or time out. Instead we build in the BACKGROUND and every index-backed tool
+// returns immediately: vinv_query serves a "still indexing" notice until the
+// first build lands, and vinv_index reports/refreshes status. The multiplexer
+// sets VINV_MCP_AUTOINDEX=1 so a standalone server self-builds on startup;
+// inside the editor the extension owns indexing, so auto-build stays off.
+type BuildStatus = 'idle' | 'building' | 'ready' | 'error';
+interface BuildState {
+	status: BuildStatus;
+	startedAt: number | null;
+	finishedAt: number | null;
+	mode: 'index' | 'update' | null;
+	error: string | null;
+	fromScratch: boolean; // true while a build with no usable prior index runs
+}
+
+function hasIndex(): boolean {
+	try {
+		return fs.existsSync(storeDir) && fs.readdirSync(storeDir).length > 0;
+	} catch {
+		return false;
+	}
+}
+
+const buildState: BuildState = {
+	status: hasIndex() ? 'ready' : 'idle',
+	startedAt: null,
+	finishedAt: null,
+	mode: null,
+	error: null,
+	fromScratch: false,
+};
+
+/**
+ * An existing index keeps serving during an incremental update; only a
+ * from-scratch (or forced) build has nothing to serve, so callers degrade.
+ */
+function indexReady(): boolean {
+	return hasIndex() && !(buildState.status === 'building' && buildState.fromScratch);
+}
+
+function buildMode(force: boolean): 'index' | 'update' {
+	return !force && hasIndex() ? 'update' : 'index';
+}
+
+/** Kicks a background build. Returns immediately; never blocks the caller. */
+function startBuild(force = false): { started: boolean; reason?: string } {
+	if (buildState.status === 'building') {
+		return { started: false, reason: 'a build is already running' };
+	}
+	const indexBin = indexBinPath();
+	if (!indexBin) {
+		buildState.status = 'error';
+		buildState.error = 'the Vinv index engine is not installed — run "pip install vinv"';
+		return { started: false, reason: buildState.error };
+	}
+	const mode = buildMode(force);
+	buildState.status = 'building';
+	buildState.startedAt = Date.now();
+	buildState.finishedAt = null;
+	buildState.mode = mode;
+	buildState.error = null;
+	buildState.fromScratch = force || !hasIndex();
+	void (async () => {
+		try {
+			await ensureEmbedderRunning({ extensionDir });
+			const args =
+				mode === 'update'
+					? ['update', workspaceRoot, '--store-dir', storeDir]
+					: ['index', workspaceRoot, '--store-dir', storeDir, ...(force ? ['--force'] : [])];
+			await new Promise<void>((resolve) => {
+				execFile(indexBin, args, { maxBuffer: 64 * 1024 * 1024, env: indexEnv() }, (error, _stdout, stderr) => {
+					if (error) {
+						buildState.status = 'error';
+						buildState.error = (stderr || error.message || 'index build failed').slice(0, 500);
+					} else {
+						buildState.status = 'ready';
+						buildState.error = null;
+					}
+					buildState.finishedAt = Date.now();
+					resolve();
+				});
+			});
+		} catch (e) {
+			buildState.status = 'error';
+			buildState.error = e instanceof Error ? e.message : String(e);
+			buildState.finishedAt = Date.now();
+		}
+	})();
+	return { started: true };
+}
+
+/**
+ * The "still indexing / build failed" notice vinv_query serves while there is
+ * no usable index yet — shaped like a query error so agents fall back to grep.
+ */
+function indexingNotice(): string {
+	if (buildState.status === 'error') {
+		return JSON.stringify({
+			status: 'error',
+			error: `Vinv index build failed: ${buildState.error}. Fix the engine/embedder, then call vinv_index to retry.`,
+		});
+	}
+	const secs = buildState.startedAt ? Math.max(0, Math.round((Date.now() - buildState.startedAt) / 1000)) : 0;
+	return JSON.stringify({
+		status: 'indexing',
+		message:
+			'Vinv is building the semantic code index for this workspace' +
+			(buildState.startedAt ? ` (started ${secs}s ago)` : '') +
+			'. It runs in the background — use text search (grep) for now and retry vinv_query shortly. ' +
+			'Call vinv_index to check status.',
+	});
+}
+
 /**
  * Injected into the client's system prompt at initialize. Tool descriptions
  * compete inside a flat tool list; this is read as policy, so it carries the
@@ -304,6 +420,27 @@ const SESSION_TOOL = {
 			},
 		},
 		required: ['action'],
+	},
+};
+
+const INDEX_TOOL = {
+	name: 'vinv_index',
+	description:
+		"Build or refresh Vinv's semantic code index for THIS workspace. The build " +
+		'runs in the BACKGROUND and this call returns IMMEDIATELY with status — it ' +
+		'never blocks. Call with no arguments to start/refresh the index and read ' +
+		'its status; pass rebuild=true to force a full rebuild from scratch. Until ' +
+		'the first build completes, vinv_query returns a "still indexing" notice, so ' +
+		'call this once up front on a fresh workspace, then poll it for readiness.',
+	inputSchema: {
+		type: 'object',
+		properties: {
+			rebuild: {
+				type: 'boolean',
+				description:
+					'Force a full rebuild from scratch (default false: incremental update when an index already exists).',
+			},
+		},
 	},
 };
 
@@ -663,13 +800,19 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 				serverInfo: { name: 'vinv-index', version: '0.0.1' },
 				instructions: INSTRUCTIONS,
 			});
+			// Standalone (multiplexed) servers self-build the index in the
+			// background so the first vinv_query has something to serve; inside the
+			// editor the extension owns indexing (flag unset), so we stay passive.
+			if (process.env.VINV_MCP_AUTOINDEX === '1') {
+				startBuild();
+			}
 			return;
 
 		case 'notifications/initialized':
 			return; // notification, no response
 
 		case 'tools/list':
-			reply(req.id, { tools: [TOOL, FEEDBACK_TOOL, SESSION_TOOL] });
+			reply(req.id, { tools: [TOOL, INDEX_TOOL, FEEDBACK_TOOL, SESSION_TOOL] });
 			return;
 
 		case 'tools/call': {
@@ -863,6 +1006,30 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 				reply(req.id, { accepted: true });
 				return;
 			}
+			if (name === 'vinv_index') {
+				const buildArgs = (params.arguments ?? {}) as { rebuild?: boolean };
+				const res = startBuild(buildArgs.rebuild === true);
+				const secs = buildState.startedAt
+					? Math.max(0, Math.round((Date.now() - buildState.startedAt) / 1000))
+					: 0;
+				const payload = {
+					status: buildState.status,
+					mode: buildState.mode,
+					has_index: hasIndex(),
+					ready: indexReady(),
+					workspace: workspaceRoot,
+					started: res.started,
+					detail: res.started
+						? `Index ${buildState.mode} started in the background for ${workspaceRoot}. ` +
+							'This does not block — poll vinv_index for status; vinv_query serves results once ready.'
+						: res.reason === 'a build is already running'
+							? `A build is already running (started ${secs}s ago). Poll vinv_index for status.`
+							: `Could not start build: ${res.reason}.`,
+					...(buildState.error ? { error: buildState.error } : {}),
+				};
+				reply(req.id, { content: [{ type: 'text', text: JSON.stringify(payload) }] });
+				return;
+			}
 			if (name !== 'vinv_query') {
 				replyError(req.id, -32602, `Unknown tool: ${name}`);
 				return;
@@ -870,6 +1037,15 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 			const args = (params.arguments ?? {}) as { query?: string; top_k?: number };
 			if (!args.query) {
 				replyError(req.id, -32602, 'Missing required argument: query');
+				return;
+			}
+			// No usable index yet — never block the agent on a minutes-long build.
+			// Kick one off (if idle) and return a fall-back-to-grep notice.
+			if (!indexReady()) {
+				if (buildState.status === 'idle') {
+					startBuild();
+				}
+				reply(req.id, { content: [{ type: 'text', text: indexingNotice() }] });
 				return;
 			}
 			const requestedTopK = args.top_k ?? 5;

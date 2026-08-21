@@ -6,19 +6,19 @@
     "url": "https://github.com/VinvAI/VinvAI",
     "source": "github"
   },
-  "version": "0.0.2",
+  "version": "0.0.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "vinv-mcp",
-      "version": "0.0.2",
+      "version": "0.0.3",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "VINV_WORKSPACE",
-          "description": "Path to the repo/workspace Vinv should analyze (defaults to the current working directory).",
+          "description": "Optional override for the repo/workspace Vinv analyzes. Normally unset — the server uses the folder your client exposes via MCP roots, falling back to the current working directory.",
           "isRequired": false,
           "format": "string"
         }

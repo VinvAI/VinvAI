@@ -21,27 +21,41 @@ uv tool install vinv
 
 ## Configure your MCP client
 
-Add `vinv-mcp` to your client's MCP config (it runs over stdio via `npx`, no
-global install needed):
+Add `vinv-mcp` to your client's MCP config **once, globally** (it runs over
+stdio via `npx`, no global install needed) — no per-repo path required:
 
 ```json
 {
   "mcpServers": {
     "vinv": {
       "command": "npx",
-      "args": ["-y", "vinv-mcp"],
-      "env": { "VINV_WORKSPACE": "/absolute/path/to/your/repo" }
+      "args": ["-y", "vinv-mcp"]
     }
   }
 }
 ```
 
-`VINV_WORKSPACE` is optional — it defaults to the current working directory. You
-can also pass the repo path as the first argument instead of the env var.
+The server discovers which folder to analyze automatically: it asks your client
+for its open workspace via **MCP roots** (Claude Code, Cursor, VS Code), so one
+config follows whatever repo you have open. Resolution order is
+`VINV_WORKSPACE` → MCP roots → current working directory. Set
+`VINV_WORKSPACE` (or pass the path as the first argument) only to pin a
+specific repo — e.g. in a client that does not expose roots.
 
 - **Claude Code:** `claude mcp add vinv -- npx -y vinv-mcp`
-- **Cursor / Claude Desktop / others:** add the JSON block above to the client's
-  MCP settings.
+- **Cursor / VS Code / others:** add the JSON block above to the client's MCP
+  settings.
+- **Claude Desktop** (no open-folder concept): pin the repo with
+  `"env": { "VINV_WORKSPACE": "/absolute/path/to/your/repo" }`.
+
+## Indexing
+
+The semantic-search index builds itself in the **background** the moment the
+server starts on a workspace (the first build also downloads the local
+embedding model, ~500 MB, once). Nothing blocks: `vinv_query` returns a "still
+indexing" notice and you fall back to text search until it is ready. Call
+`vinv_index` any time to start/refresh the index or check status, or
+`vinv_index` with `rebuild: true` to force a full rebuild.
 
 ## Tools
 
@@ -49,7 +63,7 @@ can also pass the repo path as the first argument instead of the env var.
 
 | Area | Tools |
 |---|---|
-| **Code index** | `vinv_query` (semantic search), `vinv_feedback`, `vinv_session` |
+| **Code index** | `vinv_query` (semantic search), `vinv_index` (build/refresh), `vinv_feedback`, `vinv_session` |
 | **Runtime** | `rank_suspects`, `values_of`, `slice`, `coverage_of`, `callers_of`, `blast_radius`, `why_did_this_run`, `relevant_to` |
 | **Exercise** | `vinv_ingest_run`, `vinv_run_status`, `vinv_list_candidates` |
 
