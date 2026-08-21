@@ -183,16 +183,22 @@ export function engineCommand(
 	opts?: { override?: string; extensionDir?: string },
 ): { file: string; prefixArgs: string[] } | null {
 	const root = enginesRootDir(opts);
-	if (!root) {
-		return null;
+	if (root) {
+		const script = pythonEnginePath(root, name);
+		if (fs.existsSync(script)) {
+			return { file: script, prefixArgs: [] };
+		}
+		const uv = uvPath();
+		if (uv) {
+			return { file: uv, prefixArgs: ['run', '--project', root, name] };
+		}
 	}
-	const script = pythonEnginePath(root, name);
-	if (fs.existsSync(script)) {
-		return { file: script, prefixArgs: [] };
-	}
-	const uv = uvPath();
-	if (uv) {
-		return { file: uv, prefixArgs: ['run', '--project', root, name] };
+	// PATH fallback: `pip install vinv` / `uv tool install vinv` put the engine
+	// console scripts on PATH. This is how the standalone MCP server (paired
+	// with the PyPI package) finds them — no monorepo checkout required.
+	const onPath = findOnPath(name);
+	if (onPath) {
+		return { file: onPath, prefixArgs: [] };
 	}
 	return null;
 }

@@ -1,0 +1,37 @@
+{
+  "name": "vinv-mcp",
+  "version": "0.0.1",
+  "description": "Vinv MCP server — runtime evidence, semantic code search, and fault localization for any MCP client. Pairs with `pip install vinv`.",
+  "mcpName": "io.github.VinvAI/vinv",
+  "bin": {
+    "vinv-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "vinv",
+    "ai",
+    "code-search",
+    "runtime-tracing",
+    "fault-localization"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VinvAI/VinvAI.git"
+  },
+  "homepage": "https://vinv.ai",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "npm run build"
+  }
+}

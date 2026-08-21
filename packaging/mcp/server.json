@@ -1,0 +1,28 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.VinvAI/vinv",
+  "description": "Give your agent runtime evidence: semantic code search, fault localization over real runs, live values/slices/coverage, and the verify/optimize loop. Pairs with `pip install vinv`.",
+  "repository": {
+    "url": "https://github.com/VinvAI/VinvAI",
+    "source": "github"
+  },
+  "version": "0.0.1",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "vinv-mcp",
+      "version": "0.0.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VINV_WORKSPACE",
+          "description": "Path to the repo/workspace Vinv should analyze (defaults to the current working directory).",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
