@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.VinvAI/vinv",
-  "description": "Give your agent runtime evidence: semantic code search, fault localization over real runs, live values/slices/coverage, and the verify/optimize loop. Pairs with `pip install vinv`.",
+  "description": "Runtime evidence for your AI agent: semantic search, fault localization, and live values.",
   "repository": {
     "url": "https://github.com/VinvAI/VinvAI",
     "source": "github"
