@@ -390,6 +390,28 @@ def run_exercise(
             for v in row.get("response_values", [])
         }
     )
+    # No harness scenario captured a token? Bootstrap one deterministically from
+    # the OpenAPI security scheme (OAuth2 password flow) so the authenticated
+    # sweep still runs on a first pass — generic, no hardcoded login path.
+    if not live_auth_headers and any(e.get("requires_auth") for e in endpoints):
+        from .auth import bootstrap_auth_headers
+        from .openapi import fetch_openapi
+
+        boot = bootstrap_auth_headers(
+            base_url,
+            fetch_openapi(base_url),
+            probe_fn=probe_fn,
+            exercise_id=exercise_id,
+            seed=seed,
+            logger=log,
+        )
+        if boot:
+            live_auth_headers = boot
+            log.info(
+                "auth: bootstrapped %d credential set(s) from the OpenAPI security scheme",
+                len(boot),
+            )
+
     authed_rows = _auth_sweep(
         endpoints,
         base_url,
@@ -400,6 +422,11 @@ def run_exercise(
         log,
     )
     executions.extend(authed_rows)
+
+    # Access-control oracle: a protected endpoint that serves an ANONYMOUS 2xx is
+    # a broken auth guard (OWASP API1) — invisible to every 5xx/crash oracle.
+    ac_rows = _access_control_sweep(endpoints, base_url, exercise_id, probe_fn, log)
+    executions.extend(ac_rows)
 
     # Persist whatever the round checkpoints have not already written (scenario
     # rows, canary rows and the auth sweep all land after the loop).
@@ -741,6 +768,67 @@ def _auth_sweep(
                         if v not in live_ids:
                             live_ids.append(v)
     log.info("auth sweep: %d probes across %d credential sets", len(rows), len(auth_headers))
+    return rows
+
+
+def _access_control_sweep(
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    exercise_id: str,
+    probe_fn: ProbeFn,
+    log: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Fire ONE anonymous valid request at every protected endpoint.
+
+    A protected endpoint that answers an ANONYMOUS request with a 2xx has a
+    broken access control (OWASP API1) — a bug no 5xx/crash oracle can catch,
+    because the service did not error, it wrongly SUCCEEDED. Deterministic
+    completeness pass (never a bandit arm); only the violations (anonymous 2xx)
+    are returned, so a correct 401/403 never pollutes coverage or baselines.
+    """
+    rows: list[dict[str, Any]] = []
+    checked = 0
+    for ep in endpoints:
+        if not ep.get("requires_auth"):
+            continue
+        valid = [i for i in ep.get("inputs", []) if i.get("class") == "valid"]
+        if not valid:
+            continue
+        checked += 1
+        base = valid[0]
+        candidate = Candidate(
+            strategy="anonymous",
+            provenance="access-control",
+            input_class="negative",  # a correct service rejects an anonymous call
+            body=base.get("body"),
+            path_params=base.get("path_params") or {},
+            query=base.get("query") or {},
+            headers={},  # explicitly no credentials
+        )
+        try:
+            result = probe_fn(
+                base_url,
+                ep["method"],
+                ep["path"],
+                body=candidate.body,
+                path_params=candidate.path_params,
+                query=candidate.query,
+                headers={},
+                content_type=ep.get("content_type"),
+                exercise_id=exercise_id,
+            )
+        except Exception as exc:
+            log.debug("access-control sweep failed for %s: %s", ep["api_id"], exc)
+            continue
+        if isinstance(result.status, int) and 200 <= result.status < 300:
+            row = _execution_row(0, ep, candidate, result)
+            row["access_control_violation"] = True
+            rows.append(row)
+    log.info(
+        "access-control sweep: %d protected endpoints checked, %d served an anonymous 2xx",
+        checked,
+        len(rows),
+    )
     return rows
 
 

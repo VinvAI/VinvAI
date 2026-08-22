@@ -202,6 +202,43 @@ def _op_requires_auth(operation: dict[str, Any], spec: dict[str, Any] | None = N
     return isinstance(root, list) and len(root) > 0
 
 
+def discover_token_endpoint(spec: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The OAuth2 *password-flow* token endpoint declared by the spec, or None.
+
+    OpenAPI declares interactive auth in ``components.securitySchemes``. An
+    ``oauth2`` scheme with a ``password`` flow carries the ``tokenUrl`` a client
+    POSTs credentials to (RFC 6749 §4.3 — form-encoded ``grant_type=password`` +
+    ``username`` + ``password``). Reading it here is the GENERIC way to obtain a
+    bearer for the authenticated sweep: it works for ANY OAuth2-password API
+    (FastAPI's ``OAuth2PasswordBearer`` included) and hardcodes no ``/login``
+    path. HTTP-bearer / apiKey schemes declare no token URL — the caller then
+    falls back to a user-supplied credential/hook.
+
+    Returns ``{"scheme", "token_url", "scopes"}`` (``token_url`` as declared —
+    possibly relative to the server root, which the caller joins to base_url), or
+    None when no password flow is declared.
+    """
+    components = (spec or {}).get("components")
+    schemes = components.get("securitySchemes") if isinstance(components, dict) else None
+    if not isinstance(schemes, dict):
+        return None
+    for name, scheme in schemes.items():
+        if not isinstance(scheme, dict) or scheme.get("type") != "oauth2":
+            continue
+        flows = scheme.get("flows")
+        if not isinstance(flows, dict):
+            continue
+        password = flows.get("password")
+        if isinstance(password, dict) and password.get("tokenUrl"):
+            scopes = password.get("scopes")
+            return {
+                "scheme": str(name),
+                "token_url": str(password["tokenUrl"]),
+                "scopes": list(scopes) if isinstance(scopes, dict) else [],
+            }
+    return None
+
+
 def _path_suffix(path: str) -> str:
     """A prefix-insensitive join key: the last two path segments, param-normalised.
 

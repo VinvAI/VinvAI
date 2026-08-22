@@ -13,7 +13,11 @@ yields byte-identical inputs every run:
 
 Format-aware (``email``/``uuid``/``date``/``date-time``/``uri``) so a string
 field that names a format gets a value of the right SHAPE for the valid class and
-a deliberately malformed one for the negative class.
+a deliberately malformed one for the negative class. When a schema UNDER-declares
+a semantic string (``email: str`` with no ``format``), the format is inferred
+from the field name (type-gated, declared format always wins). Unbounded numeric
+fields get an implicit-domain negative (a negative value — the ``skip=-1`` class
+of bug) rather than a low-signal wrong-type.
 
 Pure and dependency-free (stdlib ``random`` seeded per call); the OpenAPI FETCH
 lives in ``openapi.py`` so this module stays trivially unit-testable.
@@ -69,10 +73,45 @@ def _plain_string(rng: random.Random, length: int) -> str:
     return "".join(rng.choice(string.ascii_letters + string.digits) for _ in range(max(0, length)))
 
 
+# ---- name-based format inference (fallback for under-declared schemas) ------
+#
+# A schema that types a semantic field as a bare string (``email: str`` rather
+# than an ``EmailStr`` that would surface ``format: email`` in the OpenAPI) gives
+# the generator no format to honour or violate. SOTA fuzzers (Schemathesis,
+# RESTler) recover the intent from the field NAME. This table is the generic,
+# extensible form of that idea — matched fuzzily, applied ONLY to string fields
+# (so ``email_count: int`` can never be mislabelled), and always OVERRIDDEN by a
+# schema-declared ``format``. Order matters: date-time before date, because
+# "datetime"/"created_at" also contain the "date" needle.
+_NAME_FORMAT_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("email", "e_mail"), "email"),
+    (("uuid", "guid"), "uuid"),
+    (("datetime", "date_time", "timestamp", "_at"), "date-time"),
+    (("date", "dob", "birthday"), "date"),
+    (("url", "uri", "href", "website", "homepage"), "uri"),
+)
+
+
+def _infer_format(name: str) -> str | None:
+    """Best-effort format for a string field whose schema declares none."""
+    low = name.lower()
+    for needles, fmt in _NAME_FORMAT_HINTS:
+        if any(n in low for n in needles):
+            return fmt
+    return None
+
+
+def _leaf_name(path: str) -> str:
+    """The field name at the tail of a generation ``path`` (``$.a.email`` →
+    ``email``, ``$query.skip`` → ``skip``), minus any array-index suffix."""
+    seg = path.rsplit(".", 1)[-1]
+    return seg.split("[", 1)[0]
+
+
 # ---- per-type scalar generation --------------------------------------------
 
 
-def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str) -> Any:
+def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str, name: str = "") -> Any:
     enum = schema.get("enum")
     if isinstance(enum, list) and enum:
         if cls == "negative":
@@ -83,6 +122,11 @@ def _gen_string(schema: dict[str, Any], rng: random.Random, cls: str) -> Any:
         # determinism, valid a seeded choice.
         return enum[0] if cls == "boundary" else rng.choice(enum)
     fmt = schema.get("format")
+    if not fmt:
+        # Schema under-declares the format? Infer it from the field name so a
+        # bare ``email: str`` still gets a shaped value (valid) and a malformed
+        # one (negative). A declared format always wins.
+        fmt = _infer_format(name)
     min_len = int(schema.get("minLength", 0) or 0)
     max_len = schema.get("maxLength")
     max_len = int(max_len) if isinstance(max_len, int | float) else None
@@ -131,12 +175,17 @@ def _gen_number(schema: dict[str, Any], rng: random.Random, cls: str, *, integer
     if cls == "boundary":
         edge = lo if lo is not None else (hi if hi is not None else 0.0)
         return int(round(edge)) if integer else round(edge, 4)
-    # negative: out of bounds, else a wrong type.
+    # negative: violate a declared bound when one exists…
     if hi is not None:
         return int(hi) + 1 if integer else hi + 1.0
     if lo is not None:
         return int(lo) - 1 if integer else lo - 1.0
-    return "__wrong_type__"
+    # …otherwise probe the near-universal IMPLICIT domain of an unbounded
+    # numeric. Counts, offsets, sizes and ids are conventionally >= 0, so a
+    # negative is the value a correct handler must reject or clamp and a naive
+    # one 500s on (the classic skip=-1 / limit=-1 crash). Schema-driven — this
+    # fires for ANY unbounded number, never keyed on a parameter name.
+    return -1 if integer else -1.0
 
 
 def _gen_boolean(rng: random.Random, cls: str) -> Any:
@@ -219,7 +268,7 @@ def generate_value(schema: dict[str, Any], seed: int, cls: str, path: str = "$")
         return _gen_number(schema, rng, cls, integer=False)
     if jtype == "boolean":
         return _gen_boolean(rng, cls)
-    return _gen_string(schema, rng, cls)
+    return _gen_string(schema, rng, cls, _leaf_name(path))
 
 
 def generate_inputs(schema: dict[str, Any], seed: int) -> dict[str, Any]:

@@ -104,3 +104,34 @@ def test_nullable_type_list_resolves():
     schema = {"type": ["string", "null"], "minLength": 2}
     val = generate_value(schema, 1, "valid")
     assert isinstance(val, str) and len(val) >= 2
+
+
+def test_unbounded_integer_negative_probes_implicit_domain():
+    # An unbounded int (no minimum) must yield a NEGATIVE value in the negative
+    # class — the skip=-1/limit=-1 class of bug — not a wrong-type string.
+    assert generate_value({"type": "integer"}, 3, "negative") == -1
+    assert generate_value({"type": "number"}, 3, "negative") == -1.0
+    # Bounded numbers still violate the declared bound (regression).
+    assert generate_value({"type": "integer", "minimum": 0, "maximum": 10}, 3, "negative") == 11
+
+
+def test_name_inference_shapes_underdeclared_string():
+    # `email: str` with no declared format still gets an email-shaped valid value
+    # and a malformed negative value, inferred from the field name.
+    assert "@" in generate_value({"type": "string"}, 1, "valid", path="$.email")
+    assert "@" not in generate_value({"type": "string"}, 1, "negative", path="$.email")
+    # A query param named skip/id stays plain (no format inferred) — inference
+    # only fires for recognised semantic names.
+    assert "@" not in generate_value({"type": "string"}, 1, "valid", path="$query.token")
+
+
+def test_name_inference_is_type_gated():
+    # A field NAMED email but TYPED integer must never become an email string.
+    val = generate_value({"type": "integer"}, 1, "valid", path="$.email_count")
+    assert isinstance(val, int)
+
+
+def test_declared_format_wins_over_name_inference():
+    # A declared format is authoritative even when the name hints otherwise.
+    val = generate_value({"type": "string", "format": "uuid"}, 1, "valid", path="$.email")
+    assert val.count("-") == 4 and len(val) == 36

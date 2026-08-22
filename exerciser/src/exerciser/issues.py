@@ -46,7 +46,8 @@ def normalize_signature(kind: str, text: str, discriminator: str = "") -> str:
 @dataclass
 class FailureCluster:
     signature: str
-    kind: str  # "server-error" | "crash" | "invariant-violation" | "baseline-degraded"
+    # server-error | crash | invariant-violation | baseline-degraded | broken-access-control
+    kind: str
     title: str
     endpoint_id: str
     method: str
@@ -137,8 +138,10 @@ def cluster_failures(executions: list[dict[str, Any]]) -> list[FailureCluster]:
     """Cluster the failing executions from a run's results.
 
     A failure is: a 5xx status (``server-error``), a no-response/transport error
-    (``crash``), or an ``invariant_violation`` flag on the execution
-    (``invariant-violation``). Non-failures are ignored.
+    (``crash``), an ``invariant_violation`` flag (``invariant-violation``), or an
+    ``access_control_violation`` flag — a protected endpoint that served an
+    anonymous request (``broken-access-control``, OWASP API1; a 2xx, so no 5xx
+    oracle can see it). Non-failures are ignored.
     """
     clusters: dict[str, FailureCluster] = {}
     for ex in executions:
@@ -155,6 +158,9 @@ def cluster_failures(executions: list[dict[str, Any]]) -> list[FailureCluster]:
         discriminator = ""
         if violation:
             kind, detail = "invariant-violation", str(violation)
+        elif ex.get("access_control_violation"):
+            kind, detail = "broken-access-control", f"anonymous request served (HTTP {status})"
+            discriminator = str(status)
         elif error and status is None:
             kind, detail = "crash", error
         elif isinstance(status, int) and status >= 500:
