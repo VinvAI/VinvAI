@@ -44,6 +44,15 @@ uvx --from vinv exerciser campaign ./my-service --budget 20
 - **🔎 Find** — surfaces what actually broke or slowed down: server errors, crashes, latency hotspots, memory leaks, duplicate recomputation, and dead code — each tied to the exact source line. Plus **semantic code search**: ask by meaning, get ranked symbols with `def` bodies and line numbers.
 - **✅ Prove** — hands that evidence to your coding agent, then verifies its fix against acceptance tests it never sees. A "faster" change that alters any output is auto-reverted.
 
+## Dead code — zero setup
+
+Not everything needs a run. `index deadcode <repo>` (or the `vinv_deadcode` MCP tool)
+statically finds every function, class, and method **nothing references** — no tracing,
+no index, no config — and reports each with its file and line. It even catches
+**transitively-dead chains** (code whose only callers are themselves dead), and can date
+each symbol from git to tell you whether it was *never wired up* or *lost its callers*.
+The one Vinv feature that pays off before you run a thing — delete with confidence.
+
 ## Context beats model size
 
 Vinv found **four bugs and one performance problem** in
