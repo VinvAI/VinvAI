@@ -428,6 +428,13 @@ def run_exercise(
     ac_rows = _access_control_sweep(endpoints, base_url, exercise_id, probe_fn, log)
     executions.extend(ac_rows)
 
+    # Authed-hostile sweep: replay each protected endpoint's negatives UNDER the
+    # token, so an authed-only crash (skip=-1 behind auth) surfaces instead of
+    # bouncing off a 401 anonymously.
+    executions.extend(
+        _authed_negative_sweep(endpoints, base_url, exercise_id, probe_fn, live_auth_headers, log)
+    )
+
     # Persist whatever the round checkpoints have not already written (scenario
     # rows, canary rows and the auth sweep all land after the loop).
     remaining = executions[persisted:]
@@ -829,6 +836,67 @@ def _access_control_sweep(
         checked,
         len(rows),
     )
+    return rows
+
+
+def _authed_negative_sweep(
+    endpoints: list[dict[str, Any]],
+    base_url: str,
+    exercise_id: str,
+    probe_fn: ProbeFn,
+    auth_headers: list[dict[str, str]],
+    log: logging.Logger,
+) -> list[dict[str, Any]]:
+    """Replay each protected endpoint's schema-NEGATIVE inputs UNDER a token.
+
+    An anonymous hostile probe on a protected endpoint only ever earns a 401 —
+    the malformed input (``skip=-1``, a bad body) never reaches the handler, so
+    the authed-only crash it would trip stays invisible. Sending the same
+    negatives WITH credentials is what surfaces them: a 5xx clusters as
+    ``server-error``, while a 4xx (a correct rejection) is ignored. Uses the
+    first credential set; deterministic completeness pass, never a bandit arm.
+    """
+    if not auth_headers:
+        return []
+    hdrs = auth_headers[0]
+    rows: list[dict[str, Any]] = []
+    for ep in endpoints:
+        if not ep.get("requires_auth"):
+            continue
+        negatives = [
+            i
+            for i in ep.get("inputs", [])
+            if i.get("class") == "negative" and i.get("provenance") == "schema"
+        ]
+        for inp in negatives:
+            candidate = Candidate(
+                strategy="authed_negative",
+                provenance="auth_hostile",
+                input_class="negative",
+                body=inp.get("body"),
+                path_params=inp.get("path_params") or {},
+                query=inp.get("query") or {},
+                headers={**(inp.get("headers") or {}), **hdrs},
+            )
+            try:
+                result = probe_fn(
+                    base_url,
+                    ep["method"],
+                    ep["path"],
+                    body=candidate.body,
+                    path_params=candidate.path_params,
+                    query=candidate.query,
+                    headers=candidate.headers,
+                    content_type=ep.get("content_type"),
+                    exercise_id=exercise_id,
+                )
+            except Exception as exc:
+                log.debug("authed negative sweep failed for %s: %s", ep["api_id"], exc)
+                continue
+            row = _execution_row(0, ep, candidate, result)
+            row["auth"] = True
+            rows.append(row)
+    log.info("authed negative sweep: %d hostile probes replayed under a token", len(rows))
     return rows
 
 
