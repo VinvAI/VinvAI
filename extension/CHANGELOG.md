@@ -5,6 +5,12 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.7] — 2026-08-22
+
+### 🔧 Changed
+
+- **Sharper endpoint exercising** — tests behind auth by bootstrapping a token from the OpenAPI security scheme, flags endpoints that serve anonymous requests (broken access control), and derives smarter negative inputs (unbounded numerics, under-declared string formats) — no hardcoded paths or field names.
+
 ## [0.2.6] — 2026-08-22
 
 ### ✨ Added
