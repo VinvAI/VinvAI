@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://vinv.ai",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "vinv-mcp",
-      "version": "0.0.4",
+      "version": "0.0.5",
       "transport": {
         "type": "stdio"
       },

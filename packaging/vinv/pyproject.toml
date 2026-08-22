@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vinv"
-version = "0.0.3"
+version = "0.0.4"
 description = "Vinv runs, tests, and finds issues in your services — with zero code changes."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
