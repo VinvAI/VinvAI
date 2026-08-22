@@ -12,7 +12,7 @@
 
 **Vinv (Vibe Inverse) runs your services, finds issues, and verifies fixes — with zero code changes.**
 
-It's an IDE plugin that auto-exposes its MCP servers to every other coding harness on your system (Claude Code, Cursor, Copilot, Codex, Windsurf…) — so they all share the same runtime context about the repo you're working on. It connects runtime traces to the source code that produced them, hands that evidence to your agent, then runs the code again to verify the fix actually works. It even uses **Thompson sampling** to decide *how much* runtime context to give the agent — because more is not always better.
+It connects runtime traces to the source code that produced them, hands that evidence to your agent, then runs the code again to verify the fix actually works. It even uses **Thompson sampling** to decide *how much* runtime context to give the agent — because more is not always better.
 
 <sub>Python first — services and APIs. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine. Open source, Apache-2.0.</sub>
 
