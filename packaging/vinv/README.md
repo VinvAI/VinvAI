@@ -37,6 +37,13 @@ uvx --from vinv exerciser campaign ./my-service --budget 20
 
 <sub>First run fetches a one-time ~500&nbsp;MB local embedding model. Python 3.12–3.14.</sub>
 
+## What you get — Run · Test · Find · Prove
+
+- **🏃 Run** — brings every service in your repo up under tracing with **zero edits** to your code: timings, arguments, return values, call trees, from the real run.
+- **🧪 Test** — drives real requests through every endpoint (valid, boundary, negative, authenticated) and banks each response as a permanent regression case.
+- **🔎 Find** — surfaces what actually broke or slowed down: server errors, crashes, latency hotspots, memory leaks, and dead code — each tied to the exact source line.
+- **✅ Prove** — hands that evidence to your coding agent, then verifies its fix against acceptance tests it never sees. A "faster" change that alters any output is auto-reverted.
+
 ## Context beats model size
 
 Vinv found **four bugs and one performance problem** in
@@ -59,13 +66,6 @@ Upstream on Hugging Face, it found and proved an allocation fast-path in
 [smolagents](https://github.com/huggingface/smolagents) — **~37,000× less** transient
 allocation, output byte-identical across 2,015 inputs
 ([PR #2572](https://github.com/huggingface/smolagents/pull/2572)).
-
-## What you get — Run · Test · Find · Prove
-
-- **🏃 Run** — brings every service in your repo up under tracing with **zero edits** to your code: timings, arguments, return values, call trees, from the real run.
-- **🧪 Test** — drives real requests through every endpoint (valid, boundary, negative, authenticated) and banks each response as a permanent regression case.
-- **🔎 Find** — surfaces what actually broke or slowed down: server errors, crashes, latency hotspots, memory leaks, and dead code — each tied to the exact source line.
-- **✅ Prove** — hands that evidence to your coding agent, then verifies its fix against acceptance tests it never sees. A "faster" change that alters any output is auto-reverted.
 
 ## The engines
 
