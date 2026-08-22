@@ -5,6 +5,13 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.6] — 2026-08-22
+
+### ✨ Added
+
+- **`vinv_deadcode` MCP tool** — pull the dead-code report (unreferenced functions, classes, and methods, each with file and line) straight over MCP.
+- **`vinv_index` MCP tool** — build or refresh the semantic code index over MCP.
+
 ## [0.2.5] — 2026-08-19
 
 Maintenance only — no behaviour changes.

@@ -21,7 +21,7 @@
  * which is what a local `npm run bundle` dev build wants — the developer's
  * checkout is theirs to move.
  */
-export const ENGINE_REF = 'v0.2.5';
+export const ENGINE_REF = '11796e941dbf8278d51801c0a7e96bc1e0a99e69';
 
 /**
  * What an unconfigured install does when the stamped ref and the checkout
@@ -33,4 +33,4 @@ export const ENGINE_REF = 'v0.2.5';
  *   'prompt' — offer it once per extension version
  *   'never'  — leave the checkout alone
  */
-export const ENGINE_UPDATE_DEFAULT: 'auto' | 'prompt' | 'never' = 'auto';
+export const ENGINE_UPDATE_DEFAULT: 'auto' | 'prompt' | 'never' = 'prompt';
