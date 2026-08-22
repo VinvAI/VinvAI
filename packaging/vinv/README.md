@@ -41,7 +41,7 @@ uvx --from vinv exerciser campaign ./my-service --budget 20
 
 - **🏃 Run** — brings every service in your repo up under tracing with **zero edits** to your code: timings, arguments, return values, call trees, from the real run.
 - **🧪 Test** — drives real requests through every endpoint (valid, boundary, negative, authenticated) and banks each response as a permanent regression case.
-- **🔎 Find** — surfaces what actually broke or slowed down: server errors, crashes, latency hotspots, memory leaks, and dead code — each tied to the exact source line.
+- **🔎 Find** — surfaces what actually broke or slowed down: server errors, crashes, latency hotspots, memory leaks, duplicate recomputation, and dead code — each tied to the exact source line. Plus **semantic code search**: ask by meaning, get ranked symbols with `def` bodies and line numbers.
 - **✅ Prove** — hands that evidence to your coding agent, then verifies its fix against acceptance tests it never sees. A "faster" change that alters any output is auto-reverted.
 
 ## Context beats model size
@@ -71,13 +71,17 @@ allocation, output byte-identical across 2,015 inputs
 
 `pip install vinv` installs one package that ships every engine as a console script:
 
-| Command | What it does |
-|---|---|
-| `exerciser campaign <repo> --budget N` | **Start here.** One budget across every armed oracle; reports which technique paid |
-| `tracelens run -- <cmd>` | Zero-edit runtime tracing of a Python service or CLI |
-| `identification consolidate <repo>` | Join traces to source; produce the API/call-graph map |
-| `bringup …` · `goal …` · `handbook …` | Service discovery, fix episodes, and the codebase handbook |
-| `vinv-embedder` | The local embedding sidecar (no cloud keys) |
+| Engine | Command | What it does |
+|---|---|---|
+| **exerciser** | `exerciser campaign <repo> --budget N` | **Start here.** Coverage-guided API exerciser + oracle swarm — generates valid/boundary/negative/authenticated/fault/concurrent requests, banks a permanent regression suite, and reports which technique paid. |
+| **tracelens** | `tracelens run -- <cmd>` | Zero-edit runtime tracer — captures timings, arguments, return values, and call trees from a real run. |
+| **index** | `index query <repo>` · `index deadcode <repo>` | Rust semantic code index — search code by meaning, plus a source-only dead-code report. |
+| **identification** | `identification consolidate <repo>` | Joins traces to source — builds the API surface + call-graph map, tying runtime evidence to the exact function. |
+| **bringup** | `bringup list/start <repo>` | Brings services up under tracing — enumerates every service, then starts one instrumented. |
+| **handbook** | `handbook generate <repo>` | Renders the codebase-discovery task your coding agent runs to map the repo (services, entry points). Prompt-only — no LLM calls of its own. |
+| **goal** | `goal create <context>` | Distills a working context into one standing goal for fix/optimize episodes. Prompt-only. |
+| **embedder** | `vinv-embedder serve` | Local embedding sidecar ([CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed)) powering semantic search — runs on your machine, no cloud keys. |
+| **contracts** | *(library)* | `lens_contracts` — the shared data contract every engine reads and writes. |
 
 ## Works with any MCP client
 
