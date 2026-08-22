@@ -19,7 +19,7 @@ jobs:
     name: extension README matches root README
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check Open VSX README is synced from root (pills excepted)
         run: python3 scripts/sync-extension-readme.py --check
 
@@ -27,7 +27,7 @@ jobs:
     name: lint changed files (ruff + eslint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -55,7 +55,7 @@ jobs:
 
       - name: Set up uv
         if: steps.diff.outputs.py_count != '0'
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
 
       - name: Ruff lint + format check (changed Python)
         if: steps.diff.outputs.py_count != '0'
@@ -67,7 +67,7 @@ jobs:
 
       - name: Set up Node
         if: steps.diff.outputs.ts_count != '0'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
