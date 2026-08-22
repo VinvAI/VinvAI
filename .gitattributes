@@ -1,0 +1,6 @@
+# Shell scripts must stay LF: a CRLF in the shebang breaks execution on
+# Unix ("bad interpreter: /usr/bin/env bash^M"). Git hooks have no extension,
+# so pin them explicitly alongside *.sh.
+*.sh text eol=lf
+.githooks/pre-commit text eol=lf
+.githooks/pre-push text eol=lf
