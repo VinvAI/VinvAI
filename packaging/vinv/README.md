@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv" width="820">
-
 # `pip install vinv`
 
 **Vinv runs, tests, and finds issues in your services — with zero code changes.**
