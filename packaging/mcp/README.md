@@ -1,9 +1,9 @@
 # vinv-mcp
 
 **Give your AI agent runtime evidence.** One MCP server exposing all of
-[Vinv](https://vinv.ai)'s tools — semantic code search, fault localization over
-real runs, live values/slices/coverage, and the verify/optimize loop — to any
-MCP client (Claude Code, Claude Desktop, Cursor, …).
+[Vinv](https://vinv.ai)'s tools — semantic code search, dead-code detection,
+fault localization over real runs, live values/slices/coverage, and the
+verify/optimize loop — to any MCP client (Claude Code, Claude Desktop, Cursor, …).
 
 Vinv runs, tests, and finds issues in your Python services with zero code
 changes. `vinv-mcp` hands that evidence to the agent you already use.

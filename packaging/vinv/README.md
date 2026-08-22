@@ -83,10 +83,20 @@ allocation, output byte-identical across 2,015 inputs
 
 ## Works with any MCP client
 
-Vinv is also an **MCP server** — point Claude Code, Cursor, or any MCP-compatible agent at
-it and your agent gets `vinv_query` (semantic code search), `rank_suspects` (fault
+Vinv is also an **MCP server** — add it once, globally, and point Claude Code, Cursor, or
+any MCP-compatible agent at it. It finds your open workspace automatically via MCP roots,
+so a single config follows whatever repo you have open:
+
+```bash
+claude mcp add vinv -- npx -y vinv-mcp
+```
+
+Your agent gets the full tool set: `vinv_query` (semantic code search), `vinv_deadcode`
+(unreferenced code), `vinv_index` (build/refresh the index), `rank_suspects` (fault
 localization over real runs), runtime `values_of` / `slice` / `coverage_of`, and a
-`vinv_session` tool that drives the whole verify/optimize loop from chat.
+`vinv_session` tool that drives the whole verify/optimize loop from chat. The index
+builds in the background on first use. See
+[`vinv-mcp`](https://www.npmjs.com/package/vinv-mcp).
 
 ## Privacy
 
