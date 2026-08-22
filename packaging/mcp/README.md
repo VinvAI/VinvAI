@@ -63,7 +63,7 @@ indexing" notice and you fall back to text search until it is ready. Call
 
 | Area | Tools |
 |---|---|
-| **Code index** | `vinv_query` (semantic search), `vinv_index` (build/refresh), `vinv_feedback`, `vinv_session` |
+| **Code index** | `vinv_query` (semantic search), `vinv_index` (build/refresh), `vinv_deadcode` (unreferenced code), `vinv_feedback`, `vinv_session` |
 | **Runtime** | `rank_suspects`, `values_of`, `slice`, `coverage_of`, `callers_of`, `blast_radius`, `why_did_this_run`, `relevant_to` |
 | **Exercise** | `vinv_ingest_run`, `vinv_run_status`, `vinv_list_candidates` |
 

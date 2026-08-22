@@ -142,6 +142,45 @@ async function runQuery(query: string, topK: number): Promise<{ output: string; 
 	});
 }
 
+/**
+ * Runs `index deadcode` — a source-only static scan for Python definitions
+ * nothing references. Needs no prebuilt index and no embedder, so it works
+ * immediately on any workspace; runs synchronously (a fast AST walk).
+ */
+async function runDeadcode(opts: {
+	include?: string;
+	showProbable?: boolean;
+	reasons?: boolean;
+}): Promise<{ output: string }> {
+	const indexBin = indexBinPath();
+	if (!indexBin) {
+		return {
+			output: JSON.stringify({
+				status: 'error',
+				error: 'the Vinv index engine is not installed — run "pip install vinv"',
+			}),
+		};
+	}
+	const args = ['deadcode', workspaceRoot, '--json'];
+	if (opts.include) args.push('--include', opts.include);
+	if (opts.showProbable) args.push('--show-probable');
+	if (opts.reasons) args.push('--reasons');
+	return new Promise((resolve) => {
+		execFile(indexBin, args, { maxBuffer: 64 * 1024 * 1024, env: process.env }, (error, stdout, stderr) => {
+			if (stdout) {
+				resolve({ output: stdout });
+				return;
+			}
+			resolve({
+				output: JSON.stringify({
+					status: 'error',
+					error: error ? error.message : stderr || 'deadcode produced no output',
+				}),
+			});
+		});
+	});
+}
+
 // ── Background index build ────────────────────────────────────────────────
 // Building the index is minutes of work (plus a one-time embedding-model
 // download), so it must never run inside a tools/call — the agent would block
@@ -439,6 +478,36 @@ const INDEX_TOOL = {
 				type: 'boolean',
 				description:
 					'Force a full rebuild from scratch (default false: incremental update when an index already exists).',
+			},
+		},
+	},
+};
+
+const DEADCODE_TOOL = {
+	name: 'vinv_deadcode',
+	description:
+		'List Python definitions (functions, classes, methods) that NOTHING in the ' +
+		'repository references — dead code — found by static analysis of the source. ' +
+		'Needs no prebuilt index and no runtime, so it works immediately on any ' +
+		'workspace and returns each unused symbol with its file and line. Use it to ' +
+		'find safe-to-remove code; before deleting a reported symbol, still confirm ' +
+		'it is not referenced dynamically (by name) or exported as public API.',
+	inputSchema: {
+		type: 'object',
+		properties: {
+			include: {
+				type: 'string',
+				description: 'Only report definitions under this path prefix (e.g. "src/").',
+			},
+			show_probable: {
+				type: 'boolean',
+				description:
+					'Also include methods that may be overrides or duck-typed (higher recall, more false positives).',
+			},
+			reasons: {
+				type: 'boolean',
+				description:
+					'Date each symbol from git history and classify it as never-wired vs lost-its-callers (slower; needs git).',
 			},
 		},
 	},
@@ -812,7 +881,7 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 			return; // notification, no response
 
 		case 'tools/list':
-			reply(req.id, { tools: [TOOL, INDEX_TOOL, FEEDBACK_TOOL, SESSION_TOOL] });
+			reply(req.id, { tools: [TOOL, INDEX_TOOL, DEADCODE_TOOL, FEEDBACK_TOOL, SESSION_TOOL] });
 			return;
 
 		case 'tools/call': {
@@ -1028,6 +1097,20 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 					...(buildState.error ? { error: buildState.error } : {}),
 				};
 				reply(req.id, { content: [{ type: 'text', text: JSON.stringify(payload) }] });
+				return;
+			}
+			if (name === 'vinv_deadcode') {
+				const dcArgs = (params.arguments ?? {}) as {
+					include?: string;
+					show_probable?: boolean;
+					reasons?: boolean;
+				};
+				const run = await runDeadcode({
+					include: dcArgs.include,
+					showProbable: dcArgs.show_probable,
+					reasons: dcArgs.reasons,
+				});
+				reply(req.id, { content: [{ type: 'text', text: run.output }] });
 				return;
 			}
 			if (name !== 'vinv_query') {
