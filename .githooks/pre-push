@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Heavier mirror of the deterministic, locally-runnable parts of test.yml, run
+# before a push. It does NOT run the xvfb VS Code integration tests, cargo test,
+# or the ubuntu/macos/windows matrix — those are CI-only — so a green pre-push is
+# not a guarantee CI passes, but it catches the type/dep failures that don't
+# depend on a display or a specific OS. Bypass with:  git push --no-verify
+#
+# Set VINV_PREPUSH_CARGO=1 to also run `cargo test` (slow) if you touched Rust.
+set -uo pipefail
+
+repo="$(git rev-parse --show-toplevel)" || exit 0
+cd "$repo" || exit 0
+fail=0
+
+# Extension typecheck (test.yml: "Typecheck" -> npm run check).
+if command -v npm >/dev/null 2>&1; then
+	echo "· pre-push: extension typecheck (tsc)…"
+	if ! npm run check --prefix extension --silent; then
+		echo "✗ extension tsc failed."
+		fail=1
+	fi
+else
+	echo "· skip tsc (npm not found)"
+fi
+
+# Every third-party import is declared (test.yml: check-declared-deps.py).
+if command -v uv >/dev/null 2>&1; then
+	echo "· pre-push: check-declared-deps…"
+	if ! uv run python scripts/check-declared-deps.py >/dev/null 2>&1; then
+		echo "✗ check-declared-deps.py failed (an import is not declared)."
+		fail=1
+	fi
+else
+	echo "· skip check-declared-deps (uv not found)"
+fi
+
+# Optional Rust tests — opt-in because they are slow.
+if [ "${VINV_PREPUSH_CARGO:-0}" = "1" ] && command -v cargo >/dev/null 2>&1; then
+	echo "· pre-push: cargo test (index)…"
+	if ! cargo test --manifest-path index/Cargo.toml --quiet; then
+		echo "✗ cargo test failed."
+		fail=1
+	fi
+fi
+
+if [ "$fail" != 0 ]; then
+	echo
+	echo "pre-push blocked — one of the local CI mirrors failed."
+	echo "Fix the above, or bypass once with: git push --no-verify"
+	exit 1
+fi
+exit 0

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Fast, diff-scoped mirror of the lint CI (.github/workflows/lint.yml). Blocks a
+# commit that CI's lint would reject, catching the common failures locally:
+#   - extension/README.md out of sync with the root README (readme-parity job)
+#   - ruff errors/format on staged Python (changed-files job)
+#   - eslint errors on staged extension TypeScript (changed-files job)
+#
+# It only runs a tool that is actually installed; a missing tool is warned and
+# skipped, never a hard block. Bypass in a pinch with:  git commit --no-verify
+set -uo pipefail
+
+repo="$(git rev-parse --show-toplevel)" || exit 0
+cd "$repo" || exit 0
+fail=0
+
+staged() { git diff --cached --name-only --diff-filter=ACMR; }
+
+# 1. README parity — only when a file that feeds it is staged.
+if staged | grep -qE '^(README\.md|extension/README\.md|scripts/sync-extension-readme\.py)$'; then
+	if command -v python >/dev/null 2>&1; then
+		if ! python scripts/sync-extension-readme.py --check >/dev/null 2>&1; then
+			echo "✗ extension/README.md is out of sync with README.md."
+			echo "  fix: python scripts/sync-extension-readme.py   (then: git add extension/README.md)"
+			fail=1
+		fi
+	else
+		echo "· skip README parity (python not found)"
+	fi
+fi
+
+# 2. Ruff on staged Python (matches CI: ruff check + format --check).
+py="$(staged | grep -E '\.py$' || true)"
+if [ -n "$py" ]; then
+	if command -v uv >/dev/null 2>&1; then
+		if ! echo "$py" | xargs uv run ruff check; then
+			echo "✗ ruff check failed on staged Python."
+			fail=1
+		fi
+		if ! echo "$py" | xargs uv run ruff format --check >/dev/null 2>&1; then
+			echo "✗ ruff format check failed. Run: uv run ruff format <files>"
+			fail=1
+		fi
+	else
+		echo "· skip ruff (uv not found)"
+	fi
+fi
+
+# 3. ESLint on staged extension TypeScript (matches CI's path scope + invocation).
+ts="$(staged | grep -E '^extension/src/.*\.(ts|tsx)$' | sed 's#^extension/##' || true)"
+if [ -n "$ts" ]; then
+	if command -v npx >/dev/null 2>&1; then
+		if ! ( cd extension && echo "$ts" | xargs npx --no-install eslint ); then
+			echo "✗ eslint failed on staged TypeScript."
+			fail=1
+		fi
+	else
+		echo "· skip eslint (npx not found)"
+	fi
+fi
+
+if [ "$fail" != 0 ]; then
+	echo
+	echo "pre-commit blocked — this mirrors the lint CI so the push won't go red."
+	echo "Fix the above, or bypass once with: git commit --no-verify"
+	exit 1
+fi
+exit 0
