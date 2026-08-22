@@ -1,11 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.VinvAI/vinv",
+  "title": "Vinv",
   "description": "Vinv runs, tests, and finds issues in your services — with zero code changes.",
   "repository": {
     "url": "https://github.com/VinvAI/VinvAI",
     "source": "github"
   },
+  "websiteUrl": "https://vinv.ai",
   "version": "0.0.3",
   "packages": [
     {
