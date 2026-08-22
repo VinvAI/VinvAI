@@ -1,33 +1,5 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://images.vinv.ai/vinv-banner-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="https://images.vinv.ai/vinv-banner-light.png">
-  <img src="https://images.vinv.ai/vinv-banner-light.png" alt="Vinv — runs, tests, and finds issues in your services with zero code changes, then helps your AI agent fix what breaks and proves it." width="880">
-</picture>
-
-<br><br>
-
-**Vinv runs, tests, and finds issues in your services — with zero code changes.**
-
-It watches a real run of your Python services and hands your coding agent the actual execution evidence — traces, argument values, the failing frame — instead of leaving it to guess from static text. Then it won't let a fix land until that fix passes acceptance tests written *before* it, that the agent never sees. All local, through the agent you already pay for.
-
-<sub>Python first — services and APIs. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine.</sub>
-
-<br><br>
-
-<a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><img src="docs/media/vinv-demo-poster.jpg" alt="Watch the 2-minute Vinv demo — run, test, and find issues in your services with zero code changes" width="820"></a>
-
-<sub><a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><b>▶ Watch the 2-minute demo</b></a> — from a cold repo to a proven fix</sub>
-
-<br><br>
-
-<img src="https://images.vinv.ai/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
-
-<sub>One command starts it. Vinv drives the other eight stages — every arrow is evidence, not a guess.</sub>
-
-<br><br>
-
 [![License](https://img.shields.io/badge/license-Apache--2.0-D71921?style=flat-square)](LICENSE)
 [![Version](https://img.shields.io/open-vsx/v/VinvAI/VinvAI?style=flat-square&color=D71921&label=version)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
@@ -36,11 +8,67 @@ It watches a real run of your Python services and hands your coding agent the ac
 [![Open issues](https://img.shields.io/github/issues/VinvAI/VinvAI?style=flat-square&color=D71921&label=open%20issues)](https://github.com/VinvAI/VinvAI/issues)
 [![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
-**Install:** [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) · [**one-click, pick your editor**](https://vinv.ai/#install)
+# VinvAI
 
-**[01 FIND](#01-find--what-actually-ran) · [02 FIX](#02-fix--through-the-agent-you-already-pay-for) · [03 PROVE](#03-prove--or-revert-it) · [04 LEARN](#04-learn--from-what-survived)**
+**Vinv runs, tests, and finds issues in your services — with zero code changes.**
+
+It watches a real run of your Python services and hands your coding agent the actual execution evidence — traces, argument values, the failing frame — instead of leaving it to guess from static text. Then it won't let a fix land until that fix passes acceptance tests written *before* it, that the agent never sees. All local, through the agent you already pay for.
+
+<sub>Python first — services and APIs. TS & Go next.<br>No account. No API keys. No telemetry. Everything runs on your machine.</sub>
 
 </div>
+
+## Install
+
+Vinv works three ways — as an editor extension, a CLI, or an MCP server for any agent. They share the same engines.
+
+### Editor extension
+
+One click — [**install from vinv.ai**](https://vinv.ai/#install), which opens the extension directly in your chosen editor — or install straight from your editor's CLI:
+
+| Editor | Command |
+|---|---|
+| VS Code | `code --install-extension VinvAI.VinvAI` |
+| Cursor | `cursor --install-extension VinvAI.VinvAI` |
+| Windsurf | `windsurf --install-extension VinvAI.VinvAI` |
+| VSCodium | `codium --install-extension VinvAI.VinvAI` |
+| Trae | `trae --install-extension VinvAI.VinvAI` |
+| VS Code Insiders | `code-insiders --install-extension VinvAI.VinvAI` |
+
+<sub>First run builds the engines — about 4 minutes: it compiles the Rust index and fetches a one-time ~500 MB local embedding model ([uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs) required). First trace lands about a minute after that; everything after is seconds.</sub>
+
+### CLI (Python engines)
+
+```bash
+pip install vinv          # every engine as a console script
+# or run one with zero install:
+uvx --from vinv exerciser campaign <repo> --budget 20
+```
+
+### MCP server (any agent)
+
+Give Claude Code, Cursor, or any MCP client Vinv's tools. Install the engines above, then register the unified server — **one global config**; it finds your open workspace automatically via MCP roots:
+
+```bash
+claude mcp add vinv -- npx -y vinv-mcp
+```
+
+<sub>Other clients: add <code>{ "command": "npx", "args": ["-y", "vinv-mcp"] }</code> under <code>mcpServers.vinv</code> in the client's MCP config. See <a href="https://www.npmjs.com/package/vinv-mcp"><code>vinv-mcp</code></a> — 16 tools: semantic search, dead code, fault localization, runtime values/slices/coverage, and the verify/optimize loop.</sub>
+
+<details><summary><b>From source</b> — contributors, or to build the engines yourself</summary>
+
+<br>
+
+```bash
+git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
+```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
+```
+</details>
 
 ## What you get, in one loop
 
@@ -52,6 +80,11 @@ It watches a real run of your Python services and hands your coding agent the ac
 - **✅ Prove** — hands that evidence to the agent you already use (Claude Code, Cursor, Copilot…), then verifies its fix against acceptance tests written *before* the fix that it never sees. A "faster" change that alters any output is auto-reverted.
 
 <sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. Everything runs on your machine.</sub>
+
+<div align="center">
+<a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><img src="docs/media/vinv-demo-poster.jpg" alt="Watch the 2-minute Vinv demo — run, test, and find issues in your services with zero code changes" width="820"></a>
+<br><sub><a href="https://www.youtube.com/watch?v=EkUjPWKHAvI"><b>▶ Watch the 2-minute demo</b></a> — from a cold repo to a proven fix</sub>
+</div>
 
 ## The problem
 
@@ -95,33 +128,6 @@ Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (
 </div>
 
 That is *how come after it*: oracles find the waste, your agent proposes the edit, paired-bootstrap + byte-identical replay decide accept or revert, and only then does anything go upstream. The rest of this README is the machinery behind those receipts.
-
-## Install
-
-**Use it from your IDE, your CLI, or any MCP-compatible agent.** Vinv isn't another coding agent — it's the runtime-evidence layer *underneath* the one you already use, exposed as MCP servers (`vinv-index`, `vinv-runtime`, `vinv-exercise`) that Claude Code, Cursor, Codex, Copilot and Windsurf pick up automatically.
-
-One click from the marketplace — [**Open VSX**](https://open-vsx.org/extension/VinvAI/VinvAI) — or straight from your editor's CLI:
-
-| Editor | Command |
-|---|---|
-| VS Code | `code --install-extension VinvAI.VinvAI` |
-| Cursor | `cursor --install-extension VinvAI.VinvAI` |
-| Windsurf | `windsurf --install-extension VinvAI.VinvAI` |
-| VSCodium | `codium --install-extension VinvAI.VinvAI` |
-| Trae | `trae --install-extension VinvAI.VinvAI` |
-| VS Code Insiders | `code-insiders --install-extension VinvAI.VinvAI` |
-
-<sub>First run builds the engines — about 4 minutes: it compiles the Rust index and fetches a one-time ~500 MB local embedding model ([uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs) required). First trace lands about a minute after that; everything after is seconds.</sub>
-
-```bash
-git clone https://github.com/VinvAI/VinvAI ~/.vinv/engines && cd ~/.vinv/engines && ./install.sh
-```
-
-<sub>Windows (PowerShell):</sub>
-
-```powershell
-git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
-```
 
 ## Under the hood: the oracle roster
 
@@ -341,6 +347,11 @@ Vinv's release gate is Vinv — these numbers come from running the loop on this
 
 ## How it works
 
+<div align="center">
+<img src="https://images.vinv.ai/vinv-loop.png" alt="From cold repo to production-ready: Vinv's nine stages around your coding agent — bring up, trace, index, map, exercise, find, dispatch, verify, learn — each annotated with what it does and which engine runs it" width="900">
+<br><sub>One command starts it. Vinv drives the other eight stages — every arrow is evidence, not a guess.</sub>
+</div>
+
 ```mermaid
 flowchart LR
   T[Trace] --> I[Index] --> S[Serve MCP] --> V[Verify] --> L[Learn] --> T
@@ -390,6 +401,22 @@ Vinv indexes **the code** and generates — from your own run — **the traces**
 6. **See what got fixed** — **"Vinv: Open Findings"**: issue clusters, optimization episodes with their confidence intervals, regression diffs by kind, latency profile, cleanup ledger. The backing file `.vinv/reports/findings.json` is the same data, machine-readable — point your agent at it.
 7. **Regress after any change** — `exerciser regress <repo> --base-url …` replays all banked cases (re-capturing fresh credentials itself) and reports **behavior / contract / perf / environment** diffs separately, so environment drift never masquerades as a code regression.
 8. **Hunt waste on demand** — **"Optimize Latency Hotspots"**, **"Analyze Memory Trends"** (Theil–Sen leak suspects), and **"Analyze Cache Opportunities"** each turn one command into an evidence-seeded fix episode — accepted only if the paired-bootstrap CI clears and behavior stays byte-identical.
+
+## The engines
+
+`pip install vinv` ships every engine as a console script — or use any one standalone:
+
+| Engine | Command | What it does |
+|---|---|---|
+| [**exerciser**](exerciser/) | `exerciser campaign <repo> --budget N` | **Start here.** Coverage-guided API exerciser + oracle swarm — generates valid/boundary/negative/authenticated/fault/concurrent requests, banks a permanent regression suite, and reports which technique paid. |
+| [**tracelens**](tracelens/) | `tracelens run -- <cmd>` | Zero-edit runtime tracer — timings, arguments, return values, and call trees from a real run. |
+| [**index**](index/) | `index query <repo>` · `index deadcode <repo>` | Rust semantic code index — search code by meaning, plus a source-only dead-code report. |
+| [**identification**](identification/) | `identification consolidate <repo>` | Joins traces to source — builds the API surface + call-graph map, tying runtime evidence to the exact function. |
+| [**bringup**](bringup/) | `bringup list/start <repo>` | Brings services up under tracing — enumerates every service, then starts one instrumented. |
+| [**handbook**](handbook/) | `handbook generate <repo>` | Renders the codebase-discovery task your coding agent runs to map the repo. Prompt-only — no LLM calls of its own. |
+| [**goal**](goal/) | `goal create <context>` | Distills a working context into one standing goal for fix/optimize episodes. Prompt-only. |
+| [**embedder**](embedder/) | `vinv-embedder serve` | Local embedding sidecar ([CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed)) powering semantic search — no cloud keys. |
+| [**contracts**](contracts/) | *(library)* | `lens_contracts` — the shared data contract every engine reads and writes. |
 
 ## Engine CLI reference
 
