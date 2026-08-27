@@ -5,7 +5,7 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
-## [0.2.9] — 2026-08-27
+## [0.2.10] — 2026-08-27
 
 ### 🐛 Fixed
 
