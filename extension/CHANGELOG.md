@@ -5,6 +5,12 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.9] — 2026-08-27
+
+### 🐛 Fixed
+
+- **Codex CLI harness works again** — newer Codex releases removed the `--full-auto` flag from `codex exec`, so every episode dispatched to the Codex harness failed to start. Vinv now drives Codex in its full-auto mode on macOS, Linux, and Windows.
+
 ## [0.2.7] — 2026-08-22
 
 ### 🔧 Changed
