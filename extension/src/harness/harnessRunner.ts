@@ -161,10 +161,22 @@ export const HARNESSES: ReadonlyArray<HarnessDef> = [
 		id: 'codex',
 		label: 'Codex CLI',
 		kind: 'cli',
+		bin: 'codex',
 		// `exec` is headless; `-` reads the prompt from stdin. --skip-git-repo-check
 		// because target workspaces are not necessarily git repos.
-		bin: 'codex',
-		args: 'exec --full-auto --skip-git-repo-check -',
+		//
+		// --dangerously-bypass-approvals-and-sandbox is the full-bypass mode, the peer
+		// of Claude's bypassPermissions / Cursor's --force / Gemini's --yolo above: an
+		// episode fixes code and runs bring-up commands with zero human approval.
+		//
+		// We do NOT use `--full-auto`: newer Codex CLIs (0.128+) rejected it on `exec`
+		// outright — "unexpected argument '--full-auto'". Its documented replacement,
+		// `--sandbox workspace-write`, is ALSO wrong here: Codex's sandbox is OS-enforced
+		// (Linux seccomp / macOS Seatbelt) and does not exist on Windows, so there
+		// workspace-write silently collapses to read-only and EVERY command — even an
+		// in-workspace write — is "rejected: blocked by policy" (verified, Codex 0.150.1
+		// on Windows). Full bypass is the only mode that operates on all three platforms.
+		args: 'exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -',
 		installHint: 'Install with `npm install -g @openai/codex` and run `codex` once to sign in.',
 		installCommand: 'npm install -g @openai/codex',
 		postInstall: 'Then run `codex` once in a terminal to sign in.',
