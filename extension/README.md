@@ -10,9 +10,9 @@
 
 # VinvAI
 
-**Vinv runs your services, finds real issues, and verifies fixes — with zero code changes.**
+**Vinv (Vibe Inverse) runs your services, finds real issues, and verifies fixes — with zero code changes.**
 
-Vinv connects runtime traces to the exact source that produced them, hands that evidence to the coding agent you already use, then re-runs the code to prove the fix actually works. Your agent proposes; Vinv verifies.
+Vinv connects runtime traces to the exact source that produced them, hands that evidence to the coding agent you already use, then re-runs the code to prove the fix actually works. **It's not another coding agent — it's the evidence layer under the one you already use:** your agent proposes, Vinv verifies.
 
 <sub>Python first — services and APIs. TypeScript & Go next.<br>No account, no API keys, no telemetry. Everything runs on your machine. Open source, Apache-2.0.</sub>
 
@@ -108,13 +108,13 @@ flowchart LR
 
 ## Context beats model size
 
-Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★). Same five issues, same prompts, Vinv grading every run:
+Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★). Same five issues, same prompts — all driven by a commodity model (Cursor's **Composer 2.5**, not a frontier model), with Vinv grading every run:
 
 | Setup | Fixed |
 |---|---|
-| **Cheap commodity model + Vinv evidence** | **4 bugs + 1 optimization** |
-| Frontier model, working blind | 1 bug |
-| Cheap commodity model, working blind | nothing |
+| **Composer 2.5 + Vinv evidence** | **4 bugs + 1 optimization** |
+| Frontier model, blind | 1 bug |
+| Composer 2.5, blind | nothing |
 
 One trial per condition — a **demonstration, not a benchmark**. Blind, the commodity model scored zero. Hand it the failing frame, the caller chain, and the real argument values, and it beats a stronger model guessing from static code. **The evidence is what moved, not the weights.**
 
@@ -127,9 +127,9 @@ On that same template the optimization loop later detected — from live traces 
 
 ### Upstream on Hugging Face
 
-Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 framework, no affiliation — the allocation loop found and proved a fast-path in `sanitize_for_rich`. Benchmarked with `tracemalloc` on a realistic 4&nbsp;KB log line: transient per-call allocation **36.27&nbsp;KB → 0.00&nbsp;KB**; end-to-end on `log_task`, **~615.7&nbsp;KB → ~125&nbsp;B** across 3 calls; output byte-identical across **2,015** inputs. Merged upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572).
+Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 framework, no affiliation — the allocation loop found and proved a fast-path in `sanitize_for_rich`. Benchmarked with `tracemalloc` on a realistic 4&nbsp;KB log line: transient per-call allocation **36.27&nbsp;KB → 0.00&nbsp;KB (~37,137× less)**. Filed upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572), now under review — a reviewer caught an edge case (the fast path preserved a `str` subclass the old path normalized away), fixed with regression tests over **2,014** inputs.
 
-<sub>More independently-reproducible catches across scikit-learn, FastAPI, Typer and smolagents: <b><a href="https://vinv.ai/#catches">vinv.ai/#catches</a></b>.</sub>
+<sub>More independently-reproducible catches — merged, reproduced, or triaged upstream on scikit-learn, semantica, FastAPI, Typer and smolagents: <b><a href="https://vinv.ai/#catches">vinv.ai/#catches</a></b>.</sub>
 
 ## What Vinv gives your agent
 
