@@ -114,7 +114,7 @@ flowchart LR
 
 ## See it in action
 
-Not a lab benchmark — real findings, filed on real projects, every one with an upstream thread you can open. All of it driven by **Cursor running Composer 2.5 with Vinv installed** — not a frontier model. **The evidence did the work, not the model.** The full set with screenshots: [**vinv.ai/#catches**](https://vinv.ai/#catches).
+Not a lab benchmark — real findings, filed on real projects (scikit-learn, watermarks-remover, semantica, FastAPI, Typer, smolagents), every one with an upstream thread you can open. All of it driven by **Cursor running Composer 2.5 with Vinv installed** — not a frontier model. **The evidence did the work, not the model.** The full set with screenshots: [**vinv.ai/#catches**](https://vinv.ai/#catches).
 
 ### Dead code — proven by what never ran
 
@@ -134,6 +134,7 @@ Every call is timed and charged to the symbol that spent it. A candidate fix shi
 
 | Upstream | What Vinv proved | Status |
 |---|---|---|
+| [**watermarks-remover#261**](https://github.com/guillaumemeyer/watermarks-remover/pull/261) | Skip a discarded `exiftool` subprocess and redundant SynthID scoring in `clean_image` — output identical, regression-tested | ✅ **merged** |
 | [**smolagents#2572**](https://github.com/huggingface/smolagents/pull/2572) | Fast-path in `sanitize_for_rich`: **36.27 KB → 0.00 KB/call (~37,137× less)**, regression-tested over 2,014 inputs | 🔵 open, under review |
 | [**semantica#1178**](https://github.com/semantica-agi/semantica/pull/1178) | Build the built-in algorithm catalog once, share it copy-on-write | 🔵 open, triaged |
 
