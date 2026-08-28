@@ -21,7 +21,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
-<img src="docs/media/vinv-shared-context-light.png" alt="Six clients — VS Code, Cursor, Claude Code, Codex, Gemini CLI and Windsurf — all reading one workspace context in .vinv/: the code graph, runtime traces and metrics, joined on the function that handled each request" width="820">
+<img src="docs/media/vinv-shared-context.gif" alt="Six clients — VS Code, Cursor, Claude Code, Codex, Gemini CLI and Windsurf — all reading one workspace context in .vinv/: the code graph, runtime traces and metrics, joined on the function that handled each request" width="820">
 
 <sub>One workspace context, built once — every agent reads the same <code>.vinv/</code> store.</sub>
 
@@ -145,16 +145,6 @@ Scanners read source and guess. Vinv drives the service and watches what comes b
 - **hand over** — ships as an evidence pack: repro command, caller chain, real argument values.
 
 On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★), the authenticated sweep filed [**discussion #2454**](https://github.com/fastapi/full-stack-fastapi-template/discussions/2454) — four endpoints answering 500 to input that should be 4xx, one repro each — then another contributor reproduced all four against `master`, file-and-line: *"checked against master — they're all real."*
-
-**Context beats model size.** Finding them is half of it — the other half is that a commodity model *fixes* them once it can see the run. Same five issues, same prompts, only the context changes:
-
-| Setup | Fixed |
-|---|---|
-| **Composer 2.5 + Vinv evidence** | **4 bugs + 1 optimization** |
-| Frontier model, blind | 1 bug |
-| Composer 2.5, blind | nothing |
-
-One trial per condition — a **demonstration, not a benchmark**. Blind, the commodity model scored zero. Hand it the failing frame, the caller chain and the real argument values, and it beats a stronger model guessing from static code. **The evidence is what moved, not the weights.**
 
 ## What Vinv gives your agent
 
