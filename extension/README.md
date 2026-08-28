@@ -18,7 +18,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
-[**Install**](#install) · [**What it catches**](https://vinv.ai/#catches) · [**How it works**](https://vinv.ai/#how-it-works) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
+[**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
 
 </div>
 
@@ -104,7 +104,7 @@ flowchart LR
 - **Find** — surfaces what actually broke or slowed down — server errors, crashes, latency hotspots, dead code — each tied to the exact source line.
 - **Prove** — hands the evidence to the agent you already use, then verifies its fix against acceptance tests written *before* the fix that it never sees. A "faster" change that alters any output is auto-reverted.
 
-<sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. See the full walkthrough on <a href="https://vinv.ai/#how-it-works">vinv.ai/#how-it-works</a>.</sub>
+<sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. See the full walkthrough on <a href="https://vinv.ai/#under-the-hood">vinv.ai/#under-the-hood</a>.</sub>
 
 ## Context beats model size
 
@@ -135,7 +135,7 @@ Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (
 
 One loop, grouped by what you came to fix. Each capability links to a live walkthrough on the site.
 
-**Understand the codebase**
+**Understand the codebase** → [vinv.ai/#what-it-does](https://vinv.ai/#what-it-does)
 - **Semantic code search** — ask by meaning, get ranked symbols with `def` bodies and line numbers, embedded by a local model.
 - **Code Graph** — a persistent map of every symbol and call edge, updated incrementally on save, with a live runtime overlay.
 - **Runtime tracing** — zero-edit tracing: timing, memory, args, returns, errors, per call, joined to source.
@@ -145,13 +145,13 @@ One loop, grouped by what you came to fix. Each capability links to a live walkt
 - **Rank suspects** — on any failure, symbols ranked by fault-localization score over real pass/fail requests, with the real error messages attached.
 - **Behavior exerciser** — Vinv doesn't wait for traffic: it drives every discovered endpoint itself, picks strategies with a Thompson-sampling bandit, and banks every response as a permanent regression case.
 
-**Clean up dead code** → [vinv.ai/#deadcode](https://vinv.ai/#deadcode)
+**Clean up dead code** → [vinv.ai/#what-it-does](https://vinv.ai/#what-it-does)
 - **Dead-code sections** — untraced *islands* split into "no references" vs "reached from live code but never taken," each with the live callers that still point at it and a keep-or-cut verdict with reasoning.
 
-**Recover latency** → [vinv.ai/#optimize](https://vinv.ai/#optimize)
+**Recover latency** → [vinv.ai/#what-it-does](https://vinv.ai/#what-it-does)
 - **Recoverable time** — latency hotspots ranked by the milliseconds you'd actually get back, each dispatched as a predicted-then-proven optimization instead of a guess.
 
-**Trust the fix** → [vinv.ai/#how-it-works](https://vinv.ai/#how-it-works)
+**Trust the fix** → [vinv.ai/#under-the-hood](https://vinv.ai/#under-the-hood)
 - **Verified fixes** — replayed start, live port, acceptance tests the agent never sees. One click reverts everything an episode touched.
 - **Journey** — one walkthrough of everything verified: every service, then every endpoint's call tree, latency flamegraph, and exact inputs → outputs, with a form to add your own test inputs that the engine replays forever.
 - **Auto-Pilot** — one click drives discover → set up → trace → exercise → fix → verify, until green or budget; when new trace errors land, the fix episode is already dispatched by the time you see the red ring in the graph.
