@@ -110,13 +110,13 @@
   {
     "q": "What does Vinv do by tracing, joining, and serving runtime evidence?",
     "file": "README.md",
-    "symbol": "What Vinv does",
+    "symbol": "What Vinv gives your agent",
     "category": "doc"
   },
   {
     "q": "What should a user try first after installing the Vinv extension?",
     "file": "extension/README.md",
-    "symbol": "After install: the things to try",
+    "symbol": "What Vinv gives your agent",
     "category": "doc"
   },
   {
