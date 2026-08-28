@@ -19,6 +19,12 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 [**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
 
+<br>
+
+<img src="docs/media/vinv-shared-context-light.png" alt="Six clients — VS Code, Cursor, Claude Code, Codex, Gemini CLI and Windsurf — all reading one workspace context in .vinv/: the code graph, runtime traces and metrics, joined on the function that handled each request" width="820">
+
+<sub>One workspace context, built once — every agent reads the same <code>.vinv/</code> store.</sub>
+
 </div>
 
 ---
@@ -130,18 +136,15 @@ Every call is timed and charged to the symbol that spent it. A candidate fix shi
 | [**smolagents#2572**](https://github.com/huggingface/smolagents/pull/2572) | Fast-path in `sanitize_for_rich`: **36.27 KB → 0.00 KB/call (~37,137× less)**, regression-tested over 2,014 inputs | 🔵 open, under review |
 | [**semantica#1178**](https://github.com/semantica-agi/semantica/pull/1178) | Build the built-in algorithm catalog once, share it copy-on-write | 🔵 open, triaged |
 
-And when nobody upstream is grading, Vinv grades itself. On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) it detected — from live traces alone — that the default database pool **queues requests for connection checkouts** under load, dispatched the pool-sizing fix, and proved it: sustained-load median **75.6ms → 41.2ms, 45.4% faster (95% CI [36.3%, 45.8%])**, byte-identical. Two earlier attempts that couldn't certify the win were **auto-reverted**.
-
-<div align="center">
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: detects connection-pool starvation, proves a 45.4% sustained-load median improvement with a paired-bootstrap 95% CI, auto-reverts uncertified attempts" width="720">
-<br><sub>Detect from traces, dispatch the fix, prove it with a paired-bootstrap CI, revert what can't be certified.</sub>
-</div>
-
 ### Bug report — bugs that only exist while something runs
 
-Scanners read source and guess. Vinv drives every discovered endpoint with inputs nobody wrote, and knows a deliberate 4xx from a real break — so it hands over the status that *should* have come back, with a repro command and the real argument values.
+Scanners read source and guess. Vinv drives the service and watches what comes back:
 
-On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★), the authenticated sweep surfaced **four endpoints returning HTTP 500 on input that should be 4xx** (negative pagination, an unvalidated email that poisons later reads, an unguarded duplicate, a malformed recovery header) — filed as [**discussion #2454**](https://github.com/fastapi/full-stack-fastapi-template/discussions/2454) and independently reproduced against `master`, file-and-line, by another contributor.
+- **drive** — every discovered endpoint, exercised with inputs nobody wrote.
+- **judge** — a 500 is not a finding on its own; the oracle names the status that *should* have come back.
+- **hand over** — ships as an evidence pack: repro command, caller chain, real argument values.
+
+On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★), the authenticated sweep filed [**discussion #2454**](https://github.com/fastapi/full-stack-fastapi-template/discussions/2454) — four endpoints answering 500 to input that should be 4xx, one repro each — then another contributor reproduced all four against `master`, file-and-line: *"checked against master — they're all real."*
 
 **Context beats model size.** Finding them is half of it — the other half is that a commodity model *fixes* them once it can see the run. Same five issues, same prompts, only the context changes:
 
