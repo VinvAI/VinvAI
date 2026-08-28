@@ -105,9 +105,45 @@ flowchart LR
 
 <sub>Your agent is the only LLM — no new bill, no model picker, no provider keys. See the full walkthrough on <a href="https://vinv.ai/#under-the-hood">vinv.ai/#under-the-hood</a>.</sub>
 
-## Context beats model size
+## See it in action
 
-Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★). Same five issues, same prompts — all driven by a commodity model (Cursor's **Composer 2.5**, not a frontier model), with Vinv grading every run:
+Not a lab benchmark — real findings, filed on real projects, every one with an upstream thread you can open. All of it driven by **Cursor running Composer 2.5 with Vinv installed** — not a frontier model. **The evidence did the work, not the model.** The full set with screenshots: [**vinv.ai/#catches**](https://vinv.ai/#catches).
+
+### Dead code — proven by what never ran
+
+Static tools only prove *"nothing references this."* Vinv proves *"no capture ever executed this,"* carries each untraced island with the live callers that still point at it, and lets your agent return the verdict — integrate, delete, or keep.
+
+| Upstream | What Vinv caught | Status |
+|---|---|---|
+| [**scikit-learn#34790**](https://github.com/scikit-learn/scikit-learn/pull/34790) | Unused `_find_smallest_angle` helper in `_ridge.py`, stranded after a refactor | ✅ **merged** — *"thanks for the clean-up"* |
+| [**semantica#1176**](https://github.com/semantica-agi/semantica/pull/1176) | 13 unreferenced symbols across 9 files (289 deletions, 0 insertions) | ✅ **merged** — review restored 2 as deprecated |
+| [**fastapi/typer#1937**](https://github.com/fastapi/typer/discussions/1937) | Unused `OptionHelpExtra` TypedDict in the vendored Click | ✅ maintainer-confirmed |
+
+<sub>semantica#1176 is the discipline in one thread: a maintainer flagged two symbols as importable downstream, Vinv restored them with deprecation warnings, and the same maintainer merged.</sub>
+
+### Optimization — a speedup that has to prove itself
+
+Every call is timed and charged to the symbol that spent it. A candidate fix ships only if a **paired-bootstrap 95% CI** clears zero *and* the behavior suite replays **byte-identical** — faster-but-different is auto-reverted.
+
+| Upstream | What Vinv proved | Status |
+|---|---|---|
+| [**smolagents#2572**](https://github.com/huggingface/smolagents/pull/2572) | Fast-path in `sanitize_for_rich`: **36.27 KB → 0.00 KB/call (~37,137× less)**, regression-tested over 2,014 inputs | 🔵 open, under review |
+| [**semantica#1178**](https://github.com/semantica-agi/semantica/pull/1178) | Build the built-in algorithm catalog once, share it copy-on-write | 🔵 open, triaged |
+
+And when nobody upstream is grading, Vinv grades itself. On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) it detected — from live traces alone — that the default database pool **queues requests for connection checkouts** under load, dispatched the pool-sizing fix, and proved it: sustained-load median **75.6ms → 41.2ms, 45.4% faster (95% CI [36.3%, 45.8%])**, byte-identical. Two earlier attempts that couldn't certify the win were **auto-reverted**.
+
+<div align="center">
+<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: detects connection-pool starvation, proves a 45.4% sustained-load median improvement with a paired-bootstrap 95% CI, auto-reverts uncertified attempts" width="720">
+<br><sub>Detect from traces, dispatch the fix, prove it with a paired-bootstrap CI, revert what can't be certified.</sub>
+</div>
+
+### Bug report — bugs that only exist while something runs
+
+Scanners read source and guess. Vinv drives every discovered endpoint with inputs nobody wrote, and knows a deliberate 4xx from a real break — so it hands over the status that *should* have come back, with a repro command and the real argument values.
+
+On [fastapi/full-stack-fastapi-template](https://github.com/fastapi/full-stack-fastapi-template) (~44k★), the authenticated sweep surfaced **four endpoints returning HTTP 500 on input that should be 4xx** (negative pagination, an unvalidated email that poisons later reads, an unguarded duplicate, a malformed recovery header) — filed as [**discussion #2454**](https://github.com/fastapi/full-stack-fastapi-template/discussions/2454) and independently reproduced against `master`, file-and-line, by another contributor.
+
+**Context beats model size.** Finding them is half of it — the other half is that a commodity model *fixes* them once it can see the run. Same five issues, same prompts, only the context changes:
 
 | Setup | Fixed |
 |---|---|
@@ -115,20 +151,7 @@ Vinv found **four bugs and one performance problem** in [fastapi/full-stack-fast
 | Frontier model, blind | 1 bug |
 | Composer 2.5, blind | nothing |
 
-One trial per condition — a **demonstration, not a benchmark**. Blind, the commodity model scored zero. Hand it the failing frame, the caller chain, and the real argument values, and it beats a stronger model guessing from static code. **The evidence is what moved, not the weights.**
-
-On that same template the optimization loop later detected — from live traces alone — that the default database pool makes requests **queue for connection checkouts** under load, dispatched the pool-sizing fix, and proved it: sustained-load median **75.6ms → 41.2ms, 45.4% faster (95% CI [36.3%, 45.8%])**, responses byte-identical. Two earlier attempts that couldn't certify the win were **auto-reverted**.
-
-<div align="center">
-<img src="https://images.vinv.ai/vinv-pool-optimization-proof-light.gif" alt="Vinv on the FastAPI template: detects connection-pool starvation, proves a 45.4% sustained-load median improvement with a paired-bootstrap 95% CI, auto-reverts uncertified attempts" width="720">
-<br><sub>The optimization loop: detect from traces, dispatch the fix, prove it with a paired-bootstrap CI, revert what can't be certified.</sub>
-</div>
-
-### Upstream on Hugging Face
-
-Pointed at [huggingface/smolagents](https://github.com/huggingface/smolagents) (~28.5k★) — a public Apache-2.0 framework, no affiliation — the allocation loop found and proved a fast-path in `sanitize_for_rich`. Benchmarked with `tracemalloc` on a realistic 4&nbsp;KB log line: transient per-call allocation **36.27&nbsp;KB → 0.00&nbsp;KB (~37,137× less)**. Filed upstream as [**PR #2572**](https://github.com/huggingface/smolagents/pull/2572), now under review — a reviewer caught an edge case (the fast path preserved a `str` subclass the old path normalized away), fixed with regression tests over **2,014** inputs.
-
-<sub>More independently-reproducible catches — merged, reproduced, or triaged upstream on scikit-learn, semantica, FastAPI, Typer and smolagents: <b><a href="https://vinv.ai/#catches">vinv.ai/#catches</a></b>.</sub>
+One trial per condition — a **demonstration, not a benchmark**. Blind, the commodity model scored zero. Hand it the failing frame, the caller chain and the real argument values, and it beats a stronger model guessing from static code. **The evidence is what moved, not the weights.**
 
 ## What Vinv gives your agent
 
