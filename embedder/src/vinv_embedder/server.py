@@ -265,7 +265,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error_json(400, "request body is not valid JSON", "invalid_request_error")
             return
         if not isinstance(body, dict):
-            self._send_error_json(400, "request body must be a JSON object", "invalid_request_error")
+            self._send_error_json(
+                400, "request body must be a JSON object", "invalid_request_error"
+            )
             return
 
         texts = body.get("input")
@@ -273,13 +275,13 @@ class _Handler(BaseHTTPRequestHandler):
             texts = [texts]
         if not isinstance(texts, list) or not texts:
             self._send_error_json(
-                400, "'input' must be a non-empty string or array of strings", "invalid_request_error"
+                400,
+                "'input' must be a non-empty string or array of strings",
+                "invalid_request_error",
             )
             return
         if not all(isinstance(t, str) for t in texts):
-            self._send_error_json(
-                400, "'input' items must all be strings", "invalid_request_error"
-            )
+            self._send_error_json(400, "'input' items must all be strings", "invalid_request_error")
             return
         if len(texts) > self.server.max_items:
             self._send_error_json(
@@ -350,10 +352,18 @@ class _Handler(BaseHTTPRequestHandler):
         }
         requested = body.get("model")
         if requested and requested != engine.model_name:
-            response["warning"] = (
-                f"requested model '{requested}' is not loaded; "
-                f"served with loaded model '{engine.model_name}'"
+            # Reject rather than serve. A model change (e.g. the granite
+            # migration) leaves a stale sidecar loaded with the previous model;
+            # serving its wrong-dimension vectors here would poison a store that
+            # the index labels with the *requested* model. Fail loudly so the
+            # caller restarts vinv-embedder on the new model instead.
+            self._send_error_json(
+                400,
+                f"requested model '{requested}' is not loaded; this sidecar serves "
+                f"'{engine.model_name}'. Restart vinv-embedder to switch models.",
+                "model_mismatch",
             )
+            return
         self._send_json(200, response)
 
     def _safe_500(self, exc: Exception) -> None:

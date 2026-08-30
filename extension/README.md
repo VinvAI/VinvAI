@@ -305,7 +305,7 @@ Your agent is also Vinv's only LLM — every analysis step routes through the co
 | [**bringup**](https://github.com/VinvAI/VinvAI/blob/main/bringup/) | `bringup list/start <repo>` | Brings services up under tracing. |
 | [**handbook**](https://github.com/VinvAI/VinvAI/blob/main/handbook/) | `handbook generate <repo>` | Renders the codebase-discovery task your agent runs. Prompt-only. |
 | [**goal**](https://github.com/VinvAI/VinvAI/blob/main/goal/) | `goal create <context>` | Distills a working context into one standing goal. Prompt-only. |
-| [**embedder**](https://github.com/VinvAI/VinvAI/blob/main/embedder/) | `vinv-embedder serve` | Local embedding sidecar ([CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed)) — no cloud keys. |
+| [**embedder**](https://github.com/VinvAI/VinvAI/blob/main/embedder/) | `vinv-embedder serve` | Local embedding sidecar ([granite-embedding-small](https://huggingface.co/ibm-granite/granite-embedding-small-english-r2)) — no cloud keys. |
 | [**contracts**](https://github.com/VinvAI/VinvAI/blob/main/contracts/) | *(library)* | `lens_contracts` — the shared data contract every engine reads and writes. |
 
 <details><summary><b><code>exerciser</code> CLI — the oracle swarm, runnable standalone</b></summary>

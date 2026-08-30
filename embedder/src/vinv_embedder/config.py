@@ -25,13 +25,19 @@ from pathlib import Path
 # back to CPU per-op instead of raising for unimplemented operators.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-DEFAULT_MODEL = "nomic-ai/CodeRankEmbed"
+DEFAULT_MODEL = "ibm-granite/granite-embedding-small-english-r2"
 
-# Pinned HF revision of DEFAULT_MODEL (refs/heads/main as of 2026-07-23).
-# CodeRankEmbed ships custom modeling code (configuration_hf_nomic_bert.py,
-# modeling_hf_nomic_bert.py) and therefore requires trust_remote_code=True;
-# pinning the revision means we only ever execute code from this exact commit.
-DEFAULT_REVISION = "3c4b60807d71f79b43f3c4363786d9493691f8b1"
+# Per-model trust/revision policy. The default (granite, native ModernBERT in
+# transformers) needs neither custom modeling code nor a pin. The optional
+# nomic-ai/CodeRankEmbed override ships custom modeling code
+# (configuration_hf_nomic_bert.py, modeling_hf_nomic_bert.py) and so requires
+# trust_remote_code=True; pinning its revision means we only ever execute code
+# from that exact commit. Keyed by model — NOT by "is default" — so the
+# CodeRankEmbed override still loads correctly when it is not the default.
+_TRUST_REMOTE_CODE_MODELS = frozenset({"nomic-ai/CodeRankEmbed"})
+_PINNED_REVISIONS = {
+    "nomic-ai/CodeRankEmbed": "3c4b60807d71f79b43f3c4363786d9493691f8b1",
+}
 
 DEFAULT_PORT = 8776
 BIND_HOST = "127.0.0.1"  # localhost-only bind; no auth by design
@@ -93,7 +99,10 @@ def tuned_path() -> Path:
 
 
 def read_tuned() -> dict | None:
-    """The persisted auto-tune verdict, or None. Shape: {device, batch, texts_per_s, model, tuned_at}."""
+    """The persisted auto-tune verdict, or None.
+
+    Shape: {device, batch, texts_per_s, model, tuned_at}.
+    """
     try:
         import json
 
@@ -232,17 +241,15 @@ def normalize_embeddings() -> bool:
 
 
 def revision_for(model_name: str) -> str | None:
-    """Pinned revision for the default model; env override; None otherwise."""
+    """Pinned revision for models that need one; env override; None otherwise."""
     env = os.environ.get("VINV_EMBED_REVISION", "").strip()
     if env:
         return env
-    if model_name == DEFAULT_MODEL:
-        return DEFAULT_REVISION
-    return None
+    return _PINNED_REVISIONS.get(model_name)
 
 
 def trust_remote_code_for(model_name: str) -> bool:
-    """Only trust remote code for the pinned default model, unless opted in."""
-    if model_name == DEFAULT_MODEL:
+    """Trust remote code only for models that ship custom modeling, unless opted in."""
+    if model_name in _TRUST_REMOTE_CODE_MODELS:
         return True
     return os.environ.get("VINV_EMBED_TRUST_REMOTE_CODE", "0") == "1"

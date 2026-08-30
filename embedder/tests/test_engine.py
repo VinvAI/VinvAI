@@ -8,10 +8,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from conftest import fake_vectors, make_engine
 from vinv_embedder import config
 from vinv_embedder.engine import _is_mps_op_failure, _is_oom
-
-from conftest import fake_vectors, make_engine
 
 
 class TestBasicEncode:
@@ -22,11 +21,12 @@ class TestBasicEncode:
         # no prefix logic server-side: the stub saw the raw strings
         assert fake_model.encode_calls[0]["n"] == 2
 
-    def test_load_passes_pinned_revision_and_trust(self, monkeypatch, fake_model):
+    def test_load_passes_revision_and_trust(self, monkeypatch, fake_model):
+        # The default model (granite) needs neither a pinned revision nor remote code.
         eng = make_engine(monkeypatch, device="cpu")
         kw = fake_model.init_kwargs
-        assert kw["trust_remote_code"] is True
-        assert kw["revision"] == config.DEFAULT_REVISION
+        assert kw["trust_remote_code"] is False
+        assert kw["revision"] is None
         assert kw["cache_folder"] == str(config.models_dir())
         assert eng.model_name == config.DEFAULT_MODEL
 
@@ -193,9 +193,7 @@ class TestFirstBatchWarmup:
         assert not any("not hung" in m for m in msgs)  # banner is for non-cpu devices
         assert any("first batch on cpu completed in" in m for m in msgs)
 
-    def test_failed_first_encode_clears_flag_and_stays_unwarmed(
-        self, monkeypatch, fake_model
-    ):
+    def test_failed_first_encode_clears_flag_and_stays_unwarmed(self, monkeypatch, fake_model):
         eng = make_engine(monkeypatch, device="cpu")
         fake_model.raise_plan.append(ValueError("boom"))
         with pytest.raises(ValueError):

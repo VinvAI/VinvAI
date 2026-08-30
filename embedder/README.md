@@ -5,7 +5,7 @@
 ![part of vinv](https://img.shields.io/badge/part_of-vinv-d71921?style=flat-square)
 ![python](https://img.shields.io/badge/python-3.10%2B-0a0a0a?style=flat-square)
 
-`vinv-embedder` loads `nomic-ai/CodeRankEmbed` locally and serves embeddings over HTTP on `127.0.0.1` only (no auth by design). It picks the fastest available device automatically, batches and coalesces requests, and is safe to kill and restart at any time — the index owns durability.
+`vinv-embedder` loads `ibm-granite/granite-embedding-small-english-r2` locally and serves embeddings over HTTP on `127.0.0.1` only (no auth by design). It picks the fastest available device automatically, batches and coalesces requests, and is safe to kill and restart at any time — the index owns durability.
 
 | Command | Purpose |
 | --- | --- |
@@ -40,7 +40,7 @@ A second `serve` on a port that already has a healthy server just reuses it rath
 
 ## `// 03 · the model`
 
-On first run the sidecar downloads `nomic-ai/CodeRankEmbed` (~500 MB) from Hugging Face into `~/.vinv/models`, then serves from that cache. The revision is pinned; the model ships custom modeling code, so it is loaded with `trust_remote_code` only for this pinned default.
+On first run the sidecar downloads `ibm-granite/granite-embedding-small-english-r2` (~180 MB) from Hugging Face into `~/.vinv/models`, then serves from that cache. The default (native ModernBERT) needs no `trust_remote_code`. The optional `nomic-ai/CodeRankEmbed` override ships custom modeling code, so it alone is loaded with `trust_remote_code` at a pinned revision.
 
 To download ahead of time (and pick the fastest device once) without starting the server:
 
@@ -48,7 +48,7 @@ To download ahead of time (and pick the fastest device once) without starting th
 uv run vinv-embedder warmup
 ```
 
-`serve --device auto` also benchmarks each available device on the first start and remembers the winner in `~/.vinv/embedder_tuned.json` — the static `cuda > mps > cpu` order is only a guess (CodeRankEmbed can be several times faster on CPU than on Apple-Silicon MPS).
+`serve --device auto` also benchmarks each available device on the first start and remembers the winner in `~/.vinv/embedder_tuned.json` — the static `cuda > mps > cpu` order is only a guess (a small model can be several times faster on CPU than on Apple-Silicon MPS).
 
 ## `// 04 · config`
 

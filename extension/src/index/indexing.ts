@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { getBinPath, isBinAvailable, showEnginesMissingError } from '../tracelens/bin';
 import { ensureEmbedder } from '../engines/install';
+import { stopAnyEmbedder } from '../embedder/sidecar';
 import { getIndexEnv } from '../config/settings';
 
 /** Project-local index store directory: <workspace>/.vinv/index */
@@ -57,6 +58,50 @@ export function isStoreConsistent(storeDir: string): boolean {
 		});
 	} catch {
 		return false;
+	}
+}
+
+/**
+ * Store format version the current engine writes — mirror of the Rust
+ * `STORE_VERSION` in index/src/store.rs. Bump in lockstep whenever an engine
+ * change makes existing stores unqueryable; e.g. the granite embedding-model
+ * migration (v6) changed the vector space and dimension (768→384).
+ */
+export const EXPECTED_STORE_VERSION = 6;
+
+/**
+ * Invalidate a workspace index store built by an older engine this build can no
+ * longer query. A v5 CodeRankEmbed store (768-dim) cannot be searched by a v6
+ * granite engine (384-dim) — every query would fail on a model/dimension
+ * mismatch — so when `meta.version < EXPECTED_STORE_VERSION` the store is wiped
+ * and discovery rebuilds it fresh with the new model. A store already at the
+ * current version, or absent/unreadable, is left untouched. Called once at
+ * activation, before auto-reindex or discovery run — await it so the sidecar is
+ * down before the rebuild's ensureEmbedder can reuse a stale one.
+ */
+export async function invalidateStaleIndex(workspaceRoot: string): Promise<void> {
+	const storeDir = getIndexStoreDir(workspaceRoot);
+	let version: number | undefined;
+	try {
+		const meta = JSON.parse(
+			fs.readFileSync(path.join(storeDir, 'meta.json'), 'utf8'),
+		) as { version?: number };
+		version = meta.version;
+	} catch {
+		return; // no store / unreadable — nothing to invalidate
+	}
+	if (typeof version === 'number' && version < EXPECTED_STORE_VERSION) {
+		try {
+			fs.rmSync(storeDir, { recursive: true, force: true });
+		} catch {
+			// Locked / AV: the binary's model-mismatch error still forces a --force rebuild.
+		}
+		// A store this old was built by a prior engine whose sidecar may still be
+		// running on the previous embedding model. Stop ANY running sidecar so the
+		// rebuild spawns a fresh one on the current model — reusing the stale one
+		// would serve the old model's vectors into a store the index then labels
+		// with the new model (a silently mislabeled, wrong-dimension index).
+		await stopAnyEmbedder();
 	}
 }
 

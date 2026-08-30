@@ -11,6 +11,7 @@ import { registerOptimizationNudge } from './views/optimizationPanel';
 import { ReportMirrorSource } from './views/reportMirrorSource';
 import { maybeAutoDiscover } from './index/discovery';
 import { startAutoReindex } from './index/autoReindex';
+import { invalidateStaleIndex } from './index/indexing';
 import { initServiceRunner } from './bringup/serviceRunner';
 import { SmokeReportEditorProvider } from './identification/smokeReportView';
 import { CallTreeEditorProvider } from './identification/callTreeView';
@@ -219,7 +220,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	// discovered workspace is left alone, including across an install or update
 	// (that force-rebuild is commented out in maybeAutoDiscover). It also waits
 	// out any engines terminal the pass above starts.
-	void enginePass.then(() => maybeAutoDiscover(context));
+	void enginePass.then(async () => {
+		// After the engine pass (which force-updates to the pinned backend), a
+		// store built by an older engine can be unqueryable by this build — the
+		// v6 granite migration changed the embedding model and vector dimension
+		// (768→384). Drop such a store (and stop any stale-model sidecar) so
+		// discovery rebuilds it with the current model instead of failing every
+		// query on a mismatch. Awaited so the sidecar is down before discovery's
+		// ensureEmbedder could reuse it.
+		const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (ws) {
+			await invalidateStaleIndex(ws);
+		}
+		maybeAutoDiscover(context);
+	});
 
 	// Keep the index following the code: debounced incremental `index update`
 	// on save, and epoch tags on new capture sessions so runtime facts can be

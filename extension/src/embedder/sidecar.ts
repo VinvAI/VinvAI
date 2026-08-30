@@ -310,3 +310,31 @@ export function stopEmbedderIfStarted(): void {
 	}
 	lastHealthyAt = 0;
 }
+
+/**
+ * Stops ANY running `vinv-embedder` on this machine — ours, or one another
+ * window or the user started. Unlike stopEmbedderIfStarted (which only reaches
+ * our own child), this is for when the loaded model must change: a stale
+ * sidecar serving the previous embedding model would otherwise be reused by
+ * ensureEmbedderRunning and quietly serve the wrong-dimension vectors into a
+ * store the index labels with the new model. After this, the next
+ * ensureEmbedderRunning spawns a fresh sidecar on the current default model.
+ */
+export async function stopAnyEmbedder(): Promise<void> {
+	stopEmbedderIfStarted();
+	const pids = await findEmbedderPids();
+	for (const pid of pids) {
+		try {
+			if (process.platform === 'win32') {
+				execFile('taskkill', ['/F', '/PID', String(pid)], { timeout: 5_000, windowsHide: true }, () => {
+					// Best effort: the process may already be gone.
+				});
+			} else {
+				process.kill(pid, 'SIGTERM');
+			}
+		} catch {
+			// Already gone, or not ours to signal — best effort.
+		}
+	}
+	lastHealthyAt = 0;
+}

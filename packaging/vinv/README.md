@@ -89,7 +89,7 @@ allocation, output byte-identical across 2,015 inputs
 | **bringup** | `bringup list/start <repo>` | Brings services up under tracing — enumerates every service, then starts one instrumented. |
 | **handbook** | `handbook generate <repo>` | Renders the codebase-discovery task your coding agent runs to map the repo (services, entry points). Prompt-only — no LLM calls of its own. |
 | **goal** | `goal create <context>` | Distills a working context into one standing goal for fix/optimize episodes. Prompt-only. |
-| **embedder** | `vinv-embedder serve` | Local embedding sidecar ([CodeRankEmbed](https://huggingface.co/nomic-ai/CodeRankEmbed)) powering semantic search — runs on your machine, no cloud keys. |
+| **embedder** | `vinv-embedder serve` | Local embedding sidecar ([granite-embedding-small](https://huggingface.co/ibm-granite/granite-embedding-small-english-r2)) powering semantic search — runs on your machine, no cloud keys. |
 | **contracts** | *(library)* | `lens_contracts` — the shared data contract every engine reads and writes. |
 
 ## Works with any MCP client

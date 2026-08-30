@@ -75,13 +75,20 @@ pub struct Edge {
 
 /// Store format version.
 ///
+/// v6: default embedding model changed to
+/// `ibm-granite/granite-embedding-small-english-r2` (384-dim) from
+/// `nomic-ai/CodeRankEmbed` (768-dim). The vector space and dimension differ,
+/// so a v5 store cannot be queried by a v6 engine — the extension treats any
+/// store below `STORE_VERSION` as stale and rebuilds it (see the extension's
+/// `invalidateStaleIndex`). No field-shape change from v5.
+///
 /// v5: `Chunk::calls` records the callee path with its receiver
 /// (`binary_controller.get_binary`) instead of only the last segment. v4 and
 /// earlier dropped the receiver, which made a call indistinguishable from
 /// recursion into a same-named caller and silently deleted every
 /// delegation edge. Consumers that resolve calls must reject v4 rather than
 /// read those bare names as if they were whole.
-pub const STORE_VERSION: u32 = 5;
+pub const STORE_VERSION: u32 = 6;
 
 #[derive(Serialize, Deserialize)]
 struct Meta {

@@ -68,7 +68,9 @@ class TestBatchPolicy:
             (2 << 30, config.CUDA_FALLBACK_BATCH),
         ]
         for free, expected in cases:
-            monkeypatch.setattr(config, "_torch", lambda f=free: _fake_torch(cuda=True, free_vram=f))
+            monkeypatch.setattr(
+                config, "_torch", lambda f=free: _fake_torch(cuda=True, free_vram=f)
+            )
             assert config.batch_size_for("cuda") == expected, hex(free)
 
     def test_cuda_meminfo_failure_uses_fallback(self, monkeypatch):
@@ -112,8 +114,17 @@ class TestWorkersAndThresholds:
 
 
 class TestRevisionAndTrust:
-    def test_default_model_is_pinned(self):
-        assert config.revision_for(config.DEFAULT_MODEL) == config.DEFAULT_REVISION
+    CODERANK = "nomic-ai/CodeRankEmbed"
+
+    def test_default_model_unpinned_and_untrusted(self):
+        # The default (granite, native ModernBERT) needs no pin and no remote code.
+        assert config.revision_for(config.DEFAULT_MODEL) is None
+        assert config.trust_remote_code_for(config.DEFAULT_MODEL) is False
+
+    def test_coderank_override_pinned_and_trusted(self):
+        # The optional CodeRankEmbed override ships custom modeling code.
+        assert config.revision_for(self.CODERANK) is not None
+        assert config.trust_remote_code_for(self.CODERANK) is True
 
     def test_other_model_unpinned(self):
         assert config.revision_for("some/other-model") is None
@@ -122,8 +133,7 @@ class TestRevisionAndTrust:
         monkeypatch.setenv("VINV_EMBED_REVISION", "deadbeef")
         assert config.revision_for(config.DEFAULT_MODEL) == "deadbeef"
 
-    def test_trust_remote_code_only_for_default(self, monkeypatch):
-        assert config.trust_remote_code_for(config.DEFAULT_MODEL) is True
+    def test_trust_remote_code_env_optin(self, monkeypatch):
         assert config.trust_remote_code_for("some/other-model") is False
         monkeypatch.setenv("VINV_EMBED_TRUST_REMOTE_CODE", "1")
         assert config.trust_remote_code_for("some/other-model") is True

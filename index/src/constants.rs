@@ -22,12 +22,19 @@ pub const ENV_EMBED_MAX_RETRIES: &str = "INDEX_EMBED_MAX_RETRIES";
 
 /// The local embedding sidecar (`vinv-embedder serve`) listens here by default.
 pub const DEFAULT_GATEWAY_URL: &str = "http://127.0.0.1:8776/v1";
-pub const DEFAULT_EMBEDDING_MODEL: &str = "nomic-ai/CodeRankEmbed";
+/// Default embedding model. granite-embedding-small-english-r2 (47M, 384-dim,
+/// 8192-ctx, code-aware) replaced nomic-ai/CodeRankEmbed (137M, 768-dim): ~3x
+/// smaller per embedder worker for the same retrieval quality on the repo eval
+/// (holdout file MRR 0.81 vs 0.64), so the CPU embed pool can run wider. Set
+/// `INDEX_EMBEDDING_MODEL` to override (e.g. back to nomic-ai/CodeRankEmbed).
+pub const DEFAULT_EMBEDDING_MODEL: &str = "ibm-granite/granite-embedding-small-english-r2";
 pub const DEFAULT_SUMMARY_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_EMBED_BATCH: usize = 64;
 
-/// CodeRankEmbed's retrieval instruction. Queries are embedded with exactly
-/// this prefix; documents/passages are embedded WITHOUT any prefix.
+/// Query-side retrieval instruction. Queries are embedded with exactly this
+/// prefix; documents/passages are embedded WITHOUT any prefix. Retained across
+/// the granite migration (the eval that cleared granite used it) — a per-model
+/// instruction is a live tuning knob, not a fixed CodeRankEmbed requirement.
 pub const EMBED_QUERY_PREFIX: &str = "Represent this query for searching relevant code: ";
 
 // --- LLM summaries (opt-in via --summarize) ------------------------------

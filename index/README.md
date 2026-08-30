@@ -27,7 +27,7 @@ scripts/build_binary.sh        # -> dist/index
 
 By default, `index` talks to the **local embedding sidecar** at
 `http://127.0.0.1:8776/v1` — an OpenAI-compatible embeddings server running
-`nomic-ai/CodeRankEmbed` on your machine. No API key, no cloud:
+`ibm-granite/granite-embedding-small-english-r2` on your machine. No API key, no cloud:
 
 ```bash
 vinv-embedder serve        # start the sidecar, then index away
@@ -40,7 +40,7 @@ OpenAI-compatible embeddings endpoint and set `INDEX_EMBEDDING_MODEL`.
 | --- | --- | --- |
 | `INDEX_GATEWAY_URL` | OpenAI-compatible gateway base URL (including `/v1`). | `http://127.0.0.1:8776/v1` (falls back to `LITELLM_BASE_URL`) |
 | `INDEX_GATEWAY_KEY` | API key for that gateway. Unset = no Authorization header. | — (falls back to `LITELLM_API_KEY`) |
-| `INDEX_EMBEDDING_MODEL` | Embedding model id. | `nomic-ai/CodeRankEmbed` |
+| `INDEX_EMBEDDING_MODEL` | Embedding model id. | `ibm-granite/granite-embedding-small-english-r2` |
 | `INDEX_SUMMARY_MODEL` | Chat model for `--summarize`. | `gpt-4o-mini` |
 | `INDEX_EMBED_BATCH` | Inputs per embeddings request (also the resume granularity). | `64` |
 | `INDEX_EMBED_MAX_RETRIES` | Retries per batch on connection/429/5xx failures. | `5` |

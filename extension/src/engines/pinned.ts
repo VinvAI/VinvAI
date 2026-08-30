@@ -33,4 +33,4 @@ export const ENGINE_REF = 'v0.2.9';
  *   'prompt' — offer it once per extension version
  *   'never'  — leave the checkout alone
  */
-export const ENGINE_UPDATE_DEFAULT: 'auto' | 'prompt' | 'never' = 'prompt';
+export const ENGINE_UPDATE_DEFAULT: 'auto' | 'prompt' | 'never' = 'auto';

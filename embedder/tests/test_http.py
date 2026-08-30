@@ -87,13 +87,17 @@ class TestEmbeddingsContract:
         assert status == 200
         assert len(body["data"]) == 1
 
-    def test_model_mismatch_serves_with_warning(self, srv):
-        base, engine = srv
-        status, body = _post(base, "/v1/embeddings", {"model": "text-embedding-3-small", "input": ["x"]})
-        assert status == 200
-        assert "text-embedding-3-small" in body["warning"]
-        assert body["model"] == engine.model_name
-        assert engine.calls  # still served with the loaded model
+    def test_model_mismatch_rejected(self, srv):
+        base, _engine = srv
+        status, body = _post(
+            base, "/v1/embeddings", {"model": "text-embedding-3-small", "input": ["x"]}
+        )
+        # A stale sidecar on the wrong model must not silently serve mismatched
+        # vectors into a store labeled with the requested model — it 400s so the
+        # caller restarts on the new model.
+        assert status == 400
+        assert body["error"]["type"] == "model_mismatch"
+        assert "text-embedding-3-small" in body["error"]["message"]
 
     def test_no_prefix_added_server_side(self, srv):
         base, engine = srv
@@ -404,9 +408,7 @@ class TestQueueBound:
 
         engine = StubEngine()
         engine.raise_next = EncodeAbandoned("client went away")
-        h = _bare_handler(
-            FakeConn([BlockingIOError()]), engine=engine, body=self._body()
-        )
+        h = _bare_handler(FakeConn([BlockingIOError()]), engine=engine, body=self._body())
         with caplog.at_level("INFO", logger="vinv_embedder"):
             h._handle_embeddings()
         assert h.sent == []  # nothing written to a dead client
