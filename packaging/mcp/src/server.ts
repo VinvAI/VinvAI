@@ -198,7 +198,7 @@ async function handle(req: any): Promise<void> {
 			result: {
 				protocolVersion: params?.protocolVersion ?? '2024-11-05',
 				capabilities: { tools: {} },
-				serverInfo: { name: 'vinv', version: '0.0.5' },
+				serverInfo: { name: 'vinv', version: '0.0.6' },
 			},
 		});
 		return;

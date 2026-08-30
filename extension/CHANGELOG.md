@@ -5,6 +5,12 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.12] — 2026-08-31
+
+### 🔧 Changed
+
+- **Smaller, faster embedding model** — the local semantic-search model is now IBM Granite (`granite-embedding-small-english-r2`), roughly 3× lighter than before with equal-or-better code retrieval. After updating, the index rebuilds itself automatically on first launch (a one-time re-embed; the new model downloads ~180 MB).
+
 ## [0.2.10] — 2026-08-27
 
 ### 🐛 Fixed
