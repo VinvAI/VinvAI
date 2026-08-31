@@ -20,19 +20,19 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 <tr>
 <td align="center" valign="top" width="50%">
 
-<b>Editor extension</b><br><sub>the full Vinv UI, in your editor</sub>
+<b>Editor extension</b><br><sub>one click — install in</sub>
 
-<a href="https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI"><img src="https://img.shields.io/badge/Install_in_VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white" alt="Install in VS Code"></a>
-<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Install_in_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Install in Cursor"></a>
-<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Install_in_Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white" alt="Install in Windsurf"></a>
+<a href="https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI"><img src="https://img.shields.io/badge/VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white" alt="Install in VS Code"></a>
+<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Install in Cursor"></a>
+<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white" alt="Install in Windsurf"></a>
 
 </td>
 <td align="center" valign="top" width="50%">
 
-<b>MCP server</b><br><sub>16 tools for any MCP client</sub>
+<b>MCP server</b><br><sub>16 tools — add to</sub>
 
-<a href="https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19"><img src="https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Add to Cursor"></a>
-<a href="https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D"><img src="https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white" alt="Add to VS Code"></a>
+<a href="https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19"><img src="https://img.shields.io/badge/Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Add to Cursor"></a>
+<a href="https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D"><img src="https://img.shields.io/badge/VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white" alt="Add to VS Code"></a>
 
 </td>
 </tr>
