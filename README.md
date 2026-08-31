@@ -24,7 +24,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 <a href="https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI"><img src="https://img.shields.io/badge/VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white" alt="Install in VS Code"></a>
 <a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Install in Cursor"></a>
 <a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white" alt="Install in Windsurf"></a>
-<a href="https://open-vsx.org/extension/VinvAI/VinvAI"><img src="https://img.shields.io/badge/Any_IDE-8A0F16?style=for-the-badge&logo=eclipseide&logoColor=white" alt="Install in any other IDE from Open VSX"></a>
+<a href="https://vinv.ai/"><img src="https://img.shields.io/badge/Any_IDE-8A0F16?style=for-the-badge&logo=eclipseide&logoColor=white" alt="Install in any other IDE"></a>
 
 </td>
 <td align="center" valign="top" width="42%" nowrap>
