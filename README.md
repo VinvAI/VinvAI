@@ -17,7 +17,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <table width="100%">
 <tr>
-<td align="center" valign="top" width="58%" nowrap>
+<td align="center" valign="top" width="57%" nowrap>
 
 <b>Editor extension</b><br><sub>one click — install in</sub>
 
