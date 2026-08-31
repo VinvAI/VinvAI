@@ -24,8 +24,6 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 [![Add to Codex](https://img.shields.io/badge/Codex-D71921?style=for-the-badge&logo=gnubash&logoColor=white)](#mcp-server-any-agent)
 [![Add to Gemini CLI](https://img.shields.io/badge/Gemini_CLI-D71921?style=for-the-badge&logo=googlegemini&logoColor=white)](#mcp-server-any-agent)
 
-<sub>Cursor and VS Code install Vinv's 16 MCP tools in one click; Claude Code, Codex & Gemini CLI in <a href="#mcp-server-any-agent">one command</a> — then <code>pip install vinv</code> puts the engines on your PATH. Prefer the full editor experience? <a href="#install">Install the extension</a>.</sub>
-
 <br>
 
 [**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
