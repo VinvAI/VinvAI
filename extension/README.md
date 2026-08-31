@@ -18,7 +18,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <table width="100%">
 <tr>
-<td align="center" valign="top" width="50%" nowrap>
+<td align="center" valign="top" width="40%" nowrap>
 
 <b>Editor extension</b><br><sub>one click — install in</sub>
 
@@ -28,7 +28,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 <a href="https://open-vsx.org/extension/VinvAI/VinvAI"><img src="https://img.shields.io/badge/Any_IDE-8A0F16?style=for-the-badge&logo=eclipseide&logoColor=white" alt="Install in any other IDE from Open VSX"></a>
 
 </td>
-<td align="center" valign="top" width="50%" nowrap>
+<td align="center" valign="top" width="40%" nowrap>
 
 <b>MCP server</b><br><sub>16 tools — add to</sub>
 
