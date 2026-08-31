@@ -21,7 +21,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 [![Add to Cursor](https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
 [![Add to VS Code](https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
 [![Add to Claude Code](https://img.shields.io/badge/Claude_Code-D71921?style=for-the-badge&logo=claude&logoColor=white)](#mcp-server-any-agent)
-[![Add to Codex](https://img.shields.io/badge/Codex-D71921?style=for-the-badge&logo=openai&logoColor=white)](#mcp-server-any-agent)
+[![Add to Codex](https://img.shields.io/badge/Codex-D71921?style=for-the-badge&logo=gnubash&logoColor=white)](#mcp-server-any-agent)
 [![Add to Gemini CLI](https://img.shields.io/badge/Gemini_CLI-D71921?style=for-the-badge&logo=googlegemini&logoColor=white)](#mcp-server-any-agent)
 
 <sub>Cursor and VS Code install Vinv's 16 MCP tools in one click; Claude Code, Codex & Gemini CLI in <a href="#mcp-server-any-agent">one command</a> — then <code>pip install vinv</code> puts the engines on your PATH. Prefer the full editor experience? <a href="#install">Install the extension</a>.</sub>
