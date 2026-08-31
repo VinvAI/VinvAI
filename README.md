@@ -15,8 +15,27 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
-[![Add to Cursor](https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
-[![Add to VS Code](https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
+<table>
+<tr>
+<td align="center" valign="top">
+
+<b>Editor extension</b><br><sub>the full Vinv UI, in your editor</sub>
+
+<a href="https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI"><img src="https://img.shields.io/badge/Install_in_VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white" alt="Install in VS Code"></a>
+<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Install_in_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Install in Cursor"></a>
+<a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Install_in_Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white" alt="Install in Windsurf"></a>
+
+</td>
+<td align="center" valign="top">
+
+<b>MCP server</b><br><sub>16 tools for any MCP client</sub>
+
+<a href="https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19"><img src="https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white" alt="Add to Cursor"></a>
+<a href="https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D"><img src="https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white" alt="Add to VS Code"></a>
+
+</td>
+</tr>
+</table>
 
 <br>
 
@@ -48,11 +67,11 @@ Vinv works three ways — an editor extension, a CLI, or an MCP server for any a
 
 ### Editor extension
 
-[![Install in VS Code](https://img.shields.io/badge/Install_in_VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white)](https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI)
-[![Install in Cursor](https://img.shields.io/badge/Install_in_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://vinv.ai/#install)
-[![Install in Windsurf](https://img.shields.io/badge/Install_in_Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white)](https://vinv.ai/#install)
-
-<sub>VSCodium, Trae and VS Code Insiders install the same way from <a href="https://vinv.ai/#install">vinv.ai</a>, which opens the extension straight in your editor. The listing lives on <a href="https://open-vsx.org/extension/VinvAI/VinvAI">Open VSX</a> and the <a href="https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI">VS Code Marketplace</a>.</sub>
+One click — [**install from vinv.ai**](https://vinv.ai/#install), which opens the
+extension directly in your editor (VS Code, Cursor, Windsurf, VSCodium, Trae and
+Insiders). The listing lives on
+[Open VSX](https://open-vsx.org/extension/VinvAI/VinvAI) and the
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI).
 
 Or from your editor's CLI:
 
