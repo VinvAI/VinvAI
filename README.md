@@ -17,6 +17,13 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
+[![Install MCP Server in Cursor](https://img.shields.io/badge/Cursor-Install_MCP_server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
+[![Install MCP Server in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP_server-0098FF?style=flat-square&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
+
+<sub>One click adds Vinv's 16 MCP tools to your agent — then <code>pip install vinv</code> puts the engines on your PATH. Prefer the full editor experience? <a href="#install">Install the extension</a>.</sub>
+
+<br>
+
 [**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
 
 <br>
