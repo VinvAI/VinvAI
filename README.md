@@ -9,7 +9,7 @@
 
 # VinvAI
 
-**Vinv (Vibe Inverse) runs your services, finds real issues, and verifies fixes — with zero code changes.**
+**Tools for AI agents to test, fix and optimise your codebase.**
 
 Vinv connects runtime traces to the exact source that produced them, hands that evidence to the coding agent you already use, then re-runs the code to prove the fix actually works. **It's not another coding agent — it's the evidence layer under the one you already use:** your agent proposes, Vinv verifies.
 
