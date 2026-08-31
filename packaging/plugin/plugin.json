@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "vinv",
-  "version": "0.0.6",
+  "version": "0.0.5",
   "description": "Give your agent runtime evidence: semantic code search, dead-code detection, and fault localization over real runs — zero code changes (Python).",
   "author": { "name": "VinvAI", "url": "https://vinv.ai" },
   "homepage": "https://vinv.ai",
