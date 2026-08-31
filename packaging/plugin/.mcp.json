@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "vinv": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "vinv-mcp"]
+    }
+  }
+}
