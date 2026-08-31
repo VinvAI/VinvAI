@@ -1,0 +1,14 @@
+{
+  "name": "vinvai",
+  "owner": { "name": "VinvAI", "email": "support@vinv.ai" },
+  "metadata": {
+    "description": "Vinv — the evidence layer under your coding agent: runs your services, finds real issues, verifies fixes."
+  },
+  "plugins": [
+    {
+      "name": "vinv",
+      "source": "./packaging/plugin",
+      "description": "Give your agent runtime evidence: semantic code search, dead-code detection, and fault localization over real runs — zero code changes (Python)."
+    }
+  ]
+}

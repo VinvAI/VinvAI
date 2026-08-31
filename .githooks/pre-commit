@@ -2,6 +2,7 @@
 # Fast, diff-scoped mirror of the lint CI (.github/workflows/lint.yml). Blocks a
 # commit that CI's lint would reject, catching the common failures locally:
 #   - extension/README.md out of sync with the root README (readme-parity job)
+#   - the vinv-mcp version disagreeing across its seven hand-bumped copies
 #   - ruff errors/format on staged Python (changed-files job)
 #   - eslint errors on staged extension TypeScript (changed-files job)
 #
@@ -28,7 +29,19 @@ if staged | grep -qE '^(README\.md|extension/README\.md|scripts/sync-extension-r
 	fi
 fi
 
-# 2. Ruff on staged Python (matches CI: ruff check + format --check).
+# 2. vinv-mcp version parity — one release restates its version in seven places
+#    across five files, all bumped by hand. Only runs when one of them is staged.
+if staged | grep -qE '^packaging/(mcp|plugin)/'; then
+	if command -v python >/dev/null 2>&1; then
+		if ! python scripts/check-mcp-versions.py; then
+			fail=1
+		fi
+	else
+		echo "· skip vinv-mcp version parity (python not found)"
+	fi
+fi
+
+# 3. Ruff on staged Python (matches CI: ruff check + format --check).
 py="$(staged | grep -E '\.py$' || true)"
 if [ -n "$py" ]; then
 	if command -v uv >/dev/null 2>&1; then
@@ -45,7 +58,7 @@ if [ -n "$py" ]; then
 	fi
 fi
 
-# 3. ESLint on staged extension TypeScript (matches CI's path scope + invocation).
+# 4. ESLint on staged extension TypeScript (matches CI's path scope + invocation).
 ts="$(staged | grep -E '^extension/src/.*\.(ts|tsx)$' | sed 's#^extension/##' || true)"
 if [ -n "$ts" ]; then
 	if command -v npx >/dev/null 2>&1; then

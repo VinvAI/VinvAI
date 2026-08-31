@@ -18,6 +18,14 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
+[![Add to Cursor](https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
+[![Add to VS Code](https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
+[![Add to Claude Code](https://img.shields.io/badge/Claude_Code-D71921?style=for-the-badge&logo=claude&logoColor=white)](#mcp-server-any-agent)
+[![Add to Codex](https://img.shields.io/badge/Codex-D71921?style=for-the-badge&logo=gnubash&logoColor=white)](#mcp-server-any-agent)
+[![Add to Gemini CLI](https://img.shields.io/badge/Gemini_CLI-D71921?style=for-the-badge&logo=googlegemini&logoColor=white)](#mcp-server-any-agent)
+
+<br>
+
 [**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
 
 <br>
@@ -69,10 +77,30 @@ uvx --from vinv exerciser campaign <repo> --budget 20
 
 ### MCP server (any agent)
 
-Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config** that finds your open workspace automatically via MCP roots:
+Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config** that finds your open workspace automatically via MCP roots.
+
+Claude Code — install the plugin from Vinv's marketplace (adds the MCP server for you):
+
+```bash
+claude plugin marketplace add VinvAI/VinvAI
+```
+
+```bash
+claude plugin install vinv@vinvai
+```
+
+Or add the server directly — Claude Code, Codex, Gemini CLI:
 
 ```bash
 claude mcp add vinv -- npx -y vinv-mcp
+```
+
+```bash
+codex mcp add vinv -- npx -y vinv-mcp
+```
+
+```bash
+gemini mcp add vinv npx -- -y vinv-mcp
 ```
 
 <sub>Other clients: add <code>{ "command": "npx", "args": ["-y", "vinv-mcp"] }</code> under <code>mcpServers.vinv</code>. See <a href="https://www.npmjs.com/package/vinv-mcp"><code>vinv-mcp</code></a> — 16 tools: semantic search, dead code, fault localization, runtime values/slices/coverage, and the verify/optimize loop.</sub>
