@@ -78,7 +78,9 @@ uvx --from vinv exerciser campaign <repo> --budget 20
 
 Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config** that finds your open workspace automatically via MCP roots.
 
-Claude Code — install the plugin from Vinv's marketplace (adds the MCP server for you):
+Claude Code — install the plugin and the MCP server is registered for you. Both
+commands are needed: the first tells Claude Code where Vinv's marketplace is (a
+one-time step), the second installs from it.
 
 ```bash
 claude plugin marketplace add VinvAI/VinvAI
@@ -88,7 +90,7 @@ claude plugin marketplace add VinvAI/VinvAI
 claude plugin install vinv@vinvai
 ```
 
-Or add the server directly — Claude Code, Codex, Gemini CLI:
+Or skip the plugin and add the server directly — Claude Code, Codex, Gemini CLI:
 
 ```bash
 claude mcp add vinv -- npx -y vinv-mcp
