@@ -14,8 +14,6 @@
 
 Vinv connects runtime traces to the exact source that produced them, hands that evidence to the coding agent you already use, then re-runs the code to prove the fix actually works. **It's not another coding agent — it's the evidence layer under the one you already use:** your agent proposes, Vinv verifies.
 
-<sub>Python first — services and APIs. TypeScript & Go next.<br>No account, no API keys, no telemetry. Everything runs on your machine. Open source, Apache-2.0.</sub>
-
 <br>
 
 [![Add to Cursor](https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
@@ -23,7 +21,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
-[**Install**](#install) · [**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
+[**See it in action**](https://vinv.ai/#catches) · [**What it does**](https://vinv.ai/#what-it-does) · [**Under the hood**](https://vinv.ai/#under-the-hood) · [**2-min demo**](https://www.youtube.com/watch?v=EkUjPWKHAvI)
 
 <br>
 
