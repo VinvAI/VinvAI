@@ -18,10 +18,13 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <br>
 
-[![Install MCP Server in Cursor](https://img.shields.io/badge/Cursor-Install_MCP_server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
-[![Install MCP Server in VS Code](https://img.shields.io/badge/VS_Code-Install_MCP_server-0098FF?style=flat-square&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
+[![Add to Cursor](https://img.shields.io/badge/Add_to_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://cursor.com/install-mcp?name=vinv&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInZpbnYtbWNwIl19)
+[![Add to VS Code](https://img.shields.io/badge/Add_to_VS_Code-D71921?style=for-the-badge&logo=githubcopilot&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=vinv&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22vinv-mcp%22%5D%7D)
+[![Add to Claude Code](https://img.shields.io/badge/Claude_Code-D71921?style=for-the-badge&logo=claude&logoColor=white)](#mcp-server-any-agent)
+[![Add to Codex](https://img.shields.io/badge/Codex-D71921?style=for-the-badge&logo=openai&logoColor=white)](#mcp-server-any-agent)
+[![Add to Gemini CLI](https://img.shields.io/badge/Gemini_CLI-D71921?style=for-the-badge&logo=googlegemini&logoColor=white)](#mcp-server-any-agent)
 
-<sub>One click adds Vinv's 16 MCP tools to your agent — then <code>pip install vinv</code> puts the engines on your PATH. Prefer the full editor experience? <a href="#install">Install the extension</a>.</sub>
+<sub>Cursor and VS Code install Vinv's 16 MCP tools in one click; Claude Code, Codex & Gemini CLI in <a href="#mcp-server-any-agent">one command</a> — then <code>pip install vinv</code> puts the engines on your PATH. Prefer the full editor experience? <a href="#install">Install the extension</a>.</sub>
 
 <br>
 
@@ -80,6 +83,14 @@ Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config
 
 ```bash
 claude mcp add vinv -- npx -y vinv-mcp
+```
+
+```bash
+codex mcp add vinv -- npx -y vinv-mcp
+```
+
+```bash
+gemini mcp add vinv npx -- -y vinv-mcp
 ```
 
 <sub>Other clients: add <code>{ "command": "npx", "args": ["-y", "vinv-mcp"] }</code> under <code>mcpServers.vinv</code>. See <a href="https://www.npmjs.com/package/vinv-mcp"><code>vinv-mcp</code></a> — 16 tools: semantic search, dead code, fault localization, runtime values/slices/coverage, and the verify/optimize loop.</sub>
