@@ -18,7 +18,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 
 <table>
 <tr>
-<td align="center" valign="top">
+<td align="center" valign="top" width="50%">
 
 <b>Editor extension</b><br><sub>the full Vinv UI, in your editor</sub>
 
@@ -27,7 +27,7 @@ Vinv connects runtime traces to the exact source that produced them, hands that 
 <a href="https://vinv.ai/#install"><img src="https://img.shields.io/badge/Install_in_Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white" alt="Install in Windsurf"></a>
 
 </td>
-<td align="center" valign="top">
+<td align="center" valign="top" width="50%">
 
 <b>MCP server</b><br><sub>16 tools for any MCP client</sub>
 
