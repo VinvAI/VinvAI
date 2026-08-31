@@ -50,7 +50,13 @@ Vinv works three ways — an editor extension, a CLI, or an MCP server for any a
 
 ### Editor extension
 
-One click — [**install from vinv.ai**](https://vinv.ai/#install), which opens the extension directly in your editor — or from your editor's CLI:
+[![Install in VS Code](https://img.shields.io/badge/Install_in_VS_Code-D71921?style=for-the-badge&logo=vscodium&logoColor=white)](https://vscode.dev/redirect?url=vscode%3Aextension%2FVinvAI.VinvAI)
+[![Install in Cursor](https://img.shields.io/badge/Install_in_Cursor-D71921?style=for-the-badge&logo=cursor&logoColor=white)](https://vinv.ai/#install)
+[![Install in Windsurf](https://img.shields.io/badge/Install_in_Windsurf-D71921?style=for-the-badge&logo=windsurf&logoColor=white)](https://vinv.ai/#install)
+
+<sub>VSCodium, Trae and VS Code Insiders install the same way from <a href="https://vinv.ai/#install">vinv.ai</a>, which opens the extension straight in your editor. The listing lives on <a href="https://open-vsx.org/extension/VinvAI/VinvAI">Open VSX</a> and the <a href="https://marketplace.visualstudio.com/items?itemName=VinvAI.VinvAI">VS Code Marketplace</a>.</sub>
+
+Or from your editor's CLI:
 
 | Editor | Command |
 |---|---|
