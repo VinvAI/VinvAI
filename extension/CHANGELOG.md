@@ -5,6 +5,12 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.15] — 2026-09-01
+
+### 🐛 Fixed
+
+- **CLI commands with parameters actually run** — a recorded command whose value needed quoting (a vault path under a folder with a space in its name) was quoted twice, so the program received a path with literal quote marks in it and exited before doing anything. Findings also kept per-service attribution through the multi-service merge, instead of showing an empty panel.
+
 ## [0.2.14] — 2026-09-01
 
 ### 🐛 Fixed
