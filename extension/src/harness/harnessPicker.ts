@@ -5,11 +5,12 @@
  * seeds background dispatches like auto-episodes, which cannot ask).
  *
  * Options are grouped ready-first (installed CLIs / reachable chat panels,
- * then everything missing), and each missing-but-installable harness carries
- * an inline install button: it launches the install (terminal for CLIs, the
- * editor's extension installer for chat panels), the picker waits for the
- * binary/extension to appear, and then resolves with that harness — install
- * flows straight into use.
+ * then everything missing). Choosing a missing-but-installable harness — by
+ * its inline install button OR simply by selecting the row — launches the
+ * install (a visible terminal for CLIs, the editor's extension installer for
+ * chat panels), and the picker waits for the binary/extension to appear before
+ * resolving with that harness: install flows straight into use, and no caller
+ * ever receives an agent that is not actually there.
  */
 import * as vscode from 'vscode';
 import {
@@ -45,7 +46,10 @@ function buildItems(
 				? 'available in this window'
 				: 'available in this window — auto-send, best effort';
 		}
-		return h.kind === 'ide-chat' ? 'not available in this editor' : 'not installed';
+		if (h.kind === 'ide-chat') {
+			return canInstallHarness(h) ? 'not installed — select to install' : 'not available in this editor';
+		}
+		return canInstallHarness(h) ? 'not installed — select to install it here' : 'not installed';
 	};
 	const toItem = (h: HarnessDef): HarnessQuickPickItem => ({
 		id: h.id,
@@ -102,9 +106,12 @@ export async function pickHarness(
 			}
 		};
 		render();
-		qp.onDidTriggerItemButton((e) => {
-			const h = e.item.id ? HARNESSES.find((x) => x.id === e.item.id) : undefined;
-			if (!h || installing.has(h.id)) {
+		// Shared by the inline install button and by accepting a not-installed
+		// row: kick the install off in a visible integrated terminal (the user
+		// watches it run and signs in right there) and keep the picker open
+		// until the binary/extension shows up.
+		const beginInstall = (h: HarnessDef): void => {
+			if (installing.has(h.id)) {
 				return;
 			}
 			startHarnessInstall(h);
@@ -132,9 +139,26 @@ export async function pickHarness(
 				resolve({ id: done, label: installed?.label ?? done });
 				qp.hide();
 			}, INSTALL_POLL_MS);
+		};
+		qp.onDidTriggerItemButton((e) => {
+			const h = e.item.id ? HARNESSES.find((x) => x.id === e.item.id) : undefined;
+			if (h) {
+				beginInstall(h);
+			}
 		});
 		qp.onDidAccept(() => {
-			resolve(qp.selectedItems[0]);
+			const sel = qp.selectedItems[0];
+			const h = sel?.id ? HARNESSES.find((x) => x.id === sel.id) : undefined;
+			// Choosing a not-installed agent means "use this one", not "fail on the
+			// first dispatch": install it instead of resolving with a harness that
+			// is not there yet. Same terminal-visible flow as the install button —
+			// only harnesses we can actually install take this path; the rest
+			// resolve as before and the caller reports what is missing.
+			if (h && !availability[h.id] && canInstallHarness(h)) {
+				beginInstall(h);
+				return;
+			}
+			resolve(sel);
 			qp.hide();
 		});
 		qp.onDidHide(() => {

@@ -50,6 +50,7 @@ htmlcov/
 /_wintest_venv/
 /list/
 /.ccache/
+/data/
 build/
 *.log
 nuitka-crash-report.xml

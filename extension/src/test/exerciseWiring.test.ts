@@ -19,6 +19,8 @@ import {
 	isDispatchableKind,
 	evidenceFileForKind,
 	engineVerdict,
+	mergeProfiles,
+	tagProfileWithService,
 	ASSERT_SUCCESS_CRITERIA,
 } from '../harness/exerciseRunner';
 import { computeFlowModel, type FlowFacts } from '../views/flowModel';
@@ -328,5 +330,47 @@ suite('the verdict describes the run, not the last play', () => {
 			'functions.json': { status: 'environment', diagnostics: ['nothing imported'] },
 		});
 		assert.match(engineVerdict(root, 0), /nothing imported/);
+	});
+});
+
+
+suite('per-service attribution survives the profile merge', () => {
+	const profile = (id: string) => ({
+		endpoint_count: 1,
+		endpoints: [{ api_id: id, unit_kind: 'cli_invocation', coverage: { covered: 1, total: 4 } }],
+		opportunities: [{ kind: 'latency', endpoint: id }],
+	});
+
+	test('a service-free profile is stamped with the service it came from', () => {
+		const tagged = tagProfileWithService(profile('bm25-index#stats') as never, 'bm25-index') as never;
+		assert.strictEqual((tagged as { service?: string }).service, 'bm25-index');
+		assert.strictEqual((tagged as { endpoints: Array<{ service?: string }> }).endpoints[0].service, 'bm25-index');
+		assert.strictEqual(
+			(tagged as { opportunities: Array<{ service?: string }> }).opportunities[0].service,
+			'bm25-index',
+		);
+	});
+
+	test('a service the engine already stated is never overwritten', () => {
+		const own = { ...profile('x#y'), service: 'declared' } as never;
+		const tagged = tagProfileWithService(own, 'guessed') as { service?: string };
+		assert.strictEqual(tagged.service, 'declared');
+	});
+
+	test('merging several services keeps every row attributable', () => {
+		// The regression: the merge dropped the label, so the Findings panel
+		// filtered by service and matched nothing at all.
+		const merged = mergeProfiles([
+			tagProfileWithService(profile('bm25-index#stats') as never, 'bm25-index'),
+			tagProfileWithService(profile('retrieve#query') as never, 'retrieve'),
+		]) as { endpoints: Array<{ api_id: string; service?: string }> } | null;
+		assert.ok(merged, 'the merge produced nothing');
+		const byId = new Map(merged.endpoints.map((e) => [e.api_id, e.service]));
+		assert.strictEqual(byId.get('bm25-index#stats'), 'bm25-index');
+		assert.strictEqual(byId.get('retrieve#query'), 'retrieve');
+	});
+
+	test('a null profile passes through rather than throwing', () => {
+		assert.strictEqual(tagProfileWithService(null, 'svc'), null);
 	});
 });

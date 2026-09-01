@@ -349,6 +349,35 @@ function endpointCoverage(e: RawProfile): number {
  * A single document is returned untouched. That is not an optimization: it
  * keeps a one-service workspace reading the exact bytes the engine wrote.
  */
+/**
+ * Labels one service's profile rows with that service's name.
+ *
+ * A row already carrying a service keeps it — the engine is authoritative where
+ * it speaks, and this only fills the silence.
+ */
+export function tagProfileWithService(
+	profile: RawProfile | null,
+	service: string,
+): RawProfile | null {
+	if (!profile || !service) {
+		return profile;
+	}
+	const stamp = (rows: unknown): unknown =>
+		Array.isArray(rows)
+			? rows.map((r) =>
+					r && typeof r === 'object' && !(r as RawProfile).service
+						? { ...(r as RawProfile), service }
+						: r,
+				)
+			: rows;
+	return {
+		...profile,
+		service: profile.service ?? service,
+		endpoints: stamp(profile.endpoints),
+		opportunities: stamp(profile.opportunities),
+	} as RawProfile;
+}
+
 export function mergeProfiles(profiles: ReadonlyArray<RawProfile | null>): RawProfile | null {
 	const docs = profiles.filter((p): p is RawProfile => !!p && typeof p === 'object');
 	if (docs.length === 0) {
@@ -1281,7 +1310,15 @@ export async function exercisePassOnce(
 			failures.push(`${target.service}: profile failed — ${step.error ?? 'no detail'}`);
 			continue;
 		}
-		profiles.push(readExerciseJson<RawProfile>(workspaceRoot, 'profile.json'));
+		// Stamp the service onto the doc BEFORE it joins the merge. The loop is
+		// the last place that knows whose profile this is: `profile.json` is
+		// rewritten per service and carries no name of its own, so a row that
+		// leaves here unlabelled can never be attributed again. Unlabelled rows
+		// are what emptied the Findings panel — it filters by service, and every
+		// row matched nothing.
+		profiles.push(tagProfileWithService(
+			readExerciseJson<RawProfile>(workspaceRoot, 'profile.json'), target.service,
+		));
 	}
 	if (profiles.length === 0) {
 		publishExerciseState(exerciseStateFromArtifacts(null, null, 'failed', 'profile failed'));

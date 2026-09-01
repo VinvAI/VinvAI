@@ -8,6 +8,8 @@
 import * as assert from 'assert';
 import {
 	applySetupOutcome,
+	decideAfterHarnessPick,
+	decideHarnessGate,
 	decideOnFailure,
 	grantMoreBudget,
 	DEFAULT_BUDGETS,
@@ -332,5 +334,35 @@ suite('autoPilotMachine: exercise is not starved by a stuck service', () => {
 			kind: 'setup',
 			service: 'api',
 		});
+	});
+});
+
+suite('autoPilotMachine: the harness gate', () => {
+	test('an explicitly chosen, present harness is the only silent start', () => {
+		assert.strictEqual(decideHarnessGate(true, true), 'proceed');
+	});
+
+	test('never chosen asks, even though the id accessor would answer claude-code', () => {
+		// The regression this pins: "unchosen" defaults to claude-code
+		// downstream, so a run would silently drive the whole workspace through
+		// an agent the user never picked and may not have installed.
+		assert.strictEqual(decideHarnessGate(false, true), 'ask');
+		assert.strictEqual(decideHarnessGate(false, false), 'ask');
+	});
+
+	test('a chosen harness that has since disappeared asks again', () => {
+		assert.strictEqual(decideHarnessGate(true, false), 'ask');
+	});
+
+	test('dismissing the prompt stops the run — it does not fall back', () => {
+		assert.strictEqual(decideAfterHarnessPick(null, true), 'stop-unpicked');
+		assert.strictEqual(decideAfterHarnessPick(null, false), 'stop-unpicked');
+	});
+
+	test('a pick that is present proceeds; one still absent stops', () => {
+		assert.strictEqual(decideAfterHarnessPick('codex', true), 'proceed');
+		// The picker installs before resolving, so absent here means the install
+		// is still running — stop rather than dispatch into a missing CLI.
+		assert.strictEqual(decideAfterHarnessPick('codex', false), 'stop-absent');
 	});
 });

@@ -380,7 +380,7 @@ No. Vinv runs everything locally. The semantic index and code embedder run on yo
 </details>
 
 <details><summary><b>Is there any telemetry or data collection?</b></summary>
-No telemetry, no analytics, no usage pings, no crash reports. Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>; sensitive data in traces is redacted and never sent anywhere. The extension makes exactly <b>one</b> outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a broken release can tell you. No query string, no identifiers, nothing uploaded; at most once every 12 hours. Turn it off with <code>vinv.notices.enabled</code>.
+Your code, traces and findings never leave your machine: Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>, and sensitive data in traces is redacted. The extension sends <b>anonymous usage events</b> (which features run, whether they succeeded) to help us find what breaks — no source, no traces, no findings, no identifiers you did not give us. It also GETs a static file at <code>notices.vinv.ai</code> so a broken release can tell you. The engines and the MCP server send nothing at all.
 </details>
 
 <details><summary><b>Does Vinv modify my code?</b></summary>
@@ -401,7 +401,7 @@ Yes — <a href="https://github.com/VinvAI/VinvAI/blob/main/LICENSE">Apache 2.0<
 
 ## Privacy
 
-- **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
+- **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys; your code and traces are never uploaded.
 - **One outbound request, and you can read it**: a GET of a static JSON file at `notices.vinv.ai` on activation, for broken-release and security notices only. No query string, no identifiers, nothing uploaded; at most once per 12 hours; disable with `vinv.notices.enabled`.
 - The only download is the embedding model (Hugging Face, once, ~100 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.

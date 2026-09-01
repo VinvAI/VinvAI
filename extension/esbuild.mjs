@@ -29,6 +29,18 @@ const shared = {
 	sourcemap: false,
 	legalComments: 'none',
 	logLevel: 'info',
+	// Telemetry destination, resolved at BUILD time.
+	//
+	// The PostHog project key is public and write-only — shipping it inside the
+	// client is how PostHog is meant to be used — so src/telemetry/common.ts
+	// carries the production key as a plain constant and a default build just
+	// works. These overrides exist so a local build can be pointed at a scratch
+	// project instead: `VINV_POSTHOG_KEY=phc_dev npm run bundle`. Empty strings
+	// fall through to the constants, which is why they are `||` there, not `??`.
+	define: {
+		'process.env.VINV_POSTHOG_KEY': JSON.stringify(process.env.VINV_POSTHOG_KEY ?? ''),
+		'process.env.VINV_POSTHOG_HOST': JSON.stringify(process.env.VINV_POSTHOG_HOST ?? ''),
+	},
 };
 
 const entries = {
