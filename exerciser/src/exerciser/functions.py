@@ -2159,6 +2159,84 @@ def impurities_in_source(
     )
 
 
+# Phrases that mark a reason as FAIL-OPEN — the guard could not read the body,
+# so it refused rather than assumed. At FUNCTION scope that is the right call:
+# the harness is about to invoke that body. At MODULE scope it is not, and the
+# difference is the whole design of `module_scope_impurities` below.
+_UNVERIFIED_MARKERS = (
+    "cannot verify",
+    "body not verified",
+    "no readable method body",
+)
+
+
+def _is_definite_impurity(reason: str) -> bool:
+    """Whether a reason names something the guard READ, not something it could not."""
+    return not any(marker in reason for marker in _UNVERIFIED_MARKERS)
+
+
+def module_scope_impurities(source: str, *, depth: int = DEFAULT_TRANSITIVE_DEPTH) -> list[str]:
+    """World-changing calls made at a module's TOP LEVEL, run by the import itself.
+
+    `impurity_reasons` judges a function BODY. Reaching any target in a module
+    means importing that module first, which executes every top-level statement
+    before a single argument is synthesized — so a module whose top level calls
+    `os.system` ran it regardless of how pure the function the harness chose is.
+    That gap let a verified-pure target reach the in-process fast path, which
+    runs at the real repo root with the real environment.
+
+    Only DEFINITE impurities count here, and the asymmetry is deliberate. At
+    function scope an unreadable body is refused, because the harness is about
+    to call it. At module scope the import is unavoidable for every target in
+    the file, and top-level code is overwhelmingly `logger =
+    logging.getLogger(__name__)` or `router = APIRouter()` — shapes the guard
+    cannot resolve to a body and would therefore report as impure. Blocking on
+    those would refuse essentially every real module, so the fail-open reasons
+    are dropped and only what the guard actually READ is reported. That trades a
+    known, bounded blind spot for keeping the harness able to drive anything.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        # Unparseable source is already handled upstream by `source_facts`,
+        # which returns None and skips the file rather than trusting it.
+        return []
+    body = [
+        stmt
+        for stmt in tree.body
+        if not isinstance(
+            stmt,
+            ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Import | ast.ImportFrom,
+        )
+    ]
+    if not body:
+        return []
+    # A synthetic body, so every helper that expects a function node (nested
+    # definitions, pure-container parameters) sees the shape it was written for.
+    pseudo = ast.FunctionDef(
+        name="<module>",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=[],
+            vararg=None,
+            kwonlyargs=[],
+            kw_defaults=[],
+            kwarg=None,
+            defaults=[],
+        ),
+        body=body,
+        decorator_list=[],
+        returns=None,
+        type_comment=None,
+        type_params=[],
+    )
+    ast.fix_missing_locations(pseudo)
+    imports = module_imports(source)
+    known = set(module_function_defs(source)) | set(module_method_defs(source))
+    reasons = _direct_impurities(pseudo, imports, known, receiver_bindings(source, imports))
+    return [f"{reason} at module import" for reason in reasons if _is_definite_impurity(reason)]
+
+
 def impurity_class(reason: str) -> str:
     """Which control is supposed to handle this impurity.
 
@@ -2204,16 +2282,24 @@ def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, 
 
 @lru_cache(maxsize=512)
 def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
-    """Per-function ``{"params", "impurities"}`` for one module's source text."""
+    """Per-function ``{"params", "impurities"}`` for one module's source text.
+
+    Every function carries its module's TOP-LEVEL impurities as well as its own.
+    Importing the module runs that code before any target is called, so an
+    `os.system(...)` beside the `def` is as reachable as one inside it — see
+    `module_scope_impurities`.
+    """
     defs = module_function_defs(source)
     imports = module_imports(source)
     methods = module_method_defs(source)
     receivers = receiver_bindings(source, imports)
     attributes = attribute_bindings(source, imports)
+    at_import = module_scope_impurities(source)
     return {
         name: {
             "params": _ast_params(node),
-            "impurities": impurity_reasons(
+            "impurities": at_import
+            + impurity_reasons(
                 name,
                 defs,
                 imports=imports,
@@ -4130,9 +4216,7 @@ def run_functions(
     # disk so a single module's spans remain attributable.
     trace_report: dict[str, Any] = {"traced": False, "reason": "tracing disabled for this run"}
     if trace:
-        trace_report = dict(
-            tracing.trace_status(sorted({m.partition(".")[0] for m in by_module}))
-        )
+        trace_report = dict(tracing.trace_status(sorted({m.partition(".")[0] for m in by_module})))
         trace_dir = tracing.capture_path(repo, service, "functions").parent
         merged = tracing.merge_traces(trace_dir) if trace_dir.is_dir() else None
         if merged is not None:

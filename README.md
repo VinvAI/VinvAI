@@ -263,6 +263,8 @@ The **Test** stage isn't one tester — it's a set of oracles, each hunting a di
 
 Unverified code runs behind a **containment ladder**: a kernel-enforced OS sandbox (`sandbox-exec` / `bwrap` / `unshare`) where the host offers one, otherwise a process shim — always with a disposable repo copy, redirected `HOME`/`TMPDIR`, blocked network and subprocess spawning. The tier is decided by a *probe* that verifies a write outside the root really failed, never by a binary being on `PATH`. Postgres, Redis and S3 are substituted *inside* the jail so code that needs them runs instead of failing to connect.
 
+**The boundary, stated exactly.** That ladder is a **write-and-network wall, not a read wall** — a contained target can still read what the host user can read, and what it returns is summarised into `.vinv/`. Targets the guard verifies as *pure* run in process, uncontained, by design. A module's **top level** runs at import for every target in its file, so it is judged too, and an impure module demotes its functions to the contained path rather than the fast one. If the repo is untrusted, treat `exerciser` as running it — because it does.
+
 </details>
 
 ## Proven on itself
