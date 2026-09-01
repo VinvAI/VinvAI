@@ -15,10 +15,14 @@ evidence (failing input, expected-vs-got, covered frames) attached.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+from . import store
 
 _DIGITS = re.compile(r"\d+")
 _WS = re.compile(r"\s+")
@@ -246,3 +250,70 @@ def issues_document(clusters: list[FailureCluster]) -> dict[str, Any]:
         "cluster_count": len(clusters),
         "clusters": [c.to_json() for c in clusters],
     }
+
+
+def cluster_signature(cluster: dict[str, Any]) -> str:
+    """A stable identity for one cluster.
+
+    Every oracle's cluster document carries ``signature`` (:func:`normalize_
+    signature`), which is exactly the digit-normalised identity the rest of Vinv
+    dedupes on. The fallback exists only so a hand-written or older document
+    still dedupes on SOMETHING rather than silently paying twice.
+    """
+    sig = cluster.get("signature")
+    if isinstance(sig, str) and sig:
+        return sig
+    return "|".join(str(cluster.get(k, "")) for k in ("kind", "endpoint_id", "title"))
+
+
+def merge_into_issues(
+    repo: Path,
+    clusters: Iterable[dict[str, Any]],
+    *,
+    logger: logging.Logger | None = None,
+) -> int:
+    """Publish an oracle's clusters into ``issues.json``. Returns how many were new.
+
+    ``issues.json`` is the ONLY file the extension's dispatch path reads
+    (``exerciseStateFromArtifacts`` -> ``clustersToEpisodes`` ->
+    ``dispatchIssueEpisode``), so a cluster that never lands here is invisible:
+    no Findings row, no fix episode, however correctly it was found.
+
+    That is not hypothetical. On a CLI-only repo the invocation oracle recorded
+    four failures in ``invocations.json`` and the campaign then stopped with
+    ``no-actions`` — nothing published them, so ``issues.json`` was never
+    written and the scorecard reported zero. Any oracle that clusters must call
+    this itself rather than relying on the campaign having run.
+
+    Merges rather than overwrites, keyed on signature, because ``run`` owns this
+    file for the HTTP oracle and both sets of findings are real. The extension
+    dedupes dispatches by signature, so a cluster appearing twice costs nothing.
+
+    ORDERING: ``run`` rewrites this file wholesale, so publishers must land
+    after it in a pass.
+    """
+    log = logger or logging.getLogger(__name__)
+    incoming = [c for c in clusters if isinstance(c, dict)]
+    if not incoming:
+        return 0
+    path = store.issues_path(repo)
+    doc = store.read_json(path)
+    existing = doc.get("clusters") if isinstance(doc, dict) else None
+    by_sig: dict[str, dict[str, Any]] = {}
+    if isinstance(existing, list):
+        for c in existing:
+            if isinstance(c, dict):
+                by_sig[cluster_signature(c)] = c
+    before = len(by_sig)
+    for cluster in incoming:
+        by_sig.setdefault(cluster_signature(cluster), cluster)
+    ordered = sorted(by_sig.values(), key=lambda c: (str(c.get("kind")), str(c.get("path"))))
+    store.write_json(path, {"version": 1, "cluster_count": len(ordered), "clusters": ordered})
+    added = len(by_sig) - before
+    log.info(
+        "published %d cluster(s) into issues.json (%d new, %d total)",
+        len(incoming),
+        added,
+        len(ordered),
+    )
+    return added

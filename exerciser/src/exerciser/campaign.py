@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import exception_policy, store
+from . import exception_policy, issues, store
 from .bandit import Action, ActionBandit, Outcome, seed_actions_from_prior
 from .interpreter import resolve_cached
 
@@ -432,18 +432,10 @@ class OracleConfig:
     _signature_contracts: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
-def _cluster_signature(cluster: dict[str, Any]) -> str:
-    """A stable identity for one cluster.
-
-    Every oracle's cluster document carries ``signature`` (``issues.normalize_
-    signature``), which is exactly the digit-normalised identity the rest of Vinv
-    dedupes on. The fallback exists only so a hand-written or older document
-    still dedupes on SOMETHING rather than silently paying twice.
-    """
-    sig = cluster.get("signature")
-    if isinstance(sig, str) and sig:
-        return sig
-    return "|".join(str(cluster.get(k, "")) for k in ("kind", "endpoint_id", "title"))
+#: Moved to `issues` so any oracle can publish without importing the campaign —
+#: the invocation oracle runs whether or not a campaign does. Re-exported here
+#: because this module's own call sites (and its tests) still name them.
+_cluster_signature = issues.cluster_signature
 
 
 def _findings(
@@ -486,51 +478,13 @@ def _merge_into_issues(
     *,
     logger: logging.Logger | None = None,
 ) -> int:
-    """Publish the oracles' clusters into ``issues.json``. Returns how many were new.
+    """Publish the campaign's oracle clusters into ``issues.json``.
 
-    This is the step that was missing, and without it the five newer oracles
-    were unreachable in practice however correct they were. Each writes its own
-    artifact (``functions.json``, ``differential.json``, …), and the campaign
-    kept only signatures for credit accounting — but the extension's dispatch
-    path (``exerciseStateFromArtifacts`` → ``clustersToEpisodes`` →
-    ``dispatchIssueEpisode``) reads exactly ONE file: ``issues.json``. So a
-    campaign could find real defects and surface none of them.
-
-    Merging rather than overwriting, keyed on signature, because ``run`` owns
-    this file for the HTTP oracle and both sets of findings are real. The
-    extension already dedupes dispatches by signature, so a cluster appearing
-    here twice across passes costs nothing.
-
-    ORDERING REQUIREMENT: the campaign must run AFTER ``run`` in a pass, since
-    ``run`` rewrites this file wholesale. ``exerciseRunner`` invokes it last.
+    Thin wrapper over :func:`issues.merge_into_issues`, which owns the merge now
+    that oracles outside a campaign publish too. Keeps the campaign's own
+    signature-keyed dict, whose keys are already cluster signatures.
     """
-    log = logger or logging.getLogger(__name__)
-    if not clusters:
-        return 0
-    path = store.issues_path(repo)
-    doc = store.read_json(path)
-    existing = doc.get("clusters") if isinstance(doc, dict) else None
-    by_sig: dict[str, dict[str, Any]] = {}
-    if isinstance(existing, list):
-        for c in existing:
-            if isinstance(c, dict):
-                by_sig[_cluster_signature(c)] = c
-    before = len(by_sig)
-    for sig, cluster in clusters.items():
-        by_sig.setdefault(sig, cluster)
-    ordered = sorted(by_sig.values(), key=lambda c: (str(c.get("kind")), str(c.get("path"))))
-    store.write_json(
-        path,
-        {"version": 1, "cluster_count": len(ordered), "clusters": ordered},
-    )
-    added = len(by_sig) - before
-    log.info(
-        "campaign: published %d oracle cluster(s) into issues.json (%d new, %d total)",
-        len(clusters),
-        added,
-        len(ordered),
-    )
-    return added
+    return issues.merge_into_issues(repo, clusters.values(), logger=logger)
 
 
 def _clusters_of(

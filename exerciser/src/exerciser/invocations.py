@@ -34,7 +34,7 @@ from typing import Any
 
 from . import store, tracing
 from .invocation_render import invocation_slug, render_invocation
-from .issues import build_clusters
+from .issues import build_clusters, merge_into_issues
 from .redact import redact_text
 
 #: Wall-clock ceiling for one invocation. A CLI that outruns this is reported as
@@ -550,6 +550,13 @@ def run_invocations(
     }
     store.write_jsonl(store.exercise_dir(repo) / "invocation_results.jsonl", rows)
     store.write_json(store.exercise_dir(repo) / "invocations.json", result)
+    # Publish into issues.json — the ONE file the extension's Findings view and
+    # fix-episode dispatcher read. Writing only invocations.json stranded every
+    # CLI failure: correctly found, correctly clustered, and invisible. The
+    # campaign publishes its own oracles, but it does not always run — on a
+    # CLI-only repo it stops with 'no-actions' before publishing anything — so
+    # this oracle cannot delegate the step.
+    result["issues_published"] = merge_into_issues(repo, (c.to_json() for c in clusters), logger=lg)
     lg.info(
         "invocations: %d run across %d service(s), %d failing, %d clusters",
         len(rows),
