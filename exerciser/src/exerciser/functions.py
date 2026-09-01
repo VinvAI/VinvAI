@@ -1583,249 +1583,80 @@ def _resolvable_root(root_id: str, imports: dict[str, str], known: set[str]) -> 
     return root_id in imports or root_id in known or root_id in _BUILTIN_NAMES
 
 
-def _direct_impurities(
-    node: ast.AST,
-    imports: dict[str, str] | None = None,
-    known: set[str] | None = None,
-    receivers: dict[str, str] | None = None,
-    self_attrs: dict[str, str] | None = None,
-) -> list[str]:
-    """World-changing — or unverifiable — calls made directly in one body.
-
-    ``imports`` resolves local bindings to real dotted modules; ``known`` is the
-    set of same-module function (and ``Class.method``) names the caller will
-    inspect separately; ``receivers`` names objects built by an impure module or
-    a same-module class (see ``receiver_bindings``). A bare call to anything
-    outside ``known`` ∪ builtins ∪ ``imports`` cannot be resolved to source, and
-    an unresolvable call is treated as impure.
-
-    DECORATORS are judged here too, and they are judged as calls even when they
-    are written bare: ``@deco`` is an ``ast.Name``, so a walk that only looked at
-    ``ast.Call`` nodes inspected the undecorated body while the harness went on
-    to call the decorated object.
-    """
-    imports = imports or {}
-    known = (known or set()) | _nested_definitions(node)
-    receivers = receivers or {}
-    self_attrs = self_attrs or {}
-    # Parameters this body's own signature declares to be builtin containers, less
-    # any name the body reassigns (after `xs = open(p)` the annotation on `xs` no
-    # longer describes what `xs.write(...)` runs on).
-    pure_params = {
-        name: base
-        for name, base in _pure_container_params(node).items()
-        if name not in _rebound_names(node)
-    }
-    reasons: list[str] = []
-    # Calls that CONSTRUCT the exception of a `raise`. Building an exception
-    # object is not a side effect, and `raise MyError(...)` where `MyError` came
-    # `from .errors import MyError` is one of the most common shapes in any
-    # codebase — the cross-module rule below would otherwise refuse every
-    # function that raises its package's own error type, which is a large and
-    # entirely wrong loss of coverage.
-    raised: set[int] = set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.Raise):
-            for part in (child.exc, child.cause):
-                if isinstance(part, ast.Call):
-                    raised.add(id(part))
-    for child in ast.walk(node):
-        # --- decorators: `@deco`, `@deco(...)`, `@mod.deco` ------------------
-        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            for decorator in child.decorator_list:
-                reason = _decorator_reason(decorator, imports, known)
-                if reason is not None:
-                    reasons.append(reason)
+def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, Any]]:
+    """Parameter records read from SOURCE (no import), same shape as the live ones."""
+    args = node.args
+    positional = [*args.posonlyargs, *args.args]
+    first_default = len(positional) - len(args.defaults)
+    out: list[dict[str, Any]] = []
+    for i, arg in enumerate(positional):
+        if arg.arg in ("self", "cls"):
             continue
-        if not isinstance(child, ast.Call):
-            continue
-        if id(child) in raised:
-            continue  # constructing the exception of a `raise` — see `raised`
-        func = child.func
-
-        # --- bare name: `f(...)` -------------------------------------------
-        if isinstance(func, ast.Name):
-            name = func.id
-            if name in _OPEN_NAMES and _is_write_open(child):
-                reasons.append("opens a file for writing")
-            elif name in _CODE_EVAL_NAMES:
-                reasons.append(f"{CODE_EVALUATION_REASON}: {name}()")
-            elif name in _IMPURE_BARE_CALLS:
-                reasons.append(f"calls {name}()")
-            elif name in imports:
-                # `from os import remove` then a bare `remove(path)`: judged on
-                # the module it really came from. When that module is NOT one we
-                # know, fall through to the unverified rule rather than treating
-                # "not on the impure list" as proof of purity.
-                reason = _dotted_reason(imports[name]) or _unverified_cross_module_reason(
-                    imports[name]
-                )
-                if reason:
-                    reasons.append(reason)
-            elif name not in known and name not in _BUILTIN_NAMES:
-                reasons.append(f"calls {name}() — unresolved local name, cannot verify")
-            continue
-
-        # --- attribute chain: `a.b.c(...)` ----------------------------------
-        if isinstance(func, ast.Attribute):
-            root, attrs = _attr_chain(func)
-            if not isinstance(root, _VERIFIABLE_ROOTS):
-                # `getattr(shutil, "rmtree")(root)`, `handlers[k].run()`, …
-                reasons.append(_INDIRECT_REASON)
-                continue
-            attr = attrs[-1]
-            # Set when the receiver is a parameter the signature annotates as a
-            # builtin container, and the chain is exactly one attribute deep
-            # (`xs.remove(3)`, not `xs.log.remove()` — a list has no `.log`, so
-            # the deeper chain is unresolvable and stays refused).
-            pure_container: str | None = None
-            if isinstance(root, ast.Name):
-                # A receiver BUILT by an impure module (`_session =
-                # requests.Session()`) or by a same-module class (`_store =
-                # Store()`), reached either through a module-level binding or
-                # through `self.<attr>` inside a method body. Neither is an
-                # import binding, so neither was ever resolved here — and a
-                # client object held on `self` is the commonest shape of all.
-                bound, rest, label = _resolve_receiver(
-                    root.id, attrs, receivers, self_attrs, pure_params
-                )
-                if bound is not None and bound.startswith(_PARAM_TAINT) and len(attrs) == 1:
-                    pure_container = bound[len(_PARAM_TAINT) :]
-                if bound is not None and bound.startswith(_MODULE_TAINT):
-                    origin = bound[len(_MODULE_TAINT) :]
-                    reasons.append(f"calls .{attr}() on {label}, built by {origin}()")
-                    continue
-                if bound is not None and bound.startswith(_CLASS_TAINT):
-                    cls = bound[len(_CLASS_TAINT) :]
-                    if len(rest) == 1 and f"{cls}.{attr}" in known:
-                        continue  # the method body is judged through the frontier
-                    reasons.append(f"calls .{attr}() on {label} ({cls}) — no readable method body")
-                    continue
-                tail = ".".join(attrs)
-                # Both readings, because either one being impure is enough: the
-                # RESOLVED module (`sp.run` -> `subprocess.run`) and the literal
-                # binding (a name that shadows a module the guard knows).
-                candidates = [f"{imports.get(root.id, root.id)}.{tail}", f"{root.id}.{tail}"]
-                reason = next(
-                    (r for r in (_dotted_reason(c) for c in dict.fromkeys(candidates)) if r), None
-                )
-                if reason:
-                    reasons.append(reason)
-                    continue
-                # Same fail-open as the bare-name branch, reached differently:
-                # `import mypkg.db` then `mypkg.db.wipe_all()` resolves cleanly,
-                # matches no impure module, and used to fall through as pure.
-                if root.id in imports:
-                    unverified = _unverified_cross_module_reason(f"{imports[root.id]}.{tail}")
-                    if unverified:
-                        reasons.append(unverified)
-                        continue
-                # An attribute chain two deep or more, rooted at a name this
-                # guard cannot resolve to a module, a same-module definition, a
-                # tainted receiver or a builtin. `self.sink.record(tag)`,
-                # `cfg.client.send(x)`, `ctx.s3.upload_file(...)`: the object the
-                # method runs on is decided at runtime, so the body that would
-                # run has never been read. The file already refuses an
-                # unresolvable BARE NAME (`calls f() — unresolved local name`);
-                # refusing the chain is the same rule, and its absence was a
-                # hole a real filesystem write walked straight through.
-                if len(attrs) >= 2 and not _resolvable_root(root.id, imports, known):
-                    reasons.append(_INDIRECT_REASON)
-                    continue
-            # `p.open('w')` — the METHOD spelling, where mode is the first
-            # positional argument rather than the second.
-            if attr in _OPEN_NAMES and _is_write_open(child, mode_arg=0):
-                reasons.append("opens a file for writing")
-                continue
-            if attr in _IMPURE_METHOD_NAMES and pure_container is None:
-                reasons.append(f"calls .{attr}()")
-            continue
-
-        # --- anything else in call position ---------------------------------
-        # `getattr(shutil, "rmtree")(root)` (a Call as func), `table[k](x)`,
-        # `(lambda: os.remove(p))()`. The old walk `continue`d here and inspected
-        # NOTHING, which is how the worst bypass got in.
-        reasons.append(_INDIRECT_REASON)
-    return sorted(dict.fromkeys(reasons))
-
-
-def _local_calls(
-    node: ast.AST,
-    known: set[str],
-    receivers: dict[str, str] | None = None,
-    self_attrs: dict[str, str] | None = None,
-) -> list[str]:
-    """Same-module bodies this one reaches: bare calls, DECORATORS, and methods.
-
-    Decorators count because a decorated target IS the wrapper — the frontier
-    has to reach ``_wrap`` for its body to be judged at all. Methods count when
-    the receiver is a known instance of a same-module class (``_store =
-    Store()`` then ``_store.wipe()``, or ``self.sink = Sink()`` then
-    ``self.sink.record()``), which is how the receiver's ``os.remove`` becomes
-    visible.
-    """
-    receivers = receivers or {}
-    self_attrs = self_attrs or {}
-    out: set[str] = set()
-    for child in ast.walk(node):
-        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            for decorator in child.decorator_list:
-                ref = _decorator_ref(decorator)
-                if isinstance(ref, ast.Name):
-                    out.add(ref.id)
-            continue
-        if not isinstance(child, ast.Call):
-            continue
-        if isinstance(child.func, ast.Name):
-            out.add(child.func.id)
-            continue
-        if isinstance(child.func, ast.Attribute):
-            root, attrs = _attr_chain(child.func)
-            if not isinstance(root, ast.Name):
-                continue
-            bound, rest, _label = _resolve_receiver(root.id, attrs, receivers, self_attrs)
-            if bound and bound.startswith(_CLASS_TAINT) and len(rest) == 1:
-                out.add(f"{bound[len(_CLASS_TAINT) :]}.{rest[0]}")
-    return sorted(out & known)
-
-
-def module_function_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    """Module-level ``def``s of a Python source text, by name.
-
-    Nested and class-level definitions are deliberately absent: the harness can
-    only call module-level callables, so those are the only bodies to judge.
-    """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return {}
-    return {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
-
-
-def module_method_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
-    """``"Class.method"`` → its def, for module-level classes.
-
-    The harness never DRIVES a method — it can only call module-level
-    callables — but it has to be able to JUDGE one: a module-level
-    ``_store = Store()`` makes ``_store.wipe()`` a call into this file, and the
-    only way to know whether that wipes anything is to read ``Store.wipe``.
-    """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return {}
-    out: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
-            continue
-        for item in node.body:
-            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
-                out[f"{node.name}.{item.name}"] = item
+        out.append(
+            {
+                "name": arg.arg,
+                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
+                "has_default": i >= first_default,
+                "keyword_only": False,
+            }
+        )
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=False):
+        out.append(
+            {
+                "name": arg.arg,
+                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
+                "has_default": default is not None,
+                "keyword_only": True,
+            }
+        )
     return out
+
+
+def _iterated_values(iterable: ast.expr) -> list[ast.expr]:
+    """The expressions a ``for`` target could be bound to, as far as is knowable."""
+    if isinstance(iterable, ast.List | ast.Tuple | ast.Set):
+        return list(iterable.elts)
+    return [iterable]
+
+
+def _own_returns(node: ast.AST) -> list[ast.Return]:
+    """``return`` statements belonging to THIS body, not to a nested ``def``."""
+    out: list[ast.Return] = []
+    stack: list[ast.AST] = list(ast.iter_child_nodes(node))
+    while stack:
+        current = stack.pop()
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            continue
+        if isinstance(current, ast.Return):
+            out.append(current)
+        stack.extend(ast.iter_child_nodes(current))
+    return out
+
+
+def _binding_sites(tree: ast.AST):
+    """Every ``(target, value)`` pair in a module, whatever syntax bound it.
+
+    Plain assignment was the only shape the receiver map used to see, and five
+    ordinary ways of binding a client object walked past it: tuple assignment,
+    ``with … as``, the walrus, a ``for`` target, and a same-module factory (that
+    last one is handled in ``_construction_origin``). Each of them produced an
+    empty binding map and a DRIVABLE verdict on ``_s.post(url)``.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                yield from _assignment_pairs(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            yield from _assignment_pairs(node.target, node.value)
+        elif isinstance(node, ast.NamedExpr):
+            yield from _assignment_pairs(node.target, node.value)
+        elif isinstance(node, ast.With | ast.AsyncWith):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    yield from _assignment_pairs(item.optional_vars, item.context_expr)
+        elif isinstance(node, ast.For | ast.AsyncFor):
+            for value in _iterated_values(node.iter):
+                yield from _assignment_pairs(node.target, value)
 
 
 def _construction_origin(
@@ -1860,20 +1691,6 @@ def _construction_origin(
             if _dotted_reason(cand):
                 return _MODULE_TAINT + cand
     return None
-
-
-def _own_returns(node: ast.AST) -> list[ast.Return]:
-    """``return`` statements belonging to THIS body, not to a nested ``def``."""
-    out: list[ast.Return] = []
-    stack: list[ast.AST] = list(ast.iter_child_nodes(node))
-    while stack:
-        current = stack.pop()
-        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
-            continue
-        if isinstance(current, ast.Return):
-            out.append(current)
-        stack.extend(ast.iter_child_nodes(current))
-    return out
 
 
 def _factory_origins(
@@ -1942,37 +1759,43 @@ def _assignment_pairs(target: ast.expr, value: ast.expr):
     yield target, value
 
 
-def _iterated_values(iterable: ast.expr) -> list[ast.expr]:
-    """The expressions a ``for`` target could be bound to, as far as is knowable."""
-    if isinstance(iterable, ast.List | ast.Tuple | ast.Set):
-        return list(iterable.elts)
-    return [iterable]
+def module_function_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Module-level ``def``s of a Python source text, by name.
 
-
-def _binding_sites(tree: ast.AST):
-    """Every ``(target, value)`` pair in a module, whatever syntax bound it.
-
-    Plain assignment was the only shape the receiver map used to see, and five
-    ordinary ways of binding a client object walked past it: tuple assignment,
-    ``with … as``, the walrus, a ``for`` target, and a same-module factory (that
-    last one is handled in ``_construction_origin``). Each of them produced an
-    empty binding map and a DRIVABLE verdict on ``_s.post(url)``.
+    Nested and class-level definitions are deliberately absent: the harness can
+    only call module-level callables, so those are the only bodies to judge.
     """
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                yield from _assignment_pairs(target, node.value)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            yield from _assignment_pairs(node.target, node.value)
-        elif isinstance(node, ast.NamedExpr):
-            yield from _assignment_pairs(node.target, node.value)
-        elif isinstance(node, ast.With | ast.AsyncWith):
-            for item in node.items:
-                if item.optional_vars is not None:
-                    yield from _assignment_pairs(item.optional_vars, item.context_expr)
-        elif isinstance(node, ast.For | ast.AsyncFor):
-            for value in _iterated_values(node.iter):
-                yield from _assignment_pairs(node.target, value)
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    return {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+
+
+def module_method_defs(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    """``"Class.method"`` → its def, for module-level classes.
+
+    The harness never DRIVES a method — it can only call module-level
+    callables — but it has to be able to JUDGE one: a module-level
+    ``_store = Store()`` makes ``_store.wipe()`` a call into this file, and the
+    only way to know whether that wipes anything is to read ``Store.wipe``.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                out[f"{node.name}.{item.name}"] = item
+    return out
 
 
 def receiver_bindings(source: str, imports: dict[str, str] | None = None) -> dict[str, str]:
@@ -2047,256 +1870,16 @@ def attribute_bindings(source: str, imports: dict[str, str] | None = None) -> di
     return out
 
 
-def _self_attrs_for(name: str, attributes: dict[str, str]) -> dict[str, str]:
-    """The ``self.<attr>`` taints in scope while judging ``"Class.method"``."""
-    cls, sep, _method = name.partition(".")
-    if not sep:
-        return {}
-    prefix = f"{cls}."
-    return {k[len(prefix) :]: v for k, v in attributes.items() if k.startswith(prefix)}
-
-
-def impurity_reasons(
-    qualname: str,
-    defs: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
-    *,
-    imports: dict[str, str] | None = None,
-    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] | None = None,
-    receivers: dict[str, str] | None = None,
-    attributes: dict[str, str] | None = None,
-    depth: int = DEFAULT_TRANSITIVE_DEPTH,
-) -> list[str]:
-    """Why calling ``qualname`` would change the world, or ``[]`` when it would not.
-
-    Transitive to ``depth`` through same-module helpers: a wrapper whose body is
-    one call to ``_really_delete()`` is exactly as destructive as the helper, and
-    an ``a -> b -> c`` chain hides it just as well as one hop did. The frontier
-    also carries DECORATORS (the harness calls the decorated object, so the
-    wrapper's body is the body that runs) and methods reached through a known
-    receiver. The walk keeps a visited set, so recursion and cycles terminate; if
-    the chain is still unexhausted at ``depth``, that is REPORTED as an impurity
-    rather than assumed harmless — the same discipline as every other refusal
-    here.
-
-    ``imports``/``methods``/``receivers``/``attributes`` should all come from the
-    same source as ``defs`` (``module_imports``, ``module_method_defs``,
-    ``receiver_bindings``, ``attribute_bindings``); ``impurities_in_source``
-    wires them together. Passing none is safe but weaker: an aliased ``import
-    subprocess as sp`` then only matches through the literal binding, and a
-    client object held on ``self`` is judged by the receiver-agnostic backstop
-    alone.
-    """
-    node = defs.get(qualname)
-    if node is None:
-        return []
-    attributes = attributes or {}
-    bodies: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {**(methods or {}), **defs}
-    known = set(bodies)
-    reasons = list(_direct_impurities(node, imports, known, receivers))
-    seen = {qualname}
-    frontier = [qualname]
-    for _ in range(max(0, depth)):
-        nxt: list[str] = []
-        for name in frontier:
-            current = bodies.get(name)
-            if current is None:
-                continue
-            decorators = _decorator_names(current)
-            for callee in _local_calls(
-                current, known, receivers, _self_attrs_for(name, attributes)
-            ):
-                if callee in seen:
-                    continue
-                seen.add(callee)
-                nxt.append(callee)
-                body = bodies[callee]
-                scope = known | (_wrapped_parameter(body) if callee in decorators else set())
-                for reason in _direct_impurities(
-                    body, imports, scope, receivers, _self_attrs_for(callee, attributes)
-                ):
-                    reasons.append(f"{reason} via {callee}()")
-        frontier = nxt
-    if frontier:
-        reasons.append(
-            f"call chain deeper than {depth} hops ({', '.join(sorted(frontier)[:3])}) "
-            "— cannot verify"
-        )
-    return sorted(dict.fromkeys(reasons))
-
-
-def impurities_in_source(
-    source: str, qualname: str, *, depth: int = DEFAULT_TRANSITIVE_DEPTH
-) -> list[str]:
-    """``impurity_reasons`` with every vocabulary read from the SAME source.
-
-    The one entry point callers should use: the imports, the class bodies and
-    the receiver bindings all have to come from the same text as the defs, and
-    wiring three of the four by hand is how a caller ends up with a weaker guard
-    than it thinks it has.
-    """
-    imports = module_imports(source)
-    return impurity_reasons(
-        qualname,
-        module_function_defs(source),
-        imports=imports,
-        methods=module_method_defs(source),
-        receivers=receiver_bindings(source, imports),
-        attributes=attribute_bindings(source, imports),
-        depth=depth,
-    )
-
-
-# Phrases that mark a reason as FAIL-OPEN — the guard could not read the body,
-# so it refused rather than assumed. At FUNCTION scope that is the right call:
-# the harness is about to invoke that body. At MODULE scope it is not, and the
-# difference is the whole design of `module_scope_impurities` below.
-_UNVERIFIED_MARKERS = (
-    "cannot verify",
-    "body not verified",
-    "no readable method body",
-)
-
-
-def _is_definite_impurity(reason: str) -> bool:
-    """Whether a reason names something the guard READ, not something it could not."""
-    return not any(marker in reason for marker in _UNVERIFIED_MARKERS)
-
-
-def module_scope_impurities(source: str, *, depth: int = DEFAULT_TRANSITIVE_DEPTH) -> list[str]:
-    """World-changing calls made at a module's TOP LEVEL, run by the import itself.
-
-    `impurity_reasons` judges a function BODY. Reaching any target in a module
-    means importing that module first, which executes every top-level statement
-    before a single argument is synthesized — so a module whose top level calls
-    `os.system` ran it regardless of how pure the function the harness chose is.
-    That gap let a verified-pure target reach the in-process fast path, which
-    runs at the real repo root with the real environment.
-
-    Only DEFINITE impurities count here, and the asymmetry is deliberate. At
-    function scope an unreadable body is refused, because the harness is about
-    to call it. At module scope the import is unavoidable for every target in
-    the file, and top-level code is overwhelmingly `logger =
-    logging.getLogger(__name__)` or `router = APIRouter()` — shapes the guard
-    cannot resolve to a body and would therefore report as impure. Blocking on
-    those would refuse essentially every real module, so the fail-open reasons
-    are dropped and only what the guard actually READ is reported. That trades a
-    known, bounded blind spot for keeping the harness able to drive anything.
-    """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        # Unparseable source is already handled upstream by `source_facts`,
-        # which returns None and skips the file rather than trusting it.
-        return []
-    body = [
-        stmt
-        for stmt in tree.body
-        if not isinstance(
-            stmt,
-            ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Import | ast.ImportFrom,
-        )
-    ]
-    if not body:
-        return []
-    # A synthetic body, so every helper that expects a function node (nested
-    # definitions, pure-container parameters) sees the shape it was written for.
-    pseudo = ast.FunctionDef(
-        name="<module>",
-        args=ast.arguments(
-            posonlyargs=[],
-            args=[],
-            vararg=None,
-            kwonlyargs=[],
-            kw_defaults=[],
-            kwarg=None,
-            defaults=[],
-        ),
-        body=body,
-        decorator_list=[],
-        returns=None,
-        type_comment=None,
-        type_params=[],
-    )
-    ast.fix_missing_locations(pseudo)
-    imports = module_imports(source)
-    known = set(module_function_defs(source)) | set(module_method_defs(source))
-    reasons = _direct_impurities(pseudo, imports, known, receiver_bindings(source, imports))
-    return [f"{reason} at module import" for reason in reasons if _is_definite_impurity(reason)]
-
-
-def impurity_class(reason: str) -> str:
-    """Which control is supposed to handle this impurity.
-
-    ``"code-evaluation"`` — the body runs source text (``exec``/``eval``/
-    ``compile``/``__import__``). The differential oracle is BUILT to drive these
-    (it feeds them a curated corpus in its own worker and compares against
-    CPython), so it opts in; the crash harness, which would call them with a
-    guessed string in a process it shares with nothing, never does.
-
-    ``"world-mutation"`` — everything else, and nothing opts into it.
-    """
-    return "code-evaluation" if reason.startswith(CODE_EVALUATION_REASON) else "world-mutation"
-
-
-def _ast_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[dict[str, Any]]:
-    """Parameter records read from SOURCE (no import), same shape as the live ones."""
-    args = node.args
-    positional = [*args.posonlyargs, *args.args]
-    first_default = len(positional) - len(args.defaults)
-    out: list[dict[str, Any]] = []
-    for i, arg in enumerate(positional):
-        if arg.arg in ("self", "cls"):
-            continue
-        out.append(
-            {
-                "name": arg.arg,
-                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
-                "has_default": i >= first_default,
-                "keyword_only": False,
-            }
-        )
-    for arg, default in zip(args.kwonlyargs, args.kw_defaults, strict=False):
-        out.append(
-            {
-                "name": arg.arg,
-                "annotation": ast.unparse(arg.annotation) if arg.annotation else None,
-                "has_default": default is not None,
-                "keyword_only": True,
-            }
-        )
-    return out
-
-
 @lru_cache(maxsize=512)
 def _facts_from_source(source: str) -> dict[str, dict[str, Any]]:
-    """Per-function ``{"params", "impurities"}`` for one module's source text.
+    """Per-function ``{"params"}`` for one module's source text.
 
-    Every function carries its module's TOP-LEVEL impurities as well as its own.
-    Importing the module runs that code before any target is called, so an
-    `os.system(...)` beside the `def` is as reachable as one inside it — see
-    `module_scope_impurities`.
+    Used to be ``{"params", "impurities"}``. The impurity analysis is gone with
+    the containment it fed: what a body does is no longer a routing decision,
+    so reading it was pure cost.
     """
     defs = module_function_defs(source)
-    imports = module_imports(source)
-    methods = module_method_defs(source)
-    receivers = receiver_bindings(source, imports)
-    attributes = attribute_bindings(source, imports)
-    at_import = module_scope_impurities(source)
-    return {
-        name: {
-            "params": _ast_params(node),
-            "impurities": at_import
-            + impurity_reasons(
-                name,
-                defs,
-                imports=imports,
-                methods=methods,
-                receivers=receivers,
-                attributes=attributes,
-            ),
-        }
-        for name, node in defs.items()
-    }
+    return {name: {"params": _ast_params(node)} for name, node in defs.items()}
 
 
 def source_facts(path: Path) -> dict[str, dict[str, Any]] | None:
@@ -2485,23 +2068,9 @@ def discover_with_refusals(
                 {"id": tid, "reason": "no module-level definition in source — nothing to verify"}
             )
             return
-        blocking = [r for r in fact["impurities"] if impurity_class(r) not in allow_impurities]
-        if blocking:
-            skipped.append({"id": tid, "reason": IMPURE_SKIP_PREFIX + "; ".join(blocking[:4])})
-            if len(refused) < max_targets:
-                refused.append(
-                    Refusal(
-                        target=FunctionTarget(
-                            module=module,
-                            qualname=qualname,
-                            file=rel,
-                            kind=kind,
-                            params=list(fact["params"]),
-                        ),
-                        reasons=list(blocking),
-                    )
-                )
-            return
+        # No purity gate. What a body does is no longer a reason to refuse it:
+        # the analysis existed to route targets to containment, and containment
+        # is gone, so refusing on it only cost coverage without buying safety.
         targets.append(
             FunctionTarget(
                 module=module,
