@@ -24,7 +24,7 @@ dependencies = [
 # guaranteed source for every input class), declared so it is installable and
 # so CI can prove the arm actually runs.
 propertygen = [
-    "hypothesis>=6.100.0,<7.0.0",
+    "hypothesis>=6.165.10,<7.0.0",
     "hypothesis-jsonschema>=0.23.0,<0.24.0",
 ]
 dev = [
