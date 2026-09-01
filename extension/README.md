@@ -243,7 +243,7 @@ Vinv ties **every runtime trace to the exact code that produced it** and hands y
 - **Deliberate 4xx rejections aren't "errors" to fix** — the defect classifier knows a service saying *no* correctly from a service breaking, so the agent is never handed a fake goal it can only game.
 - **When two attempts stop making progress**, a Nash-bargaining stall judge continues only if both an explorer stance *and* an auditor stance strictly prefer it to asking you.
 
-<details><summary><b>Under the hood: the oracle roster, the budget dispatcher, and the sandbox</b></summary>
+<details><summary><b>Under the hood: the oracle roster and the budget dispatcher</b></summary>
 
 <br>
 
@@ -262,9 +262,8 @@ The **Test** stage isn't one tester — it's a set of oracles, each hunting a di
 
 **The dispatcher is a bandit.** `exerciser campaign` allocates **one budget** across every *armed* oracle by Thompson sampling over `(target × technique × oracle)`. Cost is *measured* (wall-clock normalized to probe-equivalents plus subprocesses spawned), and credit is paid **once per defect signature** so a deterministic oracle can't re-earn credit for the same bug. Posteriors persist in `campaign.json` — which technique pays *on your repo* is learned.
 
-Unverified code runs behind a **containment ladder**: a kernel-enforced OS sandbox (`sandbox-exec` / `bwrap` / `unshare`) where the host offers one, otherwise a process shim — always with a disposable repo copy, redirected `HOME`/`TMPDIR`, blocked network and subprocess spawning. The tier is decided by a *probe* that verifies a write outside the root really failed, never by a binary being on `PATH`. Postgres, Redis and S3 are substituted *inside* the jail so code that needs them runs instead of failing to connect.
 
-**The boundary, stated exactly.** There is **no execution sandbox**. `exerciser` calls only the functions its purity guard can verify as pure, in process, against your real repo — anything it cannot verify is refused and never driven. Importing a module runs that module's top level either way. If the repo is untrusted, treat `exerciser` as running it, because it does.
+**The boundary, stated exactly.** There is **no sandbox and no purity guard**. `exerciser functions` imports every module it discovers and calls every target it finds **in process, against your real repo**, with arguments it synthesizes from type hints. Importing a module also runs that module's top level. The only refusals left are by NAME, not by analysis: destructive vocabulary (`drop_database`, `delete_*`) and test scaffolding. Nothing isolates the calls, nothing redirects writes, and an argument that resolves to an absolute path outside the repo is followed. Point it at a repo you trust, on a checkout you can `git checkout`.
 
 </details>
 
@@ -362,12 +361,11 @@ Your agent is also Vinv's only LLM — every analysis step routes through the co
 | `exerciser campaign <repo> [--base-url URL] [--budget N]` | **Start here.** One budget across every armed oracle by Thompson sampling |
 | `exerciser plan <repo> [--base-url URL]` | Per-endpoint input plan (schema + observed + semantic layers) |
 | `exerciser run <repo> --base-url URL` | Execute the plan against the live traced service, coverage-guided |
-| `exerciser functions <repo> [--require-tier os-sandbox]` | Drive entry points and exported functions in process, contained |
+| `exerciser functions <repo>` | Drive entry points and exported functions in process |
 | `exerciser differential <repo> [--target M:f --reference cpython-exec]` | Compare a function against a reference implementation |
 | `exerciser faults <repo> [--auto-target M:f]` | Legal-but-adversarial shapes at a dependency boundary |
 | `exerciser concurrency <repo> --target M:f` | Deterministic schedules + timeout injection |
 | `exerciser environment <repo>` | Dependency-resolution matrix + upstream signature drift |
-| `exerciser containment` | Which containment tier *this host* can actually provide, and why |
 | `exerciser throughput-sweep <repo> --base-url URL` | Concurrency sweep + USL fit → `throughput-ceiling` opportunities |
 | `exerciser regress <repo> --base-url URL` | Replay the accumulated behavior suite, report diffs by kind |
 | `exerciser scorecard <repo>` | Per-service scorecard: coverage before→after, invariants, issues, latency |
