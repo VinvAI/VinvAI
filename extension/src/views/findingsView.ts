@@ -18,6 +18,7 @@
  */
 
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -204,8 +205,10 @@ function wireFindings(
 
 	const sub = webview.onDidReceiveMessage((msg: FindingsOutbound | { type: 'webviewError' }) => {
 		if (msg.type === 'webviewError') {
+			reportWebviewError('findings', msg as { message?: unknown });
 			return;
 		}
+		trackUi('findings', msg.type);
 		return handleFindingsMessage(msg, actions);
 	});
 	void push();
@@ -504,12 +507,18 @@ function getHtml(): string {
 	 */
 	function narrow(f, service) {
 		if (!service) return f;
-		const issues = f.issues.filter(i => i.service === service);
-		const endpoints = (f.endpoints || []).filter(e => e.service === service);
+		// A row with NO service is shown under every service, never hidden. The
+		// attribution can be lost upstream (a merge across services that does not
+		// carry the label through), and when it is, filtering it away reports
+		// "this service is clean" for findings that exist. Noise is recoverable;
+		// silence about a real failure is not.
+		const mine = r => !r.service || r.service === service;
+		const issues = f.issues.filter(mine);
+		const endpoints = (f.endpoints || []).filter(mine);
 		return Object.assign({}, f, {
 			issues,
 			endpoints,
-			opportunities: (f.opportunities || []).filter(o => o.service === service),
+			opportunities: (f.opportunities || []).filter(mine),
 			headline: Object.assign({}, f.headline, {
 				issuesFound: issues.length,
 				endpointsTotal: endpoints.length || f.headline.endpointsTotal,
