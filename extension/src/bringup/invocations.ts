@@ -128,7 +128,16 @@ export function toBashPath(value: string): string {
 const TRUTHY = new Set(['1', 'true', 'yes', 'on']);
 
 /** The text one parameter contributes, already quoted — '' means "omit". */
-function substitute(param: InvocationParam, raw: string): string {
+/**
+ * `inQuotes` says the placeholder already sits inside a quoted span in the
+ * template (`--vault "{vault}"`). Quoting again nests one set inside the other
+ * and the program receives a value with literal quote characters in it: a path
+ * under a directory with a space in its name became
+ * `"'/Users/me/SEO - from Scratch/vault'"`, which no filesystem has, and every
+ * parameterised invocation on that repo exited 2. The template's quotes are
+ * already doing the job, so the value goes in bare.
+ */
+function substitute(param: InvocationParam, raw: string, inQuotes = false): string {
 	const value = param.type === 'path' ? toBashPath(raw.trim()) : raw.trim();
 	if (param.type === 'flag') {
 		if (!TRUTHY.has(value.toLowerCase())) {
@@ -155,7 +164,7 @@ function substitute(param: InvocationParam, raw: string): string {
 	if (param.type === 'float' && !/^-?\d+(\.\d+)?$/.test(value)) {
 		throw new InvocationRenderError(`'${param.name}' must be a number (got '${value}')`);
 	}
-	const quoted = shellQuote(value);
+	const quoted = inQuotes ? value : shellQuote(value);
 	return param.render ? param.render.replace(/\{value\}/g, quoted) : quoted;
 }
 
@@ -193,7 +202,13 @@ export function renderInvocation(
 			);
 		}
 		used.add(name);
-		const text = substitute(param, args[name] ?? param.default ?? '');
+		// Is this placeholder already inside a quoted span? Look at the
+		// characters either side of it in the TEMPLATE, not at the value.
+		const before = match.index > 0 ? invocation.command[match.index - 1] : '';
+		const afterAt = match.index + match[0].length;
+		const after = afterAt < invocation.command.length ? invocation.command[afterAt] : '';
+		const inQuotes = before === after && (before === "'" || before === '"');
+		const text = substitute(param, args[name] ?? param.default ?? '', inQuotes);
 		if (text === '') {
 			// An omitted parameter takes its own separating space with it, so the
 			// defaults render stays byte-identical to the verified string instead of

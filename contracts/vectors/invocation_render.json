@@ -18,7 +18,10 @@
   "render": [
     {
       "name": "a template with no parameters is its own rendering",
-      "invocation": { "id": "plain", "command": "acme-tool report --since 7d" },
+      "invocation": {
+        "id": "plain",
+        "command": "acme-tool report --since 7d"
+      },
       "args": {},
       "expected": "acme-tool report --since 7d"
     },
@@ -28,8 +31,19 @@
         "id": "report",
         "command": "acme-tool report --since {since} --format {format}",
         "params": [
-          { "name": "since", "default": "7d" },
-          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+          {
+            "name": "since",
+            "default": "7d"
+          },
+          {
+            "name": "format",
+            "type": "enum",
+            "default": "json",
+            "choices": [
+              "json",
+              "csv"
+            ]
+          }
         ]
       },
       "args": {},
@@ -41,11 +55,25 @@
         "id": "report",
         "command": "acme-tool report --since {since} --format {format}",
         "params": [
-          { "name": "since", "default": "7d" },
-          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+          {
+            "name": "since",
+            "default": "7d"
+          },
+          {
+            "name": "format",
+            "type": "enum",
+            "default": "json",
+            "choices": [
+              "json",
+              "csv"
+            ]
+          }
         ]
       },
-      "args": { "since": "30d", "format": "csv" },
+      "args": {
+        "since": "30d",
+        "format": "csv"
+      },
       "expected": "acme-tool report --since 30d --format csv"
     },
     {
@@ -53,9 +81,16 @@
       "invocation": {
         "id": "report",
         "command": "acme-tool report --since {since}",
-        "params": [{ "name": "since", "default": "7d" }]
+        "params": [
+          {
+            "name": "since",
+            "default": "7d"
+          }
+        ]
       },
-      "args": { "since": "7 days ago" },
+      "args": {
+        "since": "7 days ago"
+      },
       "expected": "acme-tool report --since '7 days ago'"
     },
     {
@@ -63,9 +98,16 @@
       "invocation": {
         "id": "note",
         "command": "acme-tool note --text {text}",
-        "params": [{ "name": "text", "default": "hi" }]
+        "params": [
+          {
+            "name": "text",
+            "default": "hi"
+          }
+        ]
       },
-      "args": { "text": "it's fine" },
+      "args": {
+        "text": "it's fine"
+      },
       "expected": "acme-tool note --text 'it'\\''s fine'"
     },
     {
@@ -73,7 +115,13 @@
       "invocation": {
         "id": "functions",
         "command": "vinv-exerciser functions /repo --service acme-sdk {only}",
-        "params": [{ "name": "only", "default": "", "render": "--target {value}" }]
+        "params": [
+          {
+            "name": "only",
+            "default": "",
+            "render": "--target {value}"
+          }
+        ]
       },
       "args": {},
       "expected": "vinv-exerciser functions /repo --service acme-sdk"
@@ -83,9 +131,17 @@
       "invocation": {
         "id": "functions",
         "command": "vinv-exerciser functions /repo --service acme-sdk {only}",
-        "params": [{ "name": "only", "default": "", "render": "--target {value}" }]
+        "params": [
+          {
+            "name": "only",
+            "default": "",
+            "render": "--target {value}"
+          }
+        ]
       },
-      "args": { "only": "acme_sdk.client:fetch" },
+      "args": {
+        "only": "acme_sdk.client:fetch"
+      },
       "expected": "vinv-exerciser functions /repo --service acme-sdk --target acme_sdk.client:fetch"
     },
     {
@@ -93,7 +149,13 @@
       "invocation": {
         "id": "check",
         "command": "acme-tool check {strict} ./sample",
-        "params": [{ "name": "strict", "type": "flag", "default": "false" }]
+        "params": [
+          {
+            "name": "strict",
+            "type": "flag",
+            "default": "false"
+          }
+        ]
       },
       "args": {},
       "expected": "acme-tool check ./sample"
@@ -103,9 +165,17 @@
       "invocation": {
         "id": "check",
         "command": "acme-tool check {strict} ./sample",
-        "params": [{ "name": "strict", "type": "flag", "default": "false" }]
+        "params": [
+          {
+            "name": "strict",
+            "type": "flag",
+            "default": "false"
+          }
+        ]
       },
-      "args": { "strict": "true" },
+      "args": {
+        "strict": "true"
+      },
       "expected": "acme-tool check --strict ./sample"
     },
     {
@@ -114,10 +184,17 @@
         "id": "check",
         "command": "acme-tool check {strict} ./sample",
         "params": [
-          { "name": "strict", "type": "flag", "default": "false", "render": "--fail-fast" }
+          {
+            "name": "strict",
+            "type": "flag",
+            "default": "false",
+            "render": "--fail-fast"
+          }
         ]
       },
-      "args": { "strict": "yes" },
+      "args": {
+        "strict": "yes"
+      },
       "expected": "acme-tool check --fail-fast ./sample"
     },
     {
@@ -125,9 +202,17 @@
       "invocation": {
         "id": "scan",
         "command": "acme-tool scan {root}",
-        "params": [{ "name": "root", "type": "path", "default": "." }]
+        "params": [
+          {
+            "name": "root",
+            "type": "path",
+            "default": "."
+          }
+        ]
       },
-      "args": { "root": "C:\\Users\\dev\\repo" },
+      "args": {
+        "root": "C:\\Users\\dev\\repo"
+      },
       "expected": "acme-tool scan /c/Users/dev/repo"
     },
     {
@@ -135,9 +220,17 @@
       "invocation": {
         "id": "scan",
         "command": "acme-tool scan {root}",
-        "params": [{ "name": "root", "type": "path", "default": "." }]
+        "params": [
+          {
+            "name": "root",
+            "type": "path",
+            "default": "."
+          }
+        ]
       },
-      "args": { "root": "D:/work/repo" },
+      "args": {
+        "root": "D:/work/repo"
+      },
       "expected": "acme-tool scan /d/work/repo"
     },
     {
@@ -145,9 +238,17 @@
       "invocation": {
         "id": "scan",
         "command": "acme-tool scan {root}",
-        "params": [{ "name": "root", "type": "path", "default": "." }]
+        "params": [
+          {
+            "name": "root",
+            "type": "path",
+            "default": "."
+          }
+        ]
       },
-      "args": { "root": "C:\\Program Files\\repo" },
+      "args": {
+        "root": "C:\\Program Files\\repo"
+      },
       "expected": "acme-tool scan '/c/Program Files/repo'"
     },
     {
@@ -155,7 +256,12 @@
       "invocation": {
         "id": "fmt",
         "command": "acme-tool fmt --template '{{name}}' --out {out}",
-        "params": [{ "name": "out", "default": "-" }]
+        "params": [
+          {
+            "name": "out",
+            "default": "-"
+          }
+        ]
       },
       "args": {},
       "expected": "acme-tool fmt --template '{name}' --out -"
@@ -165,7 +271,12 @@
       "invocation": {
         "id": "report",
         "command": "PATH=\"/c/repo/.venv/Scripts:$PATH\" tracelens run --target-package acme_tool --output /c/repo/.vinv/captures/s/acme-tool/trace.jsonl -- /c/repo/.venv/Scripts/python.exe -m acme_tool report --since {since}",
-        "params": [{ "name": "since", "default": "7d" }]
+        "params": [
+          {
+            "name": "since",
+            "default": "7d"
+          }
+        ]
       },
       "args": {},
       "expected": "PATH=\"/c/repo/.venv/Scripts:$PATH\" tracelens run --target-package acme_tool --output /c/repo/.vinv/captures/s/acme-tool/trace.jsonl -- /c/repo/.venv/Scripts/python.exe -m acme_tool report --since 7d"
@@ -175,16 +286,75 @@
       "invocation": {
         "id": "top",
         "command": "acme-tool top --limit {limit}",
-        "params": [{ "name": "limit", "type": "int", "default": "10" }]
+        "params": [
+          {
+            "name": "limit",
+            "type": "int",
+            "default": "10"
+          }
+        ]
       },
-      "args": { "limit": "-5" },
+      "args": {
+        "limit": "-5"
+      },
       "expected": "acme-tool top --limit -5"
+    },
+    {
+      "name": "a placeholder already inside quotes is not quoted again",
+      "invocation": {
+        "id": "doctor",
+        "command": "acme-tool doctor --vault \"{vault}\"",
+        "params": [
+          {
+            "name": "vault",
+            "type": "path",
+            "default": "/home/me/SEO - from Scratch/vault"
+          }
+        ]
+      },
+      "args": {},
+      "expected": "acme-tool doctor --vault \"/home/me/SEO - from Scratch/vault\""
+    },
+    {
+      "name": "a bare placeholder still gets quoted when the value needs it",
+      "invocation": {
+        "id": "bare",
+        "command": "acme-tool doctor --vault {vault}",
+        "params": [
+          {
+            "name": "vault",
+            "type": "path",
+            "default": "/home/me/SEO - from Scratch/vault"
+          }
+        ]
+      },
+      "args": {},
+      "expected": "acme-tool doctor --vault '/home/me/SEO - from Scratch/vault'"
+    },
+    {
+      "name": "single-quoted placeholders are left to the template too",
+      "invocation": {
+        "id": "sq",
+        "command": "acme-tool run --q '{query}'",
+        "params": [
+          {
+            "name": "query",
+            "type": "string",
+            "default": "two words"
+          }
+        ]
+      },
+      "args": {},
+      "expected": "acme-tool run --q 'two words'"
     }
   ],
   "error": [
     {
       "name": "a placeholder with no declared parameter is refused",
-      "invocation": { "id": "bad", "command": "acme-tool report --since {since}" },
+      "invocation": {
+        "id": "bad",
+        "command": "acme-tool report --since {since}"
+      },
       "args": {},
       "message": "no such parameter"
     },
@@ -193,7 +363,12 @@
       "invocation": {
         "id": "bad",
         "command": "acme-tool report",
-        "params": [{ "name": "since", "default": "7d" }]
+        "params": [
+          {
+            "name": "since",
+            "default": "7d"
+          }
+        ]
       },
       "args": {},
       "message": "has no {since}"
@@ -203,7 +378,13 @@
       "invocation": {
         "id": "scan",
         "command": "acme-tool scan {root}",
-        "params": [{ "name": "root", "required": true, "default": "" }]
+        "params": [
+          {
+            "name": "root",
+            "required": true,
+            "default": ""
+          }
+        ]
       },
       "args": {},
       "message": "required"
@@ -214,10 +395,20 @@
         "id": "report",
         "command": "acme-tool report --format {format}",
         "params": [
-          { "name": "format", "type": "enum", "default": "json", "choices": ["json", "csv"] }
+          {
+            "name": "format",
+            "type": "enum",
+            "default": "json",
+            "choices": [
+              "json",
+              "csv"
+            ]
+          }
         ]
       },
-      "args": { "format": "xml" },
+      "args": {
+        "format": "xml"
+      },
       "message": "must be one of"
     },
     {
@@ -225,9 +416,17 @@
       "invocation": {
         "id": "top",
         "command": "acme-tool top --limit {limit}",
-        "params": [{ "name": "limit", "type": "int", "default": "10" }]
+        "params": [
+          {
+            "name": "limit",
+            "type": "int",
+            "default": "10"
+          }
+        ]
       },
-      "args": { "limit": "ten" },
+      "args": {
+        "limit": "ten"
+      },
       "message": "whole number"
     }
   ]

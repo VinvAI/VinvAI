@@ -66,8 +66,17 @@ def to_bash_path(value: str) -> str:
     return value.replace("\\", "/")
 
 
-def _substitute(param: dict[str, Any], raw: str) -> str:
-    """The text one parameter contributes, already quoted. ``""`` means omit."""
+def _substitute(param: dict[str, Any], raw: str, *, in_quotes: bool = False) -> str:
+    """The text one parameter contributes, already quoted. ``""`` means omit.
+
+    ``in_quotes`` says the placeholder already sits inside a quoted span in the
+    template (``--vault "{vault}"``). Quoting again nests one set inside the
+    other and the program receives a value with literal quote characters in it:
+    a path under a directory with a space in its name became
+    ``"'/Users/me/SEO - from Scratch/vault'"``, which no filesystem has, and
+    every parameterised invocation on that repo exited 2. The template's quotes
+    are already doing the job, so the value goes in bare.
+    """
     ptype = param.get("type")
     value = to_bash_path(raw.strip()) if ptype == "path" else raw.strip()
     name = str(param.get("name") or "")
@@ -94,7 +103,7 @@ def _substitute(param: dict[str, Any], raw: str) -> str:
     if ptype == "float" and not re.fullmatch(r"-?\d+(\.\d+)?", value):
         raise InvocationRenderError(f"'{name}' must be a number (got '{value}')")
 
-    quoted = shell_quote(value)
+    quoted = value if in_quotes else shell_quote(value)
     return render.replace("{value}", quoted) if isinstance(render, str) else quoted
 
 
@@ -137,7 +146,16 @@ def render_invocation(invocation: dict[str, Any], args: dict[str, str] | None = 
         supplied = args.get(name)
         if supplied is None:
             supplied = param.get("default")
-        text = _substitute(param, str(supplied) if supplied is not None else "")
+        # Is this placeholder already inside a quoted span? Look at the
+        # characters either side of it in the TEMPLATE, not at the value.
+        before = command[m.start() - 1] if m.start() > 0 else ""
+        after = command[m.end()] if m.end() < len(command) else ""
+        in_quotes = before == after and before in ("'", '"')
+        text = _substitute(
+            param,
+            str(supplied) if supplied is not None else "",
+            in_quotes=in_quotes,
+        )
         if text == "":
             # An omitted parameter takes its own separating space with it, so the
             # defaults render stays byte-identical to the verified string rather
