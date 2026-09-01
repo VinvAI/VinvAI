@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { trackUi } from '../telemetry/instrument';
 import * as crypto from 'crypto';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from '../views/webviewTheme';
 import {
@@ -123,7 +122,6 @@ export function openConfigureForm(context: vscode.ExtensionContext): void {
 
 	panel.webview.onDidReceiveMessage(
 		async (message: InboundMessage) => {
-			trackUi('configure', message.type);
 			switch (message.type) {
 				case 'saveHarness': {
 					if (message.harnessId) {

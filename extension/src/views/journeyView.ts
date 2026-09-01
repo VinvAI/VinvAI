@@ -12,7 +12,6 @@
  */
 
 import * as vscode from 'vscode';
-import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -166,10 +165,8 @@ function wireJourney(workspaceRoot: string, webview: vscode.Webview): vscode.Dis
 
 	const sub = webview.onDidReceiveMessage((msg: JourneyOutbound | { type: 'webviewError' }) => {
 		if (msg.type === 'webviewError') {
-			reportWebviewError('journey', msg as { message?: unknown });
 			return;
 		}
-		trackUi('journey', msg.type);
 		return handleJourneyMessage(msg, actions);
 	});
 	void push();

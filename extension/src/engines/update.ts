@@ -37,7 +37,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { registerTrackedCommand } from '../telemetry/instrument';
 import { execFile } from 'child_process';
 import { defaultEnginesCloneDir, engineSyncStampPath, enginesSynced } from './resolve';
 import { cargoBuildCommand, installEngines, resolveEnginesRoot, runInEnginesTerminal } from './install';
@@ -582,7 +581,7 @@ export async function maybeUpdateEngines(
 /** Registers the engines-update command. */
 export function registerEngineUpdate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		registerTrackedCommand('vinv-vs.updateEngines', () =>
+		vscode.commands.registerCommand('vinv-vs.updateEngines', () =>
 			maybeUpdateEngines(context, { force: true }),
 		),
 	);

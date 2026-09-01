@@ -168,18 +168,6 @@ export function uvPath(): string | null {
 	]);
 }
 
-/**
- * Absolute path of `git`, or null when it is not installed.
- *
- * Not a prerequisite the installer offers to fix (unlike uv and Rust, git has no
- * safe one-liner installer), but it is required for the clone — so a machine
- * without it fails the install in a way that looks like a network problem.
- * Worth being able to count.
- */
-export function gitPath(): string | null {
-	return findOnPath('git');
-}
-
 /** Absolute path of the `cargo` CLI, or null when Rust is not installed. */
 export function cargoPath(): string | null {
 	return findOnPath('cargo', [path.join(os.homedir(), '.cargo', 'bin')]);

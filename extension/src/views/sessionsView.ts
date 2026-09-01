@@ -8,7 +8,6 @@ import {
 } from '../identification/identification';
 import { buildFilteredTrace } from '../identification/traceFilter';
 import { onDiscoveryStateChange } from '../index/discovery';
-import { bucketCount, installAgeDays, installAgeHours, track } from '../telemetry';
 
 /**
  * A trace time filter chosen from the Sessions view. `windowMs` is a sliding
@@ -43,11 +42,7 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
 	private counts = new Map<string, number>();
 	/** True once a tracesummary poll has returned, so counts are meaningful. */
 	private haveCounts = false;
-	/**
-	 * In-window guard so the once-per-install globalState read below does not run
-	 * on every one-second poll. The durable "already reported" record is the
-	 * globalState key, not this — see reportFirstTrace.
-	 */
+	/** Session guard so the first-trace funnel event fires at most once per window. */
 	private firstTraceChecked = false;
 	private pollTimer: NodeJS.Timeout | undefined;
 	private polling = false;
@@ -167,7 +162,6 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
 			// observes a real trace hit. Once per install (globalState-stamped).
 			if (!this.firstTraceChecked && [...next.values()].some((n) => n > 0)) {
 				this.firstTraceChecked = true;
-				this.reportFirstTrace();
 			}
 			if (this.countsChanged(next)) {
 				this.counts = next;
@@ -181,27 +175,6 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
 		} finally {
 			this.polling = false;
 		}
-	}
-
-	/**
-	 * The activation milestone that matters most: this install has just seen a
-	 * real request flow through a real service under tracing. Everything before
-	 * it is setup; everything after it is the product working.
-	 *
-	 * Stamped in globalState rather than held in memory, because the poll that
-	 * detects it runs in every open window — an in-memory flag would report the
-	 * same milestone once per window instead of once per install.
-	 */
-	private reportFirstTrace(): void {
-		const KEY = 'vinv.telemetry.firstTrace';
-		if (this.context.globalState.get<boolean>(KEY)) {
-			return;
-		}
-		void this.context.globalState.update(KEY, true);
-		track('milestone_first_trace', {
-			days_since_install: bucketCount(installAgeDays()),
-			hours_since_first_activation: bucketCount(installAgeHours()),
-		});
 	}
 
 	private countsChanged(next: Map<string, number>): boolean {

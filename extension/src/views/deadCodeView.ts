@@ -12,7 +12,6 @@
  * different and unearned statement.
  */
 import * as vscode from 'vscode';
-import { trackUi } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -156,7 +155,6 @@ function attach(view: vscode.WebviewPanel, context: vscode.ExtensionContext, wor
 	};
 
 	current.webview.onDidReceiveMessage(async (msg: { type: string; symbol?: DeadSymbol }) => {
-	 trackUi('deadcode', msg.type);
 	 try {
 		if (msg.type === 'ready' || msg.type === 'refresh') {
 			push();

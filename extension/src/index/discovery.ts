@@ -28,7 +28,6 @@ import {
 import { ensureHarnessChosen } from '../harness/harnessPicker';
 import { runDeadCodeScan, type DeadCodeProgress } from './deadCodeScan';
 import { awaitEnginesTerminal } from '../engines/install';
-import { bucketCount, bucketMs, classifyError, track, type DiscoveryStage } from '../telemetry';
 
 /** Combined outcome of a Discover Project run. */
 export interface DiscoveryResult {
@@ -54,13 +53,6 @@ export interface DiscoveryOptions {
 	 * re-discover reuses the (expensive) handbook and only fills gaps.
 	 */
 	force?: boolean;
-	/**
-	 * How this run was reached. Reporting only — it separates "auto-discovery on
-	 * activation" from "the user clicked Discover" from "Auto-Pilot drove it",
-	 * which behave very differently and would otherwise be one undifferentiated
-	 * number.
-	 */
-	trigger?: 'auto' | 'command' | 'autopilot';
 }
 
 /** Coarse lifecycle phase of discovery, surfaced by the Project status view. */
@@ -121,42 +113,6 @@ function purgeArtifacts(workspaceRoot: string): void {
 	}
 }
 
-/**
- * Runs one discovery stage, recording how long it took and how it ended.
- *
- * Cancellation is read from the shared token rather than inferred from a thrown
- * value, because these stages signal a stopped run by returning false, not by
- * throwing — counting that as a failure would make the Stop button look like a
- * bug in whatever stage happened to be running.
- */
-async function timeStage(
-	stage: DiscoveryStage,
-	run: () => Thenable<boolean>,
-	token: vscode.CancellationToken,
-): Promise<boolean> {
-	const started = Date.now();
-	let ok = false;
-	try {
-		ok = await run();
-		return ok;
-	} finally {
-		track('discovery_stage', {
-			stage,
-			outcome: token.isCancellationRequested ? 'cancelled' : ok ? 'ok' : 'error',
-			duration_ms: bucketMs(Date.now() - started),
-		});
-	}
-}
-
-/** Service count for reporting; a half-written services file must not throw here. */
-function safeServiceCount(workspaceRoot: string): number {
-	try {
-		return readServices(workspaceRoot).length;
-	} catch {
-		return 0;
-	}
-}
-
 /** Names the stages that did not complete, for a failure tooltip. */
 function failureDetail(indexOk: boolean, handbookOk: boolean, bringupOk: boolean): string {
 	const failed: string[] = [];
@@ -198,13 +154,6 @@ export async function runDiscovery(
 		return { indexOk: false, handbookOk: false, deadCodeOk: false, bringupOk: false };
 	}
 
-	const discoveryStarted = Date.now();
-	track('discovery_started', {
-		trigger: options.trigger ?? 'command',
-		force: !!options.force,
-		harness_id: getHarnessId(),
-	});
-
 	const cts = new vscode.CancellationTokenSource();
 	activeCts = cts;
 	// A single context key spanning the whole multi-phase run so UI (the sidebar
@@ -244,25 +193,14 @@ export async function runDiscovery(
 		// first-time picker: still index locally, but skip the LLM stages.
 		const harness = await ensureHarnessChosen();
 
-		// Each stage reports its own duration and outcome as it settles, rather
-		// than one event for the phase: the whole question this answers is WHICH
-		// stage kills a discovery, and a combined result cannot say.
 		const [indexOk, handbookOk, deadCodeOk] = await Promise.all([
-			timeStage('index', () => runIndexing(context, workspaceRoot, onIndex, cts.token), cts.token),
+			runIndexing(context, workspaceRoot, onIndex, cts.token),
 			harness
-				? timeStage(
-						'handbook',
-						() => runHandbookViaHarness(context, harness, workspaceRoot, onHandbook, cts.token),
-						cts.token,
-					)
+				? runHandbookViaHarness(context, harness, workspaceRoot, onHandbook, cts.token)
 				: Promise.resolve(false),
 			// Reads source rather than the store, so it does not wait on indexing —
 			// and needs no harness, so it runs even when the LLM stages are skipped.
-			timeStage(
-				'deadcode',
-				() => runDeadCodeScan(context, workspaceRoot, onDeadCode, cts.token),
-				cts.token,
-			),
+			runDeadCodeScan(context, workspaceRoot, onDeadCode, cts.token),
 		]);
 
 		// Bring-up needs the handbook on disk to enumerate services. Run it once
@@ -270,11 +208,7 @@ export async function runDiscovery(
 		// no harness was chosen, or if no handbook was produced (nothing to read).
 		let bringupOk = false;
 		if (harness && !cts.token.isCancellationRequested && isHandbookGenerated(workspaceRoot)) {
-			bringupOk = await timeStage(
-				'bringup',
-				() => runBringupListViaHarness(context, harness, workspaceRoot, onBringup, cts.token),
-				cts.token,
-			);
+			bringupOk = await runBringupListViaHarness(context, harness, workspaceRoot, onBringup, cts.token);
 		}
 
 		if (cts.token.isCancellationRequested) {
@@ -304,20 +238,6 @@ export async function runDiscovery(
 				detail: failureDetail(indexOk, handbookOk, bringupOk),
 			});
 		}
-
-		track('discovery_finished', {
-			outcome: cts.token.isCancellationRequested
-				? 'cancelled'
-				: indexOk && handbookOk && bringupOk
-					? 'done'
-					: 'incomplete',
-			index_ok: indexOk,
-			handbook_ok: handbookOk,
-			deadcode_ok: deadCodeOk,
-			bringup_ok: bringupOk,
-			services_count: bucketCount(safeServiceCount(workspaceRoot)),
-			total_ms: bucketMs(Date.now() - discoveryStarted),
-		});
 
 		// deadCodeOk is reported but deliberately absent from the completion
 		// condition above: the scan is a report, and losing it does not leave the
@@ -356,13 +276,6 @@ async function autoSetupServices(
 		try {
 			await runBringupStartViaHarness(context, getHarnessId(), workspaceRoot, service, undefined, token);
 		} catch (e) {
-			// Was console.error alone. A service that never gets set up is the
-			// difference between Vinv working and Vinv appearing to do nothing,
-			// so the failure needs to be countable.
-			track('autosetup_service_failed', {
-				error_class: classifyError(e),
-				services_total: bucketCount(pending.length),
-			});
 			console.error(`Vinv: auto-setup failed for ${service.name}`, e);
 		}
 	}

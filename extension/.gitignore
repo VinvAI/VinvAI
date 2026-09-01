@@ -8,6 +8,11 @@ node_modules
 # Local Claude settings (may contain machine-specific paths and secrets)
 .claude/settings.local.json
 
+# Analytics instrumentation — dev builds only, never shipped or committed. The
+# published extension states it sends no telemetry, so this staying out of the
+# repo is what keeps that claim true.
+src/telemetry/
+
 # Bundled binaries (large, platform-specific) — packaged into the .vsix but not committed
 bin/tracelens
 bin/index

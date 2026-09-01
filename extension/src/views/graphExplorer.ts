@@ -14,7 +14,6 @@
  * allows nothing external).
  */
 import * as vscode from 'vscode';
-import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getGraphHtml } from './graphExplorerHtml';
@@ -326,10 +325,8 @@ export class GraphExplorerEditorProvider implements vscode.CustomReadonlyEditorP
 		const msgSub = webview.onDidReceiveMessage((msg: OutboundMessage) => {
 			const raw = msg as { type?: string; message?: unknown; stack?: unknown };
 			if (raw.type === 'webviewError') {
-				reportWebviewError('graph_explorer', raw);
 				return;
 			}
-			trackUi('graph_explorer', raw.type ?? 'unknown');
 			return handleGraphMessage(msg, actions);
 		});
 

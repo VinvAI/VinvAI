@@ -21,16 +21,10 @@
  *     even if the endpoint keeps serving it;
  *   - one per activation, and off with a single setting.
  *
- * THIS REQUEST UPLOADS NOTHING. It is a GET of a static file: no query string,
- * no identifiers, no version. All filtering happens here, on the client,
- * precisely so the request carries nothing. It follows no redirects, and the
- * URL is a constant no setting can repoint.
- *
- * It is no longer the extension's only outbound request — usage telemetry is
- * the other one, and it is a very different thing: it uploads. See the header
- * of src/telemetry/index.ts for what it sends and what gates it. Keeping that
- * distinction visible here matters, because the guarantees below are this
- * module's, not the extension's.
+ * THIS IS THE EXTENSION'S ONLY OUTBOUND REQUEST. It is a GET of a static file:
+ * no query string, no identifiers, no version, nothing uploaded. All filtering
+ * happens here, on the client, precisely so the request carries nothing. It
+ * follows no redirects, and the URL is a constant no setting can repoint.
  *
  * THE PAYLOAD IS UNTRUSTED. It cannot name a VS Code command — the file picks
  * from the closed set in `resolveAction`, and link targets are https on an

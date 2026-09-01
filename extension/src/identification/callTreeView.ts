@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -218,10 +217,8 @@ function wireCallTree(
 	const msgSub = webview.onDidReceiveMessage((msg: OutboundMessage) => {
 		const raw = msg as { type?: string; message?: unknown; stack?: unknown };
 		if (raw.type === 'webviewError') {
-			reportWebviewError('calltree', raw);
 			return;
 		}
-		trackUi('calltree', raw.type ?? 'unknown');
 		return handleCallTreeMessage(msg, actions);
 	});
 

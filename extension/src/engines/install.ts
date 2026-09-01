@@ -9,8 +9,6 @@
  * their machine.
  */
 import * as vscode from 'vscode';
-import { registerTrackedCommand } from '../telemetry/instrument';
-import { bucketCount, track } from '../telemetry';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -21,7 +19,6 @@ import {
 	engineCommand,
 	engineRunDonePath,
 	engineSyncStampPath,
-	gitPath,
 	enginesRootDir,
 	enginesSynced,
 	resolveIndexBinary,
@@ -29,7 +26,6 @@ import {
 } from './resolve';
 import { ensureEmbedderRunning, isEmbedderHealthy, type EmbedderStatus } from '../embedder/sidecar';
 import { ENGINE_REF } from './pinned';
-import { resolveBash } from '../proc';
 
 /** Official, non-interactive installer command for a missing prerequisite. */
 function installerCommand(tool: 'uv' | 'rust'): string {
@@ -97,50 +93,6 @@ export function resolveEnginesRoot(context: vscode.ExtensionContext): string | n
 }
 
 /** True when the engines are installed AND `uv sync` has produced the venv. */
-/** When the user last kicked off an engines install, for the settle check below. */
-const INSTALL_STARTED_KEY = 'vinv.telemetry.enginesInstallStarted';
-
-/** How long an unfinished install waits before it counts as abandoned. */
-const INSTALL_ABANDON_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Reports whether an engines install that started ever actually finished.
- *
- * The install runs in a terminal the extension hands work to and never hears
- * back from, so there is no completion callback to hook. Instead this runs on a
- * later activation and reconciles: engines present now means the attempt landed;
- * still absent a day later means the user gave up. Either way it fires once and
- * clears the stamp.
- *
- * This is the number that decides whether the terminal-based installer survives.
- */
-export function reconcileEnginesInstall(context: vscode.ExtensionContext): void {
-	try {
-		const startedAt = context.globalState.get<number>(INSTALL_STARTED_KEY);
-		if (typeof startedAt !== 'number' || startedAt <= 0) {
-			return;
-		}
-		const elapsed = Date.now() - startedAt;
-		if (enginesReady(context)) {
-			track('engines_install_settled', {
-				outcome: 'ready',
-				minutes_bucket: bucketCount(Math.round(elapsed / 60_000)),
-			});
-		} else if (elapsed > INSTALL_ABANDON_MS) {
-			track('engines_install_settled', {
-				outcome: 'abandoned',
-				minutes_bucket: bucketCount(Math.round(elapsed / 60_000)),
-			});
-		} else {
-			// Still plausibly in flight — leave the stamp and look again next time.
-			return;
-		}
-		void context.globalState.update(INSTALL_STARTED_KEY, undefined);
-	} catch {
-		// Reporting must never break activation.
-	}
-}
-
 export function enginesReady(context: vscode.ExtensionContext): boolean {
 	const root = resolveEnginesRoot(context);
 	return root !== null && enginesSynced(root);
@@ -154,12 +106,10 @@ export function enginesReady(context: vscode.ExtensionContext): boolean {
  */
 async function ensurePrerequisites(): Promise<boolean> {
 	if (!uvPath()) {
-		track('engines_prereq_missing', { tool: 'uv' });
 		installPrerequisite('uv', 'uv');
 		return false;
 	}
 	if (!cargoPath()) {
-		track('engines_prereq_missing', { tool: 'rust' });
 		installPrerequisite('rust', 'Rust');
 		return false;
 	}
@@ -332,20 +282,6 @@ export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: 
  * docs instead.
  */
 export async function installEngines(context: vscode.ExtensionContext): Promise<void> {
-	// Recorded BEFORE the prerequisite gate, so an install that never gets past
-	// a missing tool still counts as an attempt — otherwise the denominator
-	// silently excludes exactly the users who were blocked first.
-	track('engines_install_started', {
-		has_git: !!gitPath(),
-		has_uv: !!uvPath(),
-		has_rust: !!cargoPath(),
-		has_bash: !!resolveBash(),
-	});
-	// Stamped so a later activation can tell whether this attempt ever landed —
-	// the terminal itself reports nothing back, which is why the outcome of the
-	// single most important onboarding step has never been observable.
-	void context.globalState.update(INSTALL_STARTED_KEY, Date.now());
-
 	if (!(await ensurePrerequisites())) {
 		return;
 	}
@@ -460,6 +396,6 @@ export async function ensureIndexBinary(context: vscode.ExtensionContext): Promi
 /** Registers the engines commands. */
 export function registerEnginesCommands(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		registerTrackedCommand('vinv-vs.installEngines', () => installEngines(context)),
+		vscode.commands.registerCommand('vinv-vs.installEngines', () => installEngines(context)),
 	);
 }

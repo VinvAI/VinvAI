@@ -59,7 +59,6 @@ import { indexStoreDir, loadStoreEpoch } from '../graph/indexGraph';
 import { loadSession, setEpisodeBudget, setGoal } from '../harness/session';
 import { buildTrajectoryReport } from '../harness/trajectoryReport';
 import { exportDiagnostics } from '../support/diagnostics';
-import { registerTrackedCommand, requireWorkspaceFolder } from '../telemetry/instrument';
 
 /** Resolves a service name from a tree-item arg (`.id`) or a string. */
 function serviceNameFrom(arg?: { id?: string } | string): string | undefined {
@@ -96,12 +95,13 @@ export function registerCommands(
 	// epoch enhancement) — registered here so activation stays one call site.
 	registerPipelineRunners(context);
 	context.subscriptions.push(
-		registerTrackedCommand('vinv-vs.openDebugPanel', openDebugPanel),
+		vscode.commands.registerCommand('vinv-vs.openDebugPanel', openDebugPanel),
 		// Manual escape hatches for the automatic pipeline stages — the same
 		// serialized passes the watchers and Auto-Pilot run, invokable on demand.
-		registerTrackedCommand('vinv-vs.runInsights', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.runInsights');
+		vscode.commands.registerCommand('vinv-vs.runInsights', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const result = await runInsightPass(context, folder.uri.fsPath);
@@ -111,9 +111,10 @@ export function registerCommands(
 					: `Vinv: Insight pass ${result.outcome}${result.error ? ` — ${result.error}` : ''}.`,
 			);
 		}),
-		registerTrackedCommand('vinv-vs.runProbes', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.runProbes');
+		vscode.commands.registerCommand('vinv-vs.runProbes', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const result = await runProbePass(context, folder.uri.fsPath);
@@ -126,9 +127,10 @@ export function registerCommands(
 		// The Flow rail's Test stage. Auto-Pilot schedules this pass on its own,
 		// but the rail hands the user the button so testing is not something
 		// that only ever happens when the pilot decides to.
-		registerTrackedCommand('vinv-vs.runExercise', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.runExercise');
+		vscode.commands.registerCommand('vinv-vs.runExercise', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const result = await vscode.window.withProgress(
@@ -149,10 +151,10 @@ export function registerCommands(
 		}),
 		// The Flow title bar's "View Traces" button.
 		registerTracesPanel(context),
-		registerTrackedCommand('vinv-vs.refreshSessions', () => sessionsProvider.refresh()),
+		vscode.commands.registerCommand('vinv-vs.refreshSessions', () => sessionsProvider.refresh()),
 		// Filter the Sessions trace-hit counts to a time window (ES-style quick
 		// ranges plus a custom "last N"). "All time" clears the filter.
-		registerTrackedCommand('vinv-vs.filterSessionsByTime', async () => {
+		vscode.commands.registerCommand('vinv-vs.filterSessionsByTime', async () => {
 			const active = sessionsProvider.getTimeRange();
 			type Pick = vscode.QuickPickItem & { range?: SessionTimeRange; custom?: boolean };
 			const items: Pick[] = [
@@ -194,7 +196,7 @@ export function registerCommands(
 		//   • Programmatically / keybinding — passes a bare entry-point id string.
 		//   • Command Palette (no argument) — we prompt with a QuickPick of the
 		//     workspace's entry points.
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.openCallTree',
 			async (arg?: { apiId?: string; label?: string } | string) => {
 				const folder = vscode.workspace.workspaceFolders?.[0];
@@ -243,7 +245,7 @@ export function registerCommands(
 		),
 		// One place to walk everything Vinv verified: services, then every
 		// endpoint's call tree + flamegraph + exercised IO, with next/prev.
-		registerTrackedCommand('vinv-vs.openJourney', async () => {
+		vscode.commands.registerCommand('vinv-vs.openJourney', async () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showErrorMessage('Open a workspace folder to view the journey.');
@@ -256,7 +258,7 @@ export function registerCommands(
 		// `arg.service` opens the view already narrowed to one service — that is
 		// how the Flow rail's Findings rows hand off. Invoked from the title bar
 		// or the palette there is no arg, and the view opens unfiltered.
-		registerTrackedCommand('vinv-vs.openFindings', async (arg?: { service?: string }) => {
+		vscode.commands.registerCommand('vinv-vs.openFindings', async (arg?: { service?: string }) => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showErrorMessage('Open a workspace folder to view findings.');
@@ -267,7 +269,7 @@ export function registerCommands(
 		// The values the exerciser could not derive. This panel used to open only
 		// as a side effect of an exercise pass, so closing the tab — or getting a
 		// credential wrong — meant re-running the whole pipeline to be asked again.
-		registerTrackedCommand('vinv-vs.openConfigRequests', async () => {
+		vscode.commands.registerCommand('vinv-vs.openConfigRequests', async () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showErrorMessage('Open a workspace folder to configure it.');
@@ -286,10 +288,10 @@ export function registerCommands(
 				);
 			}
 		}),
-		registerTrackedCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
-		registerTrackedCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),
-		registerTrackedCommand('vinv-vs.runIndex', () => openIndexTerminal(context)),
-		registerTrackedCommand('vinv-vs.indexProject', () => {
+		vscode.commands.registerCommand('vinv-vs.configureProject', () => openConfigureForm(context)),
+		vscode.commands.registerCommand('vinv-vs.runTracelens', () => openTracelensTerminal(context)),
+		vscode.commands.registerCommand('vinv-vs.runIndex', () => openIndexTerminal(context)),
+		vscode.commands.registerCommand('vinv-vs.indexProject', () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder to discover it.');
@@ -299,7 +301,7 @@ export function registerCommands(
 		}),
 		// Re-discover from the Project status row: a normal resume run that reuses
 		// the (expensive) handbook and only fills missing artifacts.
-		registerTrackedCommand('vinv-vs.rediscover', () => {
+		vscode.commands.registerCommand('vinv-vs.rediscover', () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder to discover it.');
@@ -309,7 +311,7 @@ export function registerCommands(
 		}),
 		// Force a full rebuild: deletes the index, handbook, and service list first,
 		// so everything is regenerated. Confirmed because it is slow and discards work.
-		registerTrackedCommand('vinv-vs.rediscoverForce', async () => {
+		vscode.commands.registerCommand('vinv-vs.rediscoverForce', async () => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a folder to discover it.');
@@ -325,14 +327,15 @@ export function registerCommands(
 			}
 			void runDiscovery(context, folder.uri.fsPath, {}, { force: true });
 		}),
-		registerTrackedCommand('vinv-vs.stopDiscovery', () => stopDiscovery()),
+		vscode.commands.registerCommand('vinv-vs.stopDiscovery', () => stopDiscovery()),
 		// Auto-Pilot: one command that drives the whole workspace to green —
 		// discover, set up every service, run each under tracing, verify it
 		// serves, and dispatch fix episodes on failure. Invoked while a run is in
 		// flight, it becomes the watch/cancel surface instead of double-starting.
-		registerTrackedCommand('vinv-vs.autoPilot', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.autoPilot');
+		vscode.commands.registerCommand('vinv-vs.autoPilot', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			if (isAutoPilotRunning()) {
@@ -354,11 +357,12 @@ export function registerCommands(
 		// Run a verified service from the Services view. Invoked from a row's inline
 		// ▶ (arg = the tree item) or from the view-title Start… button (no arg → a
 		// QuickPick dropdown of services that are set up).
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.serviceStart',
 			async (arg?: { id?: string } | string) => {
-				const folder = requireWorkspaceFolder('vinv-vs.serviceStart');
+				const folder = vscode.workspace.workspaceFolders?.[0];
 				if (!folder) {
+					void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 					return;
 				}
 				const root = folder.uri.fsPath;
@@ -388,11 +392,12 @@ export function registerCommands(
 		// debug toolbar and every "just run it" reflex depend on. Asking is a
 		// separate, opt-in affordance for the cases where the arguments are the
 		// whole point.
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.serviceStartWithArgs',
 			async (arg?: { id?: string } | string) => {
-				const folder = requireWorkspaceFolder('vinv-vs.serviceStartWithArgs');
+				const folder = vscode.workspace.workspaceFolders?.[0];
 				if (!folder) {
+					void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 					return;
 				}
 				const root = folder.uri.fsPath;
@@ -433,7 +438,7 @@ export function registerCommands(
 			},
 		),
 		// Stop a running service (ends its debug session).
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.serviceStop',
 			(arg?: { id?: string } | string) => {
 				const name = serviceNameFrom(arg);
@@ -445,11 +450,12 @@ export function registerCommands(
 		// Set up a not-yet-verified service: bring it up under tracelens (which
 		// installs, starts, verifies, and records its start command). After that the
 		// row flips to "ready" and can be run with ▶.
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.serviceSetup',
 			async (arg?: { id?: string } | string) => {
-				const folder = requireWorkspaceFolder('vinv-vs.serviceSetup');
+				const folder = vscode.workspace.workspaceFolders?.[0];
 				if (!folder) {
+					void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 					return;
 				}
 				const root = folder.uri.fsPath;
@@ -482,10 +488,11 @@ export function registerCommands(
 				await offerEpisodeForBringupFailure(context, root, name);
 			},
 		),
-		registerTrackedCommand('vinv-vs.refreshServices', () => servicesProvider.refresh()),
-		registerTrackedCommand('vinv-vs.runService', async (serviceName?: string) => {
-			const folder = requireWorkspaceFolder('vinv-vs.runService');
+		vscode.commands.registerCommand('vinv-vs.refreshServices', () => servicesProvider.refresh()),
+		vscode.commands.registerCommand('vinv-vs.runService', async (serviceName?: string) => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const root = folder.uri.fsPath;
@@ -517,9 +524,10 @@ export function registerCommands(
 		}),
 		// Open the interactive code-graph explorer (force layout over the index
 		// store with runtime overlay, diff impact, guided tour, and search).
-		registerTrackedCommand('vinv-vs.openGraphExplorer', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.openGraphExplorer');
+		vscode.commands.registerCommand('vinv-vs.openGraphExplorer', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			void openGraphExplorer(context, folder.uri.fsPath);
@@ -530,8 +538,8 @@ export function registerCommands(
 		// The dead-code report, browsable. Opens even with no report on disk — the
 		// panel says the analysis has not run rather than showing an empty list,
 		// which would read as "there is no dead code".
-		registerTrackedCommand('vinv-vs.openDeadCode', () => openDeadCode(context)),
-		registerTrackedCommand(
+		vscode.commands.registerCommand('vinv-vs.openDeadCode', () => openDeadCode(context)),
+		vscode.commands.registerCommand(
 			'vinv-vs.askVinv',
 			(arg?: { seedRow?: number; callSite?: CallSiteContext }) => {
 				openAskVinv(context, { seedRow: arg?.seedRow, callSite: arg?.callSite });
@@ -540,9 +548,10 @@ export function registerCommands(
 		// Agent-driven graph enhancement: resolve every ambiguous cross-file
 		// reference the deterministic resolver refused to guess, then apply the
 		// adjudicated edges with an incremental index update.
-		registerTrackedCommand('vinv-vs.enhanceGraph', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.enhanceGraph');
+		vscode.commands.registerCommand('vinv-vs.enhanceGraph', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const root = folder.uri.fsPath;
@@ -591,11 +600,12 @@ export function registerCommands(
 		// Start a closed-loop harness episode. Invoked from the graph explorer
 		// ("Send to harness" with a node row), the QnA panel (dispatch), the
 		// auto-trigger notifications, or the palette (prompts for the issue).
-		registerTrackedCommand(
+		vscode.commands.registerCommand(
 			'vinv-vs.fixWithHarness',
 			async (arg?: { row?: number; rows?: number[]; issue?: string; service?: string }) => {
-				const folder = requireWorkspaceFolder('vinv-vs.fixWithHarness');
+				const folder = vscode.workspace.workspaceFolders?.[0];
 				if (!folder) {
+					void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 					return;
 				}
 				const root = folder.uri.fsPath;
@@ -647,9 +657,10 @@ export function registerCommands(
 		// active session (.vinv/askvinv/sessions/) and are readable/writable from
 		// BOTH sides — these commands are the VS Code side; VINV: directives in
 		// harness output are the chat side.
-		registerTrackedCommand('vinv-vs.setGoal', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.setGoal');
+		vscode.commands.registerCommand('vinv-vs.setGoal', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const current = loadSession(folder.uri.fsPath);
@@ -668,9 +679,10 @@ export function registerCommands(
 					: 'Vinv: Goal cleared — episodes run per-task.',
 			);
 		}),
-		registerTrackedCommand('vinv-vs.setEpisodeBudget', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.setEpisodeBudget');
+		vscode.commands.registerCommand('vinv-vs.setEpisodeBudget', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const current = loadSession(folder.uri.fsPath);
@@ -694,9 +706,10 @@ export function registerCommands(
 		// optimization verdict engine (algorithm/caching/async decisions belong
 		// to the agent; the frozen-probe evidence, the paired-bootstrap verdict,
 		// and the revert belong to Vinv — exerciseOptimize.ts).
-		registerTrackedCommand('vinv-vs.optimizeHotspots', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.optimizeHotspots');
+		vscode.commands.registerCommand('vinv-vs.optimizeHotspots', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			void runVerifiedHotspotEpisode(context, folder.uri.fsPath);
@@ -706,9 +719,10 @@ export function registerCommands(
 		// 'dispatched' only AFTER the dispatch is confirmed (the engine's
 		// onAccept hook) — a declined offer leaves no phantom "Agent optimizing…"
 		// state and freezes no before-cost. No row → the whole-Pareto sweep.
-		registerTrackedCommand('vinv-vs.optimizeHotspot', (row?: number) => {
-			const folder = requireWorkspaceFolder('vinv-vs.optimizeHotspot');
+		vscode.commands.registerCommand('vinv-vs.optimizeHotspot', (row?: number) => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			// Only ONE episode runs at a time. Refuse loudly instead of letting
@@ -728,9 +742,10 @@ export function registerCommands(
 		// Opens the full-page Optimization report (the evidence surface: ranked
 		// recoverable time + predicted→proven verdicts). The sidebar view is the
 		// ambient backlog; this is the tab you drag into chat.
-		registerTrackedCommand('vinv-vs.openOptimization', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.openOptimization');
+		vscode.commands.registerCommand('vinv-vs.openOptimization', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			void openOptimizationReport(folder.uri.fsPath);
@@ -741,9 +756,10 @@ export function registerCommands(
 		// optimization episode itself verifies correctness (tests) but never
 		// re-traces, so the after-latency is only ever captured by re-running the
 		// flow here (or by the user running it by hand).
-		registerTrackedCommand('vinv-vs.measureOptimization', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.measureOptimization');
+		vscode.commands.registerCommand('vinv-vs.measureOptimization', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const root = folder.uri.fsPath;
@@ -825,9 +841,10 @@ export function registerCommands(
 		}),
 		// Memory sweep: symbols retaining memory every session with a positive
 		// Theil–Sen trend become a leak-investigation episode.
-		registerTrackedCommand('vinv-vs.analyzeMemoryTrends', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.analyzeMemoryTrends');
+		vscode.commands.registerCommand('vinv-vs.analyzeMemoryTrends', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			void offerEpisodeForMemoryTrends(context, folder.uri.fsPath);
@@ -835,23 +852,24 @@ export function registerCommands(
 		// Cache sweep: deterministic symbols recomputing identical inputs
 		// (same args_hash) become a memoization episode, judged by the same
 		// verdict engine as every other optimization dispatch.
-		registerTrackedCommand('vinv-vs.analyzeCacheOpportunities', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.analyzeCacheOpportunities');
+		vscode.commands.registerCommand('vinv-vs.analyzeCacheOpportunities', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			void runVerifiedCacheSweep(context, folder.uri.fsPath);
 		}),
 		// Brings back an escalation the operator closed without deciding — the
 		// episode is suspended, not aborted, until they answer.
-		registerTrackedCommand('vinv-vs.resumeJudgment', async () => {
+		vscode.commands.registerCommand('vinv-vs.resumeJudgment', async () => {
 			await resumeJudgment();
 		}),
 		// Post-completion dispute: a VERIFIED episode the human says is still
 		// wrong → counterexample test → reproduces = retract + re-dispatch with
 		// the strengthened oracle; the reconciliation protocol's production
 		// surface (oracle↔human disagreement is never silently averaged).
-		registerTrackedCommand('vinv-vs.disputeVerified', async (episodeId?: string) => {
+		vscode.commands.registerCommand('vinv-vs.disputeVerified', async (episodeId?: string) => {
 			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				void vscode.window.showWarningMessage('Vinv: Open a workspace folder first.');
@@ -862,9 +880,10 @@ export function registerCommands(
 		// The cross-episode audit trail: goal, per-episode arms/rewards/evidence,
 		// stall negotiations, agent disputes, and policy updates — rendered from
 		// session.json + the episode ledger into a markdown report.
-		registerTrackedCommand('vinv-vs.showTrajectory', async () => {
-			const folder = requireWorkspaceFolder('vinv-vs.showTrajectory');
+		vscode.commands.registerCommand('vinv-vs.showTrajectory', async () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const root = folder.uri.fsPath;
@@ -878,10 +897,11 @@ export function registerCommands(
 		}),
 		// Support escape hatch: engine logs, episode ledger, config shape —
 		// exported for the user to review and attach to a bug report.
-		registerTrackedCommand('vinv-vs.exportDiagnostics', () => exportDiagnostics(context)),
-		registerTrackedCommand('vinv-vs.registerCursorMcp', () => {
-			const folder = requireWorkspaceFolder('vinv-vs.registerCursorMcp');
+		vscode.commands.registerCommand('vinv-vs.exportDiagnostics', () => exportDiagnostics(context)),
+		vscode.commands.registerCommand('vinv-vs.registerCursorMcp', () => {
+			const folder = vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
+				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const outcomes = registerDetectedTargets(context, folder.uri.fsPath);

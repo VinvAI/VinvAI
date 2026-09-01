@@ -1,5 +1,4 @@
 import * as vscode from 'vscode';
-import { registerTrackedCommand, requireWorkspaceFolder, trackUi } from '../telemetry/instrument';
 import {
 	hasCaptures,
 	entryPointLabel,
@@ -66,11 +65,11 @@ let panel: vscode.WebviewPanel | undefined;
 
 /** Opens (or reveals) the Traces panel. */
 export async function openTraces(context: vscode.ExtensionContext): Promise<void> {
-	const folder = requireWorkspaceFolder('vinv-vs.openTraces');
-	if (!folder) {
+	const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!root) {
+		void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 		return;
 	}
-	const root = folder.uri.fsPath;
 	if (panel) {
 		panel.reveal(vscode.ViewColumn.Active);
 		return;
@@ -218,9 +217,6 @@ export async function openTraces(context: vscode.ExtensionContext): Promise<void
 		panel = undefined;
 	});
 	panel.webview.onDidReceiveMessage((msg: { type?: string; id?: string; label?: string; range?: string }) => {
-		// `range` carries which time window was chosen, which is a real signal
-		// about how people read traces; `id` is an endpoint id and never travels.
-		trackUi('traces', msg.type ?? 'unknown', msg.type === 'range' ? msg.range : undefined);
 		if (msg.type === 'open' && msg.id) {
 			void vscode.commands.executeCommand('vinv-vs.openCallTree', {
 				apiId: msg.id,
@@ -428,5 +424,5 @@ vscode.postMessage({ type: 'ready' });
 
 /** Registers the `vinv-vs.openTraces` command. */
 export function registerTracesPanel(context: vscode.ExtensionContext): vscode.Disposable {
-	return registerTrackedCommand('vinv-vs.openTraces', () => openTraces(context));
+	return vscode.commands.registerCommand('vinv-vs.openTraces', () => openTraces(context));
 }
