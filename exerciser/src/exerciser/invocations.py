@@ -61,20 +61,73 @@ def _tail(text: str | None) -> str:
     return redact_text(trimmed) if len(text) <= _TAIL_CHARS else "…" + redact_text(trimmed)
 
 
+def _verified_expect_exits(repo: Path, service_name: Any) -> dict[str, int]:
+    """``id -> expect_exit`` from a service's verified bring-up record.
+
+    ``services.json`` is the inventory the AGENT writes, before anything has
+    run. ``.vinv/start_commands/<service>.json`` is what bring-up writes AFTER
+    verifying each invocation, so it is the only file that knows a command's
+    real exit code. Where the agent omitted ``expect_exit`` — which it may, the
+    field is optional and defaults to 0 — the inventory claims 0 for a command
+    bring-up watched exit 3 and verified as correct. The exerciser then read the
+    inventory, compared 3 against 0, and reported a working command as an error.
+
+    Observed on a real repo: four of fourteen CLI invocations (documented exits
+    of 10, 3, 10 and 2) were all flagged as defects.
+    """
+    if not isinstance(service_name, str) or not service_name.strip():
+        return {}
+    doc = store.read_json(repo / ".vinv" / "start_commands" / f"{service_name}.json") or {}
+    if not isinstance(doc, dict):
+        return {}
+    out: dict[str, int] = {}
+    for inv in doc.get("invocations") or []:
+        if not isinstance(inv, dict):
+            continue
+        ident, expect = inv.get("id"), inv.get("expect_exit")
+        if (
+            isinstance(ident, str)
+            and ident.strip()
+            and isinstance(expect, int)
+            and not isinstance(expect, bool)
+        ):
+            out[ident.strip()] = expect
+    return out
+
+
 def read_services(repo: Path) -> list[dict[str, Any]]:
     """The run-to-completion services in ``.vinv/services.json``.
 
     Read directly rather than through bringup: this package does not depend on
     the renderer, and the field contract is the file, not the code that wrote
     it.
+
+    Each service's invocations are backfilled from its verified bring-up record
+    (see :func:`_verified_expect_exits`), which is the only place a command's
+    real expected exit code is known.
     """
     doc = store.read_json(repo / ".vinv" / "services.json") or {}
     services = doc.get("services") if isinstance(doc, dict) else None
     if not isinstance(services, list):
         return []
-    return [
+    kept = [
         s for s in services if isinstance(s, dict) and s.get("kind") in _RUN_TO_COMPLETION_KINDS
     ]
+    for svc in kept:
+        verified = _verified_expect_exits(repo, svc.get("name"))
+        if not verified:
+            continue
+        invocations = svc.get("invocations")
+        if not isinstance(invocations, list):
+            continue
+        for inv in invocations:
+            # Only fill a GAP: an expect_exit the agent stated explicitly is a
+            # deliberate declaration and outranks the observed run.
+            if isinstance(inv, dict) and not isinstance(inv.get("expect_exit"), int):
+                ident = inv.get("id")
+                if isinstance(ident, str) and ident.strip() in verified:
+                    inv["expect_exit"] = verified[ident.strip()]
+    return kept
 
 
 def library_driver_command(project_root: Path, service_name: str) -> str:

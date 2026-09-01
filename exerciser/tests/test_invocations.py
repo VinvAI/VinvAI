@@ -17,6 +17,7 @@ from pathlib import Path
 from exerciser import store
 from exerciser.invocations import (
     expand_invocation,
+    read_services,
     resolved_command,
     run_invocations,
     service_invocations,
@@ -530,3 +531,62 @@ def test_a_template_that_cannot_be_filled_is_reported_not_run(tmp_path: Path) ->
     assert row["error_type"] == "MalformedInvocation"
     assert "no such parameter" in row["error"]
     assert result["failures"] == 1
+
+
+def test_expect_exit_is_backfilled_from_the_verified_bringup_record(tmp_path: Path) -> None:
+    """A verified non-zero exit is not a defect just because the agent omitted it.
+
+    ``services.json`` is written before anything runs and ``expect_exit`` is
+    optional there, so it defaults to 0. ``start_commands/<service>.json`` is
+    written after bring-up VERIFIED each invocation, so it is the only file that
+    knows a command exits 3 on purpose. Reading only the inventory reported four
+    of one real repo's fourteen CLI invocations — documented exits of 10, 3, 10
+    and 2 — as errors while they behaved exactly as designed.
+    """
+    repo = _repo(tmp_path, [])
+    service = _cli_service(
+        repo,
+        [
+            {"id": "stats", "command": f'"{_PY}" -m acme.tool 3 3'},
+            {"id": "report", "command": f'"{_PY}" -m acme.tool 3 0'},
+            {"id": "declared", "command": f'"{_PY}" -m acme.tool 3 1', "expect_exit": 1},
+        ],
+    )
+    (repo / ".vinv" / "services.json").write_text(
+        json.dumps({"services": [service]}), encoding="utf-8"
+    )
+    (repo / ".vinv" / "start_commands").mkdir()
+    (repo / ".vinv" / "start_commands" / "acme-tool.json").write_text(
+        json.dumps(
+            {
+                "service": "acme-tool",
+                "invocations": [
+                    {"id": "stats", "expect_exit": 3},
+                    # The agent already declared 1 for this one; the record
+                    # disagreeing must not override an explicit declaration.
+                    {"id": "declared", "expect_exit": 9},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    by_id = {
+        inv["id"]: inv["expect_exit"]
+        for svc in read_services(repo)
+        for inv in service_invocations(svc, repo)
+    }
+    assert by_id["stats"] == 3, "verified exit code should fill the gap the agent left"
+    assert by_id["report"] == 0, "an invocation the record says nothing about stays at 0"
+    assert by_id["declared"] == 1, "an explicit declaration outranks the observed run"
+
+
+def test_expect_exit_survives_a_missing_bringup_record(tmp_path: Path) -> None:
+    """No start_commands file (never brought up) must not break the read."""
+    repo = _repo(tmp_path, [])
+    service = _cli_service(repo, [{"id": "solo", "command": f'"{_PY}" -m acme.tool 3 0'}])
+    (repo / ".vinv" / "services.json").write_text(
+        json.dumps({"services": [service]}), encoding="utf-8"
+    )
+    invocations = [inv for svc in read_services(repo) for inv in service_invocations(svc, repo)]
+    assert [inv["expect_exit"] for inv in invocations] == [0]
