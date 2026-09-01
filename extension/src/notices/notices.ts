@@ -21,10 +21,16 @@
  *     even if the endpoint keeps serving it;
  *   - one per activation, and off with a single setting.
  *
- * THIS IS THE EXTENSION'S ONLY OUTBOUND REQUEST. It is a GET of a static file:
- * no query string, no identifiers, no version, nothing uploaded. All filtering
- * happens here, on the client, precisely so the request carries nothing. It
- * follows no redirects, and the URL is a constant no setting can repoint.
+ * THIS REQUEST UPLOADS NOTHING. It is a GET of a static file: no query string,
+ * no identifiers, no version. All filtering happens here, on the client,
+ * precisely so the request carries nothing. It follows no redirects, and the
+ * URL is a constant no setting can repoint.
+ *
+ * It is no longer the extension's only outbound request — usage telemetry is
+ * the other one, and it is a very different thing: it uploads. See the header
+ * of src/telemetry/index.ts for what it sends and what gates it. Keeping that
+ * distinction visible here matters, because the guarantees below are this
+ * module's, not the extension's.
  *
  * THE PAYLOAD IS UNTRUSTED. It cannot name a VS Code command — the file picks
  * from the closed set in `resolveAction`, and link targets are https on an
@@ -46,8 +52,25 @@ const LAST_FETCH_KEY = 'vinv.notices.lastFetch';
 /**
  * Minimum gap between fetches. Activation runs on every window, and a user with
  * six windows open reloading all day must not turn into six requests an hour.
+ * The stamp lives in `globalState`, which is shared across windows, so this
+ * bounds the whole machine rather than one window.
  */
-const MIN_FETCH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const MIN_FETCH_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * How often the check re-runs while a window stays open.
+ *
+ * Activation alone was the only trigger, which made the real reach of a notice
+ * "whenever this person next restarts their editor" — unbounded for anyone who
+ * leaves it running for days, which is most people mid-project. Lowering the
+ * fetch gap could not fix that on its own: with nothing re-invoking the check,
+ * a shorter gap only mattered to someone who was restarting anyway.
+ *
+ * The two are deliberately equal. The timer proposes, `MIN_FETCH_INTERVAL_MS`
+ * disposes: every tick still goes through the same gap check against shared
+ * state, so N windows ticking together still yield at most one request an hour.
+ */
+const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 /** Response cap. A notices file is a few KB; anything larger is not one. */
 const MAX_BYTES = 64 * 1024;
@@ -393,13 +416,47 @@ async function runAction(action: NoticeAction): Promise<void> {
 	}
 }
 
+/** Set once the repeating check is armed for this window. */
+let repeatTimer: ReturnType<typeof setInterval> | undefined;
+
+/**
+ * Arms the repeating check, once per extension host.
+ *
+ * Idempotent because activation is not: a window reload calls in again, and a
+ * second interval would double this window's tick rate for the rest of the
+ * session. Disposed with the extension so a reload cannot leave the old timer
+ * running beside the new one.
+ */
+function armRepeatingCheck(context: vscode.ExtensionContext): void {
+	if (repeatTimer !== undefined) {
+		return;
+	}
+	repeatTimer = setInterval(() => {
+		void maybeShowNotices(context);
+	}, CHECK_INTERVAL_MS);
+	context.subscriptions.push({
+		dispose: () => {
+			if (repeatTimer !== undefined) {
+				clearInterval(repeatTimer);
+				repeatTimer = undefined;
+			}
+		},
+	});
+}
+
 /**
  * Fetches the notices file and shows at most one notice.
  *
  * Called on activation and never awaited: a slow endpoint must not delay the
- * window, and a missing one must not say anything.
+ * window, and a missing one must not say anything. The first call also arms an
+ * hourly repeat, so a notice reaches a window that stays open instead of
+ * waiting for the next editor restart.
  */
 export async function maybeShowNotices(context: vscode.ExtensionContext): Promise<void> {
+	// Armed before the enabled check, and before the interval gate returns: this
+	// is what makes the check periodic at all, and a caller that returns early
+	// today must still be checking an hour from now.
+	armRepeatingCheck(context);
 	if (!noticesEnabled()) {
 		return;
 	}
