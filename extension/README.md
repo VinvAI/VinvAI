@@ -101,10 +101,11 @@ uvx --from vinv exerciser campaign <repo> --budget 20
 
 Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config** that finds your open workspace automatically via MCP roots.
 
-Claude Code, Codex, Gemini CLI:
+Claude Code, Codex, Gemini CLI — installed once for every folder you open, not
+just the current one:
 
 ```bash
-claude mcp add vinv -- npx -y vinv-mcp
+claude mcp add --scope user vinv -- npx -y vinv-mcp
 ```
 
 ```bash
@@ -112,8 +113,10 @@ codex mcp add vinv -- npx -y vinv-mcp
 ```
 
 ```bash
-gemini mcp add vinv npx -- -y vinv-mcp
+gemini mcp add --scope user vinv npx -- -y vinv-mcp
 ```
+
+<sub>Claude Code defaults to the current directory and Gemini CLI to the current project, so both take <code>--scope user</code>; Codex always writes to <code>~/.codex/config.toml</code> and has no scope flag.</sub>
 
 <sub>Other clients: add <code>{ "command": "npx", "args": ["-y", "vinv-mcp"] }</code> under <code>mcpServers.vinv</code>. See <a href="https://www.npmjs.com/package/vinv-mcp"><code>vinv-mcp</code></a> — 16 tools: semantic search, dead code, fault localization, runtime values/slices/coverage, and the verify/optimize loop.</sub>
 
