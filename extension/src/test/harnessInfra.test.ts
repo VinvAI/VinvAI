@@ -22,8 +22,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+	canInstallHarness,
 	classifyHarnessFailure,
 	clearHarnessBlock,
+	HARNESSES,
 	createHarnessStreamDecoder,
 	dispatchAgentPrompt,
 	getHarness,
@@ -439,5 +441,34 @@ suite('autoPilotMachine: blocked dispatch consumes no budgets', () => {
 		const { gaveUp } = summarize([markBlockedOnHarness(svc(), 'needs login')]);
 		assert.strictEqual(gaveUp.length, 1);
 		assert.ok(gaveUp[0].reason?.includes('blocked on you'));
+	});
+});
+
+/**
+ * The picker installs a missing agent — from its inline button OR from simply
+ * selecting the row — rather than resolving with one that is not there. That
+ * only works if every CLI harness actually carries an installer and a stated
+ * sign-in step, since the terminal it opens is where the user completes both.
+ *
+ * Deliberately no startHarnessInstall() call here: it would really install
+ * software on the machine running the tests.
+ */
+suite('harness installability: the accept-to-install precondition', () => {
+	test('every CLI harness is installable and says how to sign in afterwards', () => {
+		const clis = HARNESSES.filter((h) => h.kind === 'cli');
+		assert.ok(clis.length >= 4, 'expected the CLI harness catalog to be populated');
+		for (const h of clis) {
+			assert.ok(canInstallHarness(h), `${h.id} has no installer — selecting it could only fail`);
+			assert.ok(h.installCommand && h.installCommand.trim().length > 0, `${h.id}: empty install command`);
+			assert.ok(h.postInstall.trim().length > 0, `${h.id}: no post-install sign-in step to show`);
+		}
+	});
+
+	test('a chat harness needing no extension is not offered as installable', () => {
+		// ide-chat installability is extension-backed; one with no requiresExtension
+		// must fall through to "not available in this editor" instead of a no-op.
+		for (const h of HARNESSES.filter((x) => x.kind === 'ide-chat' && !x.chat?.requiresExtension)) {
+			assert.strictEqual(canInstallHarness(h), false, `${h.id} claims installability with nothing to install`);
+		}
 	});
 });

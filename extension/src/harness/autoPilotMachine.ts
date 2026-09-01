@@ -199,6 +199,46 @@ export function markBlockedOnHarness(svc: ServiceState, detail: string): Service
 }
 
 /**
+ * The harness precondition, decided before a run starts — the peer of the
+ * engines gate. Auto-Pilot dispatches EVERY stage to the coding agent, so a
+ * run begun without a usable one does not fail up front: it grinds the whole
+ * service list into give-ups. The subtlety this encodes is that "no harness
+ * chosen" and "chose the default" are indistinguishable downstream — the id
+ * accessor falls back to claude-code and cannot report "unset" — so the gate
+ * takes `chosen` as its own input rather than inferring it from the id.
+ *
+ * 'proceed': a harness was explicitly chosen AND is present right now.
+ * 'ask': prompt the human — either they never chose, or what they chose is
+ * gone (uninstalled, renamed binary, chat extension removed).
+ */
+export type HarnessGate = 'proceed' | 'ask';
+
+export function decideHarnessGate(chosen: boolean, present: boolean): HarnessGate {
+	return chosen && present ? 'proceed' : 'ask';
+}
+
+/**
+ * What to do with the answer to that prompt. Kept separate from the picker so
+ * the policy is testable without a QuickPick: the picker installs what it can
+ * before it resolves, so a pick that is STILL absent means the install is
+ * mid-flight (or the harness has no installer) — a stop, not a silent start
+ * against an agent that is not there.
+ *
+ * 'stop-unpicked': dismissed; 'stop-absent': picked but not present yet.
+ */
+export type HarnessPickOutcome = 'proceed' | 'stop-unpicked' | 'stop-absent';
+
+export function decideAfterHarnessPick(
+	picked: string | null,
+	present: boolean,
+): HarnessPickOutcome {
+	if (!picked) {
+		return 'stop-unpicked';
+	}
+	return present ? 'proceed' : 'stop-absent';
+}
+
+/**
  * Marks a service as not-a-service: the replay ran to completion cleanly, so
  * this is a CLI/script misclassified as a service. Terminal like 'library' —
  * it must never re-enter setup or consume fix budgets (the historical

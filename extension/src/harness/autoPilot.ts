@@ -21,6 +21,8 @@ import * as vscode from 'vscode';
 import {
 	applySetupOutcome,
 	applyStageOutcome,
+	decideAfterHarnessPick,
+	decideHarnessGate,
 	decideOnFailure,
 	decideOnStageFailure,
 	rearmProbesAfterExercise,
@@ -80,8 +82,10 @@ import {
 	extendAutoPilotBudgets,
 	getAutoPilotBudgets,
 	getHarnessId,
+	hasChosenHarness,
 	isAutoPilotEnabled,
 } from '../config/settings';
+import { pickHarness } from './harnessPicker';
 
 // ---- run state (single-flight per window) ----------------------------------
 
@@ -155,6 +159,38 @@ async function waitForHarnessIdle(token: vscode.CancellationToken): Promise<bool
 function harnessCanRunUnattended(): boolean {
 	const id = getHarnessId();
 	return quickScanHarnesses()[id] === true && isHarnessAutonomous(getHarness(id));
+}
+
+/**
+ * Performs the harness gate (policy: decideHarnessGate / decideAfterHarnessPick
+ * in autoPilotMachine). Returns true when the run may start. Everything here
+ * is the vscode half — the prompt and the two stop notifications; the decisions
+ * themselves are pure and unit-tested.
+ *
+ * Picking a missing agent does not fail: the picker installs it in a visible
+ * terminal (where the user watches it and signs in) and only resolves once the
+ * binary appears, so "not installed" is fixable without leaving the prompt.
+ */
+async function ensureUsableHarness(): Promise<boolean> {
+	const present = (): boolean => quickScanHarnesses()[getHarnessId()] === true;
+	if (decideHarnessGate(hasChosenHarness(), present()) === 'proceed') {
+		return true;
+	}
+	const picked = await pickHarness('Auto-Pilot needs a coding agent — which one should it use?');
+	switch (decideAfterHarnessPick(picked, present())) {
+		case 'proceed':
+			return true;
+		case 'stop-unpicked':
+			void vscode.window.showInformationMessage(
+				'Vinv: Auto-Pilot stopped — it needs a coding agent to set up and fix your services. Pick one in Configure, then run Auto-Pilot again.',
+			);
+			return false;
+		default:
+			void vscode.window.showWarningMessage(
+				`Vinv: Auto-Pilot stopped — ${getHarness(picked ?? '').label} is not ready yet. Finish its install and sign-in in the terminal it opened, then run Auto-Pilot again.`,
+			);
+			return false;
+	}
 }
 
 /** Builds the per-service ledger from what is on disk right now. */
@@ -257,6 +293,13 @@ export async function startAutoPilot(
 					void vscode.commands.executeCommand('vinv-vs.installEngines');
 				}
 			});
+		return;
+	}
+
+	// Same shape as the engines gate above: the harness is the other hard
+	// precondition, and asking once here is what keeps an unchosen (== silently
+	// claude-code) harness from taking the whole run down service by service.
+	if (!(await ensureUsableHarness())) {
 		return;
 	}
 
