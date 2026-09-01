@@ -35,7 +35,7 @@ Or run any engine with **zero install** via [uv](https://docs.astral.sh/uv/):
 uvx --from vinv exerciser campaign ./my-service --budget 20
 ```
 
-<sub>First run fetches a one-time ~500&nbsp;MB local embedding model. Python 3.12–3.14.</sub>
+<sub>First run fetches a one-time ~100&nbsp;MB local embedding model. Python 3.12–3.14.</sub>
 
 ## What you get — Run · Test · Find · Prove
 

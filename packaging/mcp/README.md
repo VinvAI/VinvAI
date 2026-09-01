@@ -52,7 +52,7 @@ specific repo — e.g. in a client that does not expose roots.
 
 The semantic-search index builds itself in the **background** the moment the
 server starts on a workspace (the first build also downloads the local
-embedding model, ~500 MB, once). Nothing blocks: `vinv_query` returns a "still
+embedding model, ~100 MB, once). Nothing blocks: `vinv_query` returns a "still
 indexing" notice and you fall back to text search until it is ready. Call
 `vinv_index` any time to start/refresh the index or check status, or
 `vinv_index` with `rebuild: true` to force a full rebuild.

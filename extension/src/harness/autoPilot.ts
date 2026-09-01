@@ -18,6 +18,7 @@
  * dispatches instead of racing them.
  */
 import * as vscode from 'vscode';
+import { bucketCount, track } from '../telemetry';
 import {
 	applySetupOutcome,
 	applyStageOutcome,
@@ -646,6 +647,21 @@ function finishSummary(services: ServiceState[], cancelled: boolean): void {
 		parts.push(`${library.length} skipped (library)`);
 	}
 	const headline = `Vinv Auto-Pilot ${cancelled ? 'cancelled' : 'finished'}: ${parts.join(', ')}.`;
+	// Auto-Pilot is default-on and is what most users actually experience, so
+	// "how many services does a hands-off run leave green" is the closest thing
+	// Vinv has to a measure of whether the product worked.
+	track('autopilot_finished', {
+		outcome: cancelled ? 'cancelled' : gaveUp.length ? 'gave_up' : 'done',
+		services_total: bucketCount(services.length),
+		services_green: bucketCount(green.length),
+		episodes: bucketCount(
+			services.reduce(
+				(n, s) => n + Object.values(s.fixEpisodes ?? {}).reduce((a, b) => a + b, 0),
+				0,
+			),
+		),
+		budget_exhausted: gaveUp.some((s) => (s.reason ?? '').toLowerCase().includes('budget')),
+	});
 	log(headline);
 	for (const s of green) {
 		log(`  green: ${s.name}${s.reason ? ` — ${s.reason}` : ''}`);

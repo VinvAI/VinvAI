@@ -18,6 +18,7 @@
  */
 
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -204,8 +205,10 @@ function wireFindings(
 
 	const sub = webview.onDidReceiveMessage((msg: FindingsOutbound | { type: 'webviewError' }) => {
 		if (msg.type === 'webviewError') {
+			reportWebviewError('findings', msg as { message?: unknown });
 			return;
 		}
+		trackUi('findings', msg.type);
 		return handleFindingsMessage(msg, actions);
 	});
 	void push();

@@ -9,7 +9,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and
 
 ### 🔧 Changed
 
-- **Smaller, faster embedding model** — the local semantic-search model is now IBM Granite (`granite-embedding-small-english-r2`), roughly 3× lighter than before with equal-or-better code retrieval. After updating, the index rebuilds itself automatically on first launch (a one-time re-embed; the new model downloads ~180 MB).
+- **Smaller, faster embedding model** — the local semantic-search model is now IBM Granite (`granite-embedding-small-english-r2`), roughly 3× lighter than before with equal-or-better code retrieval. After updating, the index rebuilds itself automatically on first launch (a one-time re-embed; the new model downloads ~100 MB).
 
 ## [0.2.10] — 2026-08-27
 

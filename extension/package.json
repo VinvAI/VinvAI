@@ -576,7 +576,7 @@
 		"clean-out": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
 		"sync-readme": "node ./scripts/sync-readme.mjs --check",
 		"stamp": "node ./scripts/stamp-engine-pin.mjs",
-		"package": "vsce package --no-rewrite-relative-links",
+		"package": "vsce package --no-dependencies --no-rewrite-relative-links",
 		"compile": "tsc -p ./",
 		"check": "tsc -p ./ --noEmit",
 		"bundle": "node ./esbuild.mjs",
@@ -586,6 +586,9 @@
 		"test": "vscode-test",
 		"test:packaged": "npm run bundle && node scripts/test-packaged.mjs",
 		"test:e2e": "node scripts/e2e-vsix-run.mjs"
+	},
+	"dependencies": {
+		"posthog-node": "^4.18.0"
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.10",

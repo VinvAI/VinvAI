@@ -13,6 +13,7 @@
  * backing file when the tab is opened before activation has wired the source.
  */
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -198,8 +199,10 @@ function wireReport(
 	disposables.push(
 		webview.onDidReceiveMessage((msg: OptimizationReportOutbound | { type: 'webviewError' }) => {
 			if (msg.type === 'webviewError') {
+				reportWebviewError('optimization', msg as { message?: unknown });
 				return;
 			}
+			trackUi('optimization', msg.type);
 			return handleOptimizationReportMessage(msg, actions);
 		}),
 	);

@@ -40,7 +40,7 @@ A second `serve` on a port that already has a healthy server just reuses it rath
 
 ## `// 03 · the model`
 
-On first run the sidecar downloads `ibm-granite/granite-embedding-small-english-r2` (~180 MB) from Hugging Face into `~/.vinv/models`, then serves from that cache. The default (native ModernBERT) needs no `trust_remote_code`. The optional `nomic-ai/CodeRankEmbed` override ships custom modeling code, so it alone is loaded with `trust_remote_code` at a pinned revision.
+On first run the sidecar downloads `ibm-granite/granite-embedding-small-english-r2` (~100 MB) from Hugging Face into `~/.vinv/models`, then serves from that cache. The default (native ModernBERT) needs no `trust_remote_code`. The optional `nomic-ai/CodeRankEmbed` override ships custom modeling code, so it alone is loaded with `trust_remote_code` at a pinned revision.
 
 To download ahead of time (and pick the fastest device once) without starting the server:
 

@@ -87,7 +87,7 @@ Or from your editor's CLI:
 | Trae | `trae --install-extension VinvAI.VinvAI` |
 | VS Code Insiders | `code-insiders --install-extension VinvAI.VinvAI` |
 
-<sub>First run builds the engines — about 4 minutes: it compiles the Rust index and fetches a one-time ~500 MB local embedding model ([uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs) required). First trace lands about a minute after that; everything after is seconds.</sub>
+<sub>First run builds the engines — about 3 minutes, mostly compiling the Rust index; it also fetches a one-time ~100 MB local embedding model ([uv](https://docs.astral.sh/uv/) and [Rust](https://rustup.rs) required). First trace lands about a minute after that; everything after is seconds.</sub>
 
 ### CLI (Python engines)
 
@@ -403,7 +403,7 @@ Yes — <a href="https://github.com/VinvAI/VinvAI/blob/main/LICENSE">Apache 2.0<
 
 - **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
 - **One outbound request, and you can read it**: a GET of a static JSON file at `notices.vinv.ai` on activation, for broken-release and security notices only. No query string, no identifiers, nothing uploaded; at most once per 12 hours; disable with `vinv.notices.enabled`.
-- The only download is the embedding model (Hugging Face, once, ~500 MB); everything else builds from this repo.
+- The only download is the embedding model (Hugging Face, once, ~100 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.
 - The only LLM Vinv talks to is the coding-agent CLI **you** configured, through its own auth.
 

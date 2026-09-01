@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { track } from '../telemetry';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -449,6 +450,11 @@ export function markHarnessBlocked(
 	const block: HarnessBlock = { kind, remediation: harnessBlockRemediation(harness, kind) };
 	harnessBlocks.set(harnessId, block);
 	preflightPassed.delete(harnessId);
+	// The single most actionable failure Vinv has: the user's agent CLI is
+	// installed but not usable (not signed in, out of quota, unreachable), so
+	// every episode and every LLM stage silently stops working. The classifier
+	// above already decided which; recording it is what makes it countable.
+	track('harness_blocked', { harness_id: harnessId, kind });
 	const noteKey = `${harnessId}:${kind}`;
 	if ((options?.notify ?? true) && !notifiedBlocks.has(noteKey)) {
 		notifiedBlocks.add(noteKey);

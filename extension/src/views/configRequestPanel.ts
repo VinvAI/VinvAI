@@ -34,6 +34,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
 import * as vscode from 'vscode';
+import { trackUi } from '../telemetry/instrument';
 
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 
@@ -346,6 +347,7 @@ export function openConfigRequestPanel(
 	);
 	panel.webview.html = getConfigPanelHtml(panel.webview.cspSource, model);
 	panel.webview.onDidReceiveMessage(async (message) => {
+		trackUi('config_requests', (message as { type?: string })?.type ?? 'unknown');
 		const outcome = await handlePanelMessage(message, model.requests, actions);
 		if (outcome.saved > 0) {panel.dispose();}
 	});

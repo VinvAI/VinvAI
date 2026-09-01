@@ -15,6 +15,7 @@
  * final reward) to ~/.vinv/telemetry/episodes.jsonl for off-policy evaluation.
  */
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi } from '../telemetry/instrument';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
@@ -777,8 +778,10 @@ export async function handleJudgmentMessage(
 	actions: JudgmentActions,
 ): Promise<void> {
 	if (m.type === 'webviewError') {
+		reportWebviewError('episode', m as { message?: unknown });
 		return;
 	}
+	trackUi('episode', m.type, m.type === 'verdict' ? m.action : undefined);
 	if (m.type === 'openPack') {
 		// Inspection only — the dialog stays up, no verdict implied.
 		await actions.openPack();

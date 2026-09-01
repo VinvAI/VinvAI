@@ -306,7 +306,7 @@ export function runIndexing(
 				// healthy instance) before the first attempt spawns the binary.
 				progress.report({ message: 'Starting embedding sidecar…' });
 				// Cancel has to take effect DURING this wait, not after it. The first
-				// run downloads a ~500 MB model, and the token was only consulted
+				// run downloads a ~100 MB model, and the token was only consulted
 				// once this resolved — so for the whole download the button looked
 				// dead and the toast sat on screen with no way to get rid of it.
 				// Racing the token closes the notification immediately. The sidecar
@@ -324,7 +324,7 @@ export function runIndexing(
 				if (!embedder) {
 					void vscode.window.showErrorMessage(
 						'Vinv: The embedding sidecar (vinv-embedder) did not come up. The first run ' +
-							'downloads a ~500 MB model, which can take a few minutes — if it just started, ' +
+							'downloads a ~100 MB model, which can take a minute — if it just started, ' +
 							'wait and try again. If it persists, run "Vinv: Install Engines".',
 					);
 					return false;
