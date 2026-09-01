@@ -676,7 +676,7 @@ def test_a_self_rooted_chain_that_writes_a_file_never_becomes_an_in_process_targ
 
     # THE assertion, on the real path: containment opted out, so nothing runs at
     # all — and with the bypass in place this file was created.
-    result = run_functions(repo, module_timeout_s=60.0, explore=False, sandbox=False)
+    result = run_functions(repo, module_timeout_s=60.0, explore=False)
     rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
     assert not probe.exists(), "a self-rooted chain wrote outside the repo, in-process"
     assert not any("combine" in r.get("target_id", "") for r in rows)
@@ -953,9 +953,9 @@ def test_impure_bodies_are_skipped_with_a_recorded_reason(tmp_path: Path):
 
 
 def test_the_driver_never_calls_an_impure_target_in_process(tmp_path: Path):
-    # The impure target IS driven now — that is the routing change — but never in
-    # this process and never outside containment. The invariant the test has
-    # always been about is unchanged: the file outside the repo survives.
+    # With the execution sandbox gone an impure target is refused outright, so
+    # it is never driven at all. The invariant the test has always been about
+    # is unchanged: the file outside the repo survives.
     repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
     victim = tmp_path / "victim.txt"
     victim.write_text("still here", encoding="utf-8")
@@ -966,31 +966,11 @@ def test_the_driver_never_calls_an_impure_target_in_process(tmp_path: Path):
     impure = [
         r for r in rows if "tidy" in r.get("target_id", "") or "housekeep" in r.get("target_id", "")
     ]
-    assert impure, "the impure targets are routed to containment, not dropped"
-    assert all(r.get("sandboxed") for r in impure), "…and NONE of them ran in-process"
+    assert not impure, "an impure target must never be driven now that nothing contains it"
     assert victim.read_text(encoding="utf-8") == "still here"
     assert any("impure-body" in s["reason"] for s in result["skipped"])
     entry = next(s for s in result["skipped"] if s["id"].endswith(":tidy"))
-    assert entry["sandbox"].startswith("driven-under-containment")
-
-
-def test_opting_out_of_containment_leaves_the_impure_set_refused_and_says_so(tmp_path: Path):
-    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
-    victim = tmp_path / "victim.txt"
-    victim.write_text("still here", encoding="utf-8")
-
-    result = run_functions(repo, module_timeout_s=60.0, sandbox=False)
-
-    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
-    assert not any("tidy" in r.get("target_id", "") for r in rows)
-    assert not any("housekeep" in r.get("target_id", "") for r in rows)
-    assert victim.read_text(encoding="utf-8") == "still here"
-    assert result["sandbox"] == {"enabled": False}
-    # LOUD: an opt-out that quietly dropped four fifths of the surface is how the
-    # coverage regression happened in the first place.
-    assert any("containment disabled by the caller" in d for d in result["diagnostics"])
-    entry = next(s for s in result["skipped"] if s["id"].endswith(":tidy"))
-    assert "stays refused" in entry["sandbox"]
+    assert entry["sandbox"] == "no execution sandbox — target stays refused"
 
 
 # ---- classification --------------------------------------------------------
@@ -1343,8 +1323,12 @@ def test_a_module_that_exits_on_import_is_reported_not_fatal(tmp_path: Path):
     )
     result = run_functions(repo, module_timeout_s=60.0)
     assert result["status"] == "ok"
-    kinds = {c["kind"] for c in result["clusters"]}
-    assert "import-error" in kinds
+    # `sys.exit(3)` at module scope is a definite impurity, so the module is
+    # never imported at all now: with no contained path to drive it on, the
+    # refusal is the outcome. Still reported, still not fatal — as a skip with
+    # its reason rather than as an import-error cluster.
+    assert any(entry["id"].endswith(":add") for entry in result["skipped"])
+    assert any("impure" in entry["reason"] for entry in result["skipped"])
 
 
 def test_empty_target_set_is_loudly_diagnosed(tmp_path: Path):

@@ -58,39 +58,27 @@ Refusing to call
    ``__main__`` are never importable targets: importing them runs fixtures and
    migrations against real state.
 
-A refusal is not a dead end — containment is where it goes
-----------------------------------------------------------
+A refusal is the end of it
+--------------------------
 
-The purity guard is right to refuse, but if refusal were the END of it the
-harness's coverage ceiling would be "whatever happens to be pure" — and the
-functions that touch the filesystem, the network or a subprocess are usually the
-ones worth exercising. So ``run_functions`` routes on what the guard could
-prove, not on a flag:
+``run_functions`` drives only what the purity guard could verify. There is no
+execution sandbox any more: the tiered containment that used to run the
+unverified set was removed, along with the AST routing that decided who needed
+it. Three outcomes remain, and two of them are "not run":
 
-* verified pure → in process, the fast path;
-* unverifiable or impure (decorated, receiver-tainted, an unresolved chain) →
-  automatically through ``sandbox``'s containment, no flag required;
-* destructive NAME or test scaffolding → refused outright, never promoted.
+* verified pure → called in process;
+* unverifiable or impure (decorated, receiver-tainted, an unresolved chain, an
+  impure body) → REFUSED, recorded on its ``skipped`` entry with the reason;
+* destructive NAME or test scaffolding → refused outright.
 
-That last one is not squeamishness: containment changes what a call costs, not
-whether calling ``drop_database`` was ever sensible.
+That is a real coverage ceiling and it is the accepted trade. The wall cost
+~2,800 lines, degraded to an in-Python fence on any host without
+``sandbox-exec`` or ``bwrap`` (Windows included), and protected mostly files
+that git already protects. What it did not cover — a synthesized argument
+resolving to an absolute path OUTSIDE the repo — it still would not.
 
-Containment means a disposable copy of the repo, ``cwd``/``HOME``/``TMPDIR``/
-``XDG_*`` redirected into a temp tree, POSIX ``setrlimit`` caps, the existing
-wall-clock deadline — and the strongest WALL the host can actually demonstrate
-(``containment.detect_containment``: an OS sandbox where one probes clean,
-otherwise the generated ``sitecustomize`` shim). What each target ATTEMPTED is
-recorded as an effect ledger, which is useful output in its own right: "this
-function writes 3 files and opens a socket" is a behavioural fact even when the
-call returns cleanly.
-
-Making the sandbox opt-IN had this backwards. It made SAFETY the thing you had
-to remember to ask for, and on one real repository the default run drove 46
-targets where containment drives 147. ``sandbox=False`` still exists, as an
-opt-OUT: the unverified set then stays refused, loudly, and nothing runs loose.
-Isolation fails CLOSED throughout — if the tree cannot be made, the repo is too
-big to copy, or the policy demanded a tier this host cannot provide, the targets
-stay refused with the reason recorded.
+Importing a module runs its top level, and nothing here prevents that. If the
+repo is untrusted, treat ``exerciser`` as running it, because it does.
 """
 
 from __future__ import annotations
@@ -121,7 +109,6 @@ from .exception_policy import DECAY, ExceptionPolicy, family_of, provenance_of, 
 from .interpreter import resolve_cached
 from .issues import FailureCluster, build_clusters
 from .redact import redact_text
-from .sandbox import SandboxPolicy, run_sandboxed_targets
 
 # =========================================================================
 # The destructive-name vocabulary (backstop; the AST purity check is primary)
@@ -3497,8 +3484,6 @@ def run_functions(
     only_targets: list[str] | None = None,
     seed: int | None = None,
     explore: bool = True,
-    sandbox: bool | None = None,
-    sandbox_policy: SandboxPolicy | None = None,
     trace: bool = True,
     logger: logging.Logger | None = None,
 ) -> dict[str, Any]:
@@ -3585,10 +3570,6 @@ def run_functions(
     # A caller who does want the hard guarantee asks for it explicitly with
     # `SandboxPolicy(require_tier=...)`, and then a host without a real wall
     # refuses loudly rather than downgrading. That is the knob's purpose.
-    sbx = sandbox_policy or (None if sandbox is False else SandboxPolicy(enabled=True))
-    opted_out = sbx is None or not sbx.enabled
-    if opted_out:
-        sbx = None
     if only_targets is not None:
         # Per-target selection: the campaign bandit allocates budget to ONE
         # action, so it must be able to drive one function rather than sweeping
@@ -3609,19 +3590,19 @@ def run_functions(
     python = choice.python
     diagnostics.extend(choice.diagnostics)
 
-    if opted_out and refusals:
+    if refusals:
         # LOUD, not silent. The impure set is where the interesting functions
         # live; a run that leaves it undriven has to say so on the summary as
         # well as on every individual skip entry.
         held = {r.id for r in refusals}
         for entry in skipped:
             if entry["id"] in held:
-                entry["sandbox"] = "containment disabled by the caller — target stays refused"
+                entry["sandbox"] = "no execution sandbox — target stays refused"
         diagnostics.append(
-            f"containment disabled by the caller — {len(refusals)} unverifiable/impure "
-            "target(s) stay refused and were never driven"
+            f"{len(refusals)} unverifiable/impure target(s) stay refused and were "
+            "never driven: there is no contained path to run them on"
         )
-        log.warning("functions_sandbox_opted_out %d targets stay refused", len(refusals))
+        log.warning("functions_refused_no_sandbox %d targets stay refused", len(refusals))
         refusals = []
 
     if not targets and not refusals:
@@ -3987,55 +3968,9 @@ def run_functions(
                 }
             )
 
-    # --- second pass: the refused, under containment -----------------------
-    #
-    # Deliberately AFTER the ordinary pass, so a sandbox that cannot be
-    # established costs nothing that already worked. `run_sandboxed_targets`
-    # either returns contained rows or reports `unavailable`; there is no third
-    # outcome, and no branch that runs a refused target loose.
+    # Impure/unverifiable targets are simply not driven: the execution
+    # sandbox that used to run them was removed, so a refusal is final.
     sandbox_report: dict[str, Any] = {"enabled": False}
-    if sbx is not None:
-        outcome = run_sandboxed_targets(
-            repo,
-            refusals,
-            policy=sbx,
-            src_roots=src_roots,
-            repo_packages=repo_packages,
-            module_timeout_s=module_timeout_s,
-            python=python,
-            logger=log,
-        )
-        rows.extend(outcome["rows"])
-        sandbox_report = outcome["report"]
-        driven = {r.id for r in refusals}
-        if outcome["status"] == "unavailable":
-            reason = str(sandbox_report.get("reason") or "isolation could not be established")
-            for entry in skipped:
-                if entry["id"] in driven:
-                    entry["sandbox"] = f"unavailable: {reason}"
-            diagnostics.append(
-                f"execution sandbox unavailable — {len(refusals)} impurity-refused "
-                f"target(s) stay refused (never run unsandboxed): {reason}"
-            )
-            log.warning("functions_sandbox_unavailable %s", reason)
-        else:
-            tier = str(sandbox_report.get("tier") or "unknown")
-            for entry in skipped:
-                if entry["id"] in driven:
-                    entry["sandbox"] = f"driven-under-containment ({tier})"
-            blind = sandbox_report.get("unobservable") or []
-            if blind:
-                # Never let an empty effect ledger read as "no effect": the shim
-                # patches Python entry points, and these targets do their I/O
-                # from C. Said once at the top level so it is not only visible to
-                # a reader who opens the per-row detail.
-                classes = sorted({c for entry in blind for c in entry["classes"]})
-                diagnostics.append(
-                    f"sandbox effect ledger INCOMPLETE for {len(blind)} contained target(s) "
-                    f"({', '.join(classes)}) — their recorded effects are a LOWER BOUND, "
-                    "not a claim that nothing happened"
-                )
-                log.warning("functions_sandbox_unobservable %s", classes)
     total_targets = len(targets) + len(refusals)
 
     # ONE chokepoint, upstream of every consumer. A target's exception message is

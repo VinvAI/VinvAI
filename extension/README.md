@@ -264,6 +264,8 @@ The **Test** stage isn't one tester — it's a set of oracles, each hunting a di
 
 Unverified code runs behind a **containment ladder**: a kernel-enforced OS sandbox (`sandbox-exec` / `bwrap` / `unshare`) where the host offers one, otherwise a process shim — always with a disposable repo copy, redirected `HOME`/`TMPDIR`, blocked network and subprocess spawning. The tier is decided by a *probe* that verifies a write outside the root really failed, never by a binary being on `PATH`. Postgres, Redis and S3 are substituted *inside* the jail so code that needs them runs instead of failing to connect.
 
+**The boundary, stated exactly.** There is **no execution sandbox**. `exerciser` calls only the functions its purity guard can verify as pure, in process, against your real repo — anything it cannot verify is refused and never driven. Importing a module runs that module's top level either way. If the repo is untrusted, treat `exerciser` as running it, because it does.
+
 </details>
 
 ## Proven on itself
