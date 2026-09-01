@@ -95,9 +95,50 @@ export interface ScorecardSummary {
 	total: number;
 	invariants: number;
 	issues: number;
+	/**
+	 * How the total breaks down by oracle: `http_endpoint`, `cli_invocation`,
+	 * `function_call`. The scorecard's unit list is only *called* endpoints; on a
+	 * CLI or library repo every entry is an invocation or a driven call, so
+	 * reporting the count as "endpoints" is right about the number and wrong
+	 * about the noun (see `_units_by_kind` in exerciser/scorecard.py).
+	 */
+	unitsByKind: Record<string, number>;
 }
 
 /** Reads .vinv/exercise/scorecard.json into the shape both surfaces render. */
+/** Plural nouns per unit kind — mirrors `_UNIT_NOUNS` in exerciser/scorecard.py. */
+const UNIT_NOUNS: Record<string, string> = {
+	http_endpoint: 'endpoints',
+	cli_invocation: 'CLI invocations',
+	function_call: 'driven calls',
+};
+
+/**
+ * The plural noun for a set of units — "endpoints" only when they are, and the
+ * neutral "units" for a mixed set, which is what the word was standing in for.
+ */
+export function unitNoun(unitsByKind: Record<string, number>): string {
+	const kinds = Object.keys(unitsByKind).filter((k) => (unitsByKind[k] ?? 0) > 0);
+	return kinds.length === 1 ? (UNIT_NOUNS[kinds[0]] ?? 'units') : 'units';
+}
+
+/** The by-kind breakdown, preferring the scorecard's own count. */
+function unitsByKind(
+	after: unknown,
+	units: ReadonlyArray<Record<string, unknown>>,
+): Record<string, number> {
+	const declared = (after as { units_by_kind?: unknown } | undefined)?.units_by_kind;
+	if (declared && typeof declared === 'object') {
+		return declared as Record<string, number>;
+	}
+	const counts: Record<string, number> = {};
+	for (const u of units) {
+		const kind = typeof u.unit_kind === 'string' ? u.unit_kind : 'http_endpoint';
+		counts[kind] = (counts[kind] ?? 0) + 1;
+	}
+	return counts;
+}
+
 export function readScorecardSummary(workspaceRoot: string): ScorecardSummary | null {
 	const sc = readExerciseJson<Record<string, any>>(workspaceRoot, 'scorecard.json');
 	if (!sc) {
@@ -110,6 +151,10 @@ export function readScorecardSummary(workspaceRoot: string): ScorecardSummary | 
 		ingestedBy: sc.ingested_by ? String(sc.ingested_by) : undefined,
 		endpointsCovered: Number(after.endpoints_with_coverage ?? 0),
 		total: Number(after.endpoints_total ?? endpoints.length),
+		// Absent on an imported run, and on any scorecard written before the
+		// exerciser started breaking the total down — fall back to counting the
+		// units themselves, which carry the kind.
+		unitsByKind: unitsByKind(sc.coverage?.after_exercised, endpoints),
 		// The exerciser totals invariants itself; an imported run has only the
 		// per-endpoint counts, so sum them rather than reporting zero.
 		invariants: Number(
@@ -130,6 +175,46 @@ export function readScorecardSummary(workspaceRoot: string): ScorecardSummary | 
 export function hasExercisePass(workspaceRoot: string): boolean {
 	const sc = readScorecardSummary(workspaceRoot);
 	return !!sc && !sc.ingestedBy;
+}
+
+/**
+ * How a clean exercise pass reads.
+ *
+ * "0/14 endpoints — 0 invariant(s), no issues" was the worst line the pilot
+ * could print. Covering nothing and finding nothing are arithmetically the same
+ * result, so a pass that drove NOTHING reported as a clean bill of health —
+ * and the noun was wrong too: on a CLI or library repo every unit is an
+ * invocation or a driven call, never an endpoint.
+ *
+ * "no issues" is therefore claimed only when something was actually driven, and
+ * the units are named for what they are. Zero has two causes worth separating:
+ * no units at all is the normal shape of a repo the HTTP oracle cannot speak
+ * to, while units that exist but went unreached means the exerciser had nowhere
+ * to send them — which for endpoints almost always means nothing was serving.
+ */
+export function exercisePassSummary(
+	workspaceRoot: string,
+	result: {
+		endpointsCovered: number;
+		total: number;
+		invariants: number;
+		unitsByKind?: Record<string, number>;
+	},
+): string {
+	// The pass result is assembled from profile.json, which does not carry the
+	// breakdown; the scorecard does, so fall back to it rather than guessing.
+	const byKind = result.unitsByKind ?? readScorecardSummary(workspaceRoot)?.unitsByKind ?? {};
+	const noun = unitNoun(byKind);
+	if (result.endpointsCovered > 0) {
+		return `Exercised ${result.endpointsCovered}/${result.total} ${noun} — ${result.invariants} invariant(s), no issues`;
+	}
+	if (result.total === 0) {
+		return 'Nothing to exercise — no endpoints, CLI invocations or driven calls found';
+	}
+	// Only endpoints need something listening; an unreached invocation or driven
+	// call is a different failure, so do not send the reader after a server.
+	const hint = noun === 'endpoints' ? ' (is a service running?)' : '';
+	return `Nothing exercised — 0/${result.total} ${noun} were reachable${hint}`;
 }
 
 /** The exercise profile shape the runner + views read (subset). */
@@ -439,6 +524,8 @@ export interface ExercisePassResult {
 	total: number;
 	invariants: number;
 	issues: number;
+	/** By-oracle breakdown of `total` — see ScorecardSummary.unitsByKind. */
+	unitsByKind?: Record<string, number>;
 	error?: string;
 }
 
