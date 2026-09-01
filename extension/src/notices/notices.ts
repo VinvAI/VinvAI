@@ -21,10 +21,16 @@
  *     even if the endpoint keeps serving it;
  *   - one per activation, and off with a single setting.
  *
- * THIS IS THE EXTENSION'S ONLY OUTBOUND REQUEST. It is a GET of a static file:
- * no query string, no identifiers, no version, nothing uploaded. All filtering
- * happens here, on the client, precisely so the request carries nothing. It
- * follows no redirects, and the URL is a constant no setting can repoint.
+ * THIS REQUEST UPLOADS NOTHING. It is a GET of a static file: no query string,
+ * no identifiers, no version. All filtering happens here, on the client,
+ * precisely so the request carries nothing. It follows no redirects, and the
+ * URL is a constant no setting can repoint.
+ *
+ * It is no longer the extension's only outbound request — usage telemetry is
+ * the other one, and it is a very different thing: it uploads. See the header
+ * of src/telemetry/index.ts for what it sends and what gates it. Keeping that
+ * distinction visible here matters, because the guarantees below are this
+ * module's, not the extension's.
  *
  * THE PAYLOAD IS UNTRUSTED. It cannot name a VS Code command — the file picks
  * from the closed set in `resolveAction`, and link targets are https on an
@@ -44,10 +50,47 @@ const SEEN_KEY = 'vinv.notices.seen';
 const LAST_FETCH_KEY = 'vinv.notices.lastFetch';
 
 /**
+ * How often the check re-runs while a window stays open.
+ *
+ * Activation alone was the only trigger, which made the real reach of a notice
+ * "whenever this person next restarts their editor" — unbounded for anyone who
+ * leaves it running for days, which is most people mid-project. Lowering the
+ * fetch gap could not fix that on its own: with nothing re-invoking the check,
+ * a shorter gap only mattered to someone who was restarting anyway.
+ */
+export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
  * Minimum gap between fetches. Activation runs on every window, and a user with
  * six windows open reloading all day must not turn into six requests an hour.
+ * The stamp lives in `globalState`, which is shared across windows, so this
+ * bounds the whole machine rather than one window.
+ *
+ * DELIBERATELY SHORTER THAN `CHECK_INTERVAL_MS`, and that margin is load-
+ * bearing. The timer's origin is the moment the check was armed; the stamp is
+ * written a moment LATER, when the fetch actually starts. Equal values make the
+ * tick land a few milliseconds short of the gap every time, so the check
+ * returns early, and the next tick is an hour after that — turning an hourly
+ * check into a two-hourly one. The stamp also drifts further right on each
+ * pass, so the effect compounds rather than settling. Five minutes of slack is
+ * far more than the drift and still bounds the machine to one request an hour.
  */
-const MIN_FETCH_INTERVAL_MS = 12 * 60 * 60 * 1000;
+export const MIN_FETCH_INTERVAL_MS = CHECK_INTERVAL_MS - 5 * 60 * 1000;
+
+/**
+ * Whether a check running at `now` should fetch, given the last attempt.
+ *
+ * Split out from the fetch itself so the schedule is testable without a window:
+ * the bug this replaced (tick and gap equal, so every other tick returned early)
+ * was invisible in a function that also needed globalState and a toast.
+ *
+ * `lastFetch` of 0 is a fresh install with nothing stored, which fetches at
+ * once — the first activation after an install is exactly when a notice about
+ * the version just installed matters most.
+ */
+export function shouldFetchNow(now: number, lastFetch: number): boolean {
+	return now - lastFetch >= MIN_FETCH_INTERVAL_MS;
+}
 
 /** Response cap. A notices file is a few KB; anything larger is not one. */
 const MAX_BYTES = 64 * 1024;
@@ -393,19 +436,53 @@ async function runAction(action: NoticeAction): Promise<void> {
 	}
 }
 
+/** Set once the repeating check is armed for this window. */
+let repeatTimer: ReturnType<typeof setInterval> | undefined;
+
+/**
+ * Arms the repeating check, once per extension host.
+ *
+ * Idempotent because activation is not: a window reload calls in again, and a
+ * second interval would double this window's tick rate for the rest of the
+ * session. Disposed with the extension so a reload cannot leave the old timer
+ * running beside the new one.
+ */
+function armRepeatingCheck(context: vscode.ExtensionContext): void {
+	if (repeatTimer !== undefined) {
+		return;
+	}
+	repeatTimer = setInterval(() => {
+		void maybeShowNotices(context);
+	}, CHECK_INTERVAL_MS);
+	context.subscriptions.push({
+		dispose: () => {
+			if (repeatTimer !== undefined) {
+				clearInterval(repeatTimer);
+				repeatTimer = undefined;
+			}
+		},
+	});
+}
+
 /**
  * Fetches the notices file and shows at most one notice.
  *
  * Called on activation and never awaited: a slow endpoint must not delay the
- * window, and a missing one must not say anything.
+ * window, and a missing one must not say anything. The first call also arms an
+ * hourly repeat, so a notice reaches a window that stays open instead of
+ * waiting for the next editor restart.
  */
 export async function maybeShowNotices(context: vscode.ExtensionContext): Promise<void> {
+	// Armed before the enabled check, and before the interval gate returns: this
+	// is what makes the check periodic at all, and a caller that returns early
+	// today must still be checking an hour from now.
+	armRepeatingCheck(context);
 	if (!noticesEnabled()) {
 		return;
 	}
 	const now = Date.now();
 	const last = context.globalState.get<number>(LAST_FETCH_KEY) ?? 0;
-	if (now - last < MIN_FETCH_INTERVAL_MS) {
+	if (!shouldFetchNow(now, last)) {
 		return;
 	}
 	// Stamped before the request, not after: an endpoint that hangs or 500s must

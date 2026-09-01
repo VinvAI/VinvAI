@@ -1,7 +1,10 @@
 import * as assert from 'assert';
 import {
+	CHECK_INTERVAL_MS,
+	MIN_FETCH_INTERVAL_MS,
 	parseNotices,
 	selectNotice,
+	shouldFetchNow,
 	versionSatisfies,
 	type Notice,
 	type NoticeAction,
@@ -222,5 +225,74 @@ suite('choosing the notice to show', () => {
 	test('among equals the file order decides', () => {
 		const chosen = pick([notice({ id: 'first' }), notice({ id: 'second' })]);
 		assert.strictEqual(chosen?.id, 'first');
+	});
+});
+
+
+suite('notice delivery schedule', () => {
+	const T0 = Date.parse('2026-09-01T09:00:00Z');
+
+	test('a fresh install fetches on its first activation', () => {
+		// Nothing stored yet, so the stamp reads 0. This is the moment a notice
+		// about the version just installed matters most; making it wait an hour
+		// would be the worst possible time to be quiet.
+		assert.strictEqual(shouldFetchNow(T0, 0), true);
+	});
+
+	test('a second window moments later does not fetch again', () => {
+		// The stamp is global, so opening five windows is still one request.
+		assert.strictEqual(shouldFetchNow(T0 + 1_000, T0), false);
+	});
+
+	test('a window left open fetches again once the gap has passed', () => {
+		assert.strictEqual(shouldFetchNow(T0 + MIN_FETCH_INTERVAL_MS, T0), true);
+		assert.strictEqual(shouldFetchNow(T0 + MIN_FETCH_INTERVAL_MS - 1, T0), false);
+	});
+
+	test('the gap is shorter than the tick, or the check silently halves', () => {
+		// Load-bearing, not cosmetic: the timer's origin is when the check was
+		// armed and the stamp is written later, when the fetch starts. Equal
+		// values make every tick land just short of the gap.
+		assert.ok(
+			MIN_FETCH_INTERVAL_MS < CHECK_INTERVAL_MS,
+			'the fetch gap must be strictly shorter than the tick interval',
+		);
+	});
+
+	test('every tick fetches, across a long uninterrupted session', () => {
+		// The regression this replaced: with tick === gap this fetched on hours
+		// 1, 3 and 5 of a six-hour session rather than every hour, because the
+		// stamp lands a few ms after the tick that wrote it — and drifts further
+		// right on each pass, so the error compounds.
+		const DRIFT_MS = 40;
+		let last = 0; // fresh install
+		const fetchedAtHour: number[] = [];
+		for (let tick = 1; tick <= 6; tick++) {
+			const now = T0 + tick * CHECK_INTERVAL_MS;
+			if (shouldFetchNow(now, last)) {
+				fetchedAtHour.push(tick);
+				last = now + DRIFT_MS;
+			}
+		}
+		assert.deepStrictEqual(fetchedAtHour, [1, 2, 3, 4, 5, 6]);
+	});
+
+	test('an upload is picked up within one tick of going live', () => {
+		// The question a release asks: someone installed, never restarted, and a
+		// notice goes up. The worst case is an upload landing just after a fetch.
+		const lastFetch = T0;
+		const uploadedAt = T0 + 1_000;
+		let seenAt: number | null = null;
+		for (let tick = 1; tick <= 4 && seenAt === null; tick++) {
+			const now = T0 + tick * CHECK_INTERVAL_MS;
+			if (shouldFetchNow(now, lastFetch)) {
+				seenAt = now;
+			}
+		}
+		assert.ok(seenAt !== null, 'the notice was never picked up');
+		assert.ok(
+			seenAt - uploadedAt <= CHECK_INTERVAL_MS,
+			`picked up ${(seenAt - uploadedAt) / 60000} minutes after upload`,
+		);
 	});
 });
