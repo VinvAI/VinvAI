@@ -5,7 +5,7 @@
 [![Downloads](https://img.shields.io/open-vsx/dt/VinvAI/VinvAI?style=flat-square&color=D71921&label=downloads)](https://open-vsx.org/extension/VinvAI/VinvAI)
 [![Tests](https://img.shields.io/github/actions/workflow/status/VinvAI/VinvAI/test.yml?branch=main&style=flat-square&label=tests&color=19D721)](https://github.com/VinvAI/VinvAI/actions/workflows/test.yml)
 [![Open issues](https://img.shields.io/github/issues/VinvAI/VinvAI?style=flat-square&color=D71921&label=open%20issues)](https://github.com/VinvAI/VinvAI/issues)
-[![100% local](https://img.shields.io/badge/100%25-local-D71921?style=flat-square)](#privacy)
+[![100% local](https://img.shields.io/badge/100%25%20local-no%20telemetry-D71921?style=flat-square)](#privacy)
 
 # VinvAI
 
@@ -379,7 +379,7 @@ No. Vinv runs everything locally. The semantic index and code embedder run on yo
 </details>
 
 <details><summary><b>Is there any telemetry or data collection?</b></summary>
-Your code, traces and findings never leave your machine: Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>, and sensitive data in traces is redacted. The extension sends <b>anonymous usage events</b> (which features run, whether they succeeded) to help us find what breaks — no source, no traces, no findings, no identifiers you did not give us. It also GETs a static file at <code>notices.vinv.ai</code> so a broken release can tell you. The engines and the MCP server send nothing at all.
+No telemetry, no analytics, no usage pings, no crash reports. Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>; sensitive data in traces is redacted and never sent anywhere. The extension makes exactly <b>one</b> outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a broken release can tell you. No query string, no identifiers, nothing uploaded; at most once an hour. Turn it off with <code>vinv.notices.enabled</code>.
 </details>
 
 <details><summary><b>Does Vinv modify my code?</b></summary>
@@ -400,7 +400,7 @@ Yes — <a href="LICENSE">Apache 2.0</a>, every engine builds from source in thi
 
 ## Privacy
 
-- **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys; your code and traces are never uploaded.
+- **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
 - **One outbound request, and you can read it**: a GET of a static JSON file at `notices.vinv.ai` on activation, for broken-release and security notices only. No query string, no identifiers, nothing uploaded; at most once per 12 hours; disable with `vinv.notices.enabled`.
 - The only download is the embedding model (Hugging Face, once, ~100 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.
