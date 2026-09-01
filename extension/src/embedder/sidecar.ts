@@ -26,7 +26,7 @@ const HEALTH_CACHE_MS = 30_000;
 
 /**
  * Default time to wait for a sidecar to answer /health with a 2xx. Generous
- * because the FIRST run downloads the ~500 MB embedding model inside this
+ * because the FIRST run downloads the ~100 MB embedding model inside this
  * window, and because a plain cached cold start is far slower than it sounds:
  * measured on a CPU-only Windows box, torch → transformers →
  * sentence_transformers import plus the model load runs past five minutes and

@@ -6,7 +6,8 @@
  * prebuilt artifacts. Installing is `git clone <monorepo> ~/.vinv/engines`,
  * `uv sync` (Python engines), and `cargo build --release` (the Rust index),
  * executed in a visible terminal so the user sees exactly what happens on
- * their machine.
+ * their machine. Any missing prerequisite (uv, Rust) installs as the first
+ * steps of that same terminal chain, so the whole thing is one click.
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -19,6 +20,7 @@ import {
 	engineCommand,
 	engineRunDonePath,
 	engineSyncStampPath,
+	defaultToolDirs,
 	enginesRootDir,
 	enginesSynced,
 	resolveIndexBinary,
@@ -99,21 +101,25 @@ export function enginesReady(context: vscode.ExtensionContext): boolean {
 }
 
 /**
- * Ensures uv and cargo are present, installing whichever is missing via its
- * official installer. Returns true only when both are already available; when a
- * tool had to be installed it returns false so the caller stops and the user
- * re-runs the install once the new tool is on PATH.
+ * Installer steps for whichever prerequisites are missing, to run ahead of the
+ * install itself in the SAME terminal.
+ *
+ * This used to install a missing tool in its own terminal and return false, so
+ * the user had to notice a toast and re-run "Install Vinv Engines" — twice on a
+ * clean machine (once for uv, once for Rust), each stop leaving the engines
+ * absent and looking like a failed install. Emitting the installers as ordinary
+ * chained steps makes it one click: the shell runs them in order, so each tool
+ * exists by the time the step that needs it runs.
  */
-async function ensurePrerequisites(): Promise<boolean> {
+function prerequisiteSteps(): string[] {
+	const steps: string[] = [];
 	if (!uvPath()) {
-		installPrerequisite('uv', 'uv');
-		return false;
+		steps.push(installerCommand('uv'));
 	}
 	if (!cargoPath()) {
-		installPrerequisite('rust', 'Rust');
-		return false;
+		steps.push(installerCommand('rust'));
 	}
-	return true;
+	return steps;
 }
 
 /** The command that builds the Rust index inside an engines checkout. */
@@ -207,10 +213,11 @@ function chainSteps(steps: string[], shell: 'powershell' | 'posix'): string {
  *
  * The terminal we spawn does not inherit rustup's (or uv's) PATH edits — a
  * freshly installed toolchain often isn't on the shell's PATH until it is
- * restarted. `ensurePrerequisites` still finds uv/cargo because cargoPath()/
- * uvPath() also probe their default install dirs (~/.cargo/bin, ~/.local/bin),
- * so the install proceeds and then a bare `cargo`/`uv` in the terminal fails
- * with "command not found". Putting those dirs on PATH first makes the bare
+ * restarted, so a bare `cargo`/`uv` in the terminal fails with "command not
+ * found". Callers pass the default install dirs (defaultToolDirs) even for a
+ * tool that is absent right now, because the same chain may install it a step
+ * earlier and a dir derived from a lookup that returned null cannot cover that
+ * case. Putting those dirs on PATH first makes the bare
  * invocations — and cargo's toolchain neighbours (rustc, the linker) — resolve.
  */
 function withPathPrefix(dirs: string[], command: string, shell: 'powershell' | 'posix'): string {
@@ -251,9 +258,13 @@ export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: 
 	);
 	terminal.show();
 	const shell: 'powershell' | 'posix' = isWin ? 'powershell' : 'posix';
-	const toolDirs = [uvPath(), cargoPath()]
-		.filter((p): p is string => p !== null)
-		.map((p) => path.dirname(p));
+	// Resolved dirs first (a tool installed somewhere non-default still wins),
+	// then the defaults, which are the only way to cover a tool this very run is
+	// about to install.
+	const toolDirs = [
+		...[uvPath(), cargoPath()].filter((p): p is string => p !== null).map((p) => path.dirname(p)),
+		...defaultToolDirs(),
+	];
 	const all = stampRoot ? [...steps, syncStampCommand(stampRoot)] : steps;
 	if (stampRoot) {
 		// Clear the previous run's marker BEFORE the shell can write this one's,
@@ -282,9 +293,9 @@ export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: 
  * docs instead.
  */
 export async function installEngines(context: vscode.ExtensionContext): Promise<void> {
-	if (!(await ensurePrerequisites())) {
-		return;
-	}
+	// Missing tools install as the first steps of the same chain rather than
+	// aborting the run — see prerequisiteSteps.
+	const prereqs = prerequisiteSteps();
 	const existingRoot = resolveEnginesRoot(context);
 	const root = existingRoot ?? defaultEnginesCloneDir();
 	const steps = existingRoot
@@ -301,9 +312,11 @@ export async function installEngines(context: vscode.ExtensionContext): Promise<
 				'uv sync',
 				cargoBuildCommand(root),
 			];
-	runInEnginesTerminal('Vinv Engines Install', steps, root);
+	runInEnginesTerminal('Vinv Engines Install', [...prereqs, ...steps], root);
 	void vscode.window.showInformationMessage(
-		'Vinv: Installing engines in the terminal. When it finishes, discovery and tracing are ready to run.',
+		prereqs.length > 0
+			? 'Vinv: Installing the missing prerequisites and then the engines, in the terminal. When it finishes, discovery and tracing are ready to run.'
+			: 'Vinv: Installing engines in the terminal. When it finishes, discovery and tracing are ready to run.',
 	);
 }
 

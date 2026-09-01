@@ -160,12 +160,21 @@ function findOnPath(name: string, extraDirs: string[] = []): string | null {
 	return null;
 }
 
+/**
+ * Where uv and rustup put their binaries by default.
+ *
+ * Used both to FIND a tool that is installed but not yet on this process's PATH,
+ * and to build the PATH prefix for a terminal that installs those tools and then
+ * uses them in the same run — at which point neither is resolvable yet, so the
+ * dirs have to be named rather than derived from a lookup. See withPathPrefix.
+ */
+export function defaultToolDirs(): string[] {
+	return [path.join(os.homedir(), '.local', 'bin'), path.join(os.homedir(), '.cargo', 'bin')];
+}
+
 /** Absolute path of the `uv` CLI, or null when it is not installed. */
 export function uvPath(): string | null {
-	return findOnPath('uv', [
-		path.join(os.homedir(), '.local', 'bin'),
-		path.join(os.homedir(), '.cargo', 'bin'),
-	]);
+	return findOnPath('uv', defaultToolDirs());
 }
 
 /** Absolute path of the `cargo` CLI, or null when Rust is not installed. */
