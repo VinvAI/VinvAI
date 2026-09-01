@@ -1,25 +1,36 @@
-"""Concurrency oracles — deterministic schedules and timeout injection.
+"""Concurrency oracle — parallel copies of a target, diffed against a serial baseline.
 
 The hang/deadlock class is dangerous to probe and invisible without trying: the
-serial driver fires one request at a time, so a lock ordering that only
-deadlocks under interleaving never interleaves, and a call that never returns
-stalls the whole run rather than being reported.
+serial driver fires one request at a time, so shared state that only corrupts
+under interleaving never interleaves, and a call that never returns stalls the
+whole run rather than being reported.
 
-Two oracles, both bounded so a hang costs a deadline and not the run:
+WHAT THIS ACTUALLY DOES, stated plainly because the previous version of this
+docstring did not. It named two oracles, ``run_schedule`` and
+``run_timeout_probe``, and NEITHER FUNCTION HAS EVER EXISTED in this package;
+the README repeated the same claim as "deterministic interleavings and timeout
+injection". There is one entry point, ``run_concurrency``, and it does this:
 
-* **Deterministic schedule** (``run_schedule``) — drive N copies of the same
-  target concurrently with a FIXED release order, so an interleaving that
-  corrupts shared state is reproducible rather than a flake. Divergence between
-  the concurrent result set and the serial baseline is the finding: if calling
-  something twice in parallel does not equal calling it twice in sequence, the
-  target has shared mutable state it does not guard.
-* **Timeout injection** (``run_timeout_probe``) — call the target with a hard
-  deadline and report the ones that blow it. A target that returns in 3 ms
-  serially and never returns under contention is a lock-ordering bug, and it is
-  reported as ``concurrency-hang`` rather than hanging the engine.
+* **Parallel batch vs serial baseline** — ``workers`` copies of the target are
+  submitted to a thread pool and the batch is repeated ``repeats`` times. The
+  REPEAT COUNT is what is fixed; the interleaving is not. Nothing pins a release
+  order — no barrier, no schedule enumeration — so the OS scheduler chooses, and
+  repetition is what gives a rare interleaving several chances rather than one.
+  Divergence between the concurrent profile and the serial baseline is the
+  finding: if calling something N times in parallel does not equal calling it N
+  times in sequence, the target has shared mutable state it does not guard.
+* **A deadline on OBSERVATION, not an injection** — the harness stops waiting on
+  a call that blows ``call_timeout`` and reports it; the call itself is abandoned,
+  not interrupted. Nothing is injected into the target. A target that returns in
+  3 ms serially and never returns under contention is reported as
+  ``concurrency-hang`` rather than hanging the engine.
 
-Both run in an isolated worker (same discipline as the other oracles), so a
-target that wedges its interpreter costs one subprocess.
+The serial-vs-serial control is what keeps the first bullet honest: a target
+whose values are clock- or entropy-derived differs from itself run twice, so its
+disagreement says nothing about concurrency. See ``stability`` below.
+
+Both batches run in an isolated worker (same discipline as the other oracles), so
+a target that wedges its interpreter costs one subprocess.
 """
 
 from __future__ import annotations
@@ -115,14 +126,17 @@ def _worker_main(argv: list[str]) -> int:
     serial = [_one() for _ in range(workers)]
     rows.append({"target": target, "phase": "serial", "results": serial})
     # A SECOND serial batch, purely as a control. The divergence verdict below
-    # compares distinct-result counts, which silently assumes the count is a
-    # property of the target rather than of timing. It is not: a function
-    # returning anything clock- or entropy-derived produces N distinct results
-    # serially (calls straddle a tick) and 1 concurrently (they land in the same
-    # instant) — reported as "updates were LOST" on a target with no shared
-    # state at all, deterministically on every repeat, so it looks like a
-    # solidly reproduced bug. If two SERIAL batches already disagree, the spread
-    # is timing, not state, and the comparison does not apply.
+    # assumes the distinct-result count is a property of the target rather than
+    # of timing. It is not: a function returning anything clock- or
+    # entropy-derived produces N distinct results serially (calls straddle a
+    # tick) and 1 concurrently (they land in the same instant) — reported as
+    # "updates were LOST" on a target with no shared state at all,
+    # deterministically on every repeat, so it looks like a solidly reproduced
+    # bug. `classify` compares the two batches by COUNT and by VALUE SET:
+    # disagreeing counts mean the spread is timing and the comparison does not
+    # apply at all, while agreeing counts over values that share nothing leave
+    # the two explanations indistinguishable — and the verdict then says so
+    # instead of asserting shared state.
     serial_control = [_one() for _ in range(workers)]
     rows.append({"target": target, "phase": "serial-control", "results": serial_control})
 
@@ -180,16 +194,23 @@ def _profile(results: list[dict[str, Any]]) -> dict[str, Any]:
       concurrent calls to a correctly-guarded read-modify-write produce N
       distinct results; a lost update collapses two of them, so a drop in
       distinct count IS the lost-update signature, independent of the values.
+    * ``values`` — those distinct values themselves. Only the two SERIAL
+      batches are ever compared by value, and only to ask whether the distinct
+      count is a property of the target at all (see ``classify``). Comparing
+      serial against concurrent by value is the mistake this docstring opens
+      with, and ``values`` must not be used for it.
     * ``failures`` — the exception types raised. Exceptions that appear only
       under concurrency are a finding by themselves.
 
     Order is deliberately ignored: concurrency reorders legitimately.
     """
     ok = [r for r in results if r.get("ok")]
+    values = sorted({str(r.get("value")) for r in ok})
     return {
         "calls": len(results),
         "ok": len(ok),
-        "distinct": len({str(r.get("value")) for r in ok}),
+        "distinct": len(values),
+        "values": values,
         "failures": sorted({str(r.get("exception")) for r in results if not r.get("ok")}),
     }
 
@@ -213,15 +234,32 @@ def classify(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     serial = _profile(serial_row.get("results") or [])
 
     # Is the distinct-count a property of the TARGET, or of timing? Two serial
-    # batches that disagree mean the return values are clock/entropy-derived, so
-    # a lower concurrent count proves nothing — concurrency compresses a spread
-    # that serial execution creates. Without this control, every such target was
-    # reported as having "unguarded shared state".
+    # batches decide it, and they must be compared by VALUE SET rather than by
+    # count. Counts alone let the control pass on exactly the case it exists to
+    # refuse: a clock- or entropy-derived return is all-unique within EVERY
+    # serial batch, so both batches report N distinct, the counts agree while
+    # the two batches share not one value — and a concurrent batch whose calls
+    # all land inside one tick was then reported as "updates were LOST, so the
+    # target has unguarded shared state" about a target with no shared state at
+    # all.
+    #
+    # Disagreeing value sets cannot simply suppress the verdict, though: a
+    # monotone counter — the canonical lost-update target, and the one this
+    # oracle exists for — produces the identical shape (1,2,3,4 serially, then
+    # 5,6,7,8, then a single value across the concurrent batch). The two are
+    # not separable from return values alone, so that third state is NAMED
+    # rather than guessed: the divergence is still reported, minus the claim
+    # about shared state that the evidence does not support.
     control_row = next((r for r in rows if r.get("phase") == "serial-control"), None)
-    count_is_stable = (
-        control_row is None  # older worker output: keep the previous behaviour
-        or _profile(control_row.get("results") or [])["distinct"] == serial["distinct"]
-    )
+    control = _profile(control_row.get("results") or []) if control_row is not None else None
+    if control is None:
+        stability = "assumed"  # older worker output: keep the previous behaviour
+    elif control["distinct"] != serial["distinct"]:
+        stability = "timing"  # the spread itself moves between batches
+    elif control["values"] != serial["values"]:
+        stability = "values-differ"  # same count, no value in common: undecidable
+    else:
+        stability = "stable"
 
     for row in rows:
         if row.get("phase") != "concurrent":
@@ -242,19 +280,22 @@ def classify(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         concurrent = _profile(row.get("results") or [])
         # Only a batch that actually SUCCEEDED can have lost an update; when
         # every call failed, the failures below are the honest report.
-        if count_is_stable and concurrent["ok"] and concurrent["distinct"] < serial["distinct"]:
-            out.append(
-                {
-                    "kind": "concurrency-divergence",
-                    "target": target,
-                    "detail": (
-                        f"{serial['distinct']} distinct results serially but only "
-                        f"{concurrent['distinct']} across the same number of "
-                        "concurrent calls — updates were LOST, so the target has "
-                        "unguarded shared state"
-                    ),
-                }
+        collapsed = concurrent["ok"] and concurrent["distinct"] < serial["distinct"]
+        if stability != "timing" and collapsed:
+            observed = (
+                f"{serial['distinct']} distinct results serially but only "
+                f"{concurrent['distinct']} across the same number of concurrent calls"
             )
+            if stability == "values-differ":
+                detail = (
+                    f"{observed} — but the two serial batches agree on the count while "
+                    "sharing no value, which a lost update and a clock- or "
+                    "entropy-derived return read inside one tick produce alike: check "
+                    "whether the result comes from shared state or from the clock"
+                )
+            else:
+                detail = f"{observed} — updates were LOST, so the target has unguarded shared state"
+            out.append({"kind": "concurrency-divergence", "target": target, "detail": detail})
         new_failures = set(concurrent["failures"]) - set(serial["failures"])
         if new_failures:
             out.append(

@@ -216,7 +216,7 @@ One loop, grouped by what you came to fix. Each capability links to a live walkt
 - **Auto-Pilot** — one click drives discover → set up → trace → exercise → fix → verify, until green or budget; when new trace errors land, the fix episode is already dispatched by the time you see the red ring in the graph.
 - **Findings** — issue clusters, optimization episodes with paired-bootstrap confidence intervals, regression diffs by kind, and a machine-readable `findings.json` your agent can consume directly.
 
-> **Honest scope:** Python first — **services and APIs**. Other languages get the index, graph and grounded Q&A, but no runtime evidence yet. TypeScript and Go are next.
+> **Honest scope:** Python first — **services and APIs**. The index, graph and grounded Q&A also cover JavaScript/TypeScript and Rust (and Markdown/reST as docs) — every other language is skipped by the indexer outright, so it gets nothing at all. Runtime evidence for TypeScript and Go is next.
 
 ## Agent alone vs Agent + Vinv
 
@@ -253,7 +253,7 @@ The **Test** stage isn't one tester — it's a set of oracles, each hunting a di
 | **HTTP exerciser** | Drives every endpoint itself — schema-valid, boundary, negative, values mined from real traces, multi-step auth | `server-error` · `crash` · `invariant-violation` |
 | **Differential oracle** | Compares a handler or evaluator against a reference — for a parser, CPython itself; disagreement *is* the bug report | `differential-mismatch` |
 | **Fault injection** | Adversarial-but-**legal** shapes at a dependency boundary, plus every chunk-split point on a stream | `fault-crash` · `fault-divergence` |
-| **Concurrency oracle** | Deterministic interleavings and timeout injection — shared state that corrupts under parallel calls, lock orderings that deadlock | `concurrency-divergence` · `concurrency-hang` |
+| **Concurrency oracle** | N copies of a target in a thread pool, repeated, diffed against a serial baseline of the same size — lost updates and exceptions that appear only in parallel; a second serial batch is the control, so a clock-derived value isn't reported as a lost update. Calls that blow the deadline are reported, not waited on | `concurrency-divergence` · `concurrency-hang` |
 | **Environment oracle** | A dependency-resolution matrix, and upstream symbols whose signature moved under you | `signature-drift` |
 | **Golden I/O baselines** | A "faster" change that quietly dropped a field or changed a status class | `baseline-degraded` |
 | **Dead code** | Untraced islands with the live callers that still reference them | dead sections |
@@ -362,7 +362,7 @@ Your agent is also Vinv's only LLM — every analysis step routes through the co
 | `exerciser functions <repo> [--require-tier os-sandbox]` | Drive entry points and exported functions in process, contained |
 | `exerciser differential <repo> [--target M:f --reference cpython-exec]` | Compare a function against a reference implementation |
 | `exerciser faults <repo> [--auto-target M:f]` | Legal-but-adversarial shapes at a dependency boundary |
-| `exerciser concurrency <repo> --target M:f` | Deterministic schedules + timeout injection |
+| `exerciser concurrency <repo> --target M:f` | N parallel copies of a target vs a serial baseline, under a deadline |
 | `exerciser environment <repo>` | Dependency-resolution matrix + upstream signature drift |
 | `exerciser containment` | Which containment tier *this host* can actually provide, and why |
 | `exerciser throughput-sweep <repo> --base-url URL` | Concurrency sweep + USL fit → `throughput-ceiling` opportunities |
@@ -391,7 +391,7 @@ Acceptance tests are authored before the fix, stored outside your workspace unde
 </details>
 
 <details><summary><b>Which languages and agents are supported?</b></summary>
-Runtime evidence — tracing, the oracle swarm, verified fixes — is Python today, for <strong>services and APIs</strong>; other stacks get the semantic index, code graph, and grounded Q&A. TypeScript and Go are next. Editors: VS Code, Cursor, Windsurf, VSCodium, Trae, VS Code Insiders. Agents it drives: Claude Code, Cursor CLI, Codex CLI, Gemini CLI, Copilot Chat, Windsurf Cascade.
+Runtime evidence — tracing, the oracle swarm, verified fixes — is Python today, for <strong>services and APIs</strong>. The semantic index, code graph and grounded Q&A cover Python, JavaScript/TypeScript and Rust (and Markdown/reST as docs); the indexer skips every other extension, so Go, Java, C/C++, C#, Ruby, PHP, Swift and the rest get nothing at all today — not a partial index, none. Runtime evidence for TypeScript and Go is next. Editors: VS Code, Cursor, Windsurf, VSCodium, Trae, VS Code Insiders. Agents it drives: Claude Code, Cursor CLI, Codex CLI, Gemini CLI, Copilot Chat, Windsurf Cascade.
 </details>
 
 <details><summary><b>Is it really free and open source?</b></summary>

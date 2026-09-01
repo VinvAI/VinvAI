@@ -1106,6 +1106,16 @@ export interface MutationSmokeResult {
 	mutants: number;
 	killed: number;
 	survivors: Array<{ file: string; line: number; original: string; mutated: string }>;
+	/**
+	 * Mutants whose acceptance run came back 'unavailable' — neither killed nor
+	 * survived, and the reason `killed + survivors.length` need not equal
+	 * `mutants`. A mutant that could not be EVALUATED did not escape detection:
+	 * the oracle never got to look at it. Folding these into the survivor list
+	 * made the one anti-overfitting signal cry wolf on infrastructure noise (a
+	 * missing interpreter, a timeout, an unparseable run) and report it as an
+	 * unpoliced neighborhood around the fix.
+	 */
+	unevaluable: number;
 }
 
 /** Max mutants per attempt — a smoke signal, not a mutation campaign. */
@@ -1114,8 +1124,12 @@ const MUTATION_MAX = 8;
 /**
  * Advisory mutation smoke: perturb the CHANGED functions and check the
  * acceptance set notices. Surviving mutants = the fix's neighborhood is
- * unpoliced (weak assertions). ADVISORY ONLY: logged + judged context, never
- * a gate, and — Goodhart guard — never revealed to the fixing agent's pack.
+ * unpoliced (weak assertions). Each mutant lands in exactly one of THREE
+ * buckets — killed (the run failed), survived (the run passed), or
+ * unevaluable (the run produced no verdict) — because an unevaluable mutant
+ * is not one that escaped detection and must not be reported as one.
+ * ADVISORY ONLY: logged + judged context, never a gate, and — Goodhart
+ * guard — never revealed to the fixing agent's pack.
  * Each mutant is written, tested once (single run — smoke, the flake guard
  * does not apply to an advisory), and the original file restored with a
  * byte-identity check; any restore anomaly aborts to 'unavailable'.
@@ -1135,7 +1149,7 @@ export async function runMutationSmoke(
 		}))
 		.filter((c) => fs.existsSync(c.file));
 	if (!python || spec.length === 0) {
-		return { status: 'unavailable', mutants: 0, killed: 0, survivors: [] };
+		return { status: 'unavailable', mutants: 0, killed: 0, unevaluable: 0, survivors: [] };
 	}
 	const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'vinv-mut-'));
 	try {
@@ -1145,15 +1159,16 @@ export async function runMutationSmoke(
 			30_000,
 		);
 		if (gen.exitCode !== 0 || gen.timedOut) {
-			return { status: 'unavailable', mutants: 0, killed: 0, survivors: [] };
+			return { status: 'unavailable', mutants: 0, killed: 0, unevaluable: 0, survivors: [] };
 		}
 		let mutants: Array<{ file: string; line: number; original: string; mutated: string; full_mutated_source: string }>;
 		try {
 			mutants = JSON.parse(gen.output.trim().split('\n').pop() ?? '[]');
 		} catch {
-			return { status: 'unavailable', mutants: 0, killed: 0, survivors: [] };
+			return { status: 'unavailable', mutants: 0, killed: 0, unevaluable: 0, survivors: [] };
 		}
 		let killed = 0;
+		let unevaluable = 0;
 		const survivors: MutationSmokeResult['survivors'] = [];
 		for (const m of mutants) {
 			const originalBytes = fs.readFileSync(m.file);
@@ -1162,19 +1177,27 @@ export async function runMutationSmoke(
 				const run = await runTestFileOnce(workspaceRoot, acceptancePath);
 				if (run.signal === 'fail') {
 					killed += 1;
-				} else {
+				} else if (run.signal === 'pass') {
+					// Only a genuine pass is a survivor: the acceptance set RAN
+					// against the perturbation and did not notice it.
 					survivors.push({ file: m.file, line: m.line, original: m.original, mutated: m.mutated });
+				} else {
+					// 'unavailable' — the run produced no verdict at all, so this
+					// mutant escaped nothing. Booking it as a survivor reports an
+					// infrastructure failure as a weak oracle, which biases the one
+					// anti-overfitting signal toward crying wolf.
+					unevaluable += 1;
 				}
 			} finally {
 				fs.writeFileSync(m.file, originalBytes);
 				// Byte-identity restore check — a mutation smoke must NEVER leave
 				// the workspace altered; any anomaly voids the whole signal.
 				if (!fs.readFileSync(m.file).equals(originalBytes)) {
-					return { status: 'unavailable', mutants: 0, killed: 0, survivors: [] };
+					return { status: 'unavailable', mutants: 0, killed: 0, unevaluable: 0, survivors: [] };
 				}
 			}
 		}
-		return { status: 'ok', mutants: mutants.length, killed, survivors };
+		return { status: 'ok', mutants: mutants.length, killed, unevaluable, survivors };
 	} finally {
 		try {
 			fs.rmSync(isolated, { recursive: true, force: true });

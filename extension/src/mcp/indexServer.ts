@@ -1138,6 +1138,20 @@ async function handle(req: JsonRpcRequest): Promise<void> {
 			const selected = selectRetrievalAction(
 				requestedTopK,
 				configuredPolicy,
+				// 'shadow' is the default deliberately: a promoted top_k is only
+				// ever run counterfactually, so a policy nobody approved never
+				// changes what a user is served. The price is that shadow logs
+				// every decision with propensity 1 — a deterministic logger,
+				// under which no off-policy estimate is identified, and a DR
+				// delta over such a ledger is only a comparison between the
+				// queries that happened to ask for different top_k. Do not read
+				// one as an off-policy result. opeEvaluator.estimate() refuses
+				// support for exactly that case (its degeneracy guard), so
+				// promotion fails closed here instead of firing on an
+				// unidentified number. 'explore' would identify it by
+				// randomizing the served action, which changes live behavior
+				// for every user and is its own decision, not a side effect of
+				// the guard.
 				process.env.VINV_RETRIEVAL_POLICY_MODE ?? 'shadow',
 			);
 			const decisionId = crypto.randomUUID();

@@ -88,6 +88,84 @@ def test_lost_updates_are_reported():
     assert "LOST" in finding["detail"]
 
 
+def test_a_moving_serial_spread_is_not_a_lost_update():
+    # The two serial batches disagree on the COUNT, so the spread is a property
+    # of timing rather than of the target: a lower concurrent count proves
+    # nothing and no verdict may rest on it.
+    rows = [
+        {
+            "target": "t",
+            "phase": "serial",
+            "results": [{"ok": True, "value": v} for v in ("1", "2", "3")],
+        },
+        {
+            "target": "t",
+            "phase": "serial-control",
+            "results": [{"ok": True, "value": v} for v in ("4", "4", "5")],
+        },
+        {
+            "target": "t",
+            "phase": "concurrent",
+            "results": [{"ok": True, "value": "9"} for _ in range(3)],
+        },
+    ]
+    assert classify(rows) == []
+
+
+def test_all_distinct_serial_batches_cannot_prove_shared_state():
+    # The failure the control exists for, and the one a count comparison misses:
+    # a clock-derived return is all-unique inside EVERY serial batch, so the two
+    # batches agree on 3 distinct while sharing no value at all. Counting alone
+    # passed the control and asserted "unguarded shared state" about a target
+    # that has none.
+    rows = [
+        {
+            "target": "t",
+            "phase": "serial",
+            "results": [{"ok": True, "value": v} for v in ("1", "2", "3")],
+        },
+        {
+            "target": "t",
+            "phase": "serial-control",
+            "results": [{"ok": True, "value": v} for v in ("4", "5", "6")],
+        },
+        {
+            "target": "t",
+            "phase": "concurrent",
+            "results": [{"ok": True, "value": "7"} for _ in range(3)],
+        },
+    ]
+    (finding,) = classify(rows)
+    assert finding["kind"] == "concurrency-divergence", "the collapse is still reported"
+    assert "unguarded shared state" not in finding["detail"], finding["detail"]
+    assert "clock" in finding["detail"], "the other explanation must be named"
+
+
+def test_a_repeated_serial_value_set_still_proves_a_lost_update():
+    # Both serial batches hand back the SAME values (a pooled allocator), so the
+    # count IS a property of the target and a concurrent batch that issues one
+    # of them twice keeps the strong verdict.
+    rows = [
+        {
+            "target": "t",
+            "phase": "serial",
+            "results": [{"ok": True, "value": v} for v in ("a", "b", "c")],
+        },
+        {
+            "target": "t",
+            "phase": "serial-control",
+            "results": [{"ok": True, "value": v} for v in ("c", "a", "b")],
+        },
+        {
+            "target": "t",
+            "phase": "concurrent",
+            "results": [{"ok": True, "value": v} for v in ("a", "b", "b")],
+        },
+    ]
+    (finding,) = classify(rows)
+    assert "updates were LOST" in finding["detail"], finding["detail"]
+
+
 def test_exceptions_only_under_concurrency_are_reported():
     rows = [
         {"target": "t", "phase": "serial", "results": [{"ok": True, "value": "1"}]},

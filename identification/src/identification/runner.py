@@ -58,8 +58,6 @@ _UBIQUITOUS_METHODS = frozenset(
 
 _PY_EXTS = {".py"}
 _JS_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
-_GO_EXTS = {".go"}
-_JVM_EXTS = {".java", ".kt"}
 
 
 # =========================================================================
@@ -126,18 +124,6 @@ _RE_JS_METHOD_CALL = re.compile(
 # NestJS controller decorators: @Get("x")  @Post()  @Delete(":id")
 _RE_TS_NEST_DECORATOR = re.compile(
     r"""@(Get|Post|Put|Patch|Delete|Head|Options|All)\(\s*[`"']?([^`"')]*)[`"']?\s*\)""",
-)
-
-# Go — gin/echo/chi/net-http (path must start with '/').
-_RE_GO_METHOD = re.compile(
-    r"""\.(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|Any|HandleFunc|Handle)\(\s*"""
-    r"""["`](/[^"`]*)["`]""",
-)
-
-# Java/Kotlin — Spring annotations.
-_RE_SPRING = re.compile(
-    r"""@(Get|Post|Put|Patch|Delete|Request)Mapping\(\s*"""
-    r"""(?:value\s*=\s*|path\s*=\s*)?["']([^"']+)["']""",
 )
 
 
@@ -1000,7 +986,7 @@ def _routes_in_source(
     declared in ``text``.  Deterministic extraction — regexes for decorator /
     imperative registration plus an AST pass for declarative route tables;
     method is upper-cased and ``"*"`` when the registration does not name one
-    (Django paths, Go ``HandleFunc``).  ``handler`` is the endpoint symbol when
+    (Django paths).  ``handler`` is the endpoint symbol when
     the declaration itself names one (declarative tables); ``None`` means the
     caller should attribute the handler by symbol adjacency, as decorators sit
     directly above their function.  Router-local mount prefixes
@@ -1052,17 +1038,6 @@ def _routes_in_source(
             out.append((m.group(1).upper(), m.group(2), _line_of(m.start()), "express", None))
         for m in _RE_TS_NEST_DECORATOR.finditer(text):
             out.append((m.group(1).upper(), m.group(2) or "/", _line_of(m.start()), "nestjs", None))
-    elif ext in _GO_EXTS:
-        for m in _RE_GO_METHOD.finditer(text):
-            meth = m.group(1).upper()
-            if meth in ("HANDLEFUNC", "HANDLE"):
-                meth = "*"
-            out.append((meth, m.group(2), _line_of(m.start()), "go", None))
-    elif ext in _JVM_EXTS:
-        for m in _RE_SPRING.finditer(text):
-            verb = m.group(1)
-            meth = "*" if verb == "Request" else verb.upper()
-            out.append((meth, m.group(2), _line_of(m.start()), "spring", None))
 
     return out
 
@@ -1160,8 +1135,8 @@ def list_service_apis(
     iterates its source files, and regex-extracts every starting point the
     service exposes, attributing each to its enclosing handler symbol:
 
-    * **HTTP routes** across FastAPI/Flask/Django, Express/NestJS, gin/echo/chi,
-      Spring — also surfaced under ``apis`` (kind ``http_api``).
+    * **HTTP routes** across FastAPI/Flask/Django and Express/NestJS — also
+      surfaced under ``apis`` (kind ``http_api``).
     * **stdlib HTTP handlers** — ``http.server`` request-handler subclasses:
       each ``do_<VERB>`` method is an HTTP route (path recovered from simple
       ``self.path`` dispatch, else ``"/"``); server construction /
@@ -1213,7 +1188,18 @@ def list_service_apis(
         file_texts: dict[str, str] = {}
         for rel in rel_files:
             ext = Path(rel).suffix.lower()
-            if ext not in (_PY_EXTS | _JS_EXTS | _GO_EXTS | _JVM_EXTS):
+            # Python and JS/TS are the whole filter because they are the whole
+            # index: `lang_for_extension` in `index/src/parse.rs` maps .go,
+            # .java and .kt to None, so `collect_files` never collects them and
+            # they never appear in `get_all_file_paths` above.  Go (gin/echo/
+            # chi) and Spring route patterns used to live in `_routes_in_source`
+            # behind dispatch arms this filter could not feed; they were removed
+            # rather than left unreachable, because dead arms read as
+            # multi-language support that does not exist (this function's
+            # docstring claimed it).  If the index learns those extensions,
+            # restore the arms AND widen this filter together — either one alone
+            # extracts nothing and reports zero routes rather than an error.
+            if ext not in (_PY_EXTS | _JS_EXTS):
                 continue
             rel_path = Path(rel)
             if rel_path.is_absolute():

@@ -11,9 +11,10 @@
  * the offline gate here is a do-no-harm + plausible-win filter at small n —
  * ESS >= 25 (bootstrap-validity/CLT boundary; self-limits promotion to
  * effects >= ~0.15), >= 40 joined samples, >= 8 pulls per compared action,
- * BCa 95% LCB >= 0 on the DR delta, no epoch contradicting the pooled delta
- * — and the 5% canary with 3-loss auto-rollback (already live in
- * indexServer) is the actual test.
+ * BCa 95% LCB >= 0 on the DR delta, no epoch contradicting the pooled delta,
+ * and support refused outright when the logging policy was deterministic (see
+ * the degeneracy guard in estimate) — and the 5% canary with 3-loss
+ * auto-rollback (already live in indexServer) is the actual test.
  *
  * Runs opportunistically after feedback accrues (every EVAL_EVERY rewarded
  * events), asynchronously, and never on the query path.
@@ -163,6 +164,10 @@ export interface OpeEstimate {
 	effectiveSampleSize: number;
 	clippedFraction: number;
 	supportOk: boolean;
+	/** Why support was refused outright, or null. Set by the degeneracy guard
+	 * in estimate(); reported in the ope_evaluation ledger event so a refusal
+	 * is never a silently missing promotion. */
+	supportRefusal: string | null;
 }
 
 /** Cross-fitted DM/IPS/SNIPS/DR — mirror of off_policy.estimate with the
@@ -199,6 +204,26 @@ export function estimate(samples: OpeSample[], targetTopK: number): OpeEstimate 
 	});
 	const weightSum = weights.reduce((a, w) => a + w, 0);
 	const ess = weightSum > 0 ? (weightSum * weightSum) / weights.reduce((a, w) => a + w * w, 0) : 0;
+	// DEGENERACY GUARD — a deterministic logger yields no off-policy estimate.
+	// When every matched row carries propensity 1 the action was not drawn, it
+	// was simply served: a row served some other action had probability 0 of
+	// receiving this one, positivity fails, and IPS/DR collapse to the mean
+	// reward of whichever queries happened to be served this top_k — a
+	// subgroup comparison, not an off-policy estimate. The other two gates
+	// cannot catch it: under a constant propensity the ESS is exactly the
+	// matched row count, so MIN_ESS silently restates MIN_ACTION_PULLS, and
+	// effectiveClip is by construction the largest matched weight, so no
+	// weight ever exceeds it and clippedFraction is 0 for any data at all.
+	// A propensity-1 ledger is precisely what the shipped 'shadow' policy
+	// mode logs (see the VINV_RETRIEVAL_POLICY_MODE default in
+	// indexServer.ts), so refuse support and let promotion fail closed
+	// rather than fire on an unidentified number. A point mass below 1 (a
+	// canary or epsilon-greedy draw) is a real randomized draw with
+	// positivity intact and stays evaluable.
+	const supportRefusal =
+		matchedInverse.length > 0 && matchedInverse.every((w) => w === 1)
+			? 'deterministic_logging_propensity_1'
+			: null;
 	return {
 		count: samples.length,
 		matchedCount: matchedInverse.length,
@@ -208,8 +233,12 @@ export function estimate(samples: OpeSample[], targetTopK: number): OpeEstimate 
 		doublyRobust: drSum / samples.length,
 		effectiveSampleSize: ess,
 		clippedFraction: clipped / samples.length,
+		supportRefusal,
 		supportOk:
-			ess >= MIN_ESS && samples.length >= MIN_SAMPLES && matchedInverse.length >= MIN_ACTION_PULLS,
+			supportRefusal === null &&
+			ess >= MIN_ESS &&
+			samples.length >= MIN_SAMPLES &&
+			matchedInverse.length >= MIN_ACTION_PULLS,
 	};
 }
 
@@ -355,6 +384,9 @@ export interface CandidateEvaluation {
 	lcb: number;
 	ucb: number;
 	supportOk: boolean;
+	/** The degeneracy guard's reason, from whichever of the candidate or the
+	 * baseline estimate it refused, or null. */
+	supportRefusal: string | null;
 	epochOk: boolean;
 	promotable: boolean;
 }
@@ -393,6 +425,7 @@ export function evaluateCandidates(samples: OpeSample[]): {
 			lcb,
 			ucb,
 			supportOk: candidateEstimate.supportOk && baselineEstimate.supportOk,
+			supportRefusal: candidateEstimate.supportRefusal ?? baselineEstimate.supportRefusal,
 			epochOk: consistency.ok,
 			promotable:
 				candidateEstimate.supportOk &&
@@ -445,11 +478,18 @@ export function maybeRunOpeEvaluation(policyDisabled: boolean): void {
 				epoch: 'any',
 				pooled_samples: samples.length,
 				baseline,
+				// The degeneracy guard's verdict on the baseline itself, stated
+				// even when there is no candidate to attach it to — a ledger
+				// logged entirely under a deterministic policy has exactly one
+				// action in it, so without this the refusal would show up only
+				// as promotions that never happen, with no reason anywhere.
+				support_refusal: estimate(samples, baseline).supportRefusal,
 				candidates: candidates.map((c) => ({
 					action: c.action,
 					dr_delta: Math.round(c.drDelta * 1000) / 1000,
 					lcb: Math.round(c.lcb * 1000) / 1000,
 					support_ok: c.supportOk,
+					support_refusal: c.supportRefusal,
 					epoch_ok: c.epochOk,
 					promotable: c.promotable,
 				})),
