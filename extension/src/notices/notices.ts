@@ -50,14 +50,6 @@ const SEEN_KEY = 'vinv.notices.seen';
 const LAST_FETCH_KEY = 'vinv.notices.lastFetch';
 
 /**
- * Minimum gap between fetches. Activation runs on every window, and a user with
- * six windows open reloading all day must not turn into six requests an hour.
- * The stamp lives in `globalState`, which is shared across windows, so this
- * bounds the whole machine rather than one window.
- */
-const MIN_FETCH_INTERVAL_MS = 60 * 60 * 1000;
-
-/**
  * How often the check re-runs while a window stays open.
  *
  * Activation alone was the only trigger, which made the real reach of a notice
@@ -65,12 +57,25 @@ const MIN_FETCH_INTERVAL_MS = 60 * 60 * 1000;
  * leaves it running for days, which is most people mid-project. Lowering the
  * fetch gap could not fix that on its own: with nothing re-invoking the check,
  * a shorter gap only mattered to someone who was restarting anyway.
- *
- * The two are deliberately equal. The timer proposes, `MIN_FETCH_INTERVAL_MS`
- * disposes: every tick still goes through the same gap check against shared
- * state, so N windows ticking together still yield at most one request an hour.
  */
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * Minimum gap between fetches. Activation runs on every window, and a user with
+ * six windows open reloading all day must not turn into six requests an hour.
+ * The stamp lives in `globalState`, which is shared across windows, so this
+ * bounds the whole machine rather than one window.
+ *
+ * DELIBERATELY SHORTER THAN `CHECK_INTERVAL_MS`, and that margin is load-
+ * bearing. The timer's origin is the moment the check was armed; the stamp is
+ * written a moment LATER, when the fetch actually starts. Equal values make the
+ * tick land a few milliseconds short of the gap every time, so the check
+ * returns early, and the next tick is an hour after that — turning an hourly
+ * check into a two-hourly one. The stamp also drifts further right on each
+ * pass, so the effect compounds rather than settling. Five minutes of slack is
+ * far more than the drift and still bounds the machine to one request an hour.
+ */
+const MIN_FETCH_INTERVAL_MS = CHECK_INTERVAL_MS - 5 * 60 * 1000;
 
 /** Response cap. A notices file is a few KB; anything larger is not one. */
 const MAX_BYTES = 64 * 1024;
