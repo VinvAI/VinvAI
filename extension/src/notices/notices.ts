@@ -58,7 +58,7 @@ const LAST_FETCH_KEY = 'vinv.notices.lastFetch';
  * fetch gap could not fix that on its own: with nothing re-invoking the check,
  * a shorter gap only mattered to someone who was restarting anyway.
  */
-const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
  * Minimum gap between fetches. Activation runs on every window, and a user with
@@ -75,7 +75,22 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;
  * pass, so the effect compounds rather than settling. Five minutes of slack is
  * far more than the drift and still bounds the machine to one request an hour.
  */
-const MIN_FETCH_INTERVAL_MS = CHECK_INTERVAL_MS - 5 * 60 * 1000;
+export const MIN_FETCH_INTERVAL_MS = CHECK_INTERVAL_MS - 5 * 60 * 1000;
+
+/**
+ * Whether a check running at `now` should fetch, given the last attempt.
+ *
+ * Split out from the fetch itself so the schedule is testable without a window:
+ * the bug this replaced (tick and gap equal, so every other tick returned early)
+ * was invisible in a function that also needed globalState and a toast.
+ *
+ * `lastFetch` of 0 is a fresh install with nothing stored, which fetches at
+ * once — the first activation after an install is exactly when a notice about
+ * the version just installed matters most.
+ */
+export function shouldFetchNow(now: number, lastFetch: number): boolean {
+	return now - lastFetch >= MIN_FETCH_INTERVAL_MS;
+}
 
 /** Response cap. A notices file is a few KB; anything larger is not one. */
 const MAX_BYTES = 64 * 1024;
@@ -467,7 +482,7 @@ export async function maybeShowNotices(context: vscode.ExtensionContext): Promis
 	}
 	const now = Date.now();
 	const last = context.globalState.get<number>(LAST_FETCH_KEY) ?? 0;
-	if (now - last < MIN_FETCH_INTERVAL_MS) {
+	if (!shouldFetchNow(now, last)) {
 		return;
 	}
 	// Stamped before the request, not after: an endpoint that hangs or 500s must
