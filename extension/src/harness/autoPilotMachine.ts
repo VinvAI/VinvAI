@@ -358,6 +358,16 @@ export type PipelineAction = PilotAction | { kind: 'probes' } | { kind: 'exercis
  * retried via decideOnStageFailure, which flips the stage back to 'pending'
  * while budget remains.
  */
+/**
+ * True when this service has already spent a setup attempt — i.e. the scheduler
+ * is retrying it rather than trying it for the first time. A first attempt is
+ * worth waiting for; a retry is what starves the stages behind it.
+ */
+function isRetryingSetup(services: ServiceState[], name: string): boolean {
+	const svc = services.find((s) => s.name === name);
+	return !!svc && svc.setupAttempts > 0;
+}
+
 export function planPipelineAction(
 	discovered: boolean,
 	services: ServiceState[],
@@ -365,6 +375,26 @@ export function planPipelineAction(
 ): PipelineAction {
 	const serviceAction = planNextAction(discovered, services);
 	if (serviceAction.kind !== 'done') {
+		// One service stuck in setup retries must not starve testing of the
+		// services that ARE up. Exercise waits while bring-up is on its first
+		// attempt — services first is the better order, since every service that
+		// comes up adds endpoints to drive — but once the blocking service is
+		// merely retrying, exercise goes ahead against whatever is already green.
+		//
+		// The green requirement is not incidental: the exerciser drives live
+		// services on their running ports, and coverage is counted by joining its
+		// requests back to traced spans. With nothing serving there is nothing to
+		// hit, so an early pass would report 0/N covered and no issues — a clean
+		// bill of health for a run that tested nothing — and mark the stage done
+		// so it never ran again.
+		if (
+			ledger.exercise === 'pending' &&
+			serviceAction.kind === 'setup' &&
+			isRetryingSetup(services, serviceAction.service) &&
+			services.some((s) => s.phase === 'green')
+		) {
+			return { kind: 'exercise' };
+		}
 		return serviceAction;
 	}
 	const anyGreen = services.some((s) => s.phase === 'green');

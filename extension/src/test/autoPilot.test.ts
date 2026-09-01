@@ -16,7 +16,9 @@ import {
 	markGaveUp,
 	markGreen,
 	noteSetupAttempt,
+	initialPipelineLedger,
 	planNextAction,
+	planPipelineAction,
 	summarize,
 	type AutoPilotBudgets,
 	type ServiceState,
@@ -280,5 +282,55 @@ suite('Auto-Pilot budgets: configurable and toppable-up', () => {
 		};
 		// Phase is only rewritten for gave-up; anything else is left alone.
 		assert.strictEqual(grantMoreBudget(running).phase, 'needs-start');
+	});
+});
+
+suite('autoPilotMachine: exercise is not starved by a stuck service', () => {
+	const ledger = initialPipelineLedger();
+
+	test('a service still on its FIRST setup attempt is worth waiting for', () => {
+		const services = [svc({ name: 'api', setupAttempts: 0 }), svc({ name: 'web', phase: 'green' })];
+		// Services first while bring-up is making progress: every service that
+		// comes up adds endpoints for the exercise pass to drive.
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), {
+			kind: 'setup',
+			service: 'api',
+		});
+	});
+
+	test('a service RETRYING setup no longer blocks exercise', () => {
+		const services = [svc({ name: 'api', setupAttempts: 2 }), svc({ name: 'web', phase: 'green' })];
+		// The regression: 'api' retried within budget forever and testing never
+		// ran, even though 'web' was up and serving the whole time.
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
+	});
+
+	test('with nothing green, a retry is not preempted — an empty pass proves nothing', () => {
+		const services = [svc({ name: 'api', setupAttempts: 2 })];
+		// The exerciser drives live services on their ports, so exercising with
+		// nothing up reports 0/N covered and "no issues" — a pass that tested
+		// nothing, banked as done. Keep fixing bring-up instead.
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), {
+			kind: 'setup',
+			service: 'api',
+		});
+	});
+
+	test('a CLI/library workspace still reaches exercise', () => {
+		// Nothing is green and nothing ever will be, but 'library' is terminal, so
+		// the scheduler drains to exercise rather than stalling. The green gate
+		// above only guards preemption of an in-flight retry — it must not make
+		// exercise unreachable for workspaces that never serve anything.
+		const services = [svc({ name: 'cli', phase: 'library' })];
+		assert.deepStrictEqual(planPipelineAction(true, services, ledger), { kind: 'exercise' });
+	});
+
+	test('exercise is scheduled once, not re-entered after it has run', () => {
+		const services = [svc({ name: 'api', setupAttempts: 2 }), svc({ name: 'web', phase: 'green' })];
+		const after = { ...ledger, exercise: 'done' as const };
+		assert.deepStrictEqual(planPipelineAction(true, services, after), {
+			kind: 'setup',
+			service: 'api',
+		});
 	});
 });
