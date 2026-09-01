@@ -17,6 +17,7 @@ from pathlib import Path
 from exerciser import store
 from exerciser.invocations import (
     expand_invocation,
+    read_services,
     resolved_command,
     run_invocations,
     service_invocations,
@@ -530,3 +531,109 @@ def test_a_template_that_cannot_be_filled_is_reported_not_run(tmp_path: Path) ->
     assert row["error_type"] == "MalformedInvocation"
     assert "no such parameter" in row["error"]
     assert result["failures"] == 1
+
+
+def test_expect_exit_is_backfilled_from_the_verified_bringup_record(tmp_path: Path) -> None:
+    """A verified non-zero exit is not a defect just because the agent omitted it.
+
+    ``services.json`` is written before anything runs and ``expect_exit`` is
+    optional there, so it defaults to 0. ``start_commands/<service>.json`` is
+    written after bring-up VERIFIED each invocation, so it is the only file that
+    knows a command exits 3 on purpose. Reading only the inventory reported four
+    of one real repo's fourteen CLI invocations — documented exits of 10, 3, 10
+    and 2 — as errors while they behaved exactly as designed.
+    """
+    repo = _repo(tmp_path, [])
+    service = _cli_service(
+        repo,
+        [
+            {"id": "stats", "command": f'"{_PY}" -m acme.tool 3 3'},
+            {"id": "report", "command": f'"{_PY}" -m acme.tool 3 0'},
+            {"id": "declared", "command": f'"{_PY}" -m acme.tool 3 1', "expect_exit": 1},
+        ],
+    )
+    (repo / ".vinv" / "services.json").write_text(
+        json.dumps({"services": [service]}), encoding="utf-8"
+    )
+    (repo / ".vinv" / "start_commands").mkdir()
+    (repo / ".vinv" / "start_commands" / "acme-tool.json").write_text(
+        json.dumps(
+            {
+                "service": "acme-tool",
+                "invocations": [
+                    {"id": "stats", "expect_exit": 3},
+                    # The agent already declared 1 for this one; the record
+                    # disagreeing must not override an explicit declaration.
+                    {"id": "declared", "expect_exit": 9},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    by_id = {
+        inv["id"]: inv["expect_exit"]
+        for svc in read_services(repo)
+        for inv in service_invocations(svc, repo)
+    }
+    assert by_id["stats"] == 3, "verified exit code should fill the gap the agent left"
+    assert by_id["report"] == 0, "an invocation the record says nothing about stays at 0"
+    assert by_id["declared"] == 1, "an explicit declaration outranks the observed run"
+
+
+def test_expect_exit_survives_a_missing_bringup_record(tmp_path: Path) -> None:
+    """No start_commands file (never brought up) must not break the read."""
+    repo = _repo(tmp_path, [])
+    service = _cli_service(repo, [{"id": "solo", "command": f'"{_PY}" -m acme.tool 3 0'}])
+    (repo / ".vinv" / "services.json").write_text(
+        json.dumps({"services": [service]}), encoding="utf-8"
+    )
+    invocations = [inv for svc in read_services(repo) for inv in service_invocations(svc, repo)]
+    assert [inv["expect_exit"] for inv in invocations] == [0]
+
+
+def test_cli_invocation_gets_a_static_root_from_its_own_trace(tmp_path: Path) -> None:
+    """A CLI unit must not report 0/0 for want of a root to measure against.
+
+    endpoint_coverage roots its static tree at a handler (HTTP) or a
+    module:qualname target (a driven call). A CLI invocation has neither — its
+    api_id is a slug like "svc#stats" — so it arrived with no root and every
+    unit reported covered=0/total=0 however much ran. On a real customer repo
+    that showed 0/14 covered and symbols_total=0 against captures holding
+    thousands of spans.
+
+    The capture names its own entry: the shallowest `enter` is where the run
+    crossed into the instrumented package.
+    """
+    from exerciser.coverage import root_symbol_in_trace
+
+    trace = tmp_path / "run.trace.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"event": "tracer_calibration"},
+                # Deliberately out of order: the deepest span is written first,
+                # so taking "the first enter" rather than the shallowest would
+                # root the tree at a leaf helper.
+                {"event": "enter", "component": "acme.util.helper", "depth": 3},
+                {"event": "enter", "component": "acme.cli.main", "depth": 0},
+                {"event": "exit", "component": "acme.cli.main", "depth": 0},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    root = root_symbol_in_trace(tmp_path, trace=str(trace))
+    assert root == "acme.cli.main", "the shallowest enter is the entry point, not the first line"
+
+
+def test_root_symbol_is_none_without_a_usable_capture(tmp_path: Path) -> None:
+    """No trace, or a trace with no spans, degrades to None rather than raising."""
+    from exerciser.coverage import root_symbol_in_trace
+
+    assert root_symbol_in_trace(tmp_path, trace=str(tmp_path / "missing.jsonl")) is None
+    empty = tmp_path / "empty.trace.jsonl"
+    empty.write_text(json.dumps({"event": "gc_pause"}) + "\n", encoding="utf-8")
+    assert root_symbol_in_trace(tmp_path, trace=str(empty)) is None

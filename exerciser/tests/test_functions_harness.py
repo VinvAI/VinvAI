@@ -1607,3 +1607,84 @@ def test_a_credential_in_an_import_error_never_reaches_a_cluster(tmp_path: Path)
     assert leaked not in json.dumps(result), "and the run summary the CLI prints"
     # The diagnostic value of the message survives — only the value is gone.
     assert "validation error for Settings" in persisted
+
+
+# ---- a nested distribution under a non-identifier directory ----------------
+#
+# A workspace opened one level ABOVE the Python project. Entry points are
+# recorded workspace-relative ("proj-dir/pkg/mod.py"), so the leading directory
+# becomes part of the module path — and a hyphen is not a valid identifier.
+# Every entry point then resolves to None and discovery skips it as
+# "not-an-importable-module", which is how a real repo reported 0 function
+# targets from 99 catalogued entry points while its index was fully built.
+
+
+def _nested_project(tmp_path: Path, *, packaged: bool) -> Path:
+    """A workspace whose project lives in a HYPHENATED subdirectory."""
+    repo = tmp_path / "workspace"
+    pkg = repo / "claude-obsidian" / "claude_obsidian"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "cli.py").write_text("def main() -> int:\n    return 0\n", encoding="utf-8")
+    if packaged:
+        (repo / "claude-obsidian" / "pyproject.toml").write_text(
+            '[project]\nname = "claude-obsidian"\nversion = "0"\n', encoding="utf-8"
+        )
+    return repo
+
+
+def test_a_hyphenated_directory_is_not_importable_without_packaging_metadata(tmp_path):
+    """The failure mode, pinned: no marker means the only root is the repo."""
+    repo = _nested_project(tmp_path, packaged=False)
+
+    roots = detect_src_roots(repo)
+
+    assert roots == ["."], "a tree with no distribution marker has only the repo root"
+    # "claude-obsidian" is not a Python identifier, so the whole path is
+    # unimportable — the segment cannot appear in a module name.
+    assert module_name_for("claude-obsidian/claude_obsidian/cli.py", roots) is None
+
+
+def test_packaging_metadata_makes_the_nested_project_importable(tmp_path):
+    """And the fix: the marker promotes the directory to an import root."""
+    repo = _nested_project(tmp_path, packaged=True)
+
+    roots = detect_src_roots(repo)
+
+    assert "claude-obsidian" in roots, "a pyproject.toml marks a distribution root"
+    # With the prefix stripped BEFORE the identifier check, what is left is the
+    # package itself — which is importable, hyphen or not in the folder above.
+    assert module_name_for("claude-obsidian/claude_obsidian/cli.py", roots) == "claude_obsidian.cli"
+
+
+def test_an_unimportable_entrypoint_is_skipped_with_its_reason(tmp_path):
+    """Discovery must RECORD why, not just report zero targets.
+
+    The campaign's diagnostic guesses ("is the code index built?") while the
+    reason is already known; a caller can only surface the real cause if
+    discovery keeps it.
+    """
+    repo = _nested_project(tmp_path, packaged=False)
+    (repo / ".vinv").mkdir()
+    (repo / ".vinv" / "identification").mkdir()
+    (repo / ".vinv" / "identification" / "apis.json").write_text(
+        json.dumps(
+            {
+                "apis": [],
+                "entrypoints": [
+                    {
+                        "kind": "cli_command",
+                        "file": "claude-obsidian/claude_obsidian/cli.py",
+                        "handler": "main",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    targets, skipped = discover_targets(repo)
+
+    assert targets == [], "an unimportable module must not be driven"
+    assert [s["reason"] for s in skipped] == ["not-an-importable-module"]
+    assert skipped[0]["id"] == "claude-obsidian/claude_obsidian/cli.py"

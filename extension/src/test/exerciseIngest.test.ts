@@ -249,6 +249,10 @@ suite('exerciseIngest: artifacts and provenance', () => {
 			total: 3,
 			invariants: 7,
 			issues: 1,
+			// Empty here on purpose: this scorecard predates units_by_kind and
+			// carries no unit list to count, which is exactly the shape an
+			// ingested or older run has. The summary must still read it.
+			unitsByKind: {},
 		});
 	});
 

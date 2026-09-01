@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import store
-from .coverage import endpoint_coverage
+from .coverage import endpoint_coverage, root_symbol_in_trace
 from .invariants import Observation, learn_invariants
 from .optimize import detect_opportunities
 
@@ -106,7 +106,15 @@ def _endpoint_profile(
     # A driven call is not a declared entry point, so there is no api_id to look
     # up — its `module:qualname` target IS the root. Passed as the fallback, so
     # a unit that does happen to be declared still resolves that way first.
-    unit_symbol = api_id if ep_execs and ep_execs[0].get("unit_kind") == "function_call" else None
+    unit_kind = ep_execs[0].get("unit_kind") if ep_execs else None
+    unit_symbol = api_id if unit_kind == "function_call" else None
+    if unit_kind == "cli_invocation":
+        # A CLI invocation has neither: no declared handler, and an api_id that
+        # is a slug ("svc#stats"), not a symbol. With no root the static tree
+        # cannot be built, so the unit reported 0/0 no matter how much ran —
+        # which is how a repo of pure CLIs showed zero coverage against traces
+        # holding thousands of spans. The capture names its own entry point.
+        unit_symbol = root_symbol_in_trace(repo, service=service, trace=unit_trace)
 
     cov = endpoint_coverage(
         repo,
