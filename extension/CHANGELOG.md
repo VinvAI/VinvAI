@@ -5,6 +5,12 @@ and CI are not listed here.
 This project follows [Keep a Changelog](https://keepachangelog.com/) and
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.14] — 2026-09-01
+
+### 🐛 Fixed
+
+- **CLI and library projects are measured correctly** — they reported 0 covered and no issues even when every command ran, kept those findings out of the Findings view, and flagged documented non-zero exits as errors.
+
 ## [0.2.12] — 2026-08-31
 
 ### 🔧 Changed
