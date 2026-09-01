@@ -157,6 +157,56 @@ def handler_observed_in_trace(
     return any(comp == handler or comp.endswith(suffix) for comp in scan.components)
 
 
+def root_symbol_in_trace(
+    repo: Path,
+    *,
+    service: str | None = None,
+    trace: str | None = None,
+) -> str | None:
+    """The outermost instrumented symbol a capture entered, or None.
+
+    A CLI invocation has no declared handler and no ``module:qualname`` target,
+    so it reached :func:`endpoint_coverage` with no root for the static tree —
+    and a unit with no denominator reports 0/0 however much of it ran. That is
+    why a repo whose every unit is a CLI invocation showed zero coverage while
+    its traces held thousands of spans.
+
+    The trace itself names the root: tracelens instruments one target package,
+    so the shallowest ``enter`` is where the run crossed into it. A wrapper
+    script outside the package leaves several depth-0 entries rather than one
+    (each top-level call into the package is its own root); the first is taken,
+    which is the entry the run actually began at. That yields a real reachable
+    set to measure against instead of nothing.
+    """
+    try:
+        path = _resolve_trace_file(Path(repo), service, trace)
+    except (FileNotFoundError, OSError):
+        return None
+    best: tuple[int, str] | None = None
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"component"' not in line or '"enter"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict) or ev.get("event") != "enter":
+                    continue
+                comp, depth = ev.get("component"), ev.get("depth")
+                if not isinstance(comp, str) or not comp:
+                    continue
+                level = depth if isinstance(depth, int) and not isinstance(depth, bool) else 0
+                if best is None or level < best[0]:
+                    best = (level, comp)
+                if best[0] == 0:
+                    break
+    except OSError:
+        return None
+    return best[1] if best else None
+
+
 def _normalize_handler(handler: str | None) -> str | None:
     """Display-form handler ("items-read_items()") → bare function name."""
     if not handler:

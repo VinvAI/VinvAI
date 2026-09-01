@@ -590,3 +590,50 @@ def test_expect_exit_survives_a_missing_bringup_record(tmp_path: Path) -> None:
     )
     invocations = [inv for svc in read_services(repo) for inv in service_invocations(svc, repo)]
     assert [inv["expect_exit"] for inv in invocations] == [0]
+
+
+def test_cli_invocation_gets_a_static_root_from_its_own_trace(tmp_path: Path) -> None:
+    """A CLI unit must not report 0/0 for want of a root to measure against.
+
+    endpoint_coverage roots its static tree at a handler (HTTP) or a
+    module:qualname target (a driven call). A CLI invocation has neither — its
+    api_id is a slug like "svc#stats" — so it arrived with no root and every
+    unit reported covered=0/total=0 however much ran. On a real customer repo
+    that showed 0/14 covered and symbols_total=0 against captures holding
+    thousands of spans.
+
+    The capture names its own entry: the shallowest `enter` is where the run
+    crossed into the instrumented package.
+    """
+    from exerciser.coverage import root_symbol_in_trace
+
+    trace = tmp_path / "run.trace.jsonl"
+    trace.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [
+                {"event": "tracer_calibration"},
+                # Deliberately out of order: the deepest span is written first,
+                # so taking "the first enter" rather than the shallowest would
+                # root the tree at a leaf helper.
+                {"event": "enter", "component": "acme.util.helper", "depth": 3},
+                {"event": "enter", "component": "acme.cli.main", "depth": 0},
+                {"event": "exit", "component": "acme.cli.main", "depth": 0},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    root = root_symbol_in_trace(tmp_path, trace=str(trace))
+    assert root == "acme.cli.main", "the shallowest enter is the entry point, not the first line"
+
+
+def test_root_symbol_is_none_without_a_usable_capture(tmp_path: Path) -> None:
+    """No trace, or a trace with no spans, degrades to None rather than raising."""
+    from exerciser.coverage import root_symbol_in_trace
+
+    assert root_symbol_in_trace(tmp_path, trace=str(tmp_path / "missing.jsonl")) is None
+    empty = tmp_path / "empty.trace.jsonl"
+    empty.write_text(json.dumps({"event": "gc_pause"}) + "\n", encoding="utf-8")
+    assert root_symbol_in_trace(tmp_path, trace=str(empty)) is None
