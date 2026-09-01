@@ -12,6 +12,11 @@ One click runs, in a visible terminal:
 ```
 git clone <vinv monorepo> ~/.vinv/engines
 cd ~/.vinv/engines && uv sync
+cargo build --release --manifest-path index/Cargo.toml
 ```
 
-Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). Already have the monorepo checked out? Vinv finds it automatically — nothing to install. You can also point Vinv at any checkout with the `vinv.enginesPath` setting.
+Needs [uv](https://docs.astral.sh/uv/getting-started/installation/), [Rust](https://rustup.rs) and git. Whichever of uv and Rust is missing installs first, in the same terminal — you do not have to run anything yourself or click Install again.
+
+Budget about 3 minutes, most of it compiling the Rust index. Code search also fetches a one-time ~100 MB embedding model the first time you use it.
+
+Already have the monorepo checked out? Vinv finds it automatically — nothing to clone. You can also point Vinv at any checkout with the `vinv.enginesPath` setting.
