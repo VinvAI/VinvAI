@@ -1,0 +1,24 @@
+name: openvsx-stats
+
+# One row a day, appended to openvsx.csv. Open VSX publishes a running TOTAL,
+# not a daily figure, so the daily number is the difference between two rows —
+# which only exists if something records the total every day.
+on:
+  schedule: [{ cron: "0 0 * * *" }]
+  workflow_dispatch:
+
+# The default GITHUB_TOKEN is read-only, so without this the push 403s and the
+# workflow fails every night having done the work.
+permissions:
+  contents: write
+
+jobs:
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          c=$(curl -s https://open-vsx.org/api/VinvAI/VinvAI | jq '.downloadCount')
+          echo "$(date -u +%F),$c" >> openvsx.csv
+          git config user.name bot; git config user.email bot@vinv.ai
+          git add openvsx.csv; git commit -m "snap $(date -u +%F)"; git push
