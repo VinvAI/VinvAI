@@ -22,7 +22,6 @@ import click
 from . import store
 from .campaign import run_campaign
 from .concurrency import run_concurrency
-from .containment import detect_containment, parse_tier
 from .differential import run_differential
 from .environment import run_environment
 from .faults import run_faults
@@ -32,7 +31,6 @@ from .plan import build_plan
 from .profile import build_profile
 from .regress import replay_suite
 from .run import run_exercise
-from .sandbox import DEFAULT_MAX_COPY_MB, SandboxPolicy
 from .scorecard import build_scorecard
 from .throughput import pick_sweep_endpoint, run_sweep, sweep_path
 from .usl import fit_usl
@@ -80,13 +78,10 @@ verify every endpoint of a service.
   2. exerciser run <repo> --base-url http://127.0.0.1:PORT
        Execute the plan against the live traced service, coverage-guided.
        Writes results.jsonl, bandit.json, issues.json, baselines/*.
-  3. exerciser functions <repo> [--no-sandbox] [--require-tier TIER] [--no-services]
+  3. exerciser functions <repo> [--no-services]
        Drive catalogued entry points and exported functions. Verified-pure
        targets run IN PROCESS (isolated workers, per-module deadline); every
-       target the purity guard could NOT verify is routed through containment
-       automatically. Writes functions.json, function_results.jsonl. Needs no
-       running service. --no-sandbox leaves the unverified set refused;
-       `exerciser containment` reports which tier this host can provide.
+       target the purity guard could not verify stays refused and undriven.
   4. exerciser invocations <repo> [--service X]
        Run each invocation `.vinv/services.json` records for a `python_cli` or
        `python_library` service, wrapped in tracelens. This is what exercises a
@@ -194,45 +189,6 @@ def run_cmd(repo_path, base_url, service, store_dir, budget, rounds, seed, settl
 )
 @click.option("--python", default=None, help="Interpreter for the workers (default: this one).")
 @click.option(
-    "--sandbox/--no-sandbox",
-    default=True,
-    show_default=True,
-    help=(
-        "Route the targets the purity guard could not verify through containment "
-        "(the default). Containment is the strongest wall this host offers: an OS "
-        "sandbox where one is available, otherwise the Python shim — plus a "
-        "disposable copy of the repo, redirected HOME/TMPDIR/XDG_*, blocked "
-        "network and subprocess spawning, POSIX rlimits. --no-sandbox leaves that "
-        "whole set REFUSED and undriven; it never runs them loose."
-    ),
-)
-@click.option(
-    "--require-tier",
-    type=click.Choice(["os-sandbox", "process-shim"]),
-    default=None,
-    help=(
-        "Refuse the run rather than accept a weaker containment tier. "
-        "'os-sandbox' demands a kernel-enforced wall (sandbox-exec/bwrap/unshare)."
-    ),
-)
-@click.option(
-    "--max-tier",
-    type=click.Choice(["os-sandbox", "process-shim"]),
-    default=None,
-    help="Cap containment at this tier (for reproducing weaker-tier behaviour).",
-)
-@click.option(
-    "--sandbox-max-copy-mb",
-    default=DEFAULT_MAX_COPY_MB,
-    show_default=True,
-    help="Refuse to sandbox a repo whose copy would exceed this size.",
-)
-@click.option(
-    "--sandbox-keep-root",
-    is_flag=True,
-    help="Leave the sandbox tree on disk for inspection instead of discarding it.",
-)
-@click.option(
     "--services/--no-services",
     default=True,
     show_default=True,
@@ -285,11 +241,6 @@ def functions_cmd(
     max_targets,
     module_timeout,
     python,
-    sandbox,
-    require_tier,
-    max_tier,
-    sandbox_max_copy_mb,
-    sandbox_keep_root,
     services,
     seed_rows,
     trace,
@@ -297,19 +248,6 @@ def functions_cmd(
     verbose,
 ):
     _configure_logging(verbose)
-    policy = (
-        SandboxPolicy(
-            enabled=True,
-            max_copy_mb=sandbox_max_copy_mb,
-            keep_root=sandbox_keep_root,
-            require_tier=parse_tier(require_tier),
-            max_tier=parse_tier(max_tier),
-            synthesize_services=services,
-            seed_rows=max(0, seed_rows),
-        )
-        if sandbox
-        else None
-    )
     try:
         result = run_functions(
             Path(repo_path),
@@ -317,8 +255,6 @@ def functions_cmd(
             max_targets=max_targets,
             module_timeout_s=module_timeout,
             python=python,
-            sandbox=sandbox,
-            sandbox_policy=policy,
             trace=trace,
             # None, not [], when unset: `only_targets=[]` filters every target
             # away and reports a clean zero, which is indistinguishable from a
@@ -370,30 +306,6 @@ def invocations_cmd(repo_path, service, timeout, trace, verbose):
         _emit({"status": "error", "error": str(exc), "repo_path": repo_path})
         return
     _emit(result)
-
-
-@main.command("containment")
-@click.option("--python", default=None, help="Interpreter to probe with (default: this one).")
-@click.option(
-    "--allow-network",
-    is_flag=True,
-    help="Probe without demanding a network wall (a policy that permits sockets).",
-)
-@click.option("-v", "--verbose", is_flag=True, help="INFO logging to stderr.")
-def containment_cmd(python, allow_network, verbose):
-    """Report which containment tier this host can actually provide, and why.
-
-    The answer comes from a PROBE — the candidate mechanism is run on a trivial
-    command and checked to have really blocked a write outside its root — never
-    from the presence of a binary on PATH.
-    """
-    _configure_logging(verbose)
-    mechanism = detect_containment(
-        block_network=not allow_network,
-        python=python,
-        logger=logging.getLogger("exerciser.containment"),
-    )
-    _emit({"status": "ok", "platform": sys.platform, **mechanism.to_json()})
 
 
 @main.command("differential")
