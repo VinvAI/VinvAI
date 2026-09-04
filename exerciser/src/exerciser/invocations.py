@@ -61,7 +61,7 @@ def _tail(text: str | None) -> str:
     return redact_text(trimmed) if len(text) <= _TAIL_CHARS else "…" + redact_text(trimmed)
 
 
-def _verified_expect_exits(repo: Path, service_name: Any) -> dict[str, int]:
+def _verified_invocations(repo: Path, service_name: Any) -> dict[str, dict[str, Any]]:
     """``id -> expect_exit`` from a service's verified bring-up record.
 
     ``services.json`` is the inventory the AGENT writes, before anything has
@@ -80,18 +80,14 @@ def _verified_expect_exits(repo: Path, service_name: Any) -> dict[str, int]:
     doc = store.read_json(repo / ".vinv" / "start_commands" / f"{service_name}.json") or {}
     if not isinstance(doc, dict):
         return {}
-    out: dict[str, int] = {}
+    out: dict[str, dict[str, Any]] = {}
     for inv in doc.get("invocations") or []:
         if not isinstance(inv, dict):
             continue
-        ident, expect = inv.get("id"), inv.get("expect_exit")
-        if (
-            isinstance(ident, str)
-            and ident.strip()
-            and isinstance(expect, int)
-            and not isinstance(expect, bool)
-        ):
-            out[ident.strip()] = expect
+        ident = inv.get("id")
+        if not isinstance(ident, str) or not ident.strip():
+            continue
+        out[ident.strip()] = inv
     return out
 
 
@@ -114,19 +110,33 @@ def read_services(repo: Path) -> list[dict[str, Any]]:
         s for s in services if isinstance(s, dict) and s.get("kind") in _RUN_TO_COMPLETION_KINDS
     ]
     for svc in kept:
-        verified = _verified_expect_exits(repo, svc.get("name"))
+        verified = _verified_invocations(repo, svc.get("name"))
         if not verified:
             continue
         invocations = svc.get("invocations")
         if not isinstance(invocations, list):
             continue
         for inv in invocations:
-            # Only fill a GAP: an expect_exit the agent stated explicitly is a
+            if not isinstance(inv, dict):
+                continue
+            ident = inv.get("id")
+            record = verified.get(ident.strip()) if isinstance(ident, str) else None
+            if record is None:
+                continue
+            # Only fill GAPS: anything the agent stated explicitly is a
             # deliberate declaration and outranks the observed run.
-            if isinstance(inv, dict) and not isinstance(inv.get("expect_exit"), int):
-                ident = inv.get("id")
-                if isinstance(ident, str) and ident.strip() in verified:
-                    inv["expect_exit"] = verified[ident.strip()]
+            expect = record.get("expect_exit")
+            if not isinstance(inv.get("expect_exit"), int) and isinstance(expect, int):
+                inv["expect_exit"] = expect
+            # `params` matters more than it looks. `resolved_command` returns a
+            # command VERBATIM when the invocation declares none, so an
+            # invocation that lost its params block does not fail to render - it
+            # runs with a literal `{vault}` in argv, argparse exits 2, and the
+            # harness reports the repo as broken. Observed: 9 of 12 CLI units
+            # on one repo, every one of them a false finding.
+            params = record.get("params")
+            if not inv.get("params") and isinstance(params, list) and params:
+                inv["params"] = [dict(prm) for prm in params if isinstance(prm, dict)]
     return kept
 
 

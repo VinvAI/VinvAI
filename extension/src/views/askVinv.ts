@@ -8,6 +8,7 @@
  * bandit ledger as explicit rewards.
  */
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi, trackViewOpened } from '../telemetry/instrument';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
 import { openPathInEditor } from '../support/openDocument';
 import { buildGraphSnapshot, hasIndexStore } from '../graph/indexGraph';
@@ -390,6 +391,7 @@ export function openAskVinv(
 		postSeedLabel(workspaceRoot);
 		return;
 	}
+	trackViewOpened('ask_vinv');
 	panel = vscode.window.createWebviewPanel('vinv.askVinv', 'Ask Vinv', vscode.ViewColumn.Beside, {
 		enableScripts: true,
 		retainContextWhenHidden: true,
@@ -442,8 +444,10 @@ export function openAskVinv(
 		}
 		const raw = msg as { type?: string; message?: unknown; stack?: unknown };
 		if (raw.type === 'webviewError') {
+			reportWebviewError('ask_vinv', raw);
 			return;
 		}
+		trackUi('ask_vinv', raw.type ?? 'unknown');
 		// Stateless open/command messages route through the extracted, tested
 		// handler; the switch below owns the stateful ones.
 		if (await handleAskVinvAction(msg, askActions)) {

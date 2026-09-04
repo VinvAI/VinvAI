@@ -13,8 +13,8 @@
  */
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { getHarnessId } from '../config/settings';
-import { allowlist, bucketCount } from './sanitize';
+import { getHarnessId, hasChosenHarness } from '../config/settings';
+import { allowlist, bucketCount, messageDigest } from './sanitize';
 
 /**
  * The PostHog project API key.
@@ -54,18 +54,58 @@ function hash(value: string, length: number): string {
 		.slice(0, length);
 }
 
-/** Editors that ship the VS Code extension API. Anything else is 'other'. */
-const KNOWN_EDITORS = ['code', 'cursor', 'windsurf', 'vscodium', 'positron'] as const;
+/**
+ * Editors that ship the VS Code extension API, as (id, appName substring) pairs.
+ *
+ * ORDER MATTERS, and the generic `visual studio code` match is deliberately
+ * LAST. Forks routinely keep the upstream name somewhere in `appName`, so a
+ * first-match-wins list that leads with the generic pattern files every one of
+ * them as plain VS Code.
+ *
+ * `code - oss` needs its own row for the opposite reason: the open-source build
+ * of VS Code does NOT contain the string `visual studio code`, so it fell
+ * through to 'other' — the bucket meant for editors we have never heard of.
+ */
+const EDITOR_MATCHERS: ReadonlyArray<readonly [id: string, needle: string]> = [
+	['cursor', 'cursor'],
+	['windsurf', 'windsurf'],
+	['vscodium', 'vscodium'],
+	['positron', 'positron'],
+	['trae', 'trae'],
+	['kiro', 'kiro'],
+	['antigravity', 'antigravity'],
+	['void', 'void'],
+	['firebase_studio', 'firebase studio'],
+	['theia', 'theia'],
+	['code_server', 'code-server'],
+	['openvscode', 'openvscode'],
+	['code_oss', 'code - oss'],
+	['code', 'visual studio code'],
+];
 
 /** Maps the (user-editable, unbounded) appName onto a closed set. */
 function editorId(): string {
 	const name = vscode.env.appName.toLowerCase();
-	for (const known of KNOWN_EDITORS) {
-		if (name.includes(known === 'code' ? 'visual studio code' : known)) {
-			return known;
+	for (const [id, needle] of EDITOR_MATCHERS) {
+		if (name.includes(needle)) {
+			return id;
 		}
 	}
 	return 'other';
+}
+
+/**
+ * A one-way fingerprint of the raw `appName`, so 'other' stays GROUPABLE.
+ *
+ * The closed set above is what keeps cardinality bounded, but it has a cost
+ * that only shows up in the data: every unrecognised editor collapses into one
+ * 'other' bucket, and there is then no way to tell whether that bucket is one
+ * fork or five — or which one to add to the list next. The digest restores that
+ * without sending the string: identical editors share a digest, and the name it
+ * was computed from never leaves the machine.
+ */
+function editorDigest(): string {
+	return messageDigest(vscode.env.appName);
 }
 
 let commonProps: Record<string, string | number | boolean> = {};
@@ -142,6 +182,7 @@ export function initCommonProps(context: vscode.ExtensionContext): void {
 		extension_version: String(context.extension.packageJSON.version ?? 'unknown'),
 		vscode_version: vscode.version,
 		editor: editorId(),
+		editor_digest: editorDigest(),
 		app_host: allowlist(vscode.env.appHost, ['desktop', 'web', 'codespaces'] as const),
 		ui_kind: vscode.env.uiKind === vscode.UIKind.Web ? 'web' : 'desktop',
 		// Whether the workspace is remote, never which remote — the name can
@@ -156,11 +197,22 @@ export function initCommonProps(context: vscode.ExtensionContext): void {
 	};
 }
 
-/** The common bag, plus the values that genuinely do change during a window. */
+/**
+ * The common bag, plus the values that genuinely do change during a window.
+ *
+ * `harness_chosen` travels beside `harness_id` because `getHarnessId` FALLS BACK
+ * to claude-code when nothing is configured (see config/settings.ts). Without
+ * the flag the two states are one value in the data: a user who picked
+ * claude-code and a user who has picked nothing at all report identically, so
+ * every rate broken down by harness silently folds the second group into the
+ * first — and the second group is the one that never gets past the first-run
+ * picker.
+ */
 export function withCommonProps(props: Record<string, unknown>): Record<string, unknown> {
 	return {
 		...commonProps,
 		harness_id: getHarnessId(),
+		harness_chosen: hasChosenHarness(),
 		install_age_days: bucketCount(installAgeDays()),
 		...props,
 	};

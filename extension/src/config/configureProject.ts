@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { trackUi, trackViewOpened } from '../telemetry/instrument';
 import * as crypto from 'crypto';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from '../views/webviewTheme';
 import {
@@ -52,6 +53,7 @@ interface InboundMessage {
 }
 
 export function openConfigureForm(context: vscode.ExtensionContext): void {
+	trackViewOpened('configure');
 	const panel = vscode.window.createWebviewPanel(
 		'vinv.configure',
 		'Configure Vinv Project',
@@ -122,6 +124,7 @@ export function openConfigureForm(context: vscode.ExtensionContext): void {
 
 	panel.webview.onDidReceiveMessage(
 		async (message: InboundMessage) => {
+			trackUi('configure', message.type);
 			switch (message.type) {
 				case 'saveHarness': {
 					if (message.harnessId) {

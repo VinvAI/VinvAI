@@ -30,17 +30,57 @@ import {
 } from './views/nextStep';
 import { ensureVinvGitignored } from './config/gitignore';
 import { registerDetectedTargets, registerNativeVsCodeProvider } from './mcp/mcpRegistrar';
-import { isMcpEnabled } from './config/settings';
+import { getHarnessId, hasChosenHarness, isMcpEnabled } from './config/settings';
 import {
 	enginesReady,
 	maybeOfferEmbedderWarmup,
+	reconcileEnginesInstall,
 	registerEnginesCommands,
 } from './engines/install';
+import { cargoPath, gitPath, uvPath } from './engines/resolve';
+import { quickScanHarnesses } from './harness/harnessRunner';
+import { isHandbookGenerated } from './handbook/handbook';
 import { maybeUpdateEngines, registerEngineUpdate } from './engines/update';
 import { maybeShowNotices } from './notices/notices';
 import { stopEmbedderIfStarted } from './embedder/sidecar';
+import { isProjectIndexed } from './index/indexing';
+import { readServices } from './bringup/bringup';
+import {
+	bucketCount,
+	bucketMs,
+	classifyError,
+	initTelemetry,
+	isFirstEverInstall,
+	shutdownTelemetry,
+	track,
+} from './telemetry';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+	const activationStarted = Date.now();
+
+	// Usage telemetry. First, so that anything below it can report — and
+	// deliberately not awaited: it returns synchronously and cannot throw, so a
+	// telemetry problem can never become an activation problem. See the header
+	// of src/telemetry/index.ts for what is and is not sent.
+	initTelemetry(context);
+
+	// Beta builds only (VINV_TELEMETRY_FORCE=1). Silently ensure the editor's
+	// extension auto-update is on, so the beta cohort picks up new builds without
+	// a prompt. Compiled out of a normal `npm run package` — a public release
+	// must never rewrite a user's global settings. `true` is VS Code's own
+	// default, so for most installs this is a no-op; it only re-enables it where
+	// the user had turned it off.
+	if (process.env.VINV_TELEMETRY_FORCE === '1') {
+		try {
+			const extCfg = vscode.workspace.getConfiguration('extensions');
+			if (extCfg.get('autoUpdate') !== true) {
+				void extCfg.update('autoUpdate', true, vscode.ConfigurationTarget.Global);
+			}
+		} catch {
+			// Settings can be policy-locked; never worth failing activation over.
+		}
+	}
+
 	// On activation (install / window reload), reveal the Vinv sidebar so users
 	// land on it rather than the default Explorer.
 	void vscode.commands.executeCommand('workbench.view.extension.vinv');
@@ -61,6 +101,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		} catch {
 			// Read-only install dir: worst case the welcome reopens next reload.
 		}
+		// The marker lives in the install dir, which VS Code replaces on update
+		// as well as on first install — so this fires for both, and the
+		// telemetry firstSeen stamp (globalState, which survives updates) is
+		// what separates them.
+		track('welcome_shown', { is_update: !isFirstEverInstall() });
 		void vscode.commands.executeCommand(
 			'workbench.action.openWalkthrough',
 			'VinvAI.VinvAI#vinv.gettingStarted',
@@ -85,15 +130,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			)
 			.then((choice) => {
 				if (choice === '⭐ Star on GitHub') {
+					track('oss_toast_action', { action: 'star' });
 					void vscode.env.openExternal(vscode.Uri.parse('https://github.com/VinvAI/VinvAI'));
 				} else if (choice === 'Get Started') {
+					track('oss_toast_action', { action: 'get_started' });
 					void vscode.commands.executeCommand(
 						'workbench.action.openWalkthrough',
 						'VinvAI.VinvAI#vinv.gettingStarted',
 					);
+				} else {
+					track('oss_toast_action', { action: 'dismissed' });
 				}
 			});
 	}
+
+	// Did a previously started engines install ever finish? The terminal it runs
+	// in never reports back, so the answer has to be reconciled here, one
+	// activation later. See reconcileEnginesInstall.
+	reconcileEnginesInstall(context);
 
 	// The one-click engines install (git clone + uv sync in a terminal).
 	registerEnginesCommands(context);
@@ -113,8 +167,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 	// The one channel that reaches an install that is already broken: a static
 	// notices file, polled at most twice a day, filtered here, at most one toast.
-	// This is the extension's ONLY outbound request — a GET that uploads nothing —
-	// and it is silent when the endpoint is unreachable. Off with vinv.notices.enabled.
+	// A GET that uploads nothing, silent when the endpoint is unreachable. Off
+	// with vinv.notices.enabled. (It is no longer the extension's only outbound
+	// request — usage telemetry is the other; see src/telemetry/index.ts.)
 	void maybeShowNotices(context);
 
 	// Engines present? Offer the one-time embedding-model warmup so the first
@@ -248,6 +303,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}),
 	);
 
+	// The state of the installed base, once per window. `activation_ms` also
+	// holds this feature to its own number: telemetry is on the activation path,
+	// so it has to be able to show it is not the reason activation is slow.
+	reportActivation(context, activationStarted);
+
 	/** Registers Vinv's MCP servers into detected agent tools when the toggle is on. */
 	function syncMcpRegistration(): void {
 		if (!isMcpEnabled()) {
@@ -260,15 +320,84 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		try {
 			registerDetectedTargets(context, folder.uri.fsPath);
 		} catch (e) {
+			// Was console.error alone, which meant a failure to wire Vinv's MCP
+			// servers into the user's agent — the thing the whole product runs
+			// on — left no trace anyone would ever see.
+			track('mcp_registration_failed', { error_class: classifyError(e) });
 			console.error('Vinv: MCP auto-registration failed', e);
 		}
 	}
 }
 
-export function deactivate(): void {
+/**
+ * Emits the one event that describes this install's state. Reads the same
+ * observable facts the walkthrough contexts and the next-step compass read, so
+ * the funnel and the UI can never disagree about what stage a user is at.
+ *
+ * Everything here is filesystem-cheap and wrapped: a stat that throws must not
+ * take activation down with it.
+ */
+function reportActivation(context: vscode.ExtensionContext, startedAt: number): void {
+	try {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		let indexed = false;
+		let captures = false;
+		let services = 0;
+		if (root) {
+			try {
+				indexed = isProjectIndexed(root);
+				captures = fs.existsSync(path.join(root, '.vinv', 'captures'))
+					&& fs.readdirSync(path.join(root, '.vinv', 'captures')).length > 0;
+				services = readServices(root).length;
+			} catch {
+				// A partially written .vinv/ is normal mid-discovery.
+			}
+		}
+		track('app_activated', {
+			activation_ms: bucketMs(Date.now() - startedAt),
+			engines_installed: enginesReady(context),
+			project_indexed: indexed,
+			has_captures: captures,
+			services_count: bucketCount(services),
+			workspace_open: !!root,
+		});
+		// The full environment, alongside the activation row.
+		//
+		// Separate from app_activated because it answers a different question:
+		// that one is "did the extension start", this one is "could it possibly
+		// work". The two dead ends it exists for — no coding agent installed at
+		// all, and prerequisites missing so the engines can never build — produce
+		// no failure event of their own, because in both cases nothing ever runs
+		// far enough to fail.
+		const availability = quickScanHarnesses();
+		const installedHarnesses = Object.values(availability).filter(Boolean).length;
+		track('environment_probed', {
+			engines_installed: enginesReady(context),
+			has_git: !!gitPath(),
+			has_uv: !!uvPath(),
+			has_rust: !!cargoPath(),
+			any_harness_installed: installedHarnesses > 0,
+			harness_installed_count: installedHarnesses,
+			harness_chosen: hasChosenHarness(),
+			selected_harness_installed: availability[getHarnessId()] === true,
+			workspace_open: !!root,
+			project_indexed: indexed,
+			handbook_present: root ? isHandbookGenerated(root) : false,
+			services_present: services > 0,
+		});
+	} catch {
+		// Instrumentation must never be the reason activation fails.
+	}
+}
+
+export async function deactivate(): Promise<void> {
 	// Stop the embedding sidecar — only when this window was the one to start it.
 	stopEmbedderIfStarted();
 	// Tear down an in-flight exercise step. Without this, closing the window leaves
 	// the engine driving the user's service with no parent and no UI to stop it.
 	abortExerciseEngine();
+	// Last, and time-boxed: VS Code's shutdown window is short and not
+	// guaranteed, and losing a queued event is always preferable to delaying the
+	// two teardowns above, which leave real processes running if they are cut off.
+	await shutdownTelemetry(1500);
 }

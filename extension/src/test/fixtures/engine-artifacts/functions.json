@@ -71,13 +71,6 @@
   },
   "substitution_gaps": [],
   "exception_policy": {
-    "TypeError@stdlib": {
-      "defect_probability": 0.055,
-      "confident": false,
-      "label_mass": 0.0,
-      "targets": 1,
-      "occurrences": 1
-    },
     "ZeroDivisionError@stdlib": {
       "defect_probability": 0.335,
       "confident": false,
@@ -100,68 +93,7 @@
   ],
   "skipped_count": 2,
   "sandbox": {
-    "enabled": true,
-    "status": "ok",
-    "reason": "no impurity-only refusals to drive",
-    "policy": {
-      "enabled": true,
-      "max_copy_mb": 256.0,
-      "address_space_mb": 2048,
-      "max_open_files": 512,
-      "max_processes": null,
-      "block_network": true,
-      "block_subprocess": true,
-      "block_escaping_writes": true,
-      "honour_gitignore": false,
-      "synthesize_services": true,
-      "seed_rows": 1,
-      "require_tier": null,
-      "max_tier": null
-    },
-    "tier": "process-shim",
-    "containment": {
-      "tier": "process-shim",
-      "mechanism": "python-shim",
-      "tool": null,
-      "blocks_writes_outside_root": false,
-      "blocks_network": false,
-      "effects_complete": false,
-      "detail": "generated sitecustomize patches the Python entry points; the durable guarantee is the disposable tree and the copied repo",
-      "checks": [
-        "shim-loaded-in-worker"
-      ],
-      "fallback_reason": "no OS containment mechanism is known for platform 'win32'",
-      "guarantees": {
-        "writes_outside_root": "intercepted at the Python level (open/os.open/os.* family); a C extension calling open(2) is NOT stopped",
-        "network": "intercepted at the Python level (socket/ssl); a C extension calling connect(2) is NOT stopped",
-        "subprocess": "intercepted at the Python level (subprocess/os.exec*/os.spawn*)",
-        "effect_ledger": "INCOMPLETE wherever the static guard predicted C-level I/O \u2014 an empty effects map means 'we could not see', not 'nothing happened'"
-      },
-      "candidates": []
-    },
-    "effects_complete": false,
-    "candidates": 0,
-    "targets": 0,
-    "modules": 0,
-    "calls": 0,
-    "verdicts": {},
-    "copy": null,
-    "root": null,
-    "root_removed": false,
-    "effects": [],
-    "effect_totals": {
-      "filesystem": 0,
-      "filesystem-escape": 0,
-      "network": 0,
-      "subprocess": 0,
-      "os-denied": 0,
-      "substitution-gap": 0
-    },
-    "unobservable": [],
-    "unobservable_totals": {},
-    "filesystem_delta": [],
-    "module_timeouts": [],
-    "refused": []
+    "enabled": false
   },
   "issue_clusters": 0,
   "clusters": [],
@@ -172,6 +104,6 @@
       "demo"
     ],
     "trace_jsonl": "<repo>\\.vinv\\captures\\vinv-exerciser\\repo\\functions\\trace.jsonl",
-    "trace_bytes": 28277
+    "trace_bytes": 28045
   }
 }

@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import {
 	defaultEnginesCloneDir,
+	engineOnPath,
 	enginesRootDir,
 	pythonEnginePath,
 	resolveIndexBinary,
@@ -63,7 +64,17 @@ export function getBinPath(context: vscode.ExtensionContext, name: string): stri
 		);
 	}
 	const root = enginesRoot(context) ?? defaultEnginesCloneDir();
-	return pythonEnginePath(root, name);
+	const inVenv = pythonEnginePath(root, name);
+	if (fs.existsSync(inVenv)) {
+		return inVenv;
+	}
+	// The wheel is the other way these engines arrive: one prebuilt distribution
+	// that puts every console script on PATH instead of in a checkout venv.
+	// Checked only AFTER the venv, so a developer's own checkout still wins over
+	// a wheel that happens to be installed too. The nominal venv path is still
+	// what gets returned when neither exists, so error messages keep naming the
+	// place the engine is expected.
+	return engineOnPath(name) ?? inVenv;
 }
 
 /** True when the named engine exists on disk. */

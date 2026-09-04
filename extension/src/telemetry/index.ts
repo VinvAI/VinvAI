@@ -51,7 +51,16 @@ import { sanitizeProps, setSanitizerStrict } from './sanitize';
 export type { ErrorClass } from './sanitize';
 export { allowlist, bucketCount, bucketMs, classifyError, messageDigest } from './sanitize';
 export { isFirstEverInstall, installAgeDays, installAgeHours } from './common';
-export type { DiscoveryStage, ErrorCode, EventName, LongOpId, Outcome, WebviewId } from './events';
+export type {
+	DiscoveryStage,
+	ErrorCode,
+	EventName,
+	LongOpId,
+	Outcome,
+	StageOutcome,
+	StageSkipReason,
+	WebviewId,
+} from './events';
 
 /** The key a build ships when nobody replaced the placeholder. */
 const PLACEHOLDER_KEY = 'phc_REPLACE_WITH_PROJECT_KEY';

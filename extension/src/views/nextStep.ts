@@ -22,6 +22,8 @@ import { hasExercisePass } from '../harness/exerciseRunner';
 import { getPipelinePhase } from '../harness/pipelineState';
 import { autoPilotStage, pipelineStage, type FlowStageId } from './flowModel';
 import type { FlowStateSource } from './flowStateSource';
+import { bucketCount, installAgeDays, track } from '../telemetry';
+import { registerTrackedCommand, requireWorkspaceFolder } from '../telemetry/instrument';
 
 export interface NextStep {
 	/** One-line imperative, e.g. "Discover this project". */
@@ -264,9 +266,18 @@ export function registerWalkthroughStepContexts(context: vscode.ExtensionContext
 		const set = (key: string, value: boolean): void => {
 			void vscode.commands.executeCommand('setContext', key, value);
 		};
-		set('vinv.state.enginesInstalled', enginesReady(context));
-		set('vinv.state.discovered', !!root && isProjectIndexed(root));
-		set('vinv.state.traced', !!root && hasCaptures(root));
+		const enginesInstalled = enginesReady(context);
+		const discovered = !!root && isProjectIndexed(root);
+		const traced = !!root && hasCaptures(root);
+		set('vinv.state.enginesInstalled', enginesInstalled);
+		set('vinv.state.discovered', discovered);
+		set('vinv.state.traced', traced);
+		// These three booleans ARE the activation funnel, and they were already
+		// being computed here and then thrown away. Recording the transitions
+		// costs nothing extra and is the only way to see where installs stall.
+		reportStage(context, 'engines_installed', enginesInstalled);
+		reportStage(context, 'discovered', discovered);
+		reportStage(context, 'traced', traced);
 	};
 	// Auto-discovery bypasses the Discover command and tracing writes capture
 	// files, not commands — watch the artifacts themselves, debounced because a
@@ -288,6 +299,34 @@ export function registerWalkthroughStepContexts(context: vscode.ExtensionContext
 		vscode.workspace.onDidChangeWorkspaceFolders(syncSoon),
 		{ dispose: () => timer && clearTimeout(timer) },
 	);
+}
+
+/** globalState prefix for "this install has reached stage X". */
+const STAGE_KEY_PREFIX = 'vinv.telemetry.stage.';
+
+/**
+ * Records a funnel stage the first time this INSTALL reaches it.
+ *
+ * globalState, not an in-memory flag, for two reasons: `sync` runs on every
+ * file-watcher tick, and a user with several windows open would otherwise
+ * report the same milestone once per window. Only forward transitions are
+ * recorded — a stage that goes false again (a deleted .vinv/) is a local
+ * accident, not a user un-reaching a milestone.
+ */
+function reportStage(
+	context: vscode.ExtensionContext,
+	stage: 'engines_installed' | 'discovered' | 'traced',
+	reached: boolean,
+): void {
+	if (!reached) {
+		return;
+	}
+	const key = `${STAGE_KEY_PREFIX}${stage}`;
+	if (context.globalState.get<boolean>(key)) {
+		return;
+	}
+	void context.globalState.update(key, true);
+	track('onboarding_stage', { stage, days_since_install: bucketCount(installAgeDays()) });
 }
 
 /** Persisted dismissal record: issue ids the user waved off, per index epoch. */
@@ -362,13 +401,16 @@ export function registerFlowIssueWarnings(
 /** Registers the compass command: shows the step and offers to run it. */
 export function registerNextStep(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		vscode.commands.registerCommand('vinv-vs.nextStep', async () => {
-			const folder = vscode.workspace.workspaceFolders?.[0];
+		registerTrackedCommand('vinv-vs.nextStep', async () => {
+			const folder = requireWorkspaceFolder('vinv-vs.nextStep');
 			if (!folder) {
-				void vscode.window.showWarningMessage('Vinv: Open a folder first.');
 				return;
 			}
 			const step = await computeNextStep(context, folder.uri.fsPath);
+			// What the compass believes the user is stuck on. Cross-checked
+			// against onboarding_stage, this separates "users are stuck here"
+			// from "the compass points here but they are actually fine".
+			track('next_step_shown', { step: step.command });
 			const go = await vscode.window.showInformationMessage(
 				`Vinv next step: ${step.label}`,
 				{ detail: step.detail, modal: false },

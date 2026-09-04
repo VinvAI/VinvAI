@@ -14,6 +14,7 @@
  * body.vscode-light/-dark/-high-contrast classes, so both themes stay legible.
  */
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi, trackViewOpened } from '../telemetry/instrument';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -96,6 +97,7 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 	) {}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
+		trackViewOpened('flow');
 		view.webview.options = { enableScripts: true };
 		view.webview.html = getFlowHtml(view.webview.cspSource);
 
@@ -122,7 +124,15 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 			showError: (message) => void vscode.window.showErrorMessage(message),
 		};
 		view.webview.onDidReceiveMessage(
-			(msg: OutboundMessage) => handleFlowMessage(msg, actions),
+			(msg: OutboundMessage) => {
+				const raw = msg as { type?: string; message?: unknown };
+				if (raw.type === 'webviewError') {
+					reportWebviewError('flow', raw);
+					return;
+				}
+				trackUi('flow', raw.type ?? 'unknown');
+				return handleFlowMessage(msg, actions);
+			},
 			undefined,
 			this.context.subscriptions,
 		);

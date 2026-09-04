@@ -55,6 +55,7 @@ import {
 	loadStoreEpoch,
 } from '../graph/indexGraph';
 import { readAdjudicated, readPendingEdges } from '../graph/graphEnhancer';
+import { track } from '../telemetry';
 import { getHandbookPath, isHandbookGenerated } from '../handbook/handbook';
 import { computeNextStep } from './nextStep';
 import { readConfigRequests } from './configRequestPanel';
@@ -435,6 +436,25 @@ export class FlowStateSource implements vscode.Disposable {
 		return facts;
 	}
 
+	/**
+	 * Emits one event per stage whose status actually CHANGED.
+	 *
+	 * The model is recomputed on every filesystem and state event — many times a
+	 * minute in an active workspace — so emitting the whole model would bury the
+	 * pipeline progression in noise and cost far more than it tells. A transition
+	 * is the thing worth recording: it is how far a user actually gets, and where
+	 * they stop, without needing them to reach a terminal event to be counted.
+	 */
+	private trackStageTransitions(previous: FlowModel, next: FlowModel): void {
+		const before = new Map(previous.stages.map((s) => [s.id, s.status]));
+		for (const stage of next.stages) {
+			const was = before.get(stage.id);
+			if (was !== undefined && was !== stage.status) {
+				track('flow_stage_changed', { stage: stage.id, status: stage.status });
+			}
+		}
+	}
+
 	private async refresh(): Promise<void> {
 		if (this.collecting) {
 			this.queued = true;
@@ -444,7 +464,9 @@ export class FlowStateSource implements vscode.Disposable {
 		try {
 			const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 			const facts = root ? await this.collectFacts(root) : this.emptyFacts();
+			const previous = this.model;
 			this.model = computeFlowModel(facts);
+			this.trackStageTransitions(previous, this.model);
 			this.emitter.fire(this.model);
 			if (root) {
 				this.writeMirror(root, this.model);

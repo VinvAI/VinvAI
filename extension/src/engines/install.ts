@@ -10,6 +10,8 @@
  * steps of that same terminal chain, so the whole thing is one click.
  */
 import * as vscode from 'vscode';
+import { registerTrackedCommand } from '../telemetry/instrument';
+import { bucketCount, track } from '../telemetry';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -20,6 +22,8 @@ import {
 	engineCommand,
 	engineRunDonePath,
 	engineSyncStampPath,
+	gitPath,
+	engineOnPath,
 	defaultToolDirs,
 	enginesRootDir,
 	enginesSynced,
@@ -27,7 +31,9 @@ import {
 	uvPath,
 } from './resolve';
 import { ensureEmbedderRunning, isEmbedderHealthy, type EmbedderStatus } from '../embedder/sidecar';
-import { ENGINE_REF } from './pinned';
+import { ENGINE_REF, ENGINE_WHEEL } from './pinned';
+import { resolveBash } from '../proc';
+import { executableFileName } from '../vinvHome';
 
 /** Official, non-interactive installer command for a missing prerequisite. */
 function installerCommand(tool: 'uv' | 'rust'): string {
@@ -44,11 +50,13 @@ function installerCommand(tool: 'uv' | 'rust'): string {
 }
 
 /**
- * Installs a missing prerequisite by running its official installer in a
- * terminal. The installer edits PATH persistently but the current terminals
- * won't see it until restarted, so the caller returns false and the user re-runs
- * "Install Vinv Engines" once it finishes (by then withPathPrefix also covers
- * ~/.cargo/bin and uv's dir).
+ * Installs a missing prerequisite by running its official installer in its own
+ * terminal, for callers that need the tool but have nothing to chain it to.
+ *
+ * The installer runs asynchronously and edits PATH only for future shells, so
+ * the tool is not usable when this returns — the caller has to stop and let the
+ * user re-run. `installEngines` does NOT use this: it folds the same installer
+ * commands into its own terminal chain so one click finishes the job.
  */
 function installPrerequisite(tool: 'uv' | 'rust', label: string): void {
 	const isWin = process.platform === 'win32';
@@ -95,9 +103,90 @@ export function resolveEnginesRoot(context: vscode.ExtensionContext): string | n
 }
 
 /** True when the engines are installed AND `uv sync` has produced the venv. */
+/** When the user last kicked off an engines install, for the settle check below. */
+const INSTALL_STARTED_KEY = 'vinv.telemetry.enginesInstallStarted';
+
+/** How long an unfinished install waits before it counts as abandoned. */
+const INSTALL_ABANDON_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Reports whether an engines install that started ever actually finished.
+ *
+ * The install runs in a terminal the extension hands work to and never hears
+ * back from, so there is no completion callback to hook. Instead this runs on a
+ * later activation and reconciles: engines present now means the attempt landed;
+ * still absent a day later means the user gave up. Either way it fires once and
+ * clears the stamp.
+ *
+ * This is the number that decides whether the terminal-based installer survives.
+ */
+export function reconcileEnginesInstall(context: vscode.ExtensionContext): void {
+	try {
+		const startedAt = context.globalState.get<number>(INSTALL_STARTED_KEY);
+		if (typeof startedAt !== 'number' || startedAt <= 0) {
+			return;
+		}
+		const elapsed = Date.now() - startedAt;
+		// Re-probed at SETTLE time, not reused from the start event: an install
+		// that abandons with uv or Rust still missing failed for a reason we can
+		// act on, and one that abandons with everything present failed for a
+		// reason we cannot yet see. Those need different fixes and used to be the
+		// same row.
+		const prereqs = {
+			has_git: !!gitPath(),
+			has_uv: !!uvPath(),
+			has_rust: !!cargoPath(),
+		};
+		if (enginesReady(context)) {
+			track('engines_install_settled', {
+				outcome: 'ready',
+				minutes_bucket: bucketCount(Math.round(elapsed / 60_000)),
+				...prereqs,
+			});
+		} else if (elapsed > INSTALL_ABANDON_MS) {
+			track('engines_install_settled', {
+				outcome: 'abandoned',
+				minutes_bucket: bucketCount(Math.round(elapsed / 60_000)),
+				...prereqs,
+			});
+		} else {
+			// Still plausibly in flight — leave the stamp and look again next time.
+			return;
+		}
+		void context.globalState.update(INSTALL_STARTED_KEY, undefined);
+	} catch {
+		// Reporting must never break activation.
+	}
+}
+
+/**
+ * True when the engines are usable — by EITHER route.
+ *
+ * This used to mean only "the checkout's venv exists", which quietly became
+ * wrong in two directions once the wheel existed. A wheel install has no
+ * checkout at all, so a perfectly working machine reported not-ready and got
+ * prompted to install forever. And a checkout whose `uv sync` succeeded but
+ * whose `cargo build` failed reported READY while the index binary — the thing
+ * discovery actually needs — was never produced. Both routes are now checked
+ * for the artifacts that matter rather than for the shape of the install.
+ */
 export function enginesReady(context: vscode.ExtensionContext): boolean {
+	if (wheelEnginesReady()) {
+		return true;
+	}
 	const root = resolveEnginesRoot(context);
 	return root !== null && enginesSynced(root);
+}
+
+/**
+ * True when the `vinv` wheel has put both halves of the engines on PATH.
+ *
+ * Both are required: the wheel ships the Python engines and the compiled Rust
+ * `index` together, so seeing one without the other means a partial or shadowed
+ * install rather than a usable one.
+ */
+export function wheelEnginesReady(): boolean {
+	return engineOnPath('index') !== null && engineOnPath('tracelens') !== null;
 }
 
 /**
@@ -111,13 +200,31 @@ export function enginesReady(context: vscode.ExtensionContext): boolean {
  * chained steps makes it one click: the shell runs them in order, so each tool
  * exists by the time the step that needs it runs.
  */
-function prerequisiteSteps(): string[] {
+function prerequisiteSteps(opts?: { needsRust?: boolean }): string[] {
+	const needsRust = opts?.needsRust !== false;
 	const steps: string[] = [];
+	// 'absent' throughout: these probes resolve a binary and do not compare a
+	// version, so a tool that is present but too old is not a case this gate can
+	// currently produce. The field exists so that when a version floor is added
+	// it does not read, in the data, as a tool the user never installed.
 	if (!uvPath()) {
+		track('engines_prereq_missing', { tool: 'uv', reason: 'absent' });
 		steps.push(installerCommand('uv'));
 	}
-	if (!cargoPath()) {
+	// Only the source route needs a Rust toolchain. Installing one for the wheel
+	// route would be worse than pointless: on Windows `rustup-init -y` lands the
+	// MSVC toolchain and suppresses the prompt warning that no linker is
+	// present, so it manufactures exactly the broken state the wheel avoids.
+	if (needsRust && !cargoPath()) {
+		track('engines_prereq_missing', { tool: 'rust', reason: 'absent' });
 		steps.push(installerCommand('rust'));
+	}
+	// Git was reported at install-start but never as a blocker, so a machine
+	// without it produced an install that simply failed with nothing to explain
+	// it — the clone is the first step and cannot run. The wheel route needs no
+	// clone, so this is only a blocker for the source route.
+	if (needsRust && !gitPath()) {
+		track('engines_prereq_missing', { tool: 'git', reason: 'absent' });
 	}
 	return steps;
 }
@@ -213,12 +320,13 @@ function chainSteps(steps: string[], shell: 'powershell' | 'posix'): string {
  *
  * The terminal we spawn does not inherit rustup's (or uv's) PATH edits — a
  * freshly installed toolchain often isn't on the shell's PATH until it is
- * restarted, so a bare `cargo`/`uv` in the terminal fails with "command not
- * found". Callers pass the default install dirs (defaultToolDirs) even for a
- * tool that is absent right now, because the same chain may install it a step
- * earlier and a dir derived from a lookup that returned null cannot cover that
- * case. Putting those dirs on PATH first makes the bare
- * invocations — and cargo's toolchain neighbours (rustc, the linker) — resolve.
+ * restarted, so a bare `cargo`/`uv` fails with "command not found". Putting
+ * those dirs on PATH first makes the bare invocations — and cargo's toolchain
+ * neighbours (rustc, the linker) — resolve.
+ *
+ * Callers pass the default install dirs (defaultToolDirs) even for a tool that
+ * is absent right now: the same chain may install it a step earlier, and a dir
+ * derived from a lookup that returned null cannot cover that case.
  */
 function withPathPrefix(dirs: string[], command: string, shell: 'powershell' | 'posix'): string {
 	const unique = [...new Set(dirs)];
@@ -251,7 +359,21 @@ function withPathPrefix(dirs: string[], command: string, shell: 'powershell' | '
  * engines looking permanently stale, or leaving a waiter hanging on a run it
  * cannot see the end of.
  */
-export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: string): void {
+export function runInEnginesTerminal(
+	name: string,
+	steps: string[],
+	stampRoot?: string,
+	opts?: {
+		/**
+		 * A command sent as its OWN line after the chain, so it runs however the
+		 * chain ended. Must be self-guarding: it fires on success too, and has to
+		 * decide for itself that there is nothing to do.
+		 */
+		recovery?: string;
+		/** Which install route this terminal is running, for telemetry. */
+		route?: 'wheel' | 'source';
+	},
+): void {
 	const isWin = process.platform === 'win32';
 	const terminal = vscode.window.createTerminal(
 		isWin ? { name, shellPath: 'powershell.exe' } : { name },
@@ -276,6 +398,17 @@ export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: 
 		}
 	}
 	terminal.sendText(withPathPrefix(toolDirs, chainSteps(all, shell), shell));
+	if (opts?.route) {
+		track('engines_install_route', { route: opts.route, has_recovery: !!opts.recovery });
+	}
+	if (opts?.recovery) {
+		// Its own line, like the done marker below: the shell reads it only once
+		// the chain returns, so it runs whether that chain succeeded or failed.
+		// A chained step could not — `&&`/`if ($?)` short-circuit on the failure
+		// this is here to recover from. The PATH prefix set by the line above
+		// persists for the session, so uv/cargo still resolve here.
+		terminal.sendText(opts.recovery);
+	}
 	if (stampRoot) {
 		// A second line, not a chained step: the shell reads it only once the
 		// command above returns, so it runs whether that command succeeded, failed,
@@ -293,11 +426,61 @@ export function runInEnginesTerminal(name: string, steps: string[], stampRoot?: 
  * docs instead.
  */
 export async function installEngines(context: vscode.ExtensionContext): Promise<void> {
-	// Missing tools install as the first steps of the same chain rather than
-	// aborting the run — see prerequisiteSteps.
-	const prereqs = prerequisiteSteps();
+	// Recorded BEFORE the prerequisite gate, so an install that never gets past
+	// a missing tool still counts as an attempt — otherwise the denominator
+	// silently excludes exactly the users who were blocked first.
+	track('engines_install_started', {
+		has_git: !!gitPath(),
+		has_uv: !!uvPath(),
+		has_rust: !!cargoPath(),
+		has_bash: !!resolveBash(),
+	});
+	// Stamped so a later activation can tell whether this attempt ever landed —
+	// the terminal itself reports nothing back, which is why the outcome of the
+	// single most important onboarding step has never been observable.
+	void context.globalState.update(INSTALL_STARTED_KEY, Date.now());
+
 	const existingRoot = resolveEnginesRoot(context);
 	const root = existingRoot ?? defaultEnginesCloneDir();
+
+	// THE WHEEL IS THE PRIMARY ROUTE. It carries every Python engine and a
+	// prebuilt `index`, so it needs no git, no Rust and no C linker — which is
+	// what makes it the right default rather than merely the easier one. Source
+	// builds need a linker the platform may not have: Windows ships none, and
+	// `rustup-init -y` installs the MSVC toolchain while suppressing the prompt
+	// that would have told the user their machine cannot link. That combination
+	// produced a machine with cargo installed, `uv sync` succeeded, and no index
+	// binary — the failure this ordering exists to remove.
+	//
+	// A DEV CHECKOUT STILL WINS: someone with their own tree is working on the
+	// engines, and pulling a published wheel over the top of that is never what
+	// they meant. Unstamped builds (ENGINE_WHEEL === '') skip the wheel for the
+	// same reason. See ./pinned.
+	const useWheel = ENGINE_WHEEL !== '' && existingRoot === null;
+
+	// Missing tools install as the first steps of the same chain rather than
+	// aborting the run — see prerequisiteSteps. The wheel route needs only uv,
+	// so it never asks for Rust: requesting a toolchain the install does not use
+	// is how the old flow turned a missing linker into a blocked onboarding.
+	const prereqs = prerequisiteSteps({ needsRust: !useWheel });
+
+	if (useWheel) {
+		// Version-pinned, for the reason ENGINE_REF is: a frozen extension must
+		// not silently pair with a newer engine. See ./pinned.
+		const steps = [`uv tool install --force "vinv==${ENGINE_WHEEL}"`];
+		runInEnginesTerminal('Vinv Engines Install', [...prereqs, ...steps], root, {
+			// Sent as its own line so it runs even though the chain above failed —
+			// which is the entire point of a fallback. Self-guarding, so it stays
+			// inert when the wheel worked.
+			recovery: sourceFallbackCommand(root),
+			route: 'wheel',
+		});
+		void vscode.window.showInformationMessage(
+			'Vinv: Installing the engines in the terminal (prebuilt — no Rust toolchain needed). When it finishes, discovery and tracing are ready to run.',
+		);
+		return;
+	}
+
 	const steps = existingRoot
 		? // Checkout present (dev checkout or previous clone) — just (re)sync + build.
 			[`cd "${root}"`, 'uv sync', cargoBuildCommand(root)]
@@ -312,12 +495,52 @@ export async function installEngines(context: vscode.ExtensionContext): Promise<
 				'uv sync',
 				cargoBuildCommand(root),
 			];
-	runInEnginesTerminal('Vinv Engines Install', [...prereqs, ...steps], root);
+	runInEnginesTerminal('Vinv Engines Install', [...prereqs, ...steps], root, {
+		// The mirror of the above: when the source build is the chosen route and
+		// its linker step dies, the prebuilt wheel is the way out. Only offered
+		// for a stamped build, so a dev checkout is never overwritten by a wheel.
+		recovery: ENGINE_WHEEL ? wheelFallbackCommand(root) : undefined,
+		route: 'source',
+	});
 	void vscode.window.showInformationMessage(
 		prereqs.length > 0
 			? 'Vinv: Installing the missing prerequisites and then the engines, in the terminal. When it finishes, discovery and tracing are ready to run.'
 			: 'Vinv: Installing engines in the terminal. When it finishes, discovery and tracing are ready to run.',
 	);
+}
+
+/** Shell test for "the checkout's index binary exists". */
+function builtIndexPath(root: string): string {
+	return path.join(root, 'index', 'target', 'release', executableFileName('index'));
+}
+
+/**
+ * Recovery for the WHEEL route: build from source when the wheel did not land.
+ *
+ * Guarded on the binary rather than on the previous command's exit code,
+ * because the thing that matters is whether an `index` exists, not whether a
+ * particular step reported success.
+ */
+function sourceFallbackCommand(root: string): string {
+	const clone = `git clone -b ${REPO_BRANCH} ${REPO_URL} "${root}"`;
+	const build = `cd "${root}"; uv sync; ${cargoBuildCommand(root)}`;
+	if (process.platform === 'win32') {
+		return `if (-not (Get-Command index -ErrorAction SilentlyContinue)) { Write-Host "Vinv: the prebuilt engines did not install — falling back to a source build."; if (-not (Test-Path "${root}")) { ${clone} }; ${build} }`;
+	}
+	return `command -v index >/dev/null 2>&1 || { echo "Vinv: the prebuilt engines did not install — falling back to a source build."; [ -d "${root}" ] || ${clone}; cd "${root}" && uv sync && ${cargoBuildCommand(root)}; }`;
+}
+
+/**
+ * Recovery for the SOURCE route: install the prebuilt wheel when the build
+ * produced no binary — overwhelmingly a missing C linker.
+ */
+function wheelFallbackCommand(root: string): string {
+	const built = builtIndexPath(root);
+	const install = `uv tool install --force "vinv==${ENGINE_WHEEL}"`;
+	if (process.platform === 'win32') {
+		return `if (-not (Test-Path "${built}")) { Write-Host "Vinv: the source build produced no index binary — installing the prebuilt engines instead."; ${install} }`;
+	}
+	return `[ -x "${built}" ] || { echo "Vinv: the source build produced no index binary — installing the prebuilt engines instead."; ${install}; }`;
 }
 
 /**
@@ -409,6 +632,6 @@ export async function ensureIndexBinary(context: vscode.ExtensionContext): Promi
 /** Registers the engines commands. */
 export function registerEnginesCommands(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		vscode.commands.registerCommand('vinv-vs.installEngines', () => installEngines(context)),
+		registerTrackedCommand('vinv-vs.installEngines', () => installEngines(context)),
 	);
 }

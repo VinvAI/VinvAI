@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { bucketMs, classifyError, messageDigest, track, type ErrorCode } from '../telemetry';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -449,6 +450,11 @@ export function markHarnessBlocked(
 	const block: HarnessBlock = { kind, remediation: harnessBlockRemediation(harness, kind) };
 	harnessBlocks.set(harnessId, block);
 	preflightPassed.delete(harnessId);
+	// The single most actionable failure Vinv has: the user's agent CLI is
+	// installed but not usable (not signed in, out of quota, unreachable), so
+	// every episode and every LLM stage silently stops working. The classifier
+	// above already decided which; recording it is what makes it countable.
+	track('harness_blocked', { harness_id: harnessId, kind });
 	const noteKey = `${harnessId}:${kind}`;
 	if ((options?.notify ?? true) && !notifiedBlocks.has(noteKey)) {
 		notifiedBlocks.add(noteKey);
@@ -752,6 +758,69 @@ export function quickScanHarnesses(): Record<string, boolean> {
 			h.kind === 'ide-chat' ? isIdeChatAvailable(h) : h.bin ? resolveHarnessCli(h) !== null : false,
 		]),
 	);
+}
+
+/** Whether one harness is present right now (cheap presence scan). */
+export function isHarnessInstalled(id: string): boolean {
+	return quickScanHarnesses()[id] === true;
+}
+
+/**
+ * Whether the user has ANY agent at all.
+ *
+ * Distinct from "the selected harness is missing", and a different problem:
+ * that one is a bad remembered choice the picker can fix, this one is a user
+ * who cannot run the LLM stages no matter what they pick.
+ */
+export function anyHarnessInstalled(): boolean {
+	return Object.values(quickScanHarnesses()).some(Boolean);
+}
+
+/**
+ * The most recent harness dispatch failure, for callers that only saw a
+ * `false`.
+ *
+ * The discovery stages report failure as a boolean and swallow the reason, so
+ * without somewhere to read it from, a handbook stage that failed because the
+ * CLI is not signed in is indistinguishable from one that failed because the
+ * binary is missing. Overwritten by each run and never cleared: it is a
+ * best-effort breadcrumb read immediately after the run it describes, not a log.
+ */
+let lastHarnessFailureInfo: { code?: ErrorCode; detail?: string } | undefined;
+
+/** See lastHarnessFailureInfo. Undefined when the last run succeeded. */
+export function lastHarnessFailure(): { code?: ErrorCode; detail?: string } | undefined {
+	return lastHarnessFailureInfo;
+}
+
+/**
+ * Records how one dispatch ended: the telemetry row, and the breadcrumb the
+ * discovery stages read.
+ */
+function recordHarnessRun(harnessId: string, r: HarnessRunResult, elapsedMs: number): void {
+	lastHarnessFailureInfo = r.ok
+		? undefined
+		: {
+				code: r.infra ? 'harness.blocked' : 'harness.run_failed',
+				detail: r.detail ?? '',
+			};
+	const failureKind = r.ok ? 'none' : (r.infra ?? 'other');
+	track('harness_run_finished', {
+		harness_id: harnessId,
+		outcome: r.ok ? 'ok' : 'error',
+		failure_kind: failureKind,
+		// The exit code as a bounded token: the raw number is unbounded enough to
+		// fragment the funnel, and the three cases that matter are "clean",
+		// "killed before exiting" and "some non-zero".
+		exit_class: r.ok ? 'ok' : r.exitCode === null ? 'no_exit' : r.exitCode === 0 ? 'zero' : 'nonzero',
+		duration_ms: bucketMs(elapsedMs),
+		...(r.ok
+			? {}
+			: {
+					error_class: classifyError(r.detail ? { message: r.detail } : undefined),
+					error_digest: messageDigest(r.detail ?? ''),
+				}),
+	});
 }
 
 /** A point-in-time harness progress update (same shape the engine runners emit). */
@@ -1190,6 +1259,44 @@ export async function runHarnessPrompt(
 		onUpdate?: (line: string) => void;
 		token?: vscode.CancellationToken;
 		/** Isolated tree for this trigger; defaults to the workspace itself. */
+		cwd?: string;
+	},
+): Promise<HarnessRunResult> {
+	// Wrapped rather than instrumented inline: the implementation below has a
+	// dozen return points, and one exit is the only place that can honestly
+	// claim to see how every dispatch ended.
+	const started = Date.now();
+	try {
+		const result = await runHarnessPromptImpl(harnessId, workspaceRoot, name, prompt, options);
+		recordHarnessRun(harnessId, result, Date.now() - started);
+		return result;
+	} catch (e) {
+		recordHarnessRun(
+			harnessId,
+			{ ok: false, exitCode: null, stdout: '', detail: errorText(e) },
+			Date.now() - started,
+		);
+		throw e;
+	}
+}
+
+/** The message text of a thrown value, for local classification only. */
+function errorText(e: unknown): string {
+	if (typeof e === 'string') {
+		return e;
+	}
+	const m = (e as { message?: unknown } | null)?.message;
+	return typeof m === 'string' ? m : '';
+}
+
+async function runHarnessPromptImpl(
+	harnessId: string,
+	workspaceRoot: string,
+	name: string,
+	prompt: string,
+	options?: {
+		onUpdate?: (line: string) => void;
+		token?: vscode.CancellationToken;
 		cwd?: string;
 	},
 ): Promise<HarnessRunResult> {

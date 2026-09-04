@@ -6,6 +6,22 @@ import { getBinPath, isBinAvailable, showEnginesMissingError } from '../tracelen
 import { ensureEmbedder } from '../engines/install';
 import { stopAnyEmbedder } from '../embedder/sidecar';
 import { getIndexEnv } from '../config/settings';
+import { bucketMs, classifyError, messageDigest, track, type ErrorCode } from '../telemetry';
+
+/**
+ * Why the last indexing run failed, for callers that only saw a `false`.
+ *
+ * `runIndexing` returns a bare boolean and reports the real reason only in a
+ * toast the user reads and closes. The discovery stage timer needs the same
+ * reason to attach to its own event, so it is parked here — best-effort, read
+ * immediately after the run it describes, overwritten by the next one.
+ */
+let lastIndexingFailureInfo: { code?: ErrorCode; detail?: string } | undefined;
+
+/** See lastIndexingFailureInfo. Undefined when the last run succeeded. */
+export function lastIndexingFailure(): { code?: ErrorCode; detail?: string } | undefined {
+	return lastIndexingFailureInfo;
+}
 
 /** Project-local index store directory: <workspace>/.vinv/index */
 export function getIndexStoreDir(workspaceRoot: string): string {
@@ -173,7 +189,13 @@ export function runIndexing(
 	const MAX_ATTEMPTS = 3;
 
 	indexing = true;
+	lastIndexingFailureInfo = undefined;
 	void vscode.commands.executeCommand('setContext', 'vinv.indexing', true);
+	track('indexing_started', {
+		store_present: fs.existsSync(storeDir),
+		store_complete: isProjectIndexed(workspaceRoot),
+		max_attempts: MAX_ATTEMPTS,
+	});
 
 	type Outcome = { outcome: 'ok' | 'cancelled' | 'failed'; detail?: string };
 
@@ -317,11 +339,30 @@ export function runIndexing(
 					token.onCancellationRequested(() => resolve('cancelled'));
 					extToken?.onCancellationRequested(() => resolve('cancelled'));
 				});
+				const embedderStarted = Date.now();
 				const embedder = await Promise.race([ensureEmbedder(context), cancelled]);
 				if (embedder === 'cancelled') {
+					// The user walking out of the model download is a product fact, not
+					// a non-event: it is the most likely reason a first run never
+					// reaches the index binary at all.
+					track('run_cancelled', {
+						op: 'index',
+						checkpoint: 'embedder_wait',
+						elapsed_ms: bucketMs(Date.now() - embedderStarted),
+					});
+					lastIndexingFailureInfo = { code: 'index.failed', detail: 'cancelled' };
 					return false;
 				}
 				if (!embedder) {
+					track('embedder_failed', {
+						stage: 'health_timeout',
+						waited_ms: bucketMs(Date.now() - embedderStarted),
+						error_class: 'timeout',
+					});
+					lastIndexingFailureInfo = {
+						code: 'index.sidecar_unhealthy',
+						detail: 'embedding sidecar did not become healthy',
+					};
 					void vscode.window.showErrorMessage(
 						'Vinv: The embedding sidecar (vinv-embedder) did not come up. The first run ' +
 							'downloads a ~100 MB model, which can take a minute — if it just started, ' +
@@ -329,10 +370,23 @@ export function runIndexing(
 					);
 					return false;
 				}
+				const embedderWaitedMs = Date.now() - embedderStarted;
+				track('embedder_ready', {
+					waited_ms: bucketMs(embedderWaitedMs),
+					// A wait past ten seconds is the model download, not a warm reuse —
+					// the distinction the 600s first-run timeout was chosen against.
+					cold_start: embedderWaitedMs > 10_000,
+				});
 				let firstDetail = '';
 				let lastDetail = '';
 				for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
 					if (token.isCancellationRequested || extToken?.isCancellationRequested) {
+						track('run_cancelled', {
+							op: 'index',
+							checkpoint: 'between_attempts',
+							elapsed_ms: bucketMs(Date.now() - embedderStarted),
+						});
+						lastIndexingFailureInfo = { code: 'index.failed', detail: 'cancelled' };
 						return false;
 					}
 
@@ -358,13 +412,36 @@ export function runIndexing(
 						onProgress?.({ percent: null, label });
 					}
 
+					const attemptStarted = Date.now();
 					const result = await runAttempt(progress, token, attempt);
+					// Per ATTEMPT, not just per run: a run that succeeds on the third
+					// try and one that succeeds on the first are the same row in
+					// `indexing_failed`, and only the first is a bug worth chasing.
+					track('indexing_attempt', {
+						attempt,
+						outcome: result.outcome === 'ok' ? 'ok' : result.outcome === 'cancelled' ? 'cancelled' : 'error',
+						duration_ms: bucketMs(Date.now() - attemptStarted),
+						...(result.outcome === 'failed'
+							? {
+									error_class: classifyError(
+										result.detail ? { message: result.detail } : undefined,
+									),
+									error_digest: messageDigest(result.detail ?? ''),
+								}
+							: {}),
+					});
 
 					if (result.outcome === 'ok') {
 						void vscode.window.showInformationMessage('Vinv: Index ready.');
 						return true;
 					}
 					if (result.outcome === 'cancelled') {
+						track('run_cancelled', {
+							op: 'index',
+							checkpoint: 'attempt',
+							elapsed_ms: bucketMs(Date.now() - attemptStarted),
+						});
+						lastIndexingFailureInfo = { code: 'index.failed', detail: 'cancelled' };
 						return false;
 					}
 
@@ -390,6 +467,16 @@ export function runIndexing(
 				const storeIssue = /corrupt index|rename|sharing violation|access is denied|permission denied|no space/i.test(
 					details,
 				);
+				// The run is over and every attempt failed. `store_issue` is the split
+				// that matters: a filesystem/antivirus lock is the user's environment,
+				// anything else is ours.
+				track('indexing_failed', {
+					stage: 'attempts_exhausted',
+					attempts: MAX_ATTEMPTS,
+					store_issue: storeIssue,
+					error_class: classifyError(details ? { message: details } : undefined),
+				});
+				lastIndexingFailureInfo = { code: 'index.failed', detail: details };
 				void vscode.window.showErrorMessage(
 					details
 						? storeIssue

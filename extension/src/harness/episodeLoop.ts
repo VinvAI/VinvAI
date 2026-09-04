@@ -15,6 +15,8 @@
  * final reward) to ~/.vinv/telemetry/episodes.jsonl for off-policy evaluation.
  */
 import * as vscode from 'vscode';
+import { reportWebviewError, trackUi, trackViewOpened } from '../telemetry/instrument';
+import { bucketMs, track } from '../telemetry';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
@@ -777,8 +779,10 @@ export async function handleJudgmentMessage(
 	actions: JudgmentActions,
 ): Promise<void> {
 	if (m.type === 'webviewError') {
+		reportWebviewError('episode', m as { message?: unknown });
 		return;
 	}
+	trackUi('episode', m.type, m.type === 'verdict' ? m.action : undefined);
 	if (m.type === 'openPack') {
 		// Inspection only — the dialog stays up, no verdict implied.
 		await actions.openPack();
@@ -831,6 +835,7 @@ export async function handleJudgmentMessage(
  */
 function openJudgmentDialog(j: ParkedJudgment): void {
 	const { title, detail, mode, proposals, packPath, canRevert, context } = j;
+	trackViewOpened('episode');
 	const panel = vscode.window.createWebviewPanel(
 		'vinvEscalation',
 		`Vinv: your judgment — ${title}`,
@@ -1091,6 +1096,7 @@ export async function runEpisode(
 	});
 
 	episodeRunning = true;
+	const episodeStarted = Date.now();
 	let attempts = 0;
 	let verified = false;
 	let aborted = false;
@@ -2521,6 +2527,16 @@ export async function runEpisode(
 			);
 		}
 	}
+	// The single exit of the loop, so this counts every episode that ran —
+	// including the ones that ended by exhausting their attempt budget, which
+	// look identical to a plain failure from anywhere else.
+	track('episode_finished', {
+		outcome: verified ? 'verified' : aborted ? 'aborted' : 'unverified',
+		attempts,
+		verified,
+		harness_id: chosenHarness,
+		duration_ms: bucketMs(Date.now() - episodeStarted),
+	});
 	return verified;
 }
 

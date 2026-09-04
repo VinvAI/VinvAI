@@ -177,6 +177,18 @@ export function uvPath(): string | null {
 	return findOnPath('uv', defaultToolDirs());
 }
 
+/**
+ * Absolute path of `git`, or null when it is not installed.
+ *
+ * Not a prerequisite the installer offers to fix (unlike uv and Rust, git has no
+ * safe one-liner installer), but it is required for the clone — so a machine
+ * without it fails the install in a way that looks like a network problem.
+ * Worth being able to count.
+ */
+export function gitPath(): string | null {
+	return findOnPath('git');
+}
+
 /** Absolute path of the `cargo` CLI, or null when Rust is not installed. */
 export function cargoPath(): string | null {
 	return findOnPath('cargo', [path.join(os.homedir(), '.cargo', 'bin')]);
@@ -235,5 +247,22 @@ export function resolveIndexBinary(opts?: {
 			return built;
 		}
 	}
-	return findOnPath('index');
+	// `defaultToolDirs()` matters here, not just PATH: the wheel fallback puts
+	// `index` in ~/.local/bin, and a tool installer only edits PATH for FUTURE
+	// shells — the already-running extension host inherited its PATH at launch,
+	// so a binary that is genuinely installed would otherwise look absent.
+	return findOnPath('index', defaultToolDirs());
+}
+
+/**
+ * A Python engine's console script found on PATH, or null.
+ *
+ * The engines normally live in the checkout's venv at a machine-stable path,
+ * which is why nothing looked anywhere else. The `vinv` wheel is the other way
+ * to get them — one prebuilt distribution carrying every engine — and it puts
+ * their console scripts on PATH instead. Without this, a machine that recovered
+ * via the wheel would have a working `index` and no `tracelens`.
+ */
+export function engineOnPath(name: string): string | null {
+	return findOnPath(name, defaultToolDirs());
 }

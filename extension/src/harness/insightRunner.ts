@@ -26,6 +26,7 @@
  * are missing.
  */
 import * as vscode from 'vscode';
+import { trackLongOp } from '../telemetry/instrument';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -367,7 +368,9 @@ export async function runInsightPass(
 	}
 	insightRunning = true;
 	try {
-		return await insightPassOnce(context, workspaceRoot);
+		// trackLongOp existed with no callers, so the duration and cancellation
+		// rate of the waits users actually sit through were never recorded.
+		return await trackLongOp('insights', () => insightPassOnce(context, workspaceRoot));
 	} finally {
 		insightRunning = false;
 		if (insightQueued) {

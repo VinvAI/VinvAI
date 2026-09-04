@@ -43,11 +43,21 @@ export function registerTrackedCommand(
 		const started = Date.now();
 		let outcome: Outcome = 'ok';
 		let errorClass;
+		let errorDigest;
+		// Emitted before the handler runs, so a command that hangs or takes the
+		// window down with it still leaves a record that it was invoked. A
+		// completion-only event cannot count the runs that never complete.
+		track('command_started', { command_id: id });
 		try {
 			return await (handler as (...a: unknown[]) => unknown).apply(thisArg, args);
 		} catch (e) {
 			outcome = isCancellation(e) ? 'cancelled' : 'error';
 			errorClass = classifyError(e);
+			errorDigest = messageDigest(
+				typeof (e as { message?: unknown } | null)?.message === 'string'
+					? ((e as { message: string }).message)
+					: '',
+			);
 			// Rethrow: the user's experience of a failing command is unchanged.
 			throw e;
 		} finally {
@@ -56,6 +66,7 @@ export function registerTrackedCommand(
 				outcome,
 				duration_ms: bucketMs(Date.now() - started),
 				error_class: errorClass,
+				error_digest: errorDigest,
 			});
 		}
 	});

@@ -12,6 +12,7 @@
  * different and unearned statement.
  */
 import * as vscode from 'vscode';
+import { trackUi, trackViewOpened } from '../telemetry/instrument';
 import * as fs from 'fs';
 import * as path from 'path';
 import { VINV_BASE_CSS, VINV_FONT_MONO } from './webviewTheme';
@@ -94,6 +95,7 @@ export function openDeadCode(context: vscode.ExtensionContext): void {
 	if (panel) {
 		panel.reveal(vscode.ViewColumn.Active);
 	} else {
+		trackViewOpened('deadcode');
 		panel = vscode.window.createWebviewPanel('vinv.deadCode', 'Vinv Dead Code', vscode.ViewColumn.Active, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
@@ -155,6 +157,7 @@ function attach(view: vscode.WebviewPanel, context: vscode.ExtensionContext, wor
 	};
 
 	current.webview.onDidReceiveMessage(async (msg: { type: string; symbol?: DeadSymbol }) => {
+	 trackUi('deadcode', msg.type);
 	 try {
 		if (msg.type === 'ready' || msg.type === 'refresh') {
 			push();

@@ -37,6 +37,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { registerTrackedCommand } from '../telemetry/instrument';
+import { track } from '../telemetry';
 import { execFile } from 'child_process';
 import { defaultEnginesCloneDir, engineSyncStampPath, enginesSynced } from './resolve';
 import { cargoBuildCommand, installEngines, resolveEnginesRoot, runInEnginesTerminal } from './install';
@@ -396,6 +398,23 @@ export async function maybeUpdateEngines(
 	context: vscode.ExtensionContext,
 	opts: { force?: boolean } = {},
 ): Promise<void> {
+	// Wrapped rather than instrumented at each branch: this decides between a
+	// dozen outcomes across two decision helpers, and one exit is the only place
+	// that can honestly say whether the check completed. `mode` travels because
+	// an update that never runs under mode 'never' is a setting, not a failure.
+	try {
+		await maybeUpdateEnginesImpl(context, opts);
+		track('engines_update_result', { outcome: 'ok', mode: engineUpdateMode() });
+	} catch (e) {
+		track('engines_update_result', { outcome: 'failed', mode: engineUpdateMode() });
+		throw e;
+	}
+}
+
+async function maybeUpdateEnginesImpl(
+	context: vscode.ExtensionContext,
+	opts: { force?: boolean } = {},
+): Promise<void> {
 	const force = opts.force === true;
 	const mode = engineUpdateMode();
 	const version = String(context.extension.packageJSON.version ?? '');
@@ -581,7 +600,7 @@ export async function maybeUpdateEngines(
 /** Registers the engines-update command. */
 export function registerEngineUpdate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
-		vscode.commands.registerCommand('vinv-vs.updateEngines', () =>
+		registerTrackedCommand('vinv-vs.updateEngines', () =>
 			maybeUpdateEngines(context, { force: true }),
 		),
 	);

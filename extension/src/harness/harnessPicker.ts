@@ -21,6 +21,39 @@ import {
 	type HarnessDef,
 } from './harnessRunner';
 import { getHarnessId, hasChosenHarness, setHarnessId } from '../config/settings';
+import { track } from '../telemetry';
+
+/**
+ * Flattens a presence scan into one boolean per harness.
+ *
+ * Property VALUES are bounded tokens (see telemetry/sanitize.ts), so a list
+ * cannot travel — and would not be worth much if it could. A column per harness
+ * is what makes "how many users have any agent at all", and "which agent is
+ * missing when discovery dies", single queries instead of string parsing.
+ *
+ * Keep in sync with HARNESSES; `scanned_count` on the event is what exposes it
+ * when this falls behind.
+ */
+function availabilityProps(availability: Record<string, boolean>): {
+	avail_claude_code: boolean;
+	avail_codex: boolean;
+	avail_cursor: boolean;
+	avail_gemini: boolean;
+	avail_copilot_chat: boolean;
+	avail_cursor_chat: boolean;
+	avail_windsurf: boolean;
+} {
+	const has = (id: string): boolean => availability[id] === true;
+	return {
+		avail_claude_code: has('claude-code'),
+		avail_codex: has('codex'),
+		avail_cursor: has('cursor'),
+		avail_gemini: has('gemini'),
+		avail_copilot_chat: has('copilot-chat'),
+		avail_cursor_chat: has('cursor-chat'),
+		avail_windsurf: has('windsurf'),
+	};
+}
 
 interface HarnessQuickPickItem extends vscode.QuickPickItem {
 	/** Absent on separator rows. */
@@ -87,10 +120,27 @@ function buildItems(
  */
 export async function pickHarness(
 	placeHolder = 'Send this task to which coding agent?',
+	reason: 'first_run' | 'explicit' = 'explicit',
 ): Promise<string | null> {
 	const remembered = getHarnessId();
 	const installing = new Set<string>();
 	let availability = quickScanHarnesses();
+
+	// What the user was actually offered. Emitted BEFORE they answer, so a
+	// dismissal still leaves a record of the choice they were looking at —
+	// without this, the most common first-run dead end (no agent installed, so
+	// nothing in the list is usable) produces no event at all.
+	track('harness_picker_shown', {
+		reason,
+		remembered_id: remembered,
+		harness_chosen: hasChosenHarness(),
+		ready_count: Object.values(availability).filter(Boolean).length,
+		scanned_count: HARNESSES.length,
+		...availabilityProps(availability),
+	});
+
+	/** Set when the pick came from an install finishing while the picker was open. */
+	let viaInstall = false;
 
 	const picked = await new Promise<HarnessQuickPickItem | undefined>((resolve) => {
 		const qp = vscode.window.createQuickPick<HarnessQuickPickItem>();
@@ -136,6 +186,7 @@ export async function pickHarness(
 						`Vinv: ${installed.label} installed — using it for this task. ${installed.postInstall}`,
 					);
 				}
+				viaInstall = true;
 				resolve({ id: done, label: installed?.label ?? done });
 				qp.hide();
 			}, INSTALL_POLL_MS);
@@ -170,6 +221,15 @@ export async function pickHarness(
 		});
 		qp.show();
 	});
+	// The dismissal rate is the first-run drop-off, and it was previously
+	// unmeasurable: a dismissed picker returns null, the caller skips its LLM
+	// stages, and nothing anywhere records that a user was asked and said no.
+	track('harness_picker_resolved', {
+		reason,
+		outcome: !picked?.id ? 'dismissed' : viaInstall ? 'installed' : 'picked',
+		harness_id: picked?.id ?? 'none',
+		was_missing: picked?.id ? availability[picked.id] !== true : false,
+	});
 	if (!picked?.id) {
 		return null;
 	}
@@ -194,5 +254,5 @@ export async function ensureHarnessChosen(
 	if (hasChosenHarness()) {
 		return getHarnessId();
 	}
-	return pickHarness(placeHolder);
+	return pickHarness(placeHolder, 'first_run');
 }
