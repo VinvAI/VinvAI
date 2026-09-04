@@ -380,7 +380,7 @@ No. Vinv runs everything locally. The semantic index and code embedder run on yo
 </details>
 
 <details><summary><b>Is there any telemetry or data collection?</b></summary>
-No telemetry, no analytics, no usage pings, no crash reports. Vinv stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>; sensitive data in traces is redacted and never sent anywhere. The extension makes exactly <b>one</b> outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a broken release can tell you. No query string, no identifiers, nothing uploaded; at most once an hour. Turn it off with <code>vinv.notices.enabled</code>.
+Yes — anonymous usage analytics, and you can turn them off. Vinv had no feedback channel at all, so nobody could tell whether an install ever reached a working state or which step killed the ones that did not; that is what this exists to answer. What travels is event names, outcomes, bucketed durations and counts, and error <i>categories</i>, keyed to a salted hash of your editor's machine id. What never travels is <b>your code, file paths, repository names, raw error text or URLs</b> — every property is filtered through an allowlist that drops anything containing a slash, a space or a quote, so a path or a sentence cannot be spelled in one. Vinv still stores per-repo state in <code>.vinv/</code> and per-machine state in <code>~/.vinv/</code>, and sensitive data in traces is redacted and never sent anywhere. Turn analytics off with your editor's own telemetry setting (<code>telemetry.telemetryLevel: "off"</code>), which Vinv honours. The extension makes one other outbound request of its own: a GET of a static file at <code>notices.vinv.ai</code> on activation, so a broken release can tell you. No query string, no identifiers, nothing uploaded; at most once an hour. Turn it off with <code>vinv.notices.enabled</code>.
 </details>
 
 <details><summary><b>Does Vinv modify my code?</b></summary>
@@ -401,7 +401,8 @@ Yes — <a href="https://github.com/VinvAI/VinvAI/blob/main/LICENSE">Apache 2.0<
 
 ## Privacy
 
-- **Everything on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys, **no telemetry — none.**
+- **Your code stays on your machine** — per-repo state in `.vinv/` (auto-gitignored), per-machine in `~/.vinv/`. No account, no API keys.
+- **Anonymous usage analytics, off with one switch** — event names, outcomes, bucketed durations and error *categories*, keyed to a salted hash of your machine id. **Never your code, file paths, repository names, raw error text or URLs**: every property crosses an allowlist that drops anything a path or a sentence could be spelled in. Honours your editor's telemetry setting — set `telemetry.telemetryLevel` to `"off"` and nothing is sent.
 - **One outbound request, and you can read it**: a GET of a static JSON file at `notices.vinv.ai` on activation, for broken-release and security notices only. No query string, no identifiers, nothing uploaded; at most once per 12 hours; disable with `vinv.notices.enabled`.
 - The only download is the embedding model (Hugging Face, once, ~100 MB); everything else builds from this repo.
 - Traces store bounded **summaries**, not raw values; sensitive parameter names (`password`, `token`, `api_key`, …) are redacted, never captured.
