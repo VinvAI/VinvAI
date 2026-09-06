@@ -12,15 +12,37 @@
       3. npm install + package  -- the editor extension (VSIX)
       4. installs the VSIX into every detected editor CLI
 
+    Steps 3-4 are for working on the extension itself. Pass -EnginesOnly to
+    build just the Python and Rust engines that the CLI and the MCP server use;
+    npm is then not required at all.
+
+    You do not need this script to use Vinv. The editor extension installs from
+    the marketplace and builds the engines itself on first run, and the MCP
+    server is `pip install vinv` plus `npx -y vinv-mcp`. Build from source to
+    work on Vinv.
+
+.PARAMETER EnginesOnly
+    Skip packaging the editor extension and skip installing it into your
+    editors. Alias: -NoExtension.
+
 .EXAMPLE
     git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines
     cd $HOME\.vinv\engines
     .\install.ps1
 
+.EXAMPLE
+    .\install.ps1 -EnginesOnly
+
 .NOTES
     If script execution is blocked, run it for this session only with:
       powershell -ExecutionPolicy Bypass -File .\install.ps1
 #>
+
+[CmdletBinding()]
+param(
+    [Alias('NoExtension')]
+    [switch] $EnginesOnly
+)
 
 $ErrorActionPreference = 'Stop'
 Set-Location -Path $PSScriptRoot
@@ -45,25 +67,39 @@ function Assert-LastExitCode([string] $What) {
     }
 }
 
+# npm is a prerequisite of step 3 only, so -EnginesOnly must not demand it.
+# Everything still required is checked up front: a missing tool should surface
+# now, not three minutes into a release build of the Rust index.
 $missing = @()
 if (-not (Test-Tool 'uv'))    { $missing += 'uv    -> https://docs.astral.sh/uv/getting-started/installation/' }
 if (-not (Test-Tool 'cargo')) { $missing += 'cargo -> https://rustup.rs' }
-if (-not (Test-Tool 'npm'))   { $missing += 'npm   -> https://nodejs.org' }
+if (-not $EnginesOnly -and -not (Test-Tool 'npm')) {
+    $missing += 'npm   -> https://nodejs.org  (or pass -EnginesOnly)'
+}
 if ($missing.Count -gt 0) {
     Write-Host 'Missing prerequisites:' -ForegroundColor Red
     foreach ($m in $missing) { Write-Host "  $m" }
     exit 1
 }
 
-Write-Host '==> [1/4] Python engines (uv sync)'
+$steps = if ($EnginesOnly) { 2 } else { 4 }
+
+Write-Host "==> [1/$steps] Python engines (uv sync)"
 uv sync
 Assert-LastExitCode 'uv sync'
 
-Write-Host '==> [2/4] Rust index (cargo build --release)'
+Write-Host "==> [2/$steps] Rust index (cargo build --release)"
 cargo build --release --manifest-path index/Cargo.toml
 Assert-LastExitCode 'cargo build'
 
-Write-Host '==> [3/4] Editor extension (npm install + package)'
+if ($EnginesOnly) {
+    Write-Host ''
+    Write-Host 'Done -- engines only. The CLI and the MCP server can use them now.'
+    Write-Host '(First index build downloads the local embedding model once, ~500 MB.)'
+    exit 0
+}
+
+Write-Host "==> [3/$steps] Editor extension (npm install + package)"
 npm install --prefix extension --no-fund --no-audit
 Assert-LastExitCode 'npm install'
 
@@ -77,18 +113,23 @@ try {
 }
 Write-Host '    built vinv.vsix'
 
-Write-Host '==> [4/4] Installing the extension into detected editors'
-$installed = 0
-foreach ($editor in @('code', 'cursor', 'windsurf', 'codium', 'trae')) {
-    if (Test-Tool $editor) {
-        Write-Host "    $editor --install-extension vinv.vsix"
-        & $editor --install-extension $vsix --force | Out-Null
-        # A single editor refusing the VSIX must not abort the others.
-        if ($LASTEXITCODE -eq 0) { $installed++ }
-    }
-}
-if ($installed -eq 0) {
+# Detect first and say so before overwriting anything: --force replaces an
+# already-installed Vinv, including one from the marketplace, with this local
+# build. Announcing the list beforehand is what makes that a choice.
+Write-Host "==> [4/$steps] Installing the extension into detected editors"
+$editors = @(@('code', 'cursor', 'windsurf', 'codium', 'trae') | Where-Object { Test-Tool $_ })
+
+if ($editors.Count -eq 0) {
     Write-Host "    no editor CLI found -- install manually: Extensions -> ... -> Install from VSIX... -> $vsix"
+} else {
+    Write-Host "    replacing any installed Vinv in: $($editors -join ', ')"
+    Write-Host '    (skip this step with -EnginesOnly; restore the released build with'
+    Write-Host '     <editor> --install-extension VinvAI.VinvAI)'
+    foreach ($editor in $editors) {
+        Write-Host "    $editor --install-extension vinv.vsix"
+        # A single editor refusing the VSIX must not abort the others.
+        & $editor --install-extension $vsix --force | Out-Null
+    }
 }
 
 Write-Host ''

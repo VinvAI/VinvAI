@@ -133,6 +133,17 @@ Windows (PowerShell):
 ```powershell
 git clone https://github.com/VinvAI/VinvAI $HOME\.vinv\engines; cd $HOME\.vinv\engines; .\install.ps1
 ```
+
+That builds the engines *and* packages the editor extension, then replaces any
+installed Vinv — including one from the marketplace — with your local build. To
+build only the Python engines and the Rust index, skip the extension entirely
+and drop the npm requirement:
+
+```bash
+./install.sh --engines-only          # PowerShell: .\install.ps1 -EnginesOnly
+```
+
+Restore the released extension at any time with `<editor> --install-extension VinvAI.VinvAI`.
 </details>
 
 ## The loop, in one picture
