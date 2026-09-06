@@ -61,8 +61,30 @@ function Test-Tool([string] $Name) {
 # Native executables set $LASTEXITCODE rather than throwing, so every build step
 # is checked explicitly -- otherwise a failed cargo build would sail on and the
 # script would report success with no binary.
-function Assert-LastExitCode([string] $What) {
-    if ($LASTEXITCODE -ne 0) {
+#
+# The preference dance matters as much as the exit code. Under PowerShell 5.1 a
+# native command's stderr is wrapped in an ErrorRecord whenever that stream is
+# redirected -- `.\install.ps1 2>&1` from CI, say -- and $ErrorActionPreference
+# 'Stop' then turns it terminating. uv and cargo both write ordinary progress to
+# stderr, so the build would die on its own output. Exit codes are the real
+# signal, so drop to 'Continue' for the call itself and judge the result here.
+function Invoke-Native {
+    param(
+        [Parameter(Mandatory)] [string] $What,
+        [Parameter(Mandatory)] [string] $Exe,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [string[]] $Arguments,
+        # Set for the editor installs: one editor refusing the VSIX must not
+        # abort the others.
+        [switch] $IgnoreExitCode
+    )
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Exe @Arguments
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if (-not $IgnoreExitCode -and $LASTEXITCODE -ne 0) {
         throw "$What failed (exit code $LASTEXITCODE)."
     }
 }
@@ -85,12 +107,10 @@ if ($missing.Count -gt 0) {
 $steps = if ($EnginesOnly) { 2 } else { 4 }
 
 Write-Host "==> [1/$steps] Python engines (uv sync)"
-uv sync
-Assert-LastExitCode 'uv sync'
+Invoke-Native -What 'uv sync' -Exe 'uv' -Arguments @('sync')
 
 Write-Host "==> [2/$steps] Rust index (cargo build --release)"
-cargo build --release --manifest-path index/Cargo.toml
-Assert-LastExitCode 'cargo build'
+Invoke-Native -What 'cargo build' -Exe 'cargo' -Arguments @('build', '--release', '--manifest-path', 'index/Cargo.toml')
 
 if ($EnginesOnly) {
     Write-Host ''
@@ -100,14 +120,12 @@ if ($EnginesOnly) {
 }
 
 Write-Host "==> [3/$steps] Editor extension (npm install + package)"
-npm install --prefix extension --no-fund --no-audit
-Assert-LastExitCode 'npm install'
+Invoke-Native -What 'npm install' -Exe 'npm' -Arguments @('install', '--prefix', 'extension', '--no-fund', '--no-audit')
 
 $vsix = Join-Path $PSScriptRoot 'vinv.vsix'
 Push-Location extension
 try {
-    npx --yes @vscode/vsce package --no-rewrite-relative-links -o $vsix | Out-Null
-    Assert-LastExitCode 'vsce package'
+    Invoke-Native -What 'vsce package' -Exe 'npx' -Arguments @('--yes', '@vscode/vsce', 'package', '--no-rewrite-relative-links', '-o', $vsix) | Out-Null
 } finally {
     Pop-Location
 }
@@ -127,8 +145,7 @@ if ($editors.Count -eq 0) {
     Write-Host '     <editor> --install-extension VinvAI.VinvAI)'
     foreach ($editor in $editors) {
         Write-Host "    $editor --install-extension vinv.vsix"
-        # A single editor refusing the VSIX must not abort the others.
-        & $editor --install-extension $vsix --force | Out-Null
+        Invoke-Native -What $editor -Exe $editor -Arguments @('--install-extension', $vsix, '--force') -IgnoreExitCode | Out-Null
     }
 }
 
