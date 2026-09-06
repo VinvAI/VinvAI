@@ -48,7 +48,7 @@ import { getHarnessId } from '../config/settings';
 import { openConfigRequestPanel, writeAnswers } from '../views/configRequestPanel';
 import { isAutoEpisodesEnabled } from '../config/settings';
 import { armTriageFallback, triageFindings } from './findingTriage';
-import { isHiddenFinding, readVerdicts } from './findingVerification';
+import { isConfirmedReal, readVerdicts } from './findingVerification';
 
 /** .vinv/exercise/<file> */
 function exerciseFile(workspaceRoot: string, name: string): string {
@@ -787,11 +787,14 @@ export async function dispatchFreshClusters(
 		return;
 	}
 	const dispatched = readDispatched(context);
-	// A finding the judge dismissed is not handed to a fixer. Unjudged ones are
-	// still dispatched: absence of a verdict has never meant absence of a defect.
+	// Only clusters a judge CONFIRMED are handed to a fixer — not merely the ones
+	// it has not dismissed. An unjudged cluster waits for its verdict instead of
+	// spending an agent run and a diff review on a defect nobody has established;
+	// it stays visible in Findings throughout, so waiting costs time and nothing
+	// else.
 	const verdicts = readVerdicts(workspaceRoot);
 	const fresh = issues.clusters.filter(
-		(c) => !dispatched.has(c.signature) && !isHiddenFinding(verdicts, c.signature),
+		(c) => !dispatched.has(c.signature) && isConfirmedReal(verdicts, c.signature),
 	);
 	const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
 	const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));

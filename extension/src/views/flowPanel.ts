@@ -90,6 +90,23 @@ export async function handleFlowMessage(
 	}
 }
 
+/**
+ * The real side effects behind a Flow message.
+ *
+ * Shared by the sidebar and the Timeline panel so a link means the same thing
+ * on both. Tests still pass their own fakes to `handleFlowMessage`.
+ */
+export function buildFlowActions(context: vscode.ExtensionContext): FlowActions {
+	return {
+		openLink: (link) => openLink(link, context),
+		openFileAt: (fsPath, line) => openFileAt(fsPath, line),
+		runCommand: async (command, ...args) => {
+			await vscode.commands.executeCommand(command, ...args);
+		},
+		showError: (message) => void vscode.window.showErrorMessage(message),
+	};
+}
+
 export class FlowViewProvider implements vscode.WebviewViewProvider {
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -99,7 +116,7 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 	resolveWebviewView(view: vscode.WebviewView): void {
 		trackViewOpened('flow');
 		view.webview.options = { enableScripts: true };
-		view.webview.html = getFlowHtml(view.webview.cspSource);
+		view.webview.html = getSidebarHtml(view.webview.cspSource);
 
 		const post = (model: FlowModel): void => {
 			void view.webview.postMessage({ type: 'model', model });
@@ -115,14 +132,7 @@ export class FlowViewProvider implements vscode.WebviewViewProvider {
 		});
 		post(this.source.getModel());
 
-		const actions: FlowActions = {
-			openLink: (link) => openLink(link, this.context),
-			openFileAt: (fsPath, line) => openFileAt(fsPath, line),
-			runCommand: async (command, ...args) => {
-				await vscode.commands.executeCommand(command, ...args);
-			},
-			showError: (message) => void vscode.window.showErrorMessage(message),
-		};
+		const actions = buildFlowActions(this.context);
 		view.webview.onDidReceiveMessage(
 			(msg: OutboundMessage) => {
 				const raw = msg as { type?: string; message?: unknown };
@@ -231,7 +241,239 @@ async function openFileAt(fsPath: string | undefined, line?: number): Promise<vo
 	});
 }
 
-function getFlowHtml(cspSource: string): string {
+/**
+ * The sidebar's destinations, in the order the old title bar used.
+ *
+ * These were icon-only buttons in the view's title bar, where an unlabelled
+ * glyph is the whole affordance. They are rows with words now, which is the
+ * point of the change; the title-bar entries are gone rather than duplicated,
+ * so there is one place per action.
+ */
+const SIDEBAR_ACTIONS: ReadonlyArray<{ label: string; command: string; icon: string }> = [
+	{ label: 'Graph Explorer', command: 'vinv-vs.openGraphExplorer', icon: 'graph' },
+	{ label: 'Optimize Panel', command: 'vinv-vs.openOptimization', icon: 'rocket' },
+	{ label: 'Findings', command: 'vinv-vs.openFindings', icon: 'checklist' },
+	{ label: 'Traces', command: 'vinv-vs.openTraces', icon: 'pulse' },
+	{ label: 'Dead Code', command: 'vinv-vs.openDeadCode', icon: 'slash' },
+	{ label: 'Configure Project', command: 'vinv-vs.configureProject', icon: 'gear' },
+];
+
+/**
+ * Icon path data, drawn on a 16×16 grid and stroked in `currentColor`.
+ *
+ * Inline SVG rather than codicons: the webview loads no icon font, and the
+ * panels that already draw their own (see askVinv) do it this way. Path data
+ * only — the client builds the elements with createElementNS, so the rule that
+ * this webview never assigns HTML holds for the icons too.
+ */
+const SIDEBAR_ICONS: Readonly<Record<string, readonly string[]>> = {
+	refresh: ['M13.2 8a5.2 5.2 0 1 1-1.5-3.7', 'M13.4 2.6v3.1h-3.1'],
+	stop: ['M4.6 4.6h6.8v6.8H4.6z'],
+	graph: ['M3 3.4h3.2v3.2H3z', 'M9.8 9.4H13v3.2H9.8z', 'M6.2 5h2.4a2 2 0 0 1 2 2v2.4'],
+	rocket: ['M8 1.6c2.3 1.9 3.3 4.3 3.3 6.8L8 11.3 4.7 8.4c0-2.5 1-4.9 3.3-6.8z', 'M6.1 11.5l-1.8 2.9 2.7-.9', 'M8 6.1v.01'],
+	checklist: ['M2.6 4.6l1.3 1.3 2.2-2.4', 'M2.6 10.6l1.3 1.3 2.2-2.4', 'M9 4.4h4.4', 'M9 10.4h4.4'],
+	verified: ['M8 1.6l5 1.9v3.9c0 3-2 5.4-5 6.9-3-1.5-5-3.9-5-6.9V3.5z', 'M5.7 7.9l1.8 1.8 3.1-3.6'],
+	pulse: ['M1.6 8h2.7l1.9-3.9L9.2 12l1.8-4h3.4'],
+	slash: ['M8 1.7a6.3 6.3 0 1 0 0 12.6A6.3 6.3 0 0 0 8 1.7z', 'M3.6 3.6l8.8 8.8'],
+	gear: [
+		'M8 5.6a2.4 2.4 0 1 0 0 4.8 2.4 2.4 0 0 0 0-4.8z',
+		'M8 1.6v1.8M8 12.6v1.8M1.6 8h1.8M12.6 8h1.8',
+		'M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3',
+	],
+};
+
+/**
+ * The sidebar: what is happening now, and the way to everything else.
+ *
+ * The rail moved to its own panel, so this surface answers one question — is
+ * Vinv doing anything, and what — and otherwise gets out of the way. It renders
+ * from the same FlowModel the panel does: the running stage supplies the line,
+ * and "View more" opens the rail where the detail lives.
+ */
+function getSidebarHtml(cspSource: string): string {
+	const nonce = crypto.randomBytes(16).toString('base64');
+	const csp = [
+		`default-src 'none'`,
+		`style-src ${cspSource} 'unsafe-inline'`,
+		`script-src 'nonce-${nonce}'`,
+	].join('; ');
+	return `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="${csp}">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Vinv</title>
+	<style>
+		${VINV_BASE_CSS}
+		body { font-size: 11.5px; padding: 10px 12px 18px; }
+
+		.status { border: 1px solid var(--line-strong); padding: 10px 12px; margin-bottom: 14px; }
+		.status .k {
+			font-size: 9px; letter-spacing: 0.22em; text-transform: uppercase;
+			color: var(--muted); margin-bottom: 6px;
+		}
+		.status .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+		.status .dot {
+			flex: none; width: 9px; height: 9px; border-radius: 50%; box-sizing: border-box;
+			border: 1.5px solid var(--muted-2); background: var(--bg);
+		}
+		.status.busy .dot {
+			--dot-ring: var(--accent-ring);
+			border-color: var(--accent-fg); background: var(--accent-fg);
+			box-shadow: 0 0 0 4px var(--dot-ring);
+			animation: v-pulse 2.4s ease-in-out infinite;
+		}
+		.status.error .dot { border-color: var(--accent-fg); background: var(--accent-fg); }
+		.status .title { color: var(--ink); font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+		.status .detail { color: var(--muted); margin: 6px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+		.status button {
+			margin-top: 10px; padding: 5px 11px; cursor: pointer; border-radius: 0;
+			font-family: inherit; font-size: 10px; font-weight: 500;
+			letter-spacing: 0.2em; text-transform: uppercase;
+			background: var(--ink); color: var(--bg); border: 1px solid var(--ink);
+			transition: background 0.2s, border-color 0.2s;
+		}
+		.status button:hover { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+
+		.acts { display: flex; flex-direction: column; gap: 1px; }
+		.acts button {
+			display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+			padding: 8px 10px; cursor: pointer; border-radius: 0;
+			font-family: inherit; font-size: 11.5px; color: var(--ink);
+			background: transparent; border: 1px solid var(--line);
+			transition: background 0.15s, border-color 0.15s;
+		}
+		.acts button:hover { border-color: var(--accent-fg); color: var(--accent-fg); }
+		/* The glyph tracks the label's colour, including the hover state, so a
+		   row reads as one control rather than an icon beside some text. */
+		.acts .ico { flex: none; width: 14px; height: 14px; color: var(--muted); }
+		.acts button:hover .ico { color: var(--accent-fg); }
+	</style>
+</head>
+<body>
+	<div class="status" id="status">
+		<div class="k">Now</div>
+		<div class="row"><span class="dot"></span><span class="title" id="s-title">Starting…</span></div>
+		<div class="detail" id="s-detail"></div>
+		<button id="more">View more</button>
+	</div>
+	<div class="acts" id="acts"></div>
+
+	<script nonce="${nonce}">
+		const vscode = acquireVsCodeApi();
+		const ACTIONS = ${JSON.stringify(SIDEBAR_ACTIONS)};
+		const ICONS = ${JSON.stringify(SIDEBAR_ICONS)};
+		const SVG_NS = 'http://www.w3.org/2000/svg';
+		let model = null;
+
+		window.onerror = (message, source, lineno, colno) => {
+			vscode.postMessage({ type: 'webviewError', message: String(message), source, lineno, colno });
+		};
+
+		/**
+		 * What to put on the one line the sidebar has.
+		 *
+		 * Auto-Pilot outranks a stage because it is the thing driving the stage;
+		 * an error outranks a waiting stage because it is the one that needs a
+		 * person. Nothing running is stated plainly rather than left blank.
+		 */
+		function currentActivity(m) {
+			const stages = (m && m.stages) || [];
+			if (m && m.autoPilot && m.autoPilot.running) {
+				return { title: 'Auto-Pilot', detail: m.autoPilot.label || '', state: 'busy' };
+			}
+			const running = stages.find((s) => s.status === 'running');
+			if (running) {
+				return { title: running.title, detail: running.activity || running.summary || '', state: 'busy' };
+			}
+			const failed = stages.find((s) => s.status === 'error');
+			if (failed) {
+				return { title: failed.title + ' needs attention', detail: failed.summary || '', state: 'error' };
+			}
+			const waiting = stages.find((s) => s.status === 'waiting');
+			if (waiting) {
+				return { title: 'Waiting', detail: waiting.summary || '', state: '' };
+			}
+			return { title: 'Idle', detail: 'Nothing is running.', state: '' };
+		}
+
+		/** Builds one icon from its path data. Unknown names render nothing. */
+		function icon(name) {
+			const svg = document.createElementNS(SVG_NS, 'svg');
+			svg.setAttribute('viewBox', '0 0 16 16');
+			svg.setAttribute('class', 'ico');
+			svg.setAttribute('fill', 'none');
+			svg.setAttribute('stroke', 'currentColor');
+			svg.setAttribute('stroke-width', '1.25');
+			svg.setAttribute('stroke-linecap', 'round');
+			svg.setAttribute('stroke-linejoin', 'round');
+			svg.setAttribute('aria-hidden', 'true');
+			for (const d of ICONS[name] || []) {
+				const p = document.createElementNS(SVG_NS, 'path');
+				p.setAttribute('d', d);
+				svg.appendChild(p);
+			}
+			return svg;
+		}
+
+		function button(label, command, iconName) {
+			const b = document.createElement('button');
+			b.appendChild(icon(iconName));
+			const span = document.createElement('span');
+			span.textContent = label;
+			b.appendChild(span);
+			b.addEventListener('click', () => vscode.postMessage({ type: 'action', command }));
+			return b;
+		}
+
+		function render() {
+			const now = currentActivity(model);
+			const box = document.getElementById('status');
+			box.className = 'status' + (now.state ? ' ' + now.state : '');
+			document.getElementById('s-title').textContent = now.title;
+			document.getElementById('s-detail').textContent = now.detail;
+
+			const acts = document.getElementById('acts');
+			acts.textContent = '';
+			// The discover row is the only one that changes: while a pass runs it
+			// is the way to stop it, which is what the title bar's swapped icon
+			// used to do.
+			const stages = (model && model.stages) || [];
+			const discovering = stages.some((s) => s.id === 'discover' && s.status === 'running');
+			acts.appendChild(
+				discovering
+					? button('Stop Discovery', 'vinv-vs.stopDiscovery', 'stop')
+					: button('Re-discover Project', 'vinv-vs.rediscover', 'refresh'),
+			);
+			for (const a of ACTIONS) { acts.appendChild(button(a.label, a.command, a.icon)); }
+		}
+
+		document.getElementById('more').addEventListener('click', () => {
+			vscode.postMessage({ type: 'action', command: 'vinv-vs.openFlowTimeline' });
+		});
+
+		window.addEventListener('message', (event) => {
+			if (event.data && event.data.type === 'model') {
+				model = event.data.model;
+				render();
+			}
+		});
+		render();
+	</script>
+</body>
+</html>`;
+}
+
+/**
+ * The full pipeline rail — now the Timeline panel's body, not the sidebar's.
+ *
+ * Exported unchanged so the panel renders exactly what the sidebar used to: the
+ * four stages with their links, the issues, and the next action. Splitting the
+ * markup as well as the surface would have meant two renderers to keep honest
+ * against one model.
+ */
+export function getRailHtml(cspSource: string): string {
 	const nonce = crypto.randomBytes(16).toString('base64');
 	const csp = [
 		`default-src 'none'`,

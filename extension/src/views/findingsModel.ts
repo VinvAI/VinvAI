@@ -249,11 +249,11 @@ export interface Findings {
 		unitsByKind: Record<string, number>;
 		symbolsCovered: number;
 		symbolsTotal: number;
-		/** Findings shown: judged real, plus those still awaiting a verdict. */
+		/** Findings shown: confirmed defects only. */
 		issuesFound: number;
 		/** Findings judged false positives and hidden. Kept, never deleted. */
 		issuesHidden: number;
-		/** Of `issuesFound`, how many have no verdict yet. */
+		/** Withheld pending a verdict — counted, never listed. */
 		issuesPending: number;
 		episodesAccepted: number;
 		episodesReverted: number;
@@ -522,9 +522,15 @@ export function buildFindings(workspaceRoot: string): Findings {
 	// sidecar, so hiding is reversible and auditable.
 	const verdicts = readVerdicts(workspaceRoot);
 	const allIssues = clusters.map((c) => toFindingsIssue(c, serviceIndex, serviceNames, verdicts));
-	const issues = allIssues.filter((i) => i.verification?.verdict !== 'false_positive');
-	const issuesHidden = allIssues.length - issues.length;
-	const issuesPending = issues.filter((i) => i.verification?.verdict === 'pending').length;
+	// Only what a judge CONFIRMED reaches the list. A finding still awaiting a
+	// verdict is withheld exactly like a dismissed one — the whole point is that
+	// a developer never reads a list mixing defects with artefacts — but it is
+	// counted, so an empty list is never silently standing in for "not checked".
+	const issues = allIssues.filter((i) => i.verification?.verdict === 'real');
+	const issuesHidden = allIssues.filter(
+		(i) => i.verification?.verdict === 'false_positive',
+	).length;
+	const issuesPending = allIssues.filter((i) => i.verification?.verdict === 'pending').length;
 	// The scorecard row is label-only (`RUN some-command`); the unit id that
 	// carries the owning service lives in the profile it was assembled from, so
 	// the two are joined on the label they both spell the same way.

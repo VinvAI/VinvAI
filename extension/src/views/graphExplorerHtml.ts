@@ -154,7 +154,6 @@ export function getGraphHtml(): string {
 			<button id="m-tour" title="Dependency-ordered walkthrough of the highest-ranked symbols">Tour</button>
 		</div>
 		<button class="v-btn primary" id="btn-ask" title="Ask a question about the selected node (or the whole codebase)">Ask Vinv</button>
-		<button class="v-btn" id="btn-trajectory" title="Show episode history, goals, rewards, evidence, disputes, reverts, and learned policy changes">Trajectory</button>
 		<button class="v-btn" id="btn-theme" title="Cycle the graph theme: follow the editor, always light, or always dark">Theme: Auto</button>
 		<button class="v-btn" id="btn-fit" title="Zoom to fit the whole graph and clear the selection">Fit</button>
 		<button class="v-btn" id="btn-refresh" title="Rebuild the snapshot from the index store on disk">Refresh</button>
@@ -1500,9 +1499,6 @@ export function getGraphHtml(): string {
 	document.getElementById('btn-refresh').addEventListener('click', () => {
 		setStatus('rebuilding…');
 		vscode.postMessage({ type: 'refresh' });
-	});
-	document.getElementById('btn-trajectory').addEventListener('click', () => {
-		vscode.postMessage({ type: 'trajectory' });
 	});
 	// ---- theme toggle: auto (follow editor) → light → dark ----
 	// The canvas re-reads CSS variables every frame, so switching the class is

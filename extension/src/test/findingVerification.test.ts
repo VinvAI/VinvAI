@@ -9,6 +9,7 @@ import * as path from 'path';
 
 import { asFindingVerdicts, type AgentSpawn } from '../harness/binaryAgents';
 import {
+	isConfirmedReal,
 	isHiddenFinding,
 	isPendingFinding,
 	judgeFindings,
@@ -197,5 +198,35 @@ suite('finding triage — selecting what to judge', () => {
 			'sig-b': { verdict: 'false_positive' as const, confidence: 1, reason: '', verified_at: '', harness: '' },
 		};
 		assert.deepStrictEqual(pendingFindingsFrom(clusters, all), []);
+	});
+});
+
+suite('finding verification — what may be dispatched', () => {
+	const store = {
+		real: { verdict: 'real' as const, confidence: 0.9, reason: '', verified_at: '', harness: 'h' },
+		fake: { verdict: 'false_positive' as const, confidence: 0.9, reason: '', verified_at: '', harness: 'h' },
+	};
+
+	test('an unjudged finding is neither shown nor dispatched', () => {
+		// Both gates are confirmed-real now: a finding nobody has judged is
+		// withheld from the list and from any fixer. isHiddenFinding still
+		// answers the narrower question — was it explicitly dismissed — which is
+		// what separates "dismissed" from "waiting" in the counts.
+		assert.strictEqual(isConfirmedReal(store, 'unjudged'), false);
+		assert.strictEqual(isHiddenFinding(store, 'unjudged'), false);
+	});
+
+	test('a confirmed defect is dispatchable', () => {
+		assert.strictEqual(isConfirmedReal(store, 'real'), true);
+		assert.strictEqual(isHiddenFinding(store, 'real'), false);
+	});
+
+	test('a dismissed finding is neither shown nor dispatched', () => {
+		assert.strictEqual(isConfirmedReal(store, 'fake'), false);
+		assert.strictEqual(isHiddenFinding(store, 'fake'), true);
+	});
+
+	test('an unsigned finding is never dispatched', () => {
+		assert.strictEqual(isConfirmedReal(store, ''), false);
 	});
 });

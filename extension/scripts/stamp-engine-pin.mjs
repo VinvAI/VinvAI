@@ -108,7 +108,7 @@ function resolveWheel() {
 
 const ref = resolveRef();
 const wheel = resolveWheel();
-const mode = (process.env.VINV_ENGINE_UPDATE ?? 'prompt').trim();
+const mode = (process.env.VINV_ENGINE_UPDATE ?? 'auto').trim();
 if (!MODES.includes(mode)) {
 	throw new Error(`VINV_ENGINE_UPDATE must be one of ${MODES.join(' | ')} (got "${mode}")`);
 }

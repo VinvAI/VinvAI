@@ -60,7 +60,11 @@ export type StageOutcome = Outcome | 'skipped';
  * agent, and the first-run picker returning null is a user-facing dead end that
  * looked, in the data, exactly like success.
  */
-export type StageSkipReason = 'no_harness' | 'no_handbook' | 'cancelled';
+export type StageSkipReason =
+	| 'no_harness'
+	| 'no_handbook'
+	| 'cancelled'
+	| 'already_current';
 
 /**
  * Stable ids for user-visible failures. Assigned BY HAND at the call site, which
@@ -116,6 +120,7 @@ export type WebviewId =
 	| 'calltree'
 	| 'episode'
 	| 'flow'
+	| 'flow_timeline'
 	| 'traces'
 	| 'deadcode'
 	| 'configure'

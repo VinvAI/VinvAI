@@ -39,7 +39,7 @@ import {
 	type StageOutcome,
 	type StageSkipReason,
 } from '../telemetry';
-import { lastIndexingFailure } from './indexing';
+import { indexIsCurrent, lastIndexingFailure } from './indexing';
 import { anyHarnessInstalled, isHarnessInstalled, lastHarnessFailure } from '../harness/harnessRunner';
 
 /** Combined outcome of a Discover Project run. */
@@ -342,13 +342,23 @@ export async function runDiscovery(
 		// Each stage reports its own duration and outcome as it settles, rather
 		// than one event for the phase: the whole question this answers is WHICH
 		// stage kills a discovery, and a combined result cannot say.
+		// Re-embedding a repository takes minutes, so it is owed only when the
+		// store cannot be reused: absent, incomplete, or written for a different
+		// embedding model (a v5 CodeRankEmbed store against a v6 granite build).
+		// A store already at this version is left alone — an install is not a
+		// reason to rebuild vectors that are still valid, and autoReindex keeps
+		// them level with the code. `force` (Re-discover Project) purges the
+		// artifacts first, so it never reaches this guard as "current".
+		const reuseIndex = !options.force && indexIsCurrent(workspaceRoot);
 		const [indexOk, handbookOk, deadCodeOk] = await Promise.all([
-			timeStage(
-				'index',
-				() => runIndexing(context, workspaceRoot, onIndex, cts.token),
-				cts.token,
-				lastIndexingFailure,
-			),
+			reuseIndex
+				? skipStage('index', 'already_current').then(() => true)
+				: timeStage(
+						'index',
+						() => runIndexing(context, workspaceRoot, onIndex, cts.token),
+						cts.token,
+						lastIndexingFailure,
+					),
 			harness
 				? timeStage(
 						'handbook',

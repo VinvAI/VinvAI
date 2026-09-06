@@ -96,7 +96,11 @@ function writeInsightManifest(workspaceRoot: string, manifest: InsightManifest):
 
 import { captureServiceFor } from '../bringup/bringup';
 import { triageGivenFindings } from './findingTriage';
-import { isHiddenFinding, readVerdicts } from './findingVerification';
+import {
+	findingSignature,
+	isConfirmedReal,
+	readVerdicts,
+} from './findingVerification';
 
 /** Filename-safe id, mirroring the smoke report's own sanitization. */
 function safeId(apiId: string): string {
@@ -211,15 +215,15 @@ export function observedUnits(
 	return units;
 }
 
-/** Content signature for issue dedup — same family as failureSignature. */
+/**
+ * Content signature for issue dedup — same family as failureSignature.
+ *
+ * Delegates to findingVerification.findingSignature so the runtime-error
+ * trigger, which cannot import this module without a cycle, keys its findings
+ * identically and shares their verdicts.
+ */
 export function issueSignature(kind: string, content: string): string {
-	const normalized = `${kind} ${content
-		.replace(/\d+/g, '#')
-		.replace(/\s+/g, ' ')
-		.trim()
-		.toLowerCase()
-		.slice(0, 600)}`;
-	return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 24);
+	return findingSignature(kind, content);
 }
 
 /** Walks a tracemap tree collecting symbol names, error counts and types. */
@@ -577,39 +581,43 @@ export async function recomputeIssues(
 	const effective = pictureDispatched
 		? issues.map((i) => (i.kind === 'runtime-error' ? { ...i, dispatched: true } : i))
 		: issues;
-	// Published immediately, minus anything already judged a false positive.
-	// Issues with no verdict are shown: this pass runs on a debounced watcher,
-	// and holding the list back until a judge answers would blank the panel
-	// every time new spans land.
+	// Only confirmed defects are published. An issue with no verdict is withheld
+	// exactly like a dismissed one: the list a developer reads is defects, or it
+	// is empty. The Findings view carries the pending COUNT so an empty list is
+	// never mistaken for a clean bill of health.
 	const visible = (store: ReturnType<typeof readVerdicts>) =>
-		effective.filter((i) => !isHiddenFinding(store, i.id));
+		effective.filter((i) => isConfirmedReal(store, i.id));
 	publishIssueList({ updatedAt: new Date().toISOString(), issues: visible(readVerdicts(workspaceRoot)) });
+
+	// Judge EVERY unjudged issue, not only the ones about to be dispatched.
+	// Gating this on the dispatch branch left two whole populations permanently
+	// unjudged: issues already dispatched (never 'fresh' again) and every issue
+	// on a workspace with auto-episodes off. Both then sat in the list forever
+	// with no verdict, which is precisely the pile this feature exists to clear.
+	// triageGivenFindings filters to unjudged and returns early when there are
+	// none, so a settled workspace costs nothing per pass.
+	await triageGivenFindings(
+		context,
+		workspaceRoot,
+		effective.map((i) => ({
+			signature: i.id,
+			kind: i.kind,
+			title: i.title,
+			evidence: i.detail,
+		})),
+		'pass-finished',
+	);
+	const judged = readVerdicts(workspaceRoot);
+	publishIssueList({ updatedAt: new Date().toISOString(), issues: visible(judged) });
 
 	// Auto-dispatch: only genuinely new signatures, one grouped episode per
 	// pass (episodes are the scarce resource; the pack carries all evidence).
-	const fresh = effective.filter((i) => !i.dispatched);
+	// And only issues a judge CONFIRMED — not merely ones it has not dismissed.
+	// An unjudged issue waits for its verdict rather than spending an agent run
+	// on a defect nobody has established; it is still shown the whole time.
+	const fresh = effective.filter((i) => !i.dispatched && isConfirmedReal(judged, i.id));
 	if (fresh.length > 0 && isAutoEpisodesEnabled()) {
-		// Judge before dispatching, for the same reason the exercise pass does:
-		// an episode aimed at a false positive costs an agent run and a diff
-		// review either way. Unjudged issues are still dispatched — no verdict
-		// has never meant no defect.
-		await triageGivenFindings(
-			context,
-			workspaceRoot,
-			fresh.map((i) => ({
-				signature: i.id,
-				kind: i.kind,
-				title: i.title,
-				evidence: i.detail,
-			})),
-			'pass-finished',
-		);
-		const judged = readVerdicts(workspaceRoot);
-		publishIssueList({ updatedAt: new Date().toISOString(), issues: visible(judged) });
-		const dispatchable = fresh.filter((i) => !isHiddenFinding(judged, i.id));
-		if (dispatchable.length === 0) {
-			return visible(judged);
-		}
+		const dispatchable = fresh;
 		const handedOff = await dispatchIssueEpisode(context, workspaceRoot, dispatchable);
 		if (handedOff) {
 			const ids = new Set(dispatchable.map((i) => i.id));
@@ -621,7 +629,7 @@ export async function recomputeIssues(
 			}
 		}
 	}
-	return effective;
+	return visible(judged);
 }
 
 // ---- capture watcher --------------------------------------------------------

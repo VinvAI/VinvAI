@@ -64,6 +64,8 @@ import {
 	opportunitySignature as attemptSignature,
 	type OptimizationCandidate,
 } from './optimizationAnalysis';
+import { triageGivenFindings } from './findingTriage';
+import { findingSignature, isConfirmedReal, readVerdicts } from './findingVerification';
 
 // The pure analyses live in runtimeAnalysis.ts (vscode-free, shared with the
 // MCP server); re-exported here so existing imports and tests keep working.
@@ -465,6 +467,52 @@ export async function offerEpisodeForBringupFailure(
 	);
 }
 
+/**
+ * The runtime-error clusters a judge has confirmed are real defects.
+ *
+ * This trigger builds its clusters straight from the runtime overlay, so they
+ * never pass through the issue list and were the one dispatch path triage could
+ * not see: three functions raising errors went to an agent as a fix episode
+ * with nothing having asked whether they were defects. The containment gate
+ * upstream already drops deliberate 4xx raises; this asks about what survives
+ * it.
+ *
+ * Keyed with findingSignature('runtime-error', line) — the same key the insight
+ * pass uses — so a cluster judged here is not re-judged there, and vice versa.
+ *
+ * Returns the confirmed subset, which may be empty. It is empty both when every
+ * cluster was dismissed and when no judge could be reached; the caller reports
+ * those differently, because "nothing to fix" and "nobody could tell us" are
+ * not the same answer.
+ */
+async function confirmedClusters(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	clusters: ErrorCluster[],
+): Promise<{ confirmed: ErrorCluster[]; judged: boolean }> {
+	const keyed = clusters.map((c) => ({
+		cluster: c,
+		signature: findingSignature('runtime-error', c.line),
+	}));
+	const outcome = await triageGivenFindings(
+		context,
+		workspaceRoot,
+		keyed.map((k) => ({
+			signature: k.signature,
+			kind: 'runtime-error',
+			title: k.cluster.line,
+			evidence: `The captured runtime trace shows this function raising errors:
+- ${k.cluster.line}`,
+		})),
+		'pass-finished',
+	);
+	const verdicts = readVerdicts(workspaceRoot);
+	return {
+		confirmed: keyed.filter((k) => isConfirmedReal(verdicts, k.signature)).map((k) => k.cluster),
+		judged: outcome !== null,
+	};
+}
+
 function runtimeErrorTask(clusters: ErrorCluster[]): EpisodeTask {
 	return {
 		kind: 'general',
@@ -538,11 +586,27 @@ export async function offerEpisodeForRuntimeErrors(
 		}
 		return;
 	}
+	const { confirmed, judged } = await confirmedClusters(context, workspaceRoot, clusters);
+	if (confirmed.length === 0) {
+		if (requestId) {
+			recordRequestOutcome(workspaceRoot, {
+				request_id: requestId,
+				kind: 'runtime-errors',
+				outcome: 'no_plan',
+				reason: judged
+					? `all ${clusters.length} error cluster(s) were judged false positives — `
+						+ 'documented rejections or probe artefacts, not defects'
+					: 'the verification agent could not be reached, so no cluster is confirmed a '
+						+ 'defect yet; they stay visible and the next pass re-judges them',
+			});
+		}
+		return;
+	}
 	await offerOrDispatch(
 		context,
 		workspaceRoot,
-		runtimeErrorTask(clusters),
-		`the smoke report found ${clusters.length} function(s) raising runtime errors`,
+		runtimeErrorTask(confirmed),
+		`the smoke report found ${confirmed.length} confirmed function(s) raising runtime errors`,
 	);
 }
 
@@ -605,12 +669,19 @@ export function registerRuntimeErrorTrigger(context: vscode.ExtensionContext): v
 		if (context.workspaceState.get<string>(RUNTIME_ERROR_SIG_KEY) === signature) {
 			return; // this exact failure picture was already dispatched/offered
 		}
+		const { confirmed } = await confirmedClusters(context, root, clusters);
+		if (confirmed.length === 0) {
+			// Judged false, or not judged yet. Either way nothing is dispatched,
+			// and the signature is deliberately NOT recorded: an unjudged picture
+			// must re-arm so the next pass can release it once a verdict lands.
+			return;
+		}
 		await context.workspaceState.update(RUNTIME_ERROR_SIG_KEY, signature);
 		await offerOrDispatch(
 			context,
 			root,
-			runtimeErrorTask(clusters),
-			`the live trace shows ${clusters.length} function(s) raising errors`,
+			runtimeErrorTask(confirmed),
+			`the live trace shows ${confirmed.length} confirmed function(s) raising errors`,
 		);
 		// Blocked ≠ dispatched: if the dispatch ran into a harness precondition
 		// failure (needs login / quota / network), un-record the signature so

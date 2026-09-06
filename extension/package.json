@@ -265,6 +265,12 @@
 				"category": "Vinv"
 			},
 			{
+				"command": "vinv-vs.openFlowTimeline",
+				"title": "Open Timeline (the pipeline, stage by stage)",
+				"category": "Vinv",
+				"icon": "$(list-tree)"
+			},
+			{
 				"command": "vinv-vs.openFindings",
 				"title": "Open Findings (what Vinv found and fixed)",
 				"category": "Vinv",
@@ -525,48 +531,6 @@
 				{
 					"command": "vinv-vs.optimizeHotspot",
 					"when": "false"
-				}
-			],
-			"view/title": [
-				{
-					"command": "vinv-vs.stopDiscovery",
-					"when": "view == vinv.flow && vinv.discovering",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.rediscover",
-					"when": "view == vinv.flow && !vinv.discovering",
-					"group": "navigation@0"
-				},
-				{
-					"command": "vinv-vs.openGraphExplorer",
-					"when": "view == vinv.flow",
-					"group": "navigation@1"
-				},
-				{
-					"command": "vinv-vs.openOptimization",
-					"when": "view == vinv.flow",
-					"group": "navigation@1"
-				},
-				{
-					"command": "vinv-vs.openFindings",
-					"when": "view == vinv.flow",
-					"group": "navigation@2"
-				},
-				{
-					"command": "vinv-vs.openTraces",
-					"when": "view == vinv.flow",
-					"group": "navigation@2"
-				},
-				{
-					"command": "vinv-vs.openDeadCode",
-					"when": "view == vinv.flow",
-					"group": "navigation@3"
-				},
-				{
-					"command": "vinv-vs.configureProject",
-					"when": "view == vinv.flow",
-					"group": "navigation@9"
 				}
 			]
 		}

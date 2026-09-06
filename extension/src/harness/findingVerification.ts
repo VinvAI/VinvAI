@@ -18,8 +18,9 @@
  *      service that hangs), not the normal path.
  *   3. One judge-findings agent judges the whole batch and returns a verdict
  *      per finding signature.
- *   4. Verdicts are stored; the view shows the real ones and hides the false
- *      positives.
+ *   4. Verdicts are stored; the view shows the CONFIRMED ones only. A finding
+ *      that has not been judged is not shown either — an unverified list is
+ *      the thing this exists to stop a developer reading.
  *
  * Nothing is deleted. Verdicts live in `.vinv/exercise/verdicts.json` keyed by
  * the finding signature the exerciser already assigns, NOT inside issues.json:
@@ -29,17 +30,41 @@
  * reappears — a false positive stays hidden across passes instead of being
  * re-judged, and re-paid for, every time.
  *
- * Safety runs one way throughout. An unjudged finding is SHOWN. A judge that is
- * unavailable, blocked, times out, or replies with anything malformed produces
- * no verdicts at all, and the view falls back to showing everything — the
- * behaviour that predates this module. Only an explicit `false_positive` from a
- * well-formed reply hides anything, because a wrongly hidden finding is one
- * nobody ever sees again.
+ * Nothing is shown, and nothing is dispatched, until a judge has confirmed it.
+ * The cost is stated plainly because it is real: while no judge can be reached,
+ * the list stays empty however much the tooling found. An empty list that means
+ * "not checked yet" and one that means "nothing wrong" are indistinguishable to
+ * a reader, so the surfaces carry a pending COUNT — never the findings
+ * themselves — and nothing is ever deleted: an unjudged finding is waiting, and
+ * the next pass that reaches a judge releases it.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
 import { asFindingVerdicts, runGoalAgent, type AgentSpawn } from './binaryAgents';
+
+/**
+ * Content signature for a finding — the verdict store's key.
+ *
+ * Lives here, in the module with no dependencies of its own, because three
+ * different producers need to agree on it: the insight pass, the exercise pass,
+ * and the runtime-error trigger. Two of those cannot import the third without
+ * a cycle, and a finding keyed differently by two producers is judged (and paid
+ * for) twice, then hidden in one place and shown in the other.
+ *
+ * Digits are collapsed so the same defect keeps one identity across runs whose
+ * line numbers or counts moved.
+ */
+export function findingSignature(kind: string, content: string): string {
+	const normalized = `${kind} ${content
+		.replace(/\d+/g, '#')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.toLowerCase()
+		.slice(0, 600)}`;
+	return crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 24);
+}
 
 /** A stored verdict: the agent's judgement plus when and by whom. */
 export interface StoredVerdict {
@@ -66,7 +91,7 @@ export interface JudgeableFinding {
 }
 
 /** How long with no new finding before the batch is judged anyway. */
-const DEFAULT_QUIET_PERIOD_MS = 10 * 60 * 1000;
+const DEFAULT_QUIET_PERIOD_MS = 5 * 60 * 1000;
 
 /** Cap on one batch, so a pathological pass cannot render an unbounded prompt. */
 const MAX_BATCH = 60;
@@ -128,6 +153,24 @@ export function writeVerdicts(workspaceRoot: string, added: VerdictStore): void 
 /** True when this finding has been judged a false positive and should be hidden. */
 export function isHiddenFinding(store: VerdictStore, signature: string): boolean {
 	return store[signature]?.verdict === 'false_positive';
+}
+
+/**
+ * True when a judge has explicitly confirmed this finding is a real defect.
+ *
+ * The gate for DISPATCH, deliberately stricter than the gate for display. A
+ * finding is shown unless it was judged false; it is handed to a fixer only
+ * once it was judged true. The asymmetry is the cost of being wrong in each
+ * direction: showing an unjudged finding costs a glance, while sending one to
+ * an agent spends a run and a diff review on something that may not be a defect
+ * at all.
+ *
+ * The consequence, stated because it is easy to miss: while no judge can be
+ * reached, nothing is confirmed, so nothing is auto-dispatched. Findings still
+ * appear, and the next pass that reaches a judge releases them.
+ */
+export function isConfirmedReal(store: VerdictStore, signature: string): boolean {
+	return store[signature]?.verdict === 'real';
 }
 
 /** True when this finding has no verdict yet — shown, but marked as pending. */

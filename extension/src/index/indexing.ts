@@ -7,6 +7,7 @@ import { ensureEmbedder } from '../engines/install';
 import { stopAnyEmbedder } from '../embedder/sidecar';
 import { getIndexEnv } from '../config/settings';
 import { bucketMs, classifyError, messageDigest, track, type ErrorCode } from '../telemetry';
+import { indexStoreIsCurrent } from './storeState';
 
 /**
  * Why the last indexing run failed, for callers that only saw a `false`.
@@ -84,6 +85,24 @@ export function isStoreConsistent(storeDir: string): boolean {
  * migration (v6) changed the vector space and dimension (768→384).
  */
 export const EXPECTED_STORE_VERSION = 6;
+
+/**
+ * True when the store on disk is one this build can reuse as-is.
+ *
+ * Complete (meta.json + vectors) AND written at the current store version. The
+ * version is the embedding model: v5 is a 768-dim CodeRankEmbed store and v6 is
+ * the 384-dim granite one, and the version is bumped in lockstep whenever a
+ * change makes existing vectors unqueryable. So "same version" means "same
+ * vector space", which is the question worth asking before spending minutes
+ * re-embedding a repository that has not changed model.
+ *
+ * Deliberately NOT a freshness check: keeping the index level with the code is
+ * autoReindex's job (incremental `index update` on save). This only answers
+ * whether a full rebuild is owed.
+ */
+export function indexIsCurrent(workspaceRoot: string): boolean {
+	return indexStoreIsCurrent(getIndexStoreDir(workspaceRoot), EXPECTED_STORE_VERSION);
+}
 
 /**
  * Invalidate a workspace index store built by an older engine this build can no

@@ -6,6 +6,8 @@ import { SessionsProvider } from './views/sessionsView';
 import { ServicesProvider } from './views/servicesView';
 import { FlowStateSource } from './views/flowStateSource';
 import { FlowViewProvider, FLOW_VIEW_ID } from './views/flowPanel';
+import { openFlowTimeline } from './views/flowTimelinePanel';
+import { registerTrackedCommand } from './telemetry/instrument';
 import { OptimizationSource } from './views/optimizationSource';
 import { registerOptimizationNudge } from './views/optimizationPanel';
 import { ReportMirrorSource } from './views/reportMirrorSource';
@@ -197,6 +199,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	context.subscriptions.push(
 		flowSource,
 		vscode.window.registerWebviewViewProvider(FLOW_VIEW_ID, new FlowViewProvider(context, flowSource)),
+		// The rail itself, in the editor area — opened by the sidebar's "View
+		// more" and by the command palette. It shares this source, so both
+		// surfaces move together.
+		registerTrackedCommand('vinv-vs.openFlowTimeline', () =>
+			openFlowTimeline(context, flowSource),
+		),
 	);
 	registerFlowIssueWarnings(context, flowSource);
 
