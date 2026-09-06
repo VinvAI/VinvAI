@@ -101,8 +101,16 @@ uvx --from vinv exerciser campaign <repo> --budget 20
 
 Give Claude Code, Cursor, or any MCP client Vinv's tools — **one global config** that finds your open workspace automatically via MCP roots.
 
-Claude Code, Codex, Gemini CLI — installed once for every folder you open, not
-just the current one:
+The servers are a front end — they shell out to the engines, which is what
+actually reads your index and runtime — so install those first. One line, and no
+Rust toolchain: the wheel ships the compiled index binary.
+
+```bash
+pip install vinv          # or: uv tool install vinv
+```
+
+Then register the server. Claude Code, Codex, Gemini CLI — installed once for
+every folder you open, not just the current one:
 
 ```bash
 claude mcp add --scope user vinv -- npx -y vinv-mcp
