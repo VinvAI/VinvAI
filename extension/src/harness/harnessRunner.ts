@@ -1837,7 +1837,19 @@ export function runHandbookViaHarness(
 		return Promise.resolve(true);
 	}
 	if (!isBinAvailable(context, 'handbook')) {
-		showEnginesMissingError('handbook');
+		// The cascade this sits at the head of: no handbook binary means no
+		// .vinv/vinv.md, which means bring-up never runs, which means
+		// services.json is never written and the run reports zero services --
+		// three stages from the actual cause. Record it so the funnel names the
+		// missing engine instead of blaming the stage that noticed last.
+		// `lastHarnessFailure` is what discovery already reads for this stage; it
+		// was simply never set here, because it is assigned from a harness run
+		// RESULT and this path returns before any harness task starts.
+		lastHarnessFailureInfo = {
+			code: 'engines.not_found',
+			detail: 'handbook engine not installed',
+		};
+		showEnginesMissingError('handbook', context);
 		return Promise.resolve(false);
 	}
 	const binPath = getBinPath(context, 'handbook');

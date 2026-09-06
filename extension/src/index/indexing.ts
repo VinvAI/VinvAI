@@ -185,7 +185,7 @@ export function runIndexing(
 			code: 'engines.not_found',
 			detail: 'index binary not installed',
 		};
-		showEnginesMissingError('index');
+		showEnginesMissingError('index', context);
 		return Promise.resolve(false);
 	}
 

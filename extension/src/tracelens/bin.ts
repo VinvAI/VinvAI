@@ -8,6 +8,7 @@ import {
 	pythonEnginePath,
 	resolveIndexBinary,
 	PYTHON_ENGINE_NAMES,
+	missingPythonEngines,
 } from '../engines/resolve';
 import { binaryFilePath } from '../vinvHome';
 
@@ -80,11 +81,21 @@ export function isBinAvailable(context: vscode.ExtensionContext, name: string): 
 }
 
 /** Shown when an engine is missing: the one next step that fixes it. */
-export function showEnginesMissingError(name: string): void {
+export function showEnginesMissingError(name: string, context?: vscode.ExtensionContext): void {
+	// Name the whole gap, not just the engine whose turn it was to notice. A
+	// partial `uv sync` leaves several missing at once, and reporting them one
+	// toast at a time -- each naming a single engine -- is what made a partial
+	// install look like a series of unrelated stage failures.
+	const root = context ? enginesRoot(context) : null;
+	const missing = root ? missingPythonEngines(root) : [];
+	const alsoMissing = missing.filter((m) => m !== name);
+	const also =
+		alsoMissing.length > 0 ? ` Also missing: ${alsoMissing.join(', ')}.` : '';
 	void vscode.window
 		.showErrorMessage(
 			`Vinv: The ${name} engine was not found — it ships prebuilt, so this is an ` +
-				`install that has not run yet, not a missing compiler. Install the Vinv engines to enable it.`,
+				`install that has not run yet, not a missing compiler.${also} ` +
+				`Install the Vinv engines to enable it.`,
 			'Install Vinv Engines',
 		)
 		.then((choice) => {
