@@ -659,6 +659,30 @@ def _capture_dependency_roots() -> list[str]:
     return roots
 
 
+def _target_python_version(target_py: str) -> tuple[int, int] | None:
+    """``(major, minor)`` of the target interpreter, or None if it won't answer."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            [target_py, "-c", "import sys; print('%d %d' % sys.version_info[:2])"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    parts = proc.stdout.split()
+    if len(parts) != 2:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+
+
 def _install_capture_dep_fallback() -> list[str]:
     """Child-side: expose tracelens's capture dependencies as a last-resort import
     fallback so a foreign target venv needs ZERO tracing installs.
@@ -750,6 +774,27 @@ def _maybe_handoff_to_target_python(argv: list[str], user: list[str]) -> None:
     # using its own — the injected copies only fill genuine gaps. See
     # ``_install_capture_dep_fallback``.
     dep_roots = _capture_dependency_roots()
+    # The roots are whole site-packages directories, so the child sees every
+    # package installed alongside tracelens -- not just the capture stack. Across
+    # a Python version boundary that is actively harmful: a pure-Python package
+    # imports fine, then its version-tagged extension module does not exist for
+    # the running interpreter, and the target dies on an import it would have
+    # resolved from its own venv (hypothesis._native, #67). Same version, same
+    # ABI, historical behaviour; different version, inject nothing and say so.
+    if dep_roots:
+        target_ver = _target_python_version(target_py)
+        if target_ver is not None and target_ver != sys.version_info[:2]:
+            dep_roots = []
+            print(
+                "\033[33m[tracelens] warning: target interpreter is Python "
+                f"{target_ver[0]}.{target_ver[1]} but tracelens runs on "
+                f"{sys.version_info[0]}.{sys.version_info[1]}; not injecting "
+                "tracelens's own dependencies, which are built for the wrong ABI. "
+                "The target venv needs opentelemetry-api, opentelemetry-sdk and "
+                "opentelemetry-instrumentation of its own -- or run tracelens from "
+                "an interpreter matching the target.\033[0m",
+                file=sys.stderr,
+            )
     if dep_roots:
         env[_CAPTURE_DEP_ROOTS_ENV] = os.pathsep.join(dep_roots)
     _log_diag_dispatch("handoff")
@@ -881,6 +926,18 @@ def _capture_selfcheck(output: str) -> list[str]:
         from tracelens.otel.exporter import exported_span_count
 
         rewritten = sorted(m for m, s in _rs().items() if s.startswith("ok:"))
+        requested = [t for t in os.environ.get("TRACELENS_TARGET_PACKAGES", "").split(",") if t]
+        if exported_span_count() == 0 and not rewritten and requested:
+            # Nothing from --target-package was ever imported and nothing was
+            # exported: the target did not get far enough to be traced at all.
+            # The branch below only fires once instrumentation took hold, so
+            # without this the loudest failure of all is the silent one (#67).
+            problems.append(
+                f"0 spans exported and no module from {', '.join(requested)} was "
+                "instrumented — the target most likely failed before it imported "
+                "its own code (check the command's own output for an import or "
+                "start-up error); the trace is of a run that never started"
+            )
         if exported_span_count() == 0 and rewritten:
             problems.append(
                 f"0 spans exported although {len(rewritten)} instrumented module(s) were "
