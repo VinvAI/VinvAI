@@ -145,6 +145,12 @@ export async function pickHarness(
 	const picked = await new Promise<HarnessQuickPickItem | undefined>((resolve) => {
 		const qp = vscode.window.createQuickPick<HarnessQuickPickItem>();
 		qp.placeholder = placeHolder;
+		// This picker gates the whole LLM half of discovery, and VS Code hides an
+		// unpinned QuickPick on any focus change — clicking the editor, switching
+		// windows. Dismissed that way it resolves undefined, indistinguishable
+		// from a deliberate Escape, and handbook and bring-up were skipped for a
+		// stray click. Every other prompt in the extension already pins itself.
+		qp.ignoreFocusOut = true;
 		let pollTimer: ReturnType<typeof setInterval> | undefined;
 		const render = (activeId?: string) => {
 			const current = qp.activeItems[0]?.id;
