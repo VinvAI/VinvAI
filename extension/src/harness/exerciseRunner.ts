@@ -47,6 +47,8 @@ import { runHarnessPrompt } from './harnessRunner';
 import { getHarnessId } from '../config/settings';
 import { openConfigRequestPanel, writeAnswers } from '../views/configRequestPanel';
 import { isAutoEpisodesEnabled } from '../config/settings';
+import { armTriageFallback, triageFindings } from './findingTriage';
+import { isHiddenFinding, readVerdicts } from './findingVerification';
 
 /** .vinv/exercise/<file> */
 function exerciseFile(workspaceRoot: string, name: string): string {
@@ -785,7 +787,12 @@ export async function dispatchFreshClusters(
 		return;
 	}
 	const dispatched = readDispatched(context);
-	const fresh = issues.clusters.filter((c) => !dispatched.has(c.signature));
+	// A finding the judge dismissed is not handed to a fixer. Unjudged ones are
+	// still dispatched: absence of a verdict has never meant absence of a defect.
+	const verdicts = readVerdicts(workspaceRoot);
+	const fresh = issues.clusters.filter(
+		(c) => !dispatched.has(c.signature) && !isHiddenFinding(verdicts, c.signature),
+	);
 	const errorShaped = fresh.filter((c) => !isAssertShapedKind(c.kind));
 	const assertShaped = fresh.filter((c) => isAssertShapedKind(c.kind));
 	if (errorShaped.length > 0) {
@@ -1201,6 +1208,10 @@ export async function exercisePassOnce(
 		if (issueDocs.length > 1) {
 			writeExerciseJson(workspaceRoot, 'issues.json', mergeIssueDocuments(issueDocs));
 		}
+		// New findings just landed: push the quiet-period deadline out. The pass
+		// finishing below is the normal trigger and cancels this; the timer only
+		// fires for a pass that never gets there.
+		armTriageFallback(context, workspaceRoot);
 	}
 
 	if (driven.length === 0) {
@@ -1363,6 +1374,13 @@ export async function exercisePassOnce(
 			(failures.length ? ` · ${failures.length} service(s) failed` : ''),
 	);
 	publishExerciseState(state);
+
+	// Judge before dispatching, not after: a fix episode aimed at a false
+	// positive spends an agent run and a diff review on a defect that was never
+	// there, and the developer reviews the diff either way. Awaited for that
+	// reason alone — the view itself does not need to wait, since an unjudged
+	// finding is shown.
+	await triageFindings(context, workspaceRoot, 'pass-finished');
 
 	// Dispatch from the MERGED document, so a defect in the service that ran
 	// first is handed to the coding agent alongside the one that ran last.

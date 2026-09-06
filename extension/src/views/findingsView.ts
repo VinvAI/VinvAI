@@ -456,8 +456,11 @@ function getHtml(): string {
 					(breakdown ? ' — ' + breakdown : '') },
 			{ k: 'Functions covered', v: h.symbolsCovered + '<small>/' + h.symbolsTotal + '</small>',
 				tip: 'Functions those ' + unitNoun(byKind, true) + ' can reach that a captured run actually executed' },
-			{ k: 'Issues found', v: h.issuesFound, hot: h.issuesFound > 0,
-				tip: 'Distinct failures observed in live runs, grouped by root cause' },
+			{ k: 'Issues found', v: h.issuesFound + (h.issuesPending > 0 ? '<small> · ' + h.issuesPending + ' unconfirmed</small>' : ''),
+				hot: h.issuesFound > 0,
+				tip: 'Distinct failures observed in live runs, grouped by root cause' +
+					(h.issuesPending > 0 ? ' — ' + h.issuesPending + ' not yet judged by a verification agent' : '') +
+					(h.issuesHidden > 0 ? ' — ' + h.issuesHidden + ' judged false positive and hidden (kept on disk)' : '') },
 			{ k: 'Optimizations accepted', v: h.episodesAccepted + '<small>/' + (h.episodesAccepted + h.episodesReverted) + ' attempts</small>',
 				tip: 'Speedups that measured faster with behavior unchanged; the rest were rolled back' },
 			{ k: 'Regression checks', v: h.regressCases + '<small> · ' + h.regressRealDiffs + ' real changes</small>', hot: h.regressRealDiffs > 0,
@@ -586,9 +589,22 @@ function getHtml(): string {
 		// worked should read as a run that mostly worked.
 		html += latencySection(f);
 
-		html += '<h2>Issue clusters (' + f.issues.length + ')</h2>';
+		// Confirmed first, then the ones still awaiting a verdict. Pending
+		// findings are shown, not withheld: nothing has judged them false, and a
+		// list that goes empty during a long exercise reads as "found nothing"
+		// rather than "still checking". They are simply marked as unconfirmed so
+		// a developer knows which ones have been through the judge.
+		const confirmed = f.issues.filter((i) => i.verification?.verdict !== 'pending');
+		const awaiting = f.issues.filter((i) => i.verification?.verdict === 'pending');
+		const hiddenCount = f.headline.issuesHidden;
+		html += '<h2>Issue clusters (' + confirmed.length + ')</h2>';
 		html += f.issues.length === 0 ? '<div class="empty">No failures found in anything that was exercised.</div>' : '';
-		for (const i of f.issues) {
+		if (hiddenCount > 0) {
+			html += '<div class="empty" title="Findings a verification agent judged false positives. They stay in .vinv/exercise/issues.json with their verdict in verdicts.json — nothing was deleted.">' +
+				hiddenCount + ' finding' + (hiddenCount === 1 ? '' : 's') + ' hidden as false positive' +
+				(hiddenCount === 1 ? '' : 's') + '.</div>';
+		}
+		for (const i of confirmed) {
 			const ex = i.exemplar;
 			html += '<div class="epi"><div class="head"><span class="badge revert">' + esc(i.kind) + '</span>' +
 				'<span class="label">' + esc(i.title) + '</span>' +
@@ -623,6 +639,25 @@ function getHtml(): string {
 			html += '<div class="files"><span title="A stable id for this failure — the same root cause keeps this fingerprint across runs, so fixes and re-checks line up">fingerprint ' + esc(i.signature) + '</span>' +
 				' · <a href="#" data-open=".vinv/exercise/' + esc(i.evidenceFile) + '" title="The artifact holding every failing row behind this cluster">' + esc(i.evidenceFile) + '</a></div>';
 			html += '</div>';
+		}
+
+		// Awaiting verification — same rows, visibly provisional. Rendered after
+		// the confirmed ones so the list a developer works from is the judged
+		// one, without hiding anything the judge has not reached yet.
+		if (awaiting.length > 0) {
+			html += '<h2 title="Findings a verification agent has not judged yet. They are shown because nothing has said they are false — a verdict only ever removes one from this group.">' +
+				'Awaiting verification (' + awaiting.length + ')</h2>';
+			for (const i of awaiting) {
+				html += '<div class="epi" style="opacity:.62">' +
+					'<div class="head"><span class="badge">' + esc(i.kind) + '</span>' +
+					'<span class="label">' + esc(i.title) + '</span>' +
+					(i.count > 1 ? '<span class="badge">' + i.count + '&times;</span>' : '') +
+					'<span class="grow"></span>' +
+					'<span class="badge env" title="Queued for the next triage pass — when the exercise finishes, or after ten quiet minutes">unconfirmed</span>' +
+					'</div>' +
+					(i.endpoint ? '<div class="files">' + esc(i.endpoint) + '</div>' : '') +
+					'</div>';
+			}
 		}
 
 		html += '<h2>Optimization episodes (' + f.episodes.length + ')</h2>';

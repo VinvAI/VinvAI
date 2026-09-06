@@ -12,6 +12,7 @@ import {
 	isHiddenFinding,
 	isPendingFinding,
 	judgeFindings,
+	pendingFindingsFrom,
 	readVerdicts,
 	verdictStorePath,
 	writeVerdicts,
@@ -154,5 +155,47 @@ suite('finding verification — judging a batch', () => {
 			await judgeFindings(SPAWN, 'claude', [{ signature: '  ', kind: 'k', title: 't', evidence: '' }], replying(null)),
 			{},
 		);
+	});
+});
+
+suite('finding triage — selecting what to judge', () => {
+	const clusters = [
+		{ signature: 'sig-a', kind: 'http_5xx', title: 'GET /orders 500', count: 3, method: 'GET', path: '/orders' },
+		{ signature: 'sig-b', kind: 'http_4xx', title: 'GET /me 401', count: 1 },
+		{ signature: '', kind: 'weird', title: 'no signature' },
+		{ signature: 'sig-a', kind: 'http_5xx', title: 'duplicate' },
+	];
+
+	test('only unjudged, signed, de-duplicated clusters are sent', () => {
+		const store = {
+			'sig-b': { verdict: 'real' as const, confidence: 1, reason: '', verified_at: '', harness: '' },
+		};
+		const out = pendingFindingsFrom(clusters, store);
+		assert.deepStrictEqual(out.map((f) => f.signature), ['sig-a']);
+	});
+
+	test('a cluster with no signature is never judged, so it stays visible', () => {
+		const out = pendingFindingsFrom([{ signature: '  ', kind: 'k', title: 't' }], {});
+		assert.deepStrictEqual(out, []);
+	});
+
+	test('evidence carries what the judge needs to decide', () => {
+		const out = pendingFindingsFrom(
+			[{ signature: 's', kind: 'http_5xx', title: 't', count: 2, method: 'GET', path: '/x',
+			   exemplar: { status: 500, strategy: 'fuzz', error: 'TypeError' } }],
+			{},
+		);
+		assert.ok(out[0].evidence.includes('GET /x'));
+		assert.ok(out[0].evidence.includes('status: 500'));
+		assert.ok(out[0].evidence.includes('TypeError'));
+		assert.ok(out[0].evidence.includes('occurrences: 2'));
+	});
+
+	test('everything judged means nothing to send', () => {
+		const all = {
+			'sig-a': { verdict: 'real' as const, confidence: 1, reason: '', verified_at: '', harness: '' },
+			'sig-b': { verdict: 'false_positive' as const, confidence: 1, reason: '', verified_at: '', harness: '' },
+		};
+		assert.deepStrictEqual(pendingFindingsFrom(clusters, all), []);
 	});
 });

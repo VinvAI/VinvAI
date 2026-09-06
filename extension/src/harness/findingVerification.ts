@@ -136,6 +136,51 @@ export function isPendingFinding(store: VerdictStore, signature: string): boolea
 }
 
 /**
+ * The findings in `clusters` that have no verdict yet.
+ *
+ * Pure, and separated from the pass so the selection is testable: a cluster
+ * with no signature cannot be keyed and is skipped — it stays visible forever,
+ * which is the safe direction, rather than being judged under a key that would
+ * collide with another cluster's.
+ */
+export function pendingFindingsFrom(
+	clusters: ReadonlyArray<Record<string, unknown>>,
+	store: VerdictStore,
+): JudgeableFinding[] {
+	const out: JudgeableFinding[] = [];
+	const seen = new Set<string>();
+	for (const c of clusters) {
+		const signature = String(c.signature ?? '').trim();
+		if (!signature || store[signature] !== undefined || seen.has(signature)) {
+			continue;
+		}
+		seen.add(signature);
+		const exemplar = (c.exemplar ?? {}) as Record<string, unknown>;
+		// The evidence the judge actually needs: what was sent, what came back,
+		// and any failure text. The renderer clips it, so over-supplying here
+		// costs nothing and under-supplying costs a verdict.
+		const evidence = [
+			`endpoint: ${String(c.method ?? '')} ${String(c.path ?? c.endpoint_id ?? '')}`.trim(),
+			`occurrences: ${String(c.count ?? 1)}`,
+			exemplar.status !== undefined ? `status: ${String(exemplar.status)}` : '',
+			exemplar.strategy ? `strategy: ${String(exemplar.strategy)}` : '',
+			exemplar.request ? `request: ${JSON.stringify(exemplar.request)}` : '',
+			exemplar.response ? `response: ${JSON.stringify(exemplar.response)}` : '',
+			exemplar.error ? `error: ${String(exemplar.error)}` : '',
+		]
+			.filter(Boolean)
+			.join('\n');
+		out.push({
+			signature,
+			kind: String(c.kind ?? ''),
+			title: String(c.title ?? ''),
+			evidence,
+		});
+	}
+	return out;
+}
+
+/**
  * Judges a batch of findings. Resolves the verdicts that were obtained, which
  * may be fewer than were asked for — a finding the agent skipped or mangled
  * stays unjudged, and therefore stays visible.
