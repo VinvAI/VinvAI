@@ -199,5 +199,19 @@ def _judge_stall_cmd(payload: dict) -> str:
     )
 
 
+@_agent_command(
+    "judge-findings",
+    "Print the batch finding-triage prompt. Payload: {findings: [{id, kind, "
+    "title, evidence}]}. The prompt demands one verdict per finding id.",
+)
+def _judge_findings_cmd(payload: dict) -> str:
+    from goal.agents import render_judge_findings_prompt
+
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError("judge-findings needs a findings list")
+    return render_judge_findings_prompt([f for f in findings if isinstance(f, dict)])
+
+
 if __name__ == "__main__":
     main()

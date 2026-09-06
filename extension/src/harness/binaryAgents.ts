@@ -127,7 +127,7 @@ export function parseAgentReply(reply: string): Record<string, unknown> | null {
  */
 export async function runGoalAgent(
 	spawnInfo: AgentSpawn,
-	subcommand: 'judge-diff' | 'author-tests' | 'judge-stall',
+	subcommand: 'judge-diff' | 'author-tests' | 'judge-stall' | 'judge-findings',
 	payload: Record<string, unknown>,
 ): Promise<Record<string, unknown> | null> {
 	if (!spawnInfo.binPath || !fs.existsSync(spawnInfo.binPath)) {
@@ -147,6 +147,52 @@ export async function runGoalAgent(
 		return null;
 	}
 	return parseAgentReply(reply);
+}
+
+/** One finding's triage verdict, as the judge-findings agent reports it. */
+export interface FindingVerdict {
+	/** The finding signature, echoed back by the agent. */
+	id: string;
+	verdict: 'real' | 'false_positive';
+	confidence: number;
+	reason: string;
+}
+
+/**
+ * Contract-validated finding verdicts from a raw agent result (null-safe).
+ *
+ * A malformed entry is DROPPED rather than defaulted. The caller treats a
+ * finding with no verdict as unjudged and keeps showing it, so dropping is the
+ * safe direction: the cost is one extra glance, where inventing a
+ * `false_positive` would hide a real defect on the strength of a parse error.
+ */
+export function asFindingVerdicts(raw: Record<string, unknown> | null): FindingVerdict[] | null {
+	if (!raw || !Array.isArray(raw.verdicts)) {
+		return null;
+	}
+	const out: FindingVerdict[] = [];
+	for (const entry of raw.verdicts) {
+		if (!entry || typeof entry !== 'object') {
+			continue;
+		}
+		const row = entry as Record<string, unknown>;
+		const id = typeof row.id === 'string' ? row.id.trim() : '';
+		const verdict = row.verdict;
+		if (!id || (verdict !== 'real' && verdict !== 'false_positive')) {
+			continue;
+		}
+		const confidence =
+			typeof row.confidence === 'number' && Number.isFinite(row.confidence)
+				? Math.min(1, Math.max(0, row.confidence))
+				: 0;
+		out.push({
+			id,
+			verdict,
+			confidence,
+			reason: typeof row.reason === 'string' ? row.reason.slice(0, 400) : '',
+		});
+	}
+	return out;
 }
 
 /** Contract-validated judge report from a raw agent result (null-safe). */

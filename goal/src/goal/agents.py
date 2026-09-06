@@ -18,6 +18,8 @@ Three agents:
   deterministic lens-selection procedure.
 - ``judge_stall``  — the explorer/auditor stall negotiation utilities
   (the Nash-unanimity judge's utility report).
+- ``judge_findings`` — batch triage of exerciser/insight findings before any
+  of them is shown: real defect or false positive, one verdict per finding.
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ logger = logging.getLogger(__name__)
 MAX_ISSUE_CHARS = 12_000
 MAX_DIFF_CHARS = 24_000
 MAX_EVIDENCE_CHARS = 16_000
+# Per-finding budget in a triage batch: enough for a title, location and a
+# failure exemplar, small enough that a large batch still fits one prompt.
+MAX_FINDING_CHARS = 2_000
 
 
 def _clip(text: str, cap: int) -> str:
@@ -222,3 +227,65 @@ def render_judge_stall_prompt(task: str, evidence_a: str, evidence_b: str) -> st
             "Near-identical evidence from the latest attempt", _clip(evidence_b, MAX_EVIDENCE_CHARS)
         )
     )
+
+
+_JUDGE_FINDINGS_INSTRUCTION = """Decide, for each finding below, whether it is a REAL defect worth a
+developer's attention or a FALSE POSITIVE the tooling should not have raised.
+
+These findings were produced by automated exercise and runtime analysis, which
+sees symptoms rather than intent. Common false positives: a non-2xx status that
+is the endpoint's documented behaviour for that input (401 on a missing token,
+404 for an absent id, 422 for invalid input); a failure caused by the probe
+sending nonsense the real caller cannot send; a timeout from a deliberate sleep
+or an unstarted dependency; an error the code already handles and reports
+correctly. Common REAL defects that merely look benign: a 500 anywhere, an
+unhandled exception reaching the boundary, a value that violates the handler's
+own contract, a state mutation left behind after a failed request.
+
+Judge honestly in BOTH directions. You are the last gate before a finding is
+discarded, and a wrongly dismissed finding is never seen again by anyone —
+whereas a wrongly kept one costs a developer one glance. When the evidence does
+not settle it, the verdict is "real". Never guess a verdict to be helpful, and
+never dismiss a finding merely because it is inconvenient, hard to read, or
+lacks a stack trace. Judge each finding on its own evidence; do not let one
+obvious false positive colour the batch.
+
+Respond with ONLY a JSON object (no fences, no prose around it) of the form:
+
+{
+  "verdicts": [
+    {
+      "id": "<the finding id, copied exactly from the input>",
+      "verdict": "real" | "false_positive",
+      "confidence": <float in [0,1]: how settled the evidence leaves you>,
+      "reason": "<one sentence naming the evidence that decided it>"
+    }
+  ]
+}
+
+Return exactly one entry per finding, with every id echoed verbatim. A finding
+you cannot judge is "real" with a low confidence and a reason saying so.
+"""
+
+
+def render_judge_findings_prompt(findings: list[dict]) -> str:
+    """Render the batch finding-triage prompt (makes no LLM call).
+
+    ``findings`` is a list of ``{id, kind, title, evidence}`` dicts. The id is
+    echoed back by the agent and is how the caller re-attaches each verdict, so
+    a finding without one is refused here rather than silently mismatched.
+    """
+    if not findings:
+        raise ValueError("judge-findings needs at least one finding")
+    blocks = []
+    for finding in findings:
+        fid = str(finding.get("id", "")).strip()
+        if not fid:
+            raise ValueError("judge-findings: every finding needs an id")
+        body = (
+            f"kind: {finding.get('kind', 'unknown')}\n"
+            f"title: {finding.get('title', '(none)')}\n\n"
+            f"{_clip(str(finding.get('evidence', '')), MAX_FINDING_CHARS)}"
+        )
+        blocks.append(_section(f"Finding {fid}", body))
+    return _JUDGE_FINDINGS_INSTRUCTION + "\n" + "".join(blocks)

@@ -20,6 +20,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { evidenceFileForKind, isDispatchableKind } from '../harness/issueKinds';
+import { readVerdicts, type VerdictStore } from '../harness/findingVerification';
 import { describeLineage } from '../harness/runtimeAnalysis';
 import { serviceForEndpointFile } from '../bringup/targetPackages';
 import { readEntryPoints, entryPointLabel } from '../identification/identification';
@@ -185,6 +186,15 @@ export interface FindingsIssue {
 	 * "unattributed" rather than pretending to know.
 	 */
 	service?: string;
+	/**
+	 * Triage state for this finding (see harness/findingVerification).
+	 *
+	 * `pending` means no verdict yet: the finding is real as far as anyone
+	 * knows, and is shown as awaiting confirmation rather than withheld.
+	 * `false_positive` findings are filtered out of `issues` entirely and
+	 * counted separately, so nothing is destroyed and the count stays honest.
+	 */
+	verification?: { verdict: 'real' | 'false_positive' | 'pending'; reason: string; confidence: number };
 	/** How many failing cases collapsed into this cluster. */
 	count: number;
 	/** Whether a fix episode can be dispatched for it (diagnostics cannot). */
@@ -239,7 +249,12 @@ export interface Findings {
 		unitsByKind: Record<string, number>;
 		symbolsCovered: number;
 		symbolsTotal: number;
+		/** Findings shown: judged real, plus those still awaiting a verdict. */
 		issuesFound: number;
+		/** Findings judged false positives and hidden. Kept, never deleted. */
+		issuesHidden: number;
+		/** Of `issuesFound`, how many have no verdict yet. */
+		issuesPending: number;
 		episodesAccepted: number;
 		episodesReverted: number;
 		regressCases: number;
@@ -432,14 +447,22 @@ function toFindingsIssue(
 	c: any,
 	services: Map<string, string>,
 	serviceNames: ReadonlySet<string>,
+	verdicts: VerdictStore = {},
 ): FindingsIssue {
 	const ex = c.exemplar ?? null;
 	const where = `${c.method ?? ''} ${c.path ?? ''}`.trim();
 	const endpoint = where || String(c.endpoint_id ?? '');
+	const signature = String(c.signature ?? '');
+	// A cluster with no signature cannot be joined to a verdict and is treated
+	// as pending forever, which shows it — the safe direction.
+	const stored = signature ? verdicts[signature] : undefined;
 	return {
 		kind: String(c.kind ?? ''),
 		title: String(c.title ?? ''),
-		signature: String(c.signature ?? ''),
+		signature,
+		verification: stored
+			? { verdict: stored.verdict, reason: stored.reason, confidence: stored.confidence }
+			: { verdict: 'pending', reason: '', confidence: 0 },
 		endpoint,
 		service: serviceForUnit(services, serviceNames, [endpoint, String(c.endpoint_id ?? '')]),
 		count: Number(c.count ?? 1),
@@ -493,7 +516,15 @@ export function buildFindings(workspaceRoot: string): Findings {
 		}),
 	);
 	const serviceNames = new Set<string>(services.map((s: { name: string }) => s.name).filter(Boolean));
-	const issues = clusters.map((c) => toFindingsIssue(c, serviceIndex, serviceNames));
+	// Judged findings are split here, once, so every consumer below — the list,
+	// the tiles, findings.json — agrees on what is shown. A false positive is
+	// filtered OUT of `issues` but stays in issues.json and in the verdict
+	// sidecar, so hiding is reversible and auditable.
+	const verdicts = readVerdicts(workspaceRoot);
+	const allIssues = clusters.map((c) => toFindingsIssue(c, serviceIndex, serviceNames, verdicts));
+	const issues = allIssues.filter((i) => i.verification?.verdict !== 'false_positive');
+	const issuesHidden = allIssues.length - issues.length;
+	const issuesPending = issues.filter((i) => i.verification?.verdict === 'pending').length;
 	// The scorecard row is label-only (`RUN some-command`); the unit id that
 	// carries the owning service lives in the profile it was assembled from, so
 	// the two are joined on the label they both spell the same way.
@@ -571,7 +602,12 @@ export function buildFindings(workspaceRoot: string): Findings {
 			// taken later, so a pass that dies before its `scorecard` step (or a
 			// scorecard left behind by an imported run) leaves the two disagreeing:
 			// the tile said 0 while the section under it listed six clusters.
-			issuesFound: clusters.length,
+			// Counts what the section under it lists, not what the engine wrote:
+			// a tile reading 6 above a list of 4 is the same defect this file
+			// already fixed once for the scorecard copy.
+			issuesFound: issues.length,
+			issuesHidden,
+			issuesPending,
 			episodesAccepted: accepted,
 			episodesReverted: episodes.length - accepted,
 			regressCases: regress.latest?.cases ?? 0,
