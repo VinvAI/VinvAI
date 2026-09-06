@@ -77,9 +77,15 @@ def run_cmd(args: tuple[str, ...]) -> None:
                                      should be AST-instrumented. Without this, only OTel
                                      framework spans (FastAPI / requests / etc.) are
                                      captured — internal calls are invisible.
-      --output PATH, -o PATH         JSONL output path. Use `-` for stdout. Default:
-                                     $TRACELENS_HOME/baselines/<service>/trace.jsonl
-                                     (TRACELENS_HOME defaults to ~/.tracelens).
+      --output PATH, -o PATH         JSONL output path. Use `-` for stdout. Defaulted in
+                                     this order: $VINV_CAPTURES_DIR/<service>/trace.jsonl,
+                                     then $TRACELENS_HOME/baselines/<service>/trace.jsonl if
+                                     TRACELENS_HOME is set, then — inside a workspace —
+                                     <root>/.vinv/captures/<service>/trace.jsonl, which is
+                                     where the MCP runtime tools and the extension read
+                                     captures from. Outside a workspace, and with neither
+                                     variable set, ~/.tracelens/baselines/<service>/trace.jsonl.
+                                     The resolved path is printed at startup.
       --sample-rate FLOAT            ParentBased(TraceIdRatioBased) ratio in [0, 1].
                                      Default 1.0 (trace every request).
       --no-otel-autoinst             Skip OpenTelemetry contrib auto-instrumentation;

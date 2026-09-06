@@ -134,13 +134,71 @@ def _parse_user_command(argv: Sequence[str]) -> tuple[list[str], list[str]]:
     return list(argv[:i]), list(argv[i + 1 :])
 
 
+def _workspace_root(start: Path | None = None) -> Path | None:
+    """The enclosing Vinv workspace, or None when we are not inside one.
+
+    An existing ``.vinv/`` wins over ``.git/`` at the same level and is checked
+    first on the way up: a repo that has already been traced keeps its store even
+    if the capture is launched from a subdirectory of a nested repo.
+    """
+    here = (start or Path.cwd()).resolve()
+    # The home directory is never a workspace: ``~/.vinv/engines`` is where the
+    # engines themselves are installed, so a bare ``~/.vinv`` check would claim
+    # $HOME as the store for every capture run outside a repo.
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+    candidates = [p for p in (here, *here.parents) if p != home]
+    for parent in candidates:
+        if (parent / ".vinv").is_dir():
+            return parent
+    for parent in candidates:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _ignore_own_artifacts(vinv_dir: Path) -> None:
+    """Keep ``.vinv/`` out of git without touching a file the user tracks.
+
+    A ``.gitignore`` holding ``*`` inside the directory ignores the directory's
+    contents and itself. Traces run to hundreds of MB, and the alternative --
+    appending to the repo's own .gitignore -- edits a tracked file from under a
+    capture run. The extension does that appending on its own, deliberately and
+    where the user can see it (extension/src/config/gitignore.ts).
+    """
+    marker = vinv_dir / ".gitignore"
+    if marker.exists():
+        return
+    try:
+        # The capture's own preflight creates .vinv/captures/<svc>/ later; the
+        # marker has to land before anything else appears under .vinv/.
+        vinv_dir.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            "# Vinv local artifacts (captures, index, reports)\n*\n", encoding="utf-8"
+        )
+    except OSError:
+        pass  # Best-effort: never fail a capture over housekeeping.
+
+
 def _default_output(user_command: list[str]) -> str:
-    """T4.4 — ``$TRACELENS_HOME/baselines/<service>/trace.jsonl`` if user didn't pass --output.
+    """The output path when the user didn't pass --output.
+
+    Precedence, explicit intent first:
+
+    1. ``VINV_CAPTURES_DIR`` -- the redirect bring-up and the extension's trace
+       store already share (see bringup/runner.py, extension/src/runtime/traceStore.ts).
+    2. ``TRACELENS_HOME`` set explicitly -- somebody chose that store; honour it.
+    3. Inside a workspace -- ``<root>/.vinv/captures/<service>/trace.jsonl``, which
+       is where the MCP runtime tools and the extension read captures from. Writing
+       anywhere else produces a valid trace that every one of those tools reports
+       as absent.
+    4. Otherwise the historical default, ``~/.tracelens/baselines/<service>/trace.jsonl``.
 
     Service name is inferred from the basename of the first arg's directory, falling back to
     ``OTEL_SERVICE_NAME`` or ``tracelens-target``. Best-effort; user can always override.
     """
-    home = Path(os.environ.get("TRACELENS_HOME", str(Path.home() / ".tracelens")))
     svc = os.environ.get("OTEL_SERVICE_NAME")
     if not svc:
         if user_command and user_command[0]:
@@ -150,7 +208,21 @@ def _default_output(user_command: list[str]) -> str:
         else:
             svc = "tracelens-target"
     svc = _safe_service_name(svc)
-    return str(home / "baselines" / svc / "trace.jsonl")
+
+    captures = os.environ.get("VINV_CAPTURES_DIR", "").strip()
+    if captures:
+        return str(Path(captures).expanduser() / svc / "trace.jsonl")
+
+    home_env = os.environ.get("TRACELENS_HOME", "").strip()
+    if home_env:
+        return str(Path(home_env).expanduser() / "baselines" / svc / "trace.jsonl")
+
+    root = _workspace_root()
+    if root is not None:
+        _ignore_own_artifacts(root / ".vinv")
+        return str(root / ".vinv" / "captures" / svc / "trace.jsonl")
+
+    return str(Path.home() / ".tracelens" / "baselines" / svc / "trace.jsonl")
 
 
 def _parse_run_flags(
@@ -243,6 +315,8 @@ def _parse_run_flags(
         os.environ["TRACELENS_SUMMARY_BYTE_CAP"] = str(summary_byte_cap)
     if output is None:
         output = _default_output(user_command)
+        if output != "-":
+            print(f"tracelens run: writing trace to {output}", file=sys.stderr)
 
     cfg = _PRESETS.get(preset, _PRESETS[_DEFAULT_PRESET])
     memory_enabled = memory_override if memory_override is not None else bool(cfg["memory"])
