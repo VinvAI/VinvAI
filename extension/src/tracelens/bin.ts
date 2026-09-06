@@ -7,19 +7,16 @@ import {
 	enginesRootDir,
 	pythonEnginePath,
 	resolveIndexBinary,
+	PYTHON_ENGINE_NAMES,
 } from '../engines/resolve';
 import { binaryFilePath } from '../vinvHome';
 
-/** Every engine the extension runs. */
-export const ENGINE_NAMES: ReadonlyArray<string> = [
-	'index',
-	'tracelens',
-	'handbook',
-	'bringup',
-	'identification',
-	'goal',
-	'exerciser',
-];
+/**
+ * Every engine the extension runs: the Rust `index` plus the Python engines the
+ * venv carries. Derived rather than restated, so a new engine cannot be added
+ * to one list and silently missed by the readiness check that reads the other.
+ */
+export const ENGINE_NAMES: ReadonlyArray<string> = ['index', ...PYTHON_ENGINE_NAMES];
 
 /** The vinv.enginesPath setting (an explicit engines-root override). */
 function enginesPathSetting(): string | undefined {

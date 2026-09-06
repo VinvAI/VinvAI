@@ -104,9 +104,38 @@ export function pythonEnginePath(enginesRoot: string, name: string): string {
 	return path.join(enginesVenvBinDir(enginesRoot), executableFileName(name));
 }
 
-/** True when `uv sync` has been run for the engines root (venv scripts exist). */
+/**
+ * Every Python engine `uv sync` installs into the checkout's venv.
+ *
+ * The Rust `index` is deliberately absent: it is not a console script, and it
+ * has its own resolver (`resolveIndexBinary`) covering the config override, the
+ * cargo build and PATH.
+ */
+export const PYTHON_ENGINE_NAMES: ReadonlyArray<string> = [
+	'tracelens',
+	'handbook',
+	'bringup',
+	'identification',
+	'goal',
+	'exerciser',
+];
+
+/**
+ * Which engines the checkout's venv is missing. Empty when it is complete.
+ *
+ * Readiness used to be one `fs.existsSync` on tracelens, standing in for all
+ * six. A `uv sync` that installed tracelens and then stopped — the Windows
+ * failure this comes from — therefore reported READY, and each stage that
+ * needed one of the other five bailed in milliseconds against a binary that was
+ * never there. Naming the missing ones is what lets a caller say which.
+ */
+export function missingPythonEngines(enginesRoot: string): string[] {
+	return PYTHON_ENGINE_NAMES.filter((name) => !fs.existsSync(pythonEnginePath(enginesRoot, name)));
+}
+
+/** True when `uv sync` has produced EVERY engine's console script. */
 export function enginesSynced(enginesRoot: string): boolean {
-	return fs.existsSync(pythonEnginePath(enginesRoot, 'tracelens'));
+	return missingPythonEngines(enginesRoot).length === 0;
 }
 
 /**
