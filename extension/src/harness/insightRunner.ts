@@ -95,6 +95,8 @@ function writeInsightManifest(workspaceRoot: string, manifest: InsightManifest):
 }
 
 import { captureServiceFor } from '../bringup/bringup';
+import { triageGivenFindings } from './findingTriage';
+import { isHiddenFinding, readVerdicts } from './findingVerification';
 
 /** Filename-safe id, mirroring the smoke report's own sanitization. */
 function safeId(apiId: string): string {
@@ -575,19 +577,46 @@ export async function recomputeIssues(
 	const effective = pictureDispatched
 		? issues.map((i) => (i.kind === 'runtime-error' ? { ...i, dispatched: true } : i))
 		: issues;
-	publishIssueList({ updatedAt: new Date().toISOString(), issues: effective });
+	// Published immediately, minus anything already judged a false positive.
+	// Issues with no verdict are shown: this pass runs on a debounced watcher,
+	// and holding the list back until a judge answers would blank the panel
+	// every time new spans land.
+	const visible = (store: ReturnType<typeof readVerdicts>) =>
+		effective.filter((i) => !isHiddenFinding(store, i.id));
+	publishIssueList({ updatedAt: new Date().toISOString(), issues: visible(readVerdicts(workspaceRoot)) });
 
 	// Auto-dispatch: only genuinely new signatures, one grouped episode per
 	// pass (episodes are the scarce resource; the pack carries all evidence).
 	const fresh = effective.filter((i) => !i.dispatched);
 	if (fresh.length > 0 && isAutoEpisodesEnabled()) {
-		const handedOff = await dispatchIssueEpisode(context, workspaceRoot, fresh);
+		// Judge before dispatching, for the same reason the exercise pass does:
+		// an episode aimed at a false positive costs an agent run and a diff
+		// review either way. Unjudged issues are still dispatched — no verdict
+		// has never meant no defect.
+		await triageGivenFindings(
+			context,
+			workspaceRoot,
+			fresh.map((i) => ({
+				signature: i.id,
+				kind: i.kind,
+				title: i.title,
+				evidence: i.detail,
+			})),
+			'pass-finished',
+		);
+		const judged = readVerdicts(workspaceRoot);
+		publishIssueList({ updatedAt: new Date().toISOString(), issues: visible(judged) });
+		const dispatchable = fresh.filter((i) => !isHiddenFinding(judged, i.id));
+		if (dispatchable.length === 0) {
+			return visible(judged);
+		}
+		const handedOff = await dispatchIssueEpisode(context, workspaceRoot, dispatchable);
 		if (handedOff) {
-			const ids = new Set(fresh.map((i) => i.id));
+			const ids = new Set(dispatchable.map((i) => i.id));
 			await recordDispatchedSignatures(context, ids);
 			markIssuesDispatched(ids);
 			// And silence the red-ring trigger for the picture we just handled.
-			if (clusterSignature && fresh.some((i) => i.kind === 'runtime-error')) {
+			if (clusterSignature && dispatchable.some((i) => i.kind === 'runtime-error')) {
 				await context.workspaceState.update(RUNTIME_ERROR_SIG_KEY, clusterSignature);
 			}
 		}

@@ -22,6 +22,7 @@ import {
 	cancelQuietTimer,
 	judgeFindings,
 	pendingFindingsFrom,
+	type JudgeableFinding,
 	noteFindingsChanged,
 	readVerdicts,
 	writeVerdicts,
@@ -56,12 +57,35 @@ export async function triageFindings(
 	workspaceRoot: string,
 	reason: TriageReason,
 ): Promise<number | null> {
+	// A finishing pass supersedes any armed quiet timer for this workspace.
+	cancelQuietTimer(workspaceRoot);
+	return triageGivenFindings(
+		context,
+		workspaceRoot,
+		pendingFindingsFrom(readClusters(workspaceRoot), readVerdicts(workspaceRoot)),
+		reason,
+	);
+}
+
+/**
+ * Judges findings the caller has already selected.
+ *
+ * The exercise pass reads its findings from issues.json; auto-insight composes
+ * them in memory and never writes that file. Both end up here, sharing one
+ * verdict store — a signature is a content hash, so the two sources cannot
+ * collide, and a finding both of them see is judged once.
+ */
+export async function triageGivenFindings(
+	context: vscode.ExtensionContext,
+	workspaceRoot: string,
+	findings: readonly JudgeableFinding[],
+	reason: TriageReason,
+): Promise<number | null> {
 	if (running.has(workspaceRoot)) {
 		return null;
 	}
-	// A finishing pass supersedes any armed quiet timer for this workspace.
-	cancelQuietTimer(workspaceRoot);
-	const pending = pendingFindingsFrom(readClusters(workspaceRoot), readVerdicts(workspaceRoot));
+	const store = readVerdicts(workspaceRoot);
+	const pending = findings.filter((f) => f.signature && store[f.signature] === undefined);
 	if (pending.length === 0) {
 		return 0;
 	}
