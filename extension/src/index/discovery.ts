@@ -26,7 +26,7 @@ import {
 	runBringupStartViaHarness,
 } from '../harness/harnessRunner';
 import { ensureHarnessChosen } from '../harness/harnessPicker';
-import { runDeadCodeScan, type DeadCodeProgress } from './deadCodeScan';
+import { lastDeadCodeFailure, runDeadCodeScan, type DeadCodeProgress } from './deadCodeScan';
 import { awaitEnginesTerminal } from '../engines/install';
 import {
 	bucketCount,
@@ -366,6 +366,7 @@ export async function runDiscovery(
 				'deadcode',
 				() => runDeadCodeScan(context, workspaceRoot, onDeadCode, cts.token),
 				cts.token,
+				lastDeadCodeFailure,
 			),
 		]);
 
