@@ -86,7 +86,8 @@ export function isBinAvailable(context: vscode.ExtensionContext, name: string): 
 export function showEnginesMissingError(name: string): void {
 	void vscode.window
 		.showErrorMessage(
-			`Vinv: The ${name} engine was not found. Install the Vinv engines (clone + uv sync) to enable it.`,
+			`Vinv: The ${name} engine was not found — it ships prebuilt, so this is an ` +
+				`install that has not run yet, not a missing compiler. Install the Vinv engines to enable it.`,
 			'Install Vinv Engines',
 		)
 		.then((choice) => {

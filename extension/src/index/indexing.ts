@@ -174,6 +174,17 @@ export function runIndexing(
 		return Promise.resolve(false);
 	}
 	if (!isBinAvailable(context, 'index')) {
+		// An absent binary is not a failed index run, but it used to look like one:
+		// this returns false in well under a millisecond, and the stage timer had
+		// nothing to attach, so the funnel showed a 0ms error with no cause on
+		// every machine that never got the engines installed. Record the reason
+		// the same way a real failure does — `runIndexing`'s caller reads it
+		// through `lastIndexingFailure` — so "not installed" stops being
+		// indistinguishable from "ran and broke".
+		lastIndexingFailureInfo = {
+			code: 'engines.not_found',
+			detail: 'index binary not installed',
+		};
 		showEnginesMissingError('index');
 		return Promise.resolve(false);
 	}

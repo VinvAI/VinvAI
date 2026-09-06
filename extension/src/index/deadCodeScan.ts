@@ -23,6 +23,21 @@ import * as fs from 'fs';
 import { spawn } from 'child_process';
 import { getBinPath, isBinAvailable } from '../tracelens/bin';
 import { getIndexEnv } from '../config/settings';
+import type { ErrorCode } from '../telemetry';
+
+/**
+ * Why the last dead-code scan failed, for a caller that only saw a `false`.
+ *
+ * Mirrors `lastIndexingFailure` in ./indexing — same contract, same lifetime:
+ * best-effort, read immediately after the run it describes, overwritten by the
+ * next one.
+ */
+let lastDeadCodeFailureInfo: { code?: ErrorCode; detail?: string } | undefined;
+
+/** See lastDeadCodeFailureInfo. Undefined when the last run succeeded. */
+export function lastDeadCodeFailure(): { code?: ErrorCode; detail?: string } | undefined {
+	return lastDeadCodeFailureInfo;
+}
 
 export interface DeadCodeProgress {
 	label: string;
@@ -169,10 +184,18 @@ export function runDeadCodeScan(
 	token?: vscode.CancellationToken,
 ): Promise<boolean> {
 	if (!isBinAvailable(context, 'index')) {
-		// Silent: the index stage running beside this one raises the missing-engine
-		// error already, and two notifications for one cause is noise.
+		// Silent to the USER: the index stage running beside this one raises the
+		// missing-engine error already, and two notifications for one cause is
+		// noise. Not silent to the caller — a stage that returns a bare false
+		// reports as a 0ms failure with no cause, which is how "the binary was
+		// never installed" and "the scan broke" became the same event.
+		lastDeadCodeFailureInfo = {
+			code: 'engines.not_found',
+			detail: 'index binary not installed',
+		};
 		return Promise.resolve(false);
 	}
+	lastDeadCodeFailureInfo = undefined;
 	const binPath = getBinPath(context, 'index');
 
 	return new Promise<boolean>((resolve) => {
