@@ -72,13 +72,22 @@ def main() -> None:
 
 @main.command("create", help=_CREATE_HELP)
 @click.argument("context", required=False, default=None)
-@click.option("--context-file", type=click.File("r", encoding="utf-8"), default=None,
-              help="Read the context from a file instead of the argument ('-' for stdin).")
-@click.option("--print-prompt", is_flag=True, hidden=True,
-              help="Deprecated no-op: printing the rendered prompt is the only mode.")
+@click.option(
+    "--context-file",
+    type=click.File("r", encoding="utf-8"),
+    default=None,
+    help="Read the context from a file instead of the argument ('-' for stdin).",
+)
+@click.option(
+    "--print-prompt",
+    is_flag=True,
+    hidden=True,
+    help="Deprecated no-op: printing the rendered prompt is the only mode.",
+)
 @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
-def create_cmd(context: str | None, context_file: IO[str] | None,
-               print_prompt: bool, verbose: bool) -> None:
+def create_cmd(
+    context: str | None, context_file: IO[str] | None, print_prompt: bool, verbose: bool
+) -> None:
     _configure_logging(verbose)
     if (context is None) == (context_file is None):
         raise click.UsageError(
@@ -115,11 +124,13 @@ def _agent_command(name: str, help_text: str):
 
     def decorator(renderer):
         @main.command(name, help=help_text)
-        @click.option("--payload-file", type=click.File("r", encoding="utf-8"),
-                      required=True,
-                      help="JSON payload for the agent ('-' for stdin).")
-        @click.option("-v", "--verbose", is_flag=True,
-                      help="Enable INFO-level logging to stderr.")
+        @click.option(
+            "--payload-file",
+            type=click.File("r", encoding="utf-8"),
+            required=True,
+            help="JSON payload for the agent ('-' for stdin).",
+        )
+        @click.option("-v", "--verbose", is_flag=True, help="Enable INFO-level logging to stderr.")
         def command(payload_file: IO[str], verbose: bool) -> None:
             _configure_logging(verbose)
             payload = _read_payload(payload_file)

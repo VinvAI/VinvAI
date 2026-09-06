@@ -70,9 +70,11 @@ does not do what the criterion asks is not_met.
 Respond with ONLY a JSON object (no fences, no prose around it) of the form:
 
 {
-  "cheat_likelihood": <float in [0,1]: probability the diff games the verification rather than fixing the cause>,
+  "cheat_likelihood": <float in [0,1]: probability the diff games verification
+                       rather than fixing the cause>,
   "goal_alignment": <float in [0,1]: probability the diff genuinely addresses the issue>,
-  "criteria_verdicts": [{"criterion": "...", "verdict": "met|not_met|unverifiable", "reason": "..."}],
+  "criteria_verdicts": [{"criterion": "...", "verdict": "met|not_met|unverifiable",
+                         "reason": "..."}],
   "scope_drift": "none|minor|major",
   "concerns": ["<specific place (file + what) that is concerning>", ...],
   "directives": ["<concrete change that would make the fix trustworthy>", ...]
@@ -154,16 +156,21 @@ def render_judge_diff_prompt(
     if not (issue or "").strip() or not (diff or "").strip():
         raise ValueError("judge-diff needs both an issue and a diff")
     return (
-        _JUDGE_DIFF_INSTRUCTION + "\n"
-        + _section("Issue (the issue/goal the fix was supposed to address)",
-                   _clip(issue, MAX_ISSUE_CHARS))
-        + _section("Diff (unified diff of the fix; may be truncated)",
-                   _clip(diff, MAX_DIFF_CHARS))
+        _JUDGE_DIFF_INSTRUCTION
+        + "\n"
+        + _section(
+            "Issue (the issue/goal the fix was supposed to address)", _clip(issue, MAX_ISSUE_CHARS)
+        )
+        + _section("Diff (unified diff of the fix; may be truncated)", _clip(diff, MAX_DIFF_CHARS))
         + _section("Standing goal (verbatim; may be empty)", _clip(goal, 2000))
-        + _section("Success criteria (one per line; empty when none were stated)",
-                   "\n".join(success_criteria) if success_criteria else "")
-        + _section("Deterministic audit findings (one per line; 'none' for a routine post-pass audit)",
-                   "\n".join(flags) if flags else "none")
+        + _section(
+            "Success criteria (one per line; empty when none were stated)",
+            "\n".join(success_criteria) if success_criteria else "",
+        )
+        + _section(
+            "Deterministic audit findings (one per line; 'none' for a routine post-pass audit)",
+            "\n".join(flags) if flags else "none",
+        )
     )
 
 
@@ -178,17 +185,25 @@ def render_author_tests_prompt(
     if not (approach or "").strip() or not (issue or "").strip():
         raise ValueError("author-tests needs an approach and an issue")
     return (
-        _AUTHOR_TESTS_INSTRUCTION + "\n"
-        + _section("Approach directive (the lens: what kind of tests to write and what "
-                   "they must do on the CURRENT code)",
-                   _clip(approach, MAX_ISSUE_CHARS))
-        + _section("Issue (the failure evidence the episode is about)",
-                   _clip(issue, MAX_ISSUE_CHARS))
+        _AUTHOR_TESTS_INSTRUCTION
+        + "\n"
+        + _section(
+            "Approach directive (the lens: what kind of tests to write and what "
+            "they must do on the CURRENT code)",
+            _clip(approach, MAX_ISSUE_CHARS),
+        )
+        + _section(
+            "Issue (the failure evidence the episode is about)", _clip(issue, MAX_ISSUE_CHARS)
+        )
         + _section("Standing goal (may be empty)", _clip(goal, 2000))
-        + _section("Relevant symbols (file:line + summaries — import the narrowest of these)",
-                   _clip(symbols, MAX_EVIDENCE_CHARS))
-        + _section("Runtime evidence (observed failure exemplars and value profiles)",
-                   _clip(runtime_evidence, MAX_EVIDENCE_CHARS))
+        + _section(
+            "Relevant symbols (file:line + summaries — import the narrowest of these)",
+            _clip(symbols, MAX_EVIDENCE_CHARS),
+        )
+        + _section(
+            "Runtime evidence (observed failure exemplars and value profiles)",
+            _clip(runtime_evidence, MAX_EVIDENCE_CHARS),
+        )
     )
 
 
@@ -197,10 +212,13 @@ def render_judge_stall_prompt(task: str, evidence_a: str, evidence_b: str) -> st
     if not (task or "").strip():
         raise ValueError("judge-stall needs the task title")
     return (
-        _JUDGE_STALL_INSTRUCTION + "\n"
+        _JUDGE_STALL_INSTRUCTION
+        + "\n"
         + _section("Task", _clip(task, 400))
-        + _section("Failure evidence from the previous attempt",
-                   _clip(evidence_a, MAX_EVIDENCE_CHARS))
-        + _section("Near-identical evidence from the latest attempt",
-                   _clip(evidence_b, MAX_EVIDENCE_CHARS))
+        + _section(
+            "Failure evidence from the previous attempt", _clip(evidence_a, MAX_EVIDENCE_CHARS)
+        )
+        + _section(
+            "Near-identical evidence from the latest attempt", _clip(evidence_b, MAX_EVIDENCE_CHARS)
+        )
     )
