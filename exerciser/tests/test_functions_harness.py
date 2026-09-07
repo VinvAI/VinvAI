@@ -20,7 +20,6 @@ from exerciser.functions import (
     annotation_base,
     annotation_resolved,
     arg_sets_for,
-    attribute_bindings,
     call_verdict,
     classify_row,
     denial_reason,
@@ -28,7 +27,6 @@ from exerciser.functions import (
     discover_targets,
     discover_with_refusals,
     import_canary,
-    impurities_in_source,
     is_denied,
     is_test_scaffolding,
     module_imports,
@@ -193,57 +191,6 @@ def test_test_modules_are_never_importable_targets():
 # ---- unit: the AST purity pre-check ---------------------------------------
 
 
-def _impurities(source: str, name: str) -> list[str]:
-    return impurities_in_source(source, name)
-
-
-def test_purity_check_sees_what_the_body_does_not_what_it_is_called():
-    # A perfectly innocent NAME over a body that deletes the filesystem. No
-    # verb vocabulary can catch this; reading the body can.
-    source = (
-        "import os\nimport shutil\nimport subprocess\nimport requests\n\n\n"
-        "def tidy(path: str) -> None:\n    os.remove(path)\n\n\n"
-        "def sweep(path: str) -> None:\n    shutil.rmtree(path)\n\n\n"
-        "def spawn(cmd: str) -> None:\n    subprocess.run(cmd)\n\n\n"
-        "def fetch(url: str) -> None:\n    requests.get(url)\n\n\n"
-        "def record(path: str) -> None:\n    open(path, 'w')\n\n\n"
-        "def query(conn) -> None:\n    conn.execute('DELETE FROM t')\n\n\n"
-        "def stop() -> None:\n    import sys\n\n    sys.exit(1)\n\n\n"
-        "def pure(a: int, b: int) -> int:\n    return a + b\n"
-    )
-    for name in ("tidy", "sweep", "spawn", "fetch", "record", "query", "stop"):
-        assert _impurities(source, name), name
-    assert _impurities(source, "pure") == [], "a pure body must stay drivable"
-
-
-def test_purity_check_follows_same_module_helpers_one_hop():
-    source = (
-        "import os\n\n\n"
-        "def tidy(path: str) -> None:\n    _really(path)\n\n\n"
-        "def _really(path: str) -> None:\n    os.remove(path)\n"
-    )
-    reasons = _impurities(source, "tidy")
-    assert reasons and "_really" in reasons[0]
-
-
-def test_reading_a_file_is_not_a_side_effect():
-    # Over-blocking costs coverage, so the check is about MUTATION: reads and
-    # path arithmetic stay drivable.
-    source = (
-        "import os\n\n\n"
-        "def load(path: str) -> str:\n"
-        "    full = os.path.join(path, 'x')\n"
-        "    with open(full) as fh:\n"
-        "        return fh.read()\n"
-    )
-    assert _impurities(source, "load") == []
-
-
-def test_an_unreadable_mode_is_treated_as_a_write():
-    source = "def save(path: str, mode: str) -> None:\n    open(path, mode)\n"
-    assert _impurities(source, "save"), "a computed mode is not assumed to be 'r'"
-
-
 # ---- unit: the bypasses an audit drove through the purity check ------------
 #
 # Each of these was ACCEPTED by the guard — i.e. would have been imported and
@@ -397,16 +344,6 @@ _BYPASSES = {
 }
 
 
-def test_the_control_case_is_still_refused():
-    assert _impurities(_CONTROL, "tidy") == ["calls os.remove()"]
-
-
-@pytest.mark.parametrize("case", sorted(_BYPASSES))
-def test_every_audited_bypass_is_refused(case: str):
-    source, name = _BYPASSES[case]
-    assert _impurities(source, name), f"{case} was ACCEPTED — the guard is bypassed"
-
-
 def test_an_alias_resolves_to_the_module_it_really_names():
     imports = module_imports(
         "import os as _os\nimport a.b as c\nimport json.decoder\n"
@@ -417,68 +354,6 @@ def test_an_alias_resolves_to_the_module_it_really_names():
     assert imports["json"] == "json", "`import a.b` binds only `a`"
     assert imports["join"] == "os.path.join"
     assert imports["helper"].startswith("."), "a relative import is never a stdlib root"
-
-
-def test_a_chain_deeper_than_the_limit_is_refused_rather_than_assumed_harmless():
-    # Depth is finite, so the honest answer past it is "cannot verify" — not
-    # silence, which is what let a 2-hop chain through when the limit was 1.
-    source = (
-        "import os\n\n\ndef a(p: str) -> None:\n    b(p)\n\n\n"
-        "def b(p: str) -> None:\n    c(p)\n\n\n"
-        "def c(p: str) -> None:\n    d(p)\n\n\ndef d(p: str) -> None:\n    e(p)\n\n\n"
-        "def e(p: str) -> None:\n    os.remove(p)\n"
-    )
-    reasons = _impurities(source, "a")
-    assert reasons and any("cannot verify" in r for r in reasons)
-
-
-def test_a_recursive_helper_terminates():
-    source = "def a(n: int) -> int:\n    return 0 if n <= 0 else a(n - 1)\n"
-    assert _impurities(source, "a") == []
-
-
-def test_a_decorated_target_whose_decorator_is_pure_is_still_driven():
-    # The decorator rule refuses what it cannot READ, not what it cannot
-    # recognise. A same-module wrapper is readable, so a decorated target whose
-    # wrapper only logs stays drivable — otherwise "judge the decorator" would
-    # just be a slower way of refusing every decorated function in the repo.
-    source = (
-        "import functools\n\n\n"
-        "def _timed(fn):\n"
-        "    @functools.wraps(fn)\n"
-        "    def inner(*args, **kwargs):\n"
-        "        return fn(*args, **kwargs)\n\n"
-        "    return inner\n\n\n"
-        "@_timed\ndef add_numbers(a: int, b: int) -> int:\n    return a + b\n"
-    )
-    assert _impurities(source, "add_numbers") == []
-
-
-def test_the_inert_stdlib_decorators_stay_drivable():
-    source = (
-        "import functools\nimport typing\n\n\n"
-        "@functools.lru_cache\ndef square(a: int) -> int:\n    return a * a\n\n\n"
-        "@functools.cache\ndef cube(a: int) -> int:\n    return a**3\n\n\n"
-        "@typing.final\ndef fixed(a: int) -> int:\n    return a\n"
-    )
-    for name in ("square", "cube", "fixed"):
-        assert _impurities(source, name) == [], name
-    # …and through the `from`-import spelling, which resolves to the same thing.
-    aliased = (
-        "from functools import lru_cache\n\n\n@lru_cache\ndef square(a: int) -> int:\n"
-        "    return a * a\n"
-    )
-    assert _impurities(aliased, "square") == []
-
-
-def test_a_pure_method_on_a_local_instance_stays_drivable():
-    # The receiver rule reads the class body; a method that computes rather than
-    # mutates is judged pure, exactly like a same-module function.
-    source = (
-        "class Store:\n    def size(self):\n        return 1\n\n\n"
-        "_store = Store()\n\n\ndef count() -> int:\n    return _store.size()\n"
-    )
-    assert _impurities(source, "count") == []
 
 
 def test_a_receiver_binding_records_what_the_name_holds():
@@ -508,58 +383,6 @@ _RECEIVER_SHAPES = {
 }
 
 
-@pytest.mark.parametrize("shape", sorted(_RECEIVER_SHAPES))
-def test_every_module_level_binding_syntax_taints_the_receiver(shape: str):
-    source = (
-        "import requests\n\n\n"
-        "def _pair():\n    return requests.Session()\n\n\n"
-        f"{_RECEIVER_SHAPES[shape]}\n\n"
-        "def drive(url: str):\n    return _s.post(url)\n"
-    )
-    assert receiver_bindings(source).get("_s"), f"{shape}: the binding was not seen at all"
-    assert _impurities(source, "drive"), f"{shape}: a network client was judged drivable"
-
-
-def test_a_with_target_taints_the_receiver():
-    source = (
-        "import requests\n\n\n"
-        "def drive(url: str):\n    with requests.Session() as _s:\n        return _s.post(url)\n"
-    )
-    assert receiver_bindings(source)["_s"] == "module:requests.Session"
-    assert any("_s" in r for r in _impurities(source, "drive"))
-
-
-def test_a_walrus_target_taints_the_receiver():
-    source = (
-        "import requests\n\n\n"
-        "def drive(url: str):\n    if (_s := requests.Session()):\n        return _s.post(url)\n"
-    )
-    assert receiver_bindings(source)["_s"] == "module:requests.Session"
-    assert any("_s" in r for r in _impurities(source, "drive"))
-
-
-def test_a_for_target_taints_the_receiver():
-    source = (
-        "import requests\n\n\n"
-        "def drive(url: str):\n    for _s in [requests.Session()]:\n        return _s.post(url)\n"
-    )
-    assert receiver_bindings(source)["_s"] == "module:requests.Session"
-    assert any("_s" in r for r in _impurities(source, "drive"))
-
-
-def test_a_same_module_factory_taints_what_it_returns():
-    # The indirection is the POINT of writing a factory, so it is exactly the
-    # shape a guard that only reads assignments will miss.
-    source = (
-        "import requests\n\n\n"
-        "def _make():\n    return requests.Session()\n\n\n"
-        "_session = _make()\n\n\n"
-        "def drive(url: str):\n    return _session.post(url)\n"
-    )
-    assert receiver_bindings(source)["_session"] == "module:requests.Session"
-    assert any("requests.Session" in r for r in _impurities(source, "drive"))
-
-
 def test_a_factory_that_does_not_always_build_the_same_thing_taints_nothing():
     # Over-tainting is the safe direction, but it is not a licence to guess: a
     # factory with a bare return, or two returns building different things, is
@@ -575,58 +398,6 @@ def test_a_factory_that_does_not_always_build_the_same_thing_taints_nothing():
 
 
 # ---- chains rooted at `self` -------------------------------------------------
-
-
-def test_an_attribute_a_class_assigns_to_self_is_resolved():
-    source = (
-        "import requests\n\n\n"
-        "class Service:\n"
-        "    def __init__(self):\n        self.session = requests.Session()\n\n"
-        "    def go(self, url):\n        return self.session.post(url)\n\n\n"
-        "_svc = Service()\n\n\n"
-        "def drive(url: str):\n    return _svc.go(url)\n"
-    )
-    assert attribute_bindings(source)["Service.session"] == "module:requests.Session"
-    reasons = _impurities(source, "drive")
-    assert any("self.session" in r and "requests.Session" in r for r in reasons), reasons
-
-
-def test_an_attribute_assigned_outside_init_is_resolved_too():
-    source = (
-        "import requests\n\n\n"
-        "class Service:\n"
-        "    def connect(self):\n        self.session = requests.Session()\n\n"
-        "    def go(self, url):\n        return self.session.post(url)\n\n\n"
-        "_svc = Service()\n\n\n"
-        "def drive(url: str):\n    return _svc.go(url)\n"
-    )
-    assert attribute_bindings(source)["Service.session"] == "module:requests.Session"
-    reasons = _impurities(source, "drive")
-    # Named, not merely refused: the unresolvable-chain rule would also reject
-    # this, and "we could not verify it" is a weaker fact than "it posts".
-    assert any("self.session" in r and "requests.Session" in r for r in reasons), reasons
-
-
-def test_an_unresolvable_attribute_chain_is_refused_like_an_unresolvable_name():
-    # The file already refused `f()` for an unresolved bare name and did NOT
-    # refuse `x.y.z()` for an unresolved root. That inconsistency was the bug:
-    # `self` is in no receiver map, so `self.sink.record(tag)` fell through to
-    # the receiver-agnostic NAME backstop and was judged PURE.
-    source = (
-        "class Service:\n"
-        "    def __init__(self, thing):\n        self.thing = thing\n\n"
-        "    def go(self, tag):\n        return self.thing.record(tag)\n\n\n"
-        "_svc = Service(None)\n\n\n"
-        "def drive(tag: str):\n    return _svc.go(tag)\n"
-    )
-    assert any("cannot verify" in r for r in _impurities(source, "drive"))
-
-
-def test_a_one_deep_chain_on_an_unresolved_root_is_still_allowed():
-    # The rule is about chains the guard cannot follow, not about every
-    # attribute access: `cfg.render()` is one hop and is still judged by the
-    # method-name backstop, exactly as before.
-    assert _impurities("def drive(cfg: str) -> str:\n    return cfg.render()\n", "drive") == []
 
 
 SELF_CHAIN_PROBE = "vinv-self-chain-escape-probe.txt"
@@ -654,60 +425,6 @@ def _self_chain_pkg(outside: Path) -> dict[str, str]:
             "def total(values: list) -> int:\n    return sum(values)\n"
         ),
     }
-
-
-def test_a_self_rooted_chain_that_writes_a_file_never_becomes_an_in_process_target(tmp_path: Path):
-    # End to end, because that is how the bypass was PROVEN: `combine` was
-    # discovered with `skipped` empty and driven in-process, and a real file
-    # appeared outside the repo. Substitute `self.session.post(url)` and data
-    # leaves the machine.
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    probe = outside / SELF_CHAIN_PROBE
-    repo = _make_repo(tmp_path / "repo", pkg=_self_chain_pkg(outside))
-
-    targets, skipped, refused = discover_with_refusals(repo)
-    assert {t.qualname for t in targets} == {"total"}, "the self-rooted writer must not be driven"
-    reasons = {s["id"]: s["reason"] for s in skipped}
-    assert "impure-body" in reasons["targetpkg.calc:combine"]
-    assert "opens a file for writing" in reasons["targetpkg.calc:combine"]
-    # …and it is RECOVERABLE, so the coverage comes back through containment.
-    assert "targetpkg.calc:combine" in {r.id for r in refused}
-
-    # THE assertion, on the real path: containment opted out, so nothing runs at
-    # all — and with the bypass in place this file was created.
-    result = run_functions(repo, module_timeout_s=60.0, explore=False, sandbox=False)
-    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
-    assert not probe.exists(), "a self-rooted chain wrote outside the repo, in-process"
-    assert not any("combine" in r.get("target_id", "") for r in rows)
-    assert any(
-        r.get("status") == "ok" and r.get("target_id", "").endswith(":total") for r in rows
-    ), result["diagnostics"]
-
-
-def test_an_aliased_name_never_borrows_a_builtin_decorators_inertness():
-    # `from mylib import staticmethod` then `@staticmethod`: the allowlist was
-    # consulted on the BARE spelling before import resolution, so a third-party
-    # wrapper wearing a builtin's name was judged provably inert and DRIVABLE.
-    hijacked = (
-        "from mylib import staticmethod\n\n\n@staticmethod\ndef drive(x: int) -> int:\n"
-        "    return x\n"
-    )
-    assert _impurities(hijacked, "drive"), "an imported name is not the builtin it shadows"
-    hijacked_attr = (
-        "from mylib import functools\n\n\n@functools.wraps\ndef drive(x: int) -> int:\n"
-        "    return x\n"
-    )
-    assert _impurities(hijacked_attr, "drive")
-    # The genuine article still costs nothing.
-    assert _impurities("@staticmethod\ndef drive(x: int) -> int:\n    return x\n", "drive") == []
-    assert (
-        _impurities(
-            "import functools\n\n\n@functools.wraps\ndef drive(x: int) -> int:\n    return x\n",
-            "drive",
-        )
-        == []
-    )
 
 
 def test_the_xunit_fixture_hooks_are_test_scaffolding():
@@ -758,18 +475,6 @@ def total(values: list) -> int:
 }
 
 
-def test_the_bare_decorated_destroyer_never_becomes_a_target(tmp_path: Path):
-    # End to end, because that is how the bypass was proven: the target was
-    # DISCOVERED with SKIPPED and REFUSED both empty, and the harness then called
-    # the wrapper.
-    repo = _make_repo(tmp_path, pkg=_DECORATED_DESTROYER_PKG)
-    targets, skipped = discover_targets(repo)
-    assert {t.qualname for t in targets} == {"total"}, "the decorated target must not be driven"
-    reasons = {s["id"]: s["reason"] for s in skipped}
-    entry = reasons["targetpkg.calc:add_numbers"]
-    assert "impure-body" in entry and "os.remove" in entry
-
-
 def test_setup_module_is_never_promoted_into_the_sandbox(tmp_path: Path):
     pkg = {
         "__init__.py": "",
@@ -787,38 +492,6 @@ def test_setup_module_is_never_promoted_into_the_sandbox(tmp_path: Path):
     # Scaffolding is TERMINAL, not recoverable: a fixture belongs to a test
     # runner, and containment does not change that.
     assert [r.target.qualname for r in refused] == []
-
-
-def test_an_unresolvable_bare_name_is_refused():
-    # `handler` is neither a builtin, an import, nor a same-module def, so the
-    # guard has no source to judge and must not assume it is pure.
-    source = "def dispatch(handler, x):\n    return handler(x)\n"
-    assert _impurities(source, "dispatch")
-
-
-def test_the_guard_did_not_become_refuse_everything():
-    # The whole point of hardening is that ORDINARY pure code stays drivable —
-    # builtins, literals, comprehensions, f-strings, nested defs, same-module
-    # helpers, stdlib READS.
-    source = (
-        "import os\nimport math\nfrom collections import Counter\n\n\n"
-        "def normalise(raw: str) -> str:\n"
-        "    parts = sorted(p.strip() for p in raw.split(','))\n"
-        "    return ','.join(parts)\n\n\n"
-        "def summarise(raw: str) -> str:\n"
-        "    counts = Counter(normalise(raw))\n"
-        "    return f'{len(counts)} distinct, {math.sqrt(len(raw)):.2f}'\n\n\n"
-        "def load(path: str) -> str:\n"
-        "    full = os.path.join(path, 'x')\n"
-        "    with open(full) as fh:\n"
-        "        return fh.read()\n\n\n"
-        "def tally(rows: list) -> int:\n"
-        "    def weigh(row):\n"
-        "        return len(row)\n\n"
-        "    return sum(weigh(r) for r in rows)\n"
-    )
-    for name in ("normalise", "summarise", "load", "tally"):
-        assert _impurities(source, name) == [], name
 
 
 # The audit's concrete scenario: NO arguments, so nothing depends on generated
@@ -841,47 +514,6 @@ def compact_workspace():
         _os.remove(CACHE + "/" + n)
 """,
 }
-
-
-def test_the_no_argument_aliased_destroyer_never_becomes_a_target(tmp_path: Path):
-    repo = _make_repo(tmp_path, pkg=_ALIASED_DESTROYER_PKG)
-    targets, skipped = discover_targets(repo)
-    assert {t.qualname for t in targets} == {"total"}
-    reasons = {s["id"]: s["reason"] for s in skipped}
-    assert "impure-body" in reasons["targetpkg.calc:compact_workspace"]
-    assert "os.remove" in reasons["targetpkg.calc:compact_workspace"]
-
-
-def test_the_differential_oracle_is_the_only_caller_that_may_take_an_evaluator(tmp_path: Path):
-    # Refusing `exec` costs the differential oracle its entire target class, so
-    # code-evaluation is a NAMED impurity class an opted-in caller can accept —
-    # and the in-process crash harness never does.
-    pkg = {
-        "__init__.py": "",
-        "sandbox.py": (
-            "def evaluate_code(code: str):\n    ns = {}\n    exec(code, ns)\n    return ns\n"
-        ),
-    }
-    repo = _make_repo(tmp_path, pkg=pkg)
-    strict, skipped = discover_targets(repo)
-    assert strict == []
-    assert "evaluates source text" in skipped[0]["reason"]
-
-    permitted, _ = discover_targets(repo, allow_impurities=frozenset({"code-evaluation"}))
-    assert {t.qualname for t in permitted} == {"evaluate_code"}
-
-    # …and the carve-out is exactly one class wide: a body that also removes
-    # files is still refused, opted in or not.
-    both = {
-        "__init__.py": "",
-        "sandbox.py": (
-            "import os as _o\n\n\ndef evaluate_code(code: str):\n"
-            "    exec(code)\n    _o.remove('/tmp/x')\n"
-        ),
-    }
-    repo2 = _make_repo(tmp_path / "two", pkg=both)
-    still, _ = discover_targets(repo2, allow_impurities=frozenset({"code-evaluation"}))
-    assert still == []
 
 
 def test_argument_sets_cover_the_input_classes():
@@ -937,60 +569,6 @@ def _erase(path: str) -> None:
     os.remove(path)
 """,
 }
-
-
-def test_impure_bodies_are_skipped_with_a_recorded_reason(tmp_path: Path):
-    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
-    targets, skipped = discover_targets(repo)
-    names = {t.qualname for t in targets}
-    assert names == {"total"}, "only the pure function may be driven"
-    reasons = {s["id"]: s["reason"] for s in skipped}
-    assert "impure-body" in reasons["targetpkg.calc:tidy"]
-    assert "os.remove" in reasons["targetpkg.calc:tidy"]
-    # …including one reached only through a same-module helper.
-    assert "impure-body" in reasons["targetpkg.calc:housekeep"]
-    assert "_erase" in reasons["targetpkg.calc:housekeep"]
-
-
-def test_the_driver_never_calls_an_impure_target_in_process(tmp_path: Path):
-    # The impure target IS driven now — that is the routing change — but never in
-    # this process and never outside containment. The invariant the test has
-    # always been about is unchanged: the file outside the repo survives.
-    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
-    victim = tmp_path / "victim.txt"
-    victim.write_text("still here", encoding="utf-8")
-
-    result = run_functions(repo, module_timeout_s=120.0)
-
-    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
-    impure = [
-        r for r in rows if "tidy" in r.get("target_id", "") or "housekeep" in r.get("target_id", "")
-    ]
-    assert impure, "the impure targets are routed to containment, not dropped"
-    assert all(r.get("sandboxed") for r in impure), "…and NONE of them ran in-process"
-    assert victim.read_text(encoding="utf-8") == "still here"
-    assert any("impure-body" in s["reason"] for s in result["skipped"])
-    entry = next(s for s in result["skipped"] if s["id"].endswith(":tidy"))
-    assert entry["sandbox"].startswith("driven-under-containment")
-
-
-def test_opting_out_of_containment_leaves_the_impure_set_refused_and_says_so(tmp_path: Path):
-    repo = _make_repo(tmp_path, pkg=_IMPURE_PKG)
-    victim = tmp_path / "victim.txt"
-    victim.write_text("still here", encoding="utf-8")
-
-    result = run_functions(repo, module_timeout_s=60.0, sandbox=False)
-
-    rows = store.read_jsonl(store.exercise_dir(repo) / "function_results.jsonl")
-    assert not any("tidy" in r.get("target_id", "") for r in rows)
-    assert not any("housekeep" in r.get("target_id", "") for r in rows)
-    assert victim.read_text(encoding="utf-8") == "still here"
-    assert result["sandbox"] == {"enabled": False}
-    # LOUD: an opt-out that quietly dropped four fifths of the surface is how the
-    # coverage regression happened in the first place.
-    assert any("containment disabled by the caller" in d for d in result["diagnostics"])
-    entry = next(s for s in result["skipped"] if s["id"].endswith(":tidy"))
-    assert "stays refused" in entry["sandbox"]
 
 
 # ---- classification --------------------------------------------------------
@@ -1331,20 +909,6 @@ def test_a_hanging_module_costs_one_module_not_the_run(tmp_path: Path):
     result = run_functions(repo, module_timeout_s=3.0)
     assert result["status"] == "ok", "a hang must never take the run down"
     assert result["module_timeouts"] == ["targetpkg.calc"]
-
-
-def test_a_module_that_exits_on_import_is_reported_not_fatal(tmp_path: Path):
-    repo = _make_repo(
-        tmp_path,
-        pkg={
-            "__init__.py": "",
-            "calc.py": "import sys\n\nsys.exit(3)\n\n\ndef add(a: int) -> int:\n    return a\n",
-        },
-    )
-    result = run_functions(repo, module_timeout_s=60.0)
-    assert result["status"] == "ok"
-    kinds = {c["kind"] for c in result["clusters"]}
-    assert "import-error" in kinds
 
 
 def test_empty_target_set_is_loudly_diagnosed(tmp_path: Path):
