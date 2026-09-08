@@ -33,7 +33,7 @@ dev = [
     # Exercises the exerciser's SQLAlchemy service-double cut point. The tests
     # skip without it, and a skipped honesty guarantee is no guarantee — this
     # keeps them RUNNING under the root `uv sync` that CI performs.
-    "sqlalchemy>=2.0,<3.0",
+    "sqlalchemy>=2.0.52,<3.0",
     # Same reason, for the exerciser's `hypothesis_valid` generator arm
     # (exerciser[propertygen]): `hypothesis_valid_available()` gates a real
     # generator arm, its tests branch on that probe, and with the package
