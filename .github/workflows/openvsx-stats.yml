@@ -16,7 +16,7 @@ jobs:
   snap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           c=$(curl -s https://open-vsx.org/api/VinvAI/VinvAI | jq '.downloadCount')
           echo "$(date -u +%F),$c" >> openvsx.csv
