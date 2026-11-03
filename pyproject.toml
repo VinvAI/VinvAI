@@ -26,9 +26,9 @@ dev = [
     # Depending on the extra here makes coverage a reconciled, locked fact
     # instead of a side effect of whoever wrote to the venv last.
     "tracelens[otel-libs]",
-    "pytest>=8.0.0,<10.0.0",
+    "pytest>=9.2.0,<10.0.0",
     "pytest-cov>=5.0.0,<6.0.0",
-    "hypothesis>=6.100.0,<7.0.0",
+    "hypothesis>=6.170.14,<7.0.0",
     "ruff>=0.6.0,<0.9.0",
     # Exercises the exerciser's SQLAlchemy service-double cut point. The tests
     # skip without it, and a skipped honesty guarantee is no guarantee — this
@@ -39,7 +39,7 @@ dev = [
     # generator arm, its tests branch on that probe, and with the package
     # absent they passed while covering nothing. Installing it at the root
     # makes the adopted arm actually run under the `uv sync` CI performs.
-    "hypothesis-jsonschema>=0.23.0,<0.24.0",
+    "hypothesis-jsonschema>=0.23.2,<0.24.0",
 ]
 
 # Python version policy (see issue #14). Ceiling is <3.15 for every member.
